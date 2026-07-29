@@ -18,78 +18,135 @@
 package validation
 
 import (
-	"errors"
+	"context"
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"k8s.io/apimachinery/pkg/util/yaml"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// DynamoGraphDeploymentRequestValidator validates DynamoGraphDeploymentRequest resources.
-// This validator can be used by both webhooks and controllers for consistent validation.
-type DynamoGraphDeploymentRequestValidator struct {
-	request               *nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-	isClusterWideOperator bool
+// DynamoGraphDeploymentRequestValidator validates v1beta1 DynamoGraphDeploymentRequest resources.
+type DynamoGraphDeploymentRequestValidator struct{}
+
+// NewDynamoGraphDeploymentRequestValidator creates a DynamoGraphDeploymentRequest validator.
+func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestValidator {
+	return &DynamoGraphDeploymentRequestValidator{}
 }
 
-// NewDynamoGraphDeploymentRequestValidator creates a new validator for DynamoGraphDeploymentRequest.
-// The isClusterWide parameter indicates whether the operator is running in cluster-wide or namespace-restricted mode.
-func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, isClusterWide bool) *DynamoGraphDeploymentRequestValidator {
-	return &DynamoGraphDeploymentRequestValidator{
-		request:               request,
-		isClusterWideOperator: isClusterWide,
-	}
+// dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
+// API values, paths, and accumulated errors remain explicit validator arguments.
+type dynamoGraphDeploymentRequestValidation struct {
+	ctx context.Context
 }
 
-// Validate performs stateless validation on the DynamoGraphDeploymentRequest.
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, error) {
-	var warnings admission.Warnings
-	var err error
-
-	// Validate profiler image is specified
-	if v.request.Spec.ProfilingConfig.ProfilerImage == "" {
-		err = errors.Join(err, errors.New("spec.profilingConfig.profilerImage is required"))
-	}
-
-	// Validate that profilingConfig.config is provided
-	if v.request.Spec.ProfilingConfig.Config == nil || len(v.request.Spec.ProfilingConfig.Config.Raw) == 0 {
-		err = errors.Join(err, errors.New("spec.profilingConfig.config is required and must not be empty"))
-	}
-
-	// Validate enableGpuDiscovery is only true for cluster-wide operators
-	if v.request.Spec.EnableGpuDiscovery && !v.isClusterWideOperator {
-		err = errors.Join(err, errors.New("spec.enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in spec.profilingConfig.config"))
-	}
-
-	// Parse config to validate structure (only if config is present)
-	if v.request.Spec.ProfilingConfig.Config != nil && len(v.request.Spec.ProfilingConfig.Config.Raw) > 0 {
-		var config map[string]interface{}
-		if parseErr := yaml.Unmarshal(v.request.Spec.ProfilingConfig.Config.Raw, &config); parseErr != nil {
-			err = errors.Join(err, fmt.Errorf("failed to parse spec.profilingConfig.config: %w", parseErr))
-		} else {
-			// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
-			if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
-				if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != v.request.Spec.Backend {
-					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.engine.backend (%s) will be overwritten by spec.backend (%s)", backend, v.request.Spec.Backend))
-				}
-			}
-			if deployment, ok := config["deployment"].(map[string]interface{}); ok {
-				if model, ok := deployment["model"].(string); ok && model != "" && model != v.request.Spec.Model {
-					warnings = append(warnings, fmt.Sprintf("spec.profilingConfig.config.deployment.model (%s) will be overwritten by spec.model (%s)", model, v.request.Spec.Model))
-				}
-			}
-		}
-	}
-
-	return warnings, err
+// Validate performs stateless validation on request. ctx and request must not be nil.
+func (v *DynamoGraphDeploymentRequestValidator) Validate(
+	ctx context.Context,
+	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (admission.Warnings, error) {
+	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
+	return nil, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
-// ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeploymentRequest.
-// Returns warnings and error.
-func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (admission.Warnings, error) {
-	// TODO: Add update validation logic for DynamoGraphDeploymentRequest
-	// Placeholder for future immutability checks
-	return nil, nil
+// ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
+func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
+	ctx context.Context,
+	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (admission.Warnings, error) {
+	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
+	return nil, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
+}
+
+// validateDynamoGraphDeploymentRequest validates request. request must not be nil.
+func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequest(
+	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) field.ErrorList {
+	return v.validateDynamoGraphDeploymentRequestSpec(&request.Spec, field.NewPath("spec"))
+}
+
+// validateDynamoGraphDeploymentRequestSpec validates spec. spec and fldPath must not be nil.
+func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestSpec(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if !features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery) && !hasManualDGDRHardware(spec.Hardware) {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("hardware"),
+			"GPU hardware configuration is required when GPU discovery is disabled",
+		))
+	}
+
+	if spec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		spec.Backend == nvidiacomv1beta1.BackendTypeAuto {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("searchStrategy"),
+			spec.SearchStrategy,
+			fmt.Sprintf("is incompatible with spec.backend %q; set spec.backend to a specific backend (sglang, trtllm, or vllm)", spec.Backend),
+		))
+	}
+
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentRequestUpdate validates an update. newRequest and oldRequest must not be nil.
+func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestUpdate(
+	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) field.ErrorList {
+	return v.validateDynamoGraphDeploymentRequestSpecUpdate(
+		&newRequest.Spec,
+		&oldRequest.Spec,
+		field.NewPath("spec"),
+		oldRequest.Status.Phase,
+	)
+}
+
+// validateDynamoGraphDeploymentRequestSpecUpdate validates a spec update.
+// newSpec, oldSpec, and fldPath must not be nil; oldPhase comes from the owning old resource status.
+func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestSpecUpdate(
+	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	fldPath *field.Path,
+	oldPhase nvidiacomv1beta1.DGDRPhase,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)
+	newRequiresHardware := !gpuDiscoveryEnabled && !hasManualDGDRHardware(newSpec.Hardware)
+	oldRequiresHardware := !gpuDiscoveryEnabled && !hasManualDGDRHardware(oldSpec.Hardware)
+	if newRequiresHardware && !oldRequiresHardware {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("hardware"),
+			"GPU hardware configuration is required when GPU discovery is disabled",
+		))
+	}
+
+	newHasIncompatibleSearch := newSpec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		newSpec.Backend == nvidiacomv1beta1.BackendTypeAuto
+	oldHasIncompatibleSearch := oldSpec.SearchStrategy == nvidiacomv1beta1.SearchStrategyThorough &&
+		oldSpec.Backend == nvidiacomv1beta1.BackendTypeAuto
+	if newHasIncompatibleSearch && !oldHasIncompatibleSearch {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("searchStrategy"),
+			newSpec.SearchStrategy,
+			fmt.Sprintf("is incompatible with spec.backend %q; set spec.backend to a specific backend (sglang, trtllm, or vllm)", newSpec.Backend),
+		))
+	}
+
+	if isImmutableDGDRPhase(oldPhase) && !apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
+		))
+	}
+
+	return allErrs
 }

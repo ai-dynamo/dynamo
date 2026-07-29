@@ -1,0 +1,14 @@
+{
+  "request_id": "deepseek-v4-tool-call-test",
+  "expected_output": {"normal_content": "", "reasoning_content": "User wants the current weather in Beijing. I'll call get_current_weather with celsius units.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_current_weather", "arguments": "{\"location\": \"Beijing\", \"format\": \"celsius\"}"}}]},
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"<think>User wants the current weather in Beijing. I'll call get_current_weather with celsius units.</think>","role":"assistant","reasoning_content":"User wants the current weather in Beijing. I'll call get_current_weather with celsius units."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜tool_calls>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜invoke name=\"get_current_weather\">\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"location\" string=\"true\">Beijing</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"format\" string=\"true\">celsius</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜invoke>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜tool_calls>","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-tool","choices":[{"index":0,"delta":{"content":null,"role":"assistant"},"finish_reason":"tool_calls"}]}}
+  ]
+}

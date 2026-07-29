@@ -31,9 +31,7 @@ class RequestHandler:
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    component = runtime.namespace("examples/pipeline").component("backend")
-
-    endpoint = component.endpoint("generate")
+    endpoint = runtime.endpoint("examples/pipeline.backend.generate")
     await endpoint.serve_endpoint(RequestHandler().generate)
 
 

@@ -9,8 +9,7 @@ reviews:
   profile: "chill"
   request_changes_workflow: false
   high_level_summary: true
-  # John likes the poems, no messing
-  poem: true
+  poem: false
   review_status: false
   collapse_walkthrough: false
   auto_review:
@@ -27,5 +26,20 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
+  path_instructions:
+    - path: "**/*.py"
+      instructions: "Review against .ai/python-guidelines.md"
+    - path: "**/tests/**/*.py"
+      instructions: "Review against .ai/pytest-guidelines.md"
+    - path: "**/tests/**/*.py"
+      instructions: "Review against .ai/test-model-size-guardrails.md"
+    - path: "**/launch/**/*.sh"
+      instructions: "Review against .ai/bash-launch-guidelines.md"
+    - path: "**/*.{py,rs,go,ts,tsx,js,mjs,cjs,sh,yaml,yml,toml}"
+      instructions: "Flag internal Linear ticket references (e.g. DIS-XXXX, DYN-XXXX, OPS-XXXX, DEP-XXXX, or any <PROJECT>-NNNN ID) in the added lines; see .ai/linear-ticket-refs.md for what to recommend."
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - ".ai/**/*.md"
 chat:
   auto_reply: true

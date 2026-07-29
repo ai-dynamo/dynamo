@@ -24,6 +24,7 @@ processor:
     - "metadata.resourceVersion"
     - "metadata.selfLink"
     - "metadata.uid"
+    - "dynamoNamespace"
     - "status.conditions[*].lastTransitionTime"
     - "status.observedGeneration"
     - "TypeMeta$"
@@ -33,6 +34,7 @@ processor:
     # Ignore only the override wrapper type to reduce repetition
     # Keep SharedSpec so embedded fields are documented once
     # - "DynamoComponentDeploymentOverridesSpec$"
+    - "ConversionContext$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"

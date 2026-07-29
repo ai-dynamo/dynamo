@@ -3,7 +3,7 @@
 
 # Standalone Router
 
-A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see the [Router Guide](/docs/components/router/router_guide.md).
+A backend-agnostic standalone KV-aware router service for Dynamo deployments. For details on how KV-aware routing works, see [Routing Concepts](../../../../docs/fern/components/router/router-concepts.md).
 
 ## Overview
 
@@ -18,9 +18,8 @@ This component is **fully configurable** and works with any Dynamo backend (vLLM
 ```bash
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
-    --block-size 64 \
-    --router-reset-states \
-    --no-track-active-blocks
+    --router-block-size 64 \
+    --no-router-track-active-blocks
 ```
 
 ### Arguments
@@ -29,61 +28,74 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-For detailed descriptions of all KV router configuration options including `--block-size`, `--kv-overlap-score-weight`, `--router-temperature`, `--no-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, and `--no-track-active-blocks`, see the [Router Guide](/docs/components/router/router_guide.md).
+Most KV tuning options use the `--router-*` prefix, but shared options such as
+`--load-aware`, `--serve-indexer`, `--use-remote-indexer`, and `--shared-cache-*` do
+not. Standalone-only options include `--endpoint` and `--router-block-size`. Legacy
+names such as `--block-size` and `--kv-events` are still accepted but deprecated.
+Run `python -m dynamo.router --help` for the standalone command surface. The
+[Frontend Configuration Reference](../../../../docs/fern/components/frontend/frontend-config-reference.mdx#router)
+is the canonical reference for shared embedded-router flags and environment variables;
+see [Configuration and Tuning](../../../../docs/fern/components/router/router-configuration.md) for
+behavioral guidance.
 
 ## Architecture
 
-The standalone router exposes two endpoints via the Dynamo runtime:
+The standalone router exposes three endpoints via the Dynamo runtime:
 
-1. **`find_best_worker`**: Given a request with token IDs, returns the best worker to handle it
-2. **`free`**: Cleans up router state when a request completes
+1. **`generate`**: Routes requests to the best worker and streams back generation results (KV-aware routing).
+2. **`best_worker_id`**: Given token IDs, returns the best worker ID for the request without routing; useful for debugging or custom routing logic.
+3. **`get_overlap_scores`**: Given token IDs, returns per-worker/per-DP-rank matched block counts for device, host-pinned, disk, and configured shared-cache tiers without routing.
 
-Clients query the `find_best_worker` endpoint to determine which worker should process each request, then call the selected worker directly.
+Clients call the `generate` endpoint to stream completions, call `best_worker_id` to decide which worker to use and then contact that worker directly, or call `get_overlap_scores` when an external scheduler wants the raw tiered overlap signal.
 
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See the [Router Guide](/docs/components/router/router_guide.md#disaggregated-serving) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `WorkerType.Prefill`. See [Disaggregated Serving](../../../../docs/fern/components/router/router-disaggregated-serving.md) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
-See [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/launch/disagg_router.sh) for a complete example.
+For an integrated frontend disaggregated example, see [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/launch/disagg_router.sh). For explicit multi-router composition, see the [Global Router README](../global_router/README.md).
 
 ```bash
 # Start frontend router for decode workers
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
-    --kv-overlap-score-weight 0  # Pure load balancing for decode
+    --router-kv-overlap-score-credit 0  # Pure load balancing for decode
 
 # Start standalone router for prefill workers
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
-    --block-size 64 \
-    --router-reset-states \
-    --no-track-active-blocks
+    --router-block-size 64 \
+    --no-router-track-active-blocks
 
 # Start decode workers
 python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
 
 # Start prefill workers
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
+python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
 ```
 
+For event-driven prefix-cache state, add the backend-specific KV event publishing flags to the workers that the router indexes. Use `--no-router-kv-events` on the router only when approximate cache-state prediction is acceptable.
+
 >[!Note]
-> **Why `--no-track-active-blocks` for prefill routing?**
+> **Why `--no-router-track-active-blocks` for prefill routing?**
 > Active block tracking is used for load balancing across decode (generation) phases. For prefill-only routing, decode load is not relevant, so disabling this reduces overhead and simplifies the router state.
 >
-> **Why `--block-size` is required for standalone routers:**
-> Unlike the frontend router which can infer block size from the ModelDeploymentCard (MDC) during worker registration, standalone routers cannot access the MDC and must have the block size explicitly specified. This is a work in progress to enable automatic inference.
+> **When should I use `--no-router-track-prefill-tokens`?**
+> Use it on decode-only routers that should ignore already-completed prompt work. This keeps `active_prefill_tokens`, queue pressure, and load estimates focused on decode-side work after a prefill-to-decode handoff.
+>
+> **Why `--router-block-size` should be set for standalone routers:**
+> Standalone routers default to block size `128`, but they do not infer block size from the ModelDeploymentCard (MDC) during worker registration. Set the value explicitly so routing decisions match the backend worker block size.
 
 ## Configuration Best Practices
 
 >[!Note]
 > **Block Size Matching:**
 > The block size must match across:
-> - Standalone router (`--block-size`)
-> - All worker instances (`--block-size`)
+> - Standalone router (`--router-block-size`)
+> - All worker instances (backend-specific, e.g. `--block-size` for vLLM)
 >
 > **Endpoint Matching:**
 > The `--endpoint` argument must match where your target workers register. For example:
@@ -95,15 +107,17 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --is-prefill-worker &
 
 To integrate the standalone router with a backend:
 
-1. Clients should query the `router.find_best_worker` endpoint before sending requests
-2. Workers should register at the endpoint specified by the `--endpoint` argument
-3. Clients should call the `router.free` endpoint when requests complete
+1. Workers should register at the endpoint specified by the `--endpoint` argument
+2. Clients call the `router.generate` endpoint to stream completions (router selects the best worker), or call `router.best_worker_id` to get the best worker ID and then send requests to that worker
+3. Router state is updated automatically as requests are routed; no separate "free" call is required
 
 See [`components/src/dynamo/vllm/handlers.py`](../vllm/handlers.py) for a reference implementation (search for `prefill_router_client`).
 
 ## See Also
 
-- [Router Guide](/docs/components/router/router_guide.md) - Configuration and tuning for KV-aware routing
-- [Router Design](/docs/design_docs/router_design.md) - Architecture details and event transport modes
+- [Router Guide](../../../../docs/fern/components/router/router-guide.md) - Deployment modes and quick start
+- [Configuration and Tuning](../../../../docs/fern/components/router/router-configuration.md) - CLI flags, transport modes, and metrics
+- [Disaggregated Serving](../../../../docs/fern/components/router/router-disaggregated-serving.md) - Prefill and decode routing setups
+- [Router Design](../../../../docs/fern/design-docs/router-design.md) - Architecture details and event transport modes
 - [Frontend Router](../frontend/README.md) - Main HTTP frontend with integrated routing
-- [Router Benchmarking](/benchmarks/router/README.md) - Performance testing and tuning
+- [Router Benchmarking](../../../../benchmarks/router/README.md) - Performance testing and tuning

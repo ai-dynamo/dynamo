@@ -25,7 +25,7 @@ spec:
             - "128"
             - --router-mode
             - kv
-            - --kv-overlap-score-weight
+            - --router-kv-overlap-score-credit
             - "0.0"
             - --router-temperature
             - "0.0"
@@ -36,8 +36,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
-          workingDir: /workspace/components/src/dynamo/planner
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     <registry>/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     <registry>/tensorrtllm-runtime:<version>.
+          image: my-registry/dynamo-planner:my-tag
           ports:
             - name: metrics
               containerPort: 9085
@@ -45,22 +51,10 @@ spec:
             - python3
           args:
             - -m
-            - planner_sla
-            - --environment=kubernetes
-            - --backend=trtllm
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
-          volumeMounts:
-            - name: planner-profile-data
-              mountPath: /workspace/profiling_results
-              readOnly: true
-        volumes:
-          - name: planner-profile-data
-            configMap:
-              # Must be pre-created before deployment by the profiler
-              # See docs/planner/sla_planner_quickstart.md for more details
-              name: planner-profile-data
-    TRTLLMDecodeWorker:
+            - dynamo.planner
+            - --config
+            - '{"environment": "kubernetes", "backend": "trtllm", "optimization_target": "sla", "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode": "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -100,7 +94,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

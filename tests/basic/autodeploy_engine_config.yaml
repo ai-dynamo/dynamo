@@ -6,4 +6,5 @@ kv_cache_config:
   enable_partial_reuse: false
   free_gpu_memory_fraction: 0.80
   max_tokens: 8192
-compile_backend: torch-cudagraph
+attn_backend: trtllm
+max_batch_size: 128

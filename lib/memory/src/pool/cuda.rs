@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! CUDA memory pool for efficient device memory allocation in hot paths.
@@ -6,6 +6,12 @@
 //! This module provides a safe wrapper around CUDA's memory pool APIs, enabling
 //! fast async allocations that avoid the overhead of cudaMalloc/cudaFree per call.
 //! Memory is returned to the pool on free and reused for subsequent allocations.
+//!
+//! # Thread Safety
+//!
+//! [`CudaMemPool`] uses internal locking to serialize host-side calls to the CUDA
+//! driver. This is required because `cuMemAllocFromPoolAsync` is not host-thread
+//! reentrant. The GPU-side operations remain stream-ordered and asynchronous.
 
 use anyhow::{Result, anyhow};
 use cudarc::driver::sys::{
@@ -67,7 +73,17 @@ impl CudaMemPoolBuilder {
         let mut props: CUmemPoolProps = unsafe { std::mem::zeroed() };
         props.allocType = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = self.context.cu_device();
+        // CUDA 13.2 moved `id` into an anonymous union inside CUmemLocation;
+        // the field path depends on the toolkit (see build.rs).
+        #[cfg(not(cuda_mem_location_union))]
+        {
+            props.location.id = self.context.cu_device();
+        }
+        #[cfg(cuda_mem_location_union)]
+        {
+            // Writing to a union field is safe; only reads are `unsafe`.
+            props.location.__bindgen_anon_1.id = self.context.cu_device();
+        }
 
         let mut pool: CUmemoryPool = ptr::null_mut();
 

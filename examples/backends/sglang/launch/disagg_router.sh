@@ -1,15 +1,15 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated serving with KV-aware routing: 2 prefill + 2 decode workers.
+# GPUs: 4
 
-# Setup cleanup trap
-cleanup() {
-    echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
-    echo "Cleanup complete."
-}
-trap cleanup EXIT INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Parse command line arguments
 ENABLE_OTEL=false
@@ -46,15 +46,21 @@ if [ "$ENABLE_OTEL" = true ]; then
     TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
 fi
 
+MODEL="Qwen/Qwen3-0.6B"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Disaggregated + KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT"
+
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # No standalone prefill router needed - the frontend handles prefill routing internally
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
-    --router-mode kv \
-    --router-reset-states &
-DYNAMO_PID=$!
+    --router-mode kv &
+
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
@@ -69,8 +75,8 @@ python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID1=$!
 
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -85,8 +91,8 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID2=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
@@ -101,8 +107,8 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
-DECODE_PID1=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
@@ -117,8 +123,9 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
-DECODE_PID2=$!
 
 # Wait for any worker to exit (keeps script running)
-wait
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

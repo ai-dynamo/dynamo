@@ -4,10 +4,16 @@
 """Handler for aggregated (prefill + decode) mode with optional encoder disaggregation."""
 
 import logging
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Optional, Union
+
+import torch
 
 from dynamo._core import Context
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
@@ -26,16 +32,21 @@ class AggregatedHandler(HandlerBase):
     def __init__(
         self,
         config: RequestHandlerConfig,
-        encoder_cache: Optional[EncoderCacheManager] = None,
+        encoder_cache: Optional[MultimodalEmbeddingCacheManager] = None,
     ):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    async def generate(self, request: dict, context: Context):
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncGenerator[dict, None]:
         """Generate response, optionally using remote encoder for multimodal."""
+        # Reject before optional remote encoder/cache work. HandlerBase keeps a
+        # second guard as a backstop for paths without these early side effects.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
-        embeddings = None
+        embeddings: Optional[Union[torch.Tensor, dict]] = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:
             messages = request.get("extra_args", {}).get(
@@ -45,15 +56,15 @@ class AggregatedHandler(HandlerBase):
                 messages
             )
             if image_urls:
-                logging.info(f"AggregatedHandler: image_urls={image_urls}")
                 result = await fetch_embeddings_from_encoder(
                     image_urls,
                     request,
                     self.encode_client,
                     self._encoder_cache,
+                    trace_context=context,
                 )
                 if isinstance(result, list):
-                    embeddings = result
+                    embeddings = result  # type: ignore[assignment]
                 else:
                     ep_disaggregated_params = result
 

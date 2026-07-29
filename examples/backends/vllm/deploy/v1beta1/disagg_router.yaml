@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-v1-disagg-router
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 2
+    type: worker
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 2
+    type: worker

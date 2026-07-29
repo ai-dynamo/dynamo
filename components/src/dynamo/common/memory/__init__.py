@@ -3,6 +3,8 @@
 
 """Memory management utilities for Dynamo components."""
 
-from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 
-__all__ = ["EncoderCacheManager"]
+__all__ = ["MultimodalEmbeddingCacheManager"]

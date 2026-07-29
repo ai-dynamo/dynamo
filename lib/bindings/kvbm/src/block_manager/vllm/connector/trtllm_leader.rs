@@ -4,8 +4,6 @@
 use super::*;
 
 use crate::block_manager::BlockManagerBuilder;
-use dynamo_llm::block_manager::connector::protocol::RequestType;
-use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
@@ -15,10 +13,30 @@ use crate::block_manager::vllm::connector::leader::{
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use crate::get_current_tokio_handle;
 use anyhow;
+use dynamo_llm::block_manager::connector::protocol::RequestType;
+use dynamo_llm::block_manager::kv_consolidator::{EventSource, KvEventConsolidationMode};
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
+
+fn parse_consolidator_mode(mode: Option<String>) -> KvEventConsolidationMode {
+    let Some(mode) = mode else {
+        return KvEventConsolidationMode::Dedup;
+    };
+
+    match mode.parse() {
+        Ok(mode) => mode,
+        Err(error) => {
+            tracing::warn!(
+                "Invalid KV event consolidator mode {:?}: {}. Falling back to dedup.",
+                mode,
+                error
+            );
+            KvEventConsolidationMode::Dedup
+        }
+    }
+}
 
 pub trait Leader: Send + Sync + std::fmt::Debug {
     fn get_num_new_matched_tokens(
@@ -71,6 +89,7 @@ impl KvConnectorLeader {
         leader_py: PyKvbmLeader,
         consolidator_trtllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -95,6 +114,7 @@ impl KvConnectorLeader {
             // Capture consolidator endpoints for the async block
             let consolidator_trtllm_ep = consolidator_trtllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let consolidator_mode = parse_consolidator_mode(consolidator_mode.clone());
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -125,6 +145,7 @@ impl KvConnectorLeader {
                         trtllm_ep,
                         consolidator_output_ep,
                         EventSource::Trtllm,
+                        consolidator_mode,
                     );
                 }
 
@@ -190,7 +211,7 @@ impl Leader for KvConnectorLeader {
 
         // TRTLLM could match partial blocks if enable_partial_reuse = True,
         // immediately return 0 to simplify things.
-        if num_computed_tokens % self.block_size != 0 {
+        if !num_computed_tokens.is_multiple_of(self.block_size) {
             return Ok((0, false));
         }
 
@@ -215,7 +236,9 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!(
+                (num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size)
+            );
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -387,6 +410,7 @@ impl Leader for KvConnectorLeader {
                 new_req.num_computed_tokens,
                 scheduled_tokens,
                 new_req.priorities.as_deref(),
+                new_req.external_sequence_hashes.as_deref(),
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -438,6 +462,7 @@ impl Leader for KvConnectorLeader {
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
                 cached_req.priorities.as_deref(),
+                cached_req.external_sequence_hashes.as_deref(),
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
@@ -516,7 +541,7 @@ pub struct PyTrtllmKvConnectorLeader {
 #[pymethods]
 impl PyTrtllmKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_trtllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_trtllm_endpoint=None, consolidator_output_endpoint=None, consolidator_mode=None))]
     pub fn new(
         worker_id: u64,
         drt: Option<PyObject>,
@@ -524,6 +549,7 @@ impl PyTrtllmKvConnectorLeader {
         leader: PyKvbmLeader,
         consolidator_trtllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
 
@@ -533,6 +559,7 @@ impl PyTrtllmKvConnectorLeader {
             leader,
             consolidator_trtllm_endpoint,
             consolidator_output_endpoint,
+            consolidator_mode,
         ));
         Ok(Self { connector_leader })
     }

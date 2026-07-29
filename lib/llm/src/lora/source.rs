@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::cache::LoRACache;
+use crate::hub::{self, HfRepoSpec};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::StreamExt;
-use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath};
+use hf_hub::Cache;
+use object_store::{ClientOptions, ObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 /// Minimal trait for LoRA sources
@@ -23,6 +26,79 @@ pub trait LoRASource: Send + Sync {
 
     /// Check if LoRA exists in this source
     async fn exists(&self, lora_uri: &str) -> Result<bool>;
+
+    /// Return a complete source-owned cache path without network access.
+    fn cached_path(&self, _lora_uri: &str) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
+}
+
+/// Hugging Face Hub LoRA source.
+///
+/// Downloads repositories into the standard Hugging Face cache and returns the
+/// immutable snapshot directory, avoiding a second copy under `DYN_LORA_PATH`.
+pub struct HuggingFaceLoRASource {
+    cache: Cache,
+}
+
+impl Default for HuggingFaceLoRASource {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl HuggingFaceLoRASource {
+    pub fn from_env() -> Self {
+        Self {
+            cache: hub::huggingface_cache(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cache(cache: Cache) -> Self {
+        Self { cache }
+    }
+
+    fn cached_snapshot(&self, spec: &HfRepoSpec) -> Result<Option<PathBuf>> {
+        let Some(snapshot) = hub::cached_hf_snapshot(&self.cache, spec, "adapter_config.json")
+        else {
+            return Ok(None);
+        };
+        Ok(LoRACache::validate_path(&snapshot)?.then_some(snapshot))
+    }
+}
+
+#[async_trait]
+impl LoRASource for HuggingFaceLoRASource {
+    async fn download(&self, hf_uri: &str, _dest_path: &Path) -> Result<PathBuf> {
+        let spec = HfRepoSpec::from_uri(hf_uri)?;
+        if let Some(snapshot) = self.cached_snapshot(&spec)? {
+            tracing::debug!(uri = hf_uri, path = %snapshot.display(), "using cached Hugging Face LoRA");
+            return Ok(snapshot);
+        }
+
+        tracing::info!(uri = hf_uri, "downloading LoRA from Hugging Face Hub");
+        let snapshot = hub::download_hf_snapshot(&self.cache, &spec).await?;
+        if !LoRACache::validate_path(&snapshot)? {
+            anyhow::bail!(
+                "Hugging Face repository {hf_uri} is not a valid LoRA: expected adapter_config.json and adapter weights"
+            );
+        }
+        hub::finalize_hf_snapshot(&self.cache, &spec, &snapshot)?;
+        Ok(snapshot)
+    }
+
+    async fn exists(&self, hf_uri: &str) -> Result<bool> {
+        HfRepoSpec::from_uri(hf_uri)?;
+        Ok(true)
+    }
+
+    fn cached_path(&self, hf_uri: &str) -> Result<Option<PathBuf>> {
+        if !hf_uri.starts_with("hf://") {
+            return Ok(None);
+        }
+        self.cached_snapshot(&HfRepoSpec::from_uri(hf_uri)?)
+    }
 }
 
 /// Local filesystem LoRA source
@@ -65,8 +141,6 @@ impl LoRASource for LocalLoRASource {
             anyhow::bail!("LoRA path is not a directory: {}", source_path.display());
         }
 
-        // For local files, we don't copy - just return the source path
-        // This avoids unnecessary disk I/O
         tracing::info!("Using local LoRA at: {:?}", source_path);
 
         Ok(source_path)
@@ -87,50 +161,68 @@ pub struct S3LoRASource {
     endpoint: Option<String>,
 }
 
-/// Retry configuration for S3 operations
 impl S3LoRASource {
-    /// Maximum number of retry attempts for S3 operations
     const MAX_RETRIES: u32 = 3;
-    /// Initial backoff duration in milliseconds
     const INITIAL_BACKOFF_MS: u64 = 1000;
-    /// Maximum backoff duration in milliseconds
     const MAX_BACKOFF_MS: u64 = 30000;
 
-    /// Download a single file with retry logic and exponential backoff
+    async fn stream_to_file(
+        store: &Arc<dyn ObjectStore>,
+        location: &ObjectPath,
+        dest: &std::path::Path,
+    ) -> Result<u64> {
+        let get_result = store
+            .get(location)
+            .await
+            .with_context(|| format!("Failed to GET {}", location))?;
+
+        let mut stream = get_result.into_stream();
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .with_context(|| format!("Failed to create file {:?}", dest))?;
+
+        let mut total_bytes: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("Error reading stream for {}", location))?;
+            file.write_all(&chunk)
+                .await
+                .with_context(|| format!("Failed to write chunk to {:?}", dest))?;
+            total_bytes += chunk.len() as u64;
+        }
+        file.flush().await?;
+
+        Ok(total_bytes)
+    }
+
     async fn download_file_with_retry(
         store: &Arc<dyn ObjectStore>,
         location: &ObjectPath,
-    ) -> Result<Bytes> {
+        dest: &std::path::Path,
+    ) -> Result<u64> {
         for attempt in 1..=Self::MAX_RETRIES {
-            let result = store.get(location).await;
-            let error = match result {
-                Ok(get_result) => match get_result.bytes().await {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(e) => anyhow::anyhow!("Failed to read bytes: {}", e),
-                },
-                Err(e) => anyhow::anyhow!("Failed to get object: {}", e),
-            };
+            match Self::stream_to_file(store, location, dest).await {
+                Ok(bytes_written) => return Ok(bytes_written),
+                Err(error) => {
+                    if attempt >= Self::MAX_RETRIES {
+                        return Err(error);
+                    }
 
-            if attempt >= Self::MAX_RETRIES {
-                return Err(error);
+                    let backoff_ms = std::cmp::min(
+                        Self::INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
+                        Self::MAX_BACKOFF_MS,
+                    );
+                    tracing::warn!(
+                        "S3 download failed (attempt {}/{}), retrying in {}ms: {}",
+                        attempt,
+                        Self::MAX_RETRIES,
+                        backoff_ms,
+                        error
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
             }
-
-            // Calculate backoff with exponential increase, capped at MAX_BACKOFF_MS
-            let backoff_ms = std::cmp::min(
-                Self::INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
-                Self::MAX_BACKOFF_MS,
-            );
-            tracing::warn!(
-                "S3 download failed (attempt {}/{}), retrying in {}ms: {}",
-                attempt,
-                Self::MAX_RETRIES,
-                backoff_ms,
-                error
-            );
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         }
 
-        // This should be unreachable, but provide a fallback
         Err(anyhow::anyhow!(
             "S3 download failed after {} retries",
             Self::MAX_RETRIES
@@ -160,26 +252,27 @@ impl S3LoRASource {
         })
     }
 
-    /// Build an ObjectStore for a specific bucket
     fn build_store(&self, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+        let timeout_secs: u64 = std::env::var("LORA_DOWNLOAD_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+
+        let client_opts = ClientOptions::new().with_timeout(Duration::from_secs(timeout_secs));
+
         let mut builder = AmazonS3Builder::new()
             .with_access_key_id(&self.access_key_id)
             .with_secret_access_key(&self.secret_access_key)
             .with_region(&self.region)
-            .with_bucket_name(bucket);
+            .with_bucket_name(bucket)
+            .with_client_options(client_opts);
 
         if let Some(ref endpoint) = self.endpoint {
             builder = builder
                 .with_endpoint(endpoint)
-                // Use path-style URLs for custom endpoints (e.g., MinIO)
                 .with_virtual_hosted_style_request(false);
 
-            // Only allow HTTP when explicitly enabled via environment variable
-            // HTTPS is the default for security
-            if std::env::var("AWS_ALLOW_HTTP")
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
+            if dynamo_runtime::config::env_is_truthy("AWS_ALLOW_HTTP") {
                 builder = builder.with_allow_http(true);
             }
         }
@@ -219,15 +312,10 @@ impl LoRASource for S3LoRASource {
             prefix
         );
 
-        // Build store for this specific bucket
         let bucket_store = self.build_store(&bucket)?;
-
-        // List all objects under the prefix
         let object_prefix = ObjectPath::from(prefix.clone());
         let mut list_stream = bucket_store.list(Some(&object_prefix));
 
-        // Create a temporary directory in the same parent as dest_path for atomic download
-        // This prevents data loss if dest_path already exists
         let parent = dest_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Destination path has no parent directory"))?;
@@ -236,7 +324,6 @@ impl LoRASource for S3LoRASource {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Destination path has no file name"))?;
 
-        // Generate unique temp directory name
         let temp_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -244,12 +331,10 @@ impl LoRASource for S3LoRASource {
         let temp_dir_name = format!("{}.tmp.{}", dest_name, temp_suffix);
         let temp_path = parent.join(&temp_dir_name);
 
-        // Create temporary directory
         tokio::fs::create_dir_all(&temp_path)
             .await
             .context("Failed to create temporary directory")?;
 
-        // Cleanup closure that only removes the temp directory on error
         let cleanup_on_error = async |err: anyhow::Error| -> anyhow::Error {
             tracing::warn!(
                 "S3 download failed, cleaning up temporary directory at {:?}",
@@ -268,7 +353,6 @@ impl LoRASource for S3LoRASource {
                 Err(e) => return Err(cleanup_on_error(e.into()).await),
             };
 
-            // Get relative path (remove prefix)
             let rel_path = meta
                 .location
                 .as_ref()
@@ -277,12 +361,11 @@ impl LoRASource for S3LoRASource {
                 .trim_start_matches('/');
 
             if rel_path.is_empty() {
-                continue; // Skip the prefix itself
+                continue;
             }
 
             let file_path = temp_path.join(rel_path);
 
-            // Create parent directories
             #[allow(clippy::collapsible_if)]
             if let Some(parent) = file_path.parent() {
                 if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -290,18 +373,16 @@ impl LoRASource for S3LoRASource {
                 }
             }
 
-            // Download file with retry logic
-            let bytes = match Self::download_file_with_retry(&bucket_store, &meta.location).await {
-                Ok(b) => b,
-                Err(e) => return Err(cleanup_on_error(e).await),
-            };
-
-            if let Err(e) = tokio::fs::write(&file_path, &bytes).await {
-                return Err(cleanup_on_error(e.into()).await);
-            }
+            let bytes_written =
+                match Self::download_file_with_retry(&bucket_store, &meta.location, &file_path)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(e) => return Err(cleanup_on_error(e).await),
+                };
 
             file_count += 1;
-            tracing::debug!("Downloaded: {} ({} bytes)", rel_path, bytes.len());
+            tracing::debug!("Downloaded: {} ({} bytes)", rel_path, bytes_written);
         }
 
         if file_count == 0 {
@@ -310,14 +391,11 @@ impl LoRASource for S3LoRASource {
             );
         }
 
-        // Atomically rename temp directory to final destination
-        // Remove dest_path if it exists (only after successful download to avoid data loss)
         if dest_path.exists() {
             tokio::fs::remove_dir_all(dest_path)
                 .await
                 .context("Failed to remove existing destination directory")?;
         }
-        // Rename is atomic on most filesystems
         tokio::fs::rename(&temp_path, dest_path)
             .await
             .context("Failed to atomically move temporary directory to destination")?;
@@ -335,7 +413,6 @@ impl LoRASource for S3LoRASource {
         let object_prefix = ObjectPath::from(prefix);
         let mut list_stream = bucket_store.list(Some(&object_prefix));
 
-        // Check if at least one object exists, propagating errors
         match list_stream.next().await {
             Some(Ok(_)) => Ok(true),
             Some(Err(e)) => Err(e.into()),
@@ -347,6 +424,10 @@ impl LoRASource for S3LoRASource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_hub::Cache;
+    use mockito::Matcher;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_parse_file_uri() {
@@ -373,5 +454,249 @@ mod tests {
     fn test_parse_s3_uri_invalid() {
         let uri = "file:///path/to/lora";
         assert!(S3LoRASource::parse_s3_uri(uri).is_err());
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn hf_source_reuses_valid_native_snapshot_in_offline_mode() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join("models--org--adapter");
+        let snapshot = repo_dir.join("snapshots/abc123");
+        fs::create_dir_all(repo_dir.join("refs")).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(repo_dir.join("refs/main"), "abc123").unwrap();
+        fs::write(snapshot.join("adapter_config.json"), "{}").unwrap();
+        fs::write(snapshot.join("adapter_model.safetensors"), "weights").unwrap();
+        fs::write(snapshot.join(".dynamo_lora_complete"), "1\n").unwrap();
+
+        let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
+        assert_eq!(
+            source.cached_path("hf://org/adapter").unwrap(),
+            Some(snapshot.clone())
+        );
+        let result = temp_env::async_with_vars(
+            [("HF_HUB_OFFLINE", Some("1"))],
+            source.download("hf://org/adapter", Path::new("unused")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, snapshot);
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn hf_source_reuses_commit_snapshot_without_ref_file() {
+        let temp = TempDir::new().unwrap();
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = temp
+            .path()
+            .join("models--org--adapter/snapshots")
+            .join(revision);
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("adapter_config.json"), "{}").unwrap();
+        fs::write(snapshot.join("adapter_model.safetensors"), "weights").unwrap();
+        fs::write(snapshot.join(".dynamo_lora_complete"), "1\n").unwrap();
+
+        let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
+        let result = temp_env::async_with_vars(
+            [("HF_HUB_OFFLINE", Some("1"))],
+            source.download(
+                format!("hf://org/adapter@{revision}").as_str(),
+                Path::new("unused"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, snapshot);
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn hf_source_downloads_complete_revision_pinned_snapshot() {
+        let mut server = mockito::Server::new_async().await;
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let token = "test-token";
+        let info = server
+            .mock("GET", "/api/models/org/adapter/revision/main")
+            .match_header("authorization", format!("Bearer {token}").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"siblings":[{{"rfilename":"adapter_config.json"}},{{"rfilename":"adapter_model.safetensors"}}],"sha":"{commit}"}}"#
+            ))
+            .create_async()
+            .await;
+        let config = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/adapter_config.json").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(200)
+            .with_header("x-repo-commit", commit)
+            .with_header("etag", "config-etag")
+            .with_header("content-range", "bytes 0-1/2")
+            .with_body("{}")
+            .expect(2)
+            .create_async()
+            .await;
+        let weights = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/adapter_model.safetensors").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(200)
+            .with_header("x-repo-commit", commit)
+            .with_header("etag", "weights-etag")
+            .with_header("content-range", "bytes 0-6/7")
+            .with_body("weights")
+            .expect(2)
+            .create_async()
+            .await;
+
+        let temp = TempDir::new().unwrap();
+        let token_path = temp.path().join("token");
+        fs::write(&token_path, token).unwrap();
+        let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
+        let snapshot = temp_env::async_with_vars(
+            [
+                ("HF_ENDPOINT", Some(server.url().as_str())),
+                ("HF_TOKEN", None),
+                ("HUGGING_FACE_HUB_TOKEN", None),
+                ("HF_TOKEN_PATH", token_path.to_str()),
+                ("HF_HUB_OFFLINE", None),
+            ],
+            source.download("hf://org/adapter", Path::new("unused")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot,
+            temp.path()
+                .join("models--org--adapter/snapshots")
+                .join(commit)
+        );
+        assert_eq!(
+            fs::read(snapshot.join("adapter_config.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            fs::read(snapshot.join("adapter_model.safetensors")).unwrap(),
+            b"weights"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("models--org--adapter/refs/main")).unwrap(),
+            commit
+        );
+        assert_eq!(
+            fs::read_to_string(snapshot.join(".dynamo_lora_complete")).unwrap(),
+            "1\n"
+        );
+
+        info.assert_async().await;
+        config.assert_async().await;
+        weights.assert_async().await;
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn hf_source_does_not_mark_partial_commit_snapshot_complete() {
+        let mut server = mockito::Server::new_async().await;
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let info = server
+            .mock(
+                "GET",
+                format!("/api/models/org/adapter/revision/{commit}").as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"siblings":[{{"rfilename":"adapter_config.json"}},{{"rfilename":"adapter_model.safetensors"}},{{"rfilename":"README.md"}}],"sha":"{commit}"}}"#
+            ))
+            .create_async()
+            .await;
+        let config = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/adapter_config.json").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(200)
+            .with_header("x-repo-commit", commit)
+            .with_header("etag", "config-etag")
+            .with_header("content-range", "bytes 0-1/2")
+            .with_body("{}")
+            .expect(2)
+            .create_async()
+            .await;
+        let weights = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/adapter_model.safetensors").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(200)
+            .with_header("x-repo-commit", commit)
+            .with_header("etag", "weights-etag")
+            .with_header("content-range", "bytes 0-6/7")
+            .with_body("weights")
+            .expect(2)
+            .create_async()
+            .await;
+        let readme = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/README.md").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let temp = TempDir::new().unwrap();
+        let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
+        let result = temp_env::async_with_vars(
+            [
+                ("HF_ENDPOINT", Some(server.url().as_str())),
+                ("HF_TOKEN", None),
+                ("HUGGING_FACE_HUB_TOKEN", None),
+                ("HF_TOKEN_PATH", None),
+                ("HF_HUB_OFFLINE", None),
+            ],
+            source.download(
+                format!("hf://org/adapter@{commit}").as_str(),
+                Path::new("unused"),
+            ),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let snapshot = temp
+            .path()
+            .join("models--org--adapter/snapshots")
+            .join(commit);
+        assert!(snapshot.join("adapter_config.json").is_file());
+        assert!(snapshot.join("adapter_model.safetensors").is_file());
+        assert!(!snapshot.join(".dynamo_lora_complete").exists());
+
+        let offline_result = temp_env::async_with_vars(
+            [("HF_HUB_OFFLINE", Some("1"))],
+            source.download(
+                format!("hf://org/adapter@{commit}").as_str(),
+                Path::new("unused"),
+            ),
+        )
+        .await;
+        assert!(offline_result.is_err());
+
+        info.assert_async().await;
+        config.assert_async().await;
+        weights.assert_async().await;
+        readme.assert_async().await;
     }
 }

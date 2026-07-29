@@ -22,8 +22,10 @@ from tests.fault_tolerance.cancellation.utils import (
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    verify_frontend_cancellation_metrics,
+    verify_runtime_cancellation_metrics,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -31,13 +33,13 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.nightly,
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
-    pytest.mark.xfail(reason="Cancellation is temporarily disabled", strict=True),
 ]
 
 
@@ -48,7 +50,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         frontend_port: int,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         """
         Initialize TensorRT-LLM worker process.
@@ -56,10 +58,11 @@ class DynamoWorkerProcess(ManagedProcess):
         Args:
             request: pytest request object
             frontend_port: Port for the frontend server
-            mode: One of "prefill_and_decode", "prefill", "decode"
+            mode: One of "agg", "prefill", "decode"
         """
         # Allocate system port for this worker
-        system_port = allocate_port(9100)
+        system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=system_port: deallocate_port(port))
         self.system_port = system_port
         self.frontend_port = frontend_port
 
@@ -76,7 +79,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--max-num-tokens",
             "16384",
         ]
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
                 f.write(
                     "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
@@ -171,7 +174,7 @@ def test_request_cancellation_trtllm_aggregated(
 
     This test verifies that when a request is cancelled by the client,
     the system properly handles the cancellation and cleans up resources
-    on the worker side in aggregated (prefill_and_decode) mode. Tests three scenarios:
+    on the worker side in aggregated (agg) mode. Tests three scenarios:
     1. Completion request
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
@@ -186,11 +189,8 @@ def test_request_cancellation_trtllm_aggregated(
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start an aggregated worker
-        # Step 2: Start a single worker (allocates its own system_port)
-        with DynamoWorkerProcess(
-            request, frontend.frontend_port, mode="prefill_and_decode"
-        ) as worker:
+        # Step 2: Start an aggregated worker (allocates its own system_port)
+        with DynamoWorkerProcess(request, frontend.frontend_port, mode="agg") as worker:
             logger.info(f"Aggregated Worker PID: {worker.get_pid()}")
 
             # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
@@ -208,7 +208,7 @@ def test_request_cancellation_trtllm_aggregated(
                 ),
             ]
 
-            for request_type, description in test_scenarios:
+            for idx, (request_type, description) in enumerate(test_scenarios):
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
@@ -216,10 +216,10 @@ def test_request_cancellation_trtllm_aggregated(
                     frontend.frontend_port, request_type
                 )
 
-                # Poll for "New Request ID" pattern
+                # Poll for "AggregatedHandler Request ID" pattern
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
-                    pattern="New Request ID: ",
+                    pattern="AggregatedHandler Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
                 )
@@ -242,11 +242,23 @@ def test_request_cancellation_trtllm_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
                 logger.info(f"{description} detected successfully")
+
+                # Verify cancellation metrics after each scenario
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type=request_type,
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=worker.system_port,
+                    expected_count=idx + 1,
+                    component="backend",
+                )
 
 
 @pytest.mark.timeout(195)  # 3x average
@@ -325,14 +337,32 @@ def test_request_cancellation_trtllm_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
                     "Chat completion stream cancellation in decode phase detected successfully"
                 )
 
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="chat_completion_stream",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    component="backend",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
+                )
 
+
+@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -400,7 +430,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 # Verify decode worker never received the request
@@ -424,8 +454,25 @@ def test_request_cancellation_trtllm_prefill_cancel(
                     "Completion request cancellation during prefill phase detected successfully"
                 )
 
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=0,
+                    component="backend",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=1,
+                    component="prefill",
+                )
 
-@pytest.mark.xfail(reason="Test fails only on CI", strict=False)
+
+@pytest.mark.skip(reason="Test fails only on CI")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -501,7 +548,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -522,4 +569,21 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
 
                 logger.info(
                     "Workers are functional after cancellation during KV transfer"
+                )
+
+                # Verify cancellation metrics
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    component="backend",
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=0,
+                    component="prefill",
                 )

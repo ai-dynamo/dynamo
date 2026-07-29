@@ -18,7 +18,7 @@ from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
-# Only deploy-specific options are defined here.
+# Deploy-specific options are defined here.
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add deploy-specific command-line options.
 
@@ -39,6 +39,32 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Deployment profile to test (e.g., agg, disagg, disagg_router). "
         "If not specified, runs all profiles for the selected framework.",
+    )
+    parser.addoption(
+        "--frontend-image",
+        type=str,
+        default=None,
+        help="Frontend container image (used by GAIE and checkpoint deploy tests).",
+    )
+    parser.addoption(
+        "--checkpoint-backend",
+        type=str,
+        default="vllm",
+        choices=("vllm", "sglang", "trtllm"),
+        help="DynamoCheckpoint backend to test.",
+    )
+    parser.addoption(
+        "--model-cache-pvc",
+        type=str,
+        default="",
+        help="Name of a pre-existing PVC to mount as a shared model cache on "
+        "worker pods (sets HF_HOME). Empty (default) downloads from HuggingFace.",
+    )
+    parser.addoption(
+        "--model-cache-mount",
+        type=str,
+        default="/models",
+        help="Mount path for the model cache PVC (used with --model-cache-pvc).",
     )
 
 
@@ -310,6 +336,7 @@ def deployment_spec(
     deployment_yaml: Path,
     image: Optional[str],
     namespace: str,
+    request,
 ) -> DeploymentSpec:
     """Create DeploymentSpec from YAML with optional image override.
 
@@ -317,6 +344,7 @@ def deployment_spec(
         deployment_yaml: Path to the deployment YAML file
         image: Optional container image override
         namespace: Kubernetes namespace for deployment
+        request: Pytest request object (for --model-cache-* options)
 
     Returns:
         Configured DeploymentSpec ready for deployment
@@ -329,5 +357,13 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+
+    # Mount the shared model cache onto workers when a PVC is provided (CI on
+    # clusters that provision it); otherwise workers download from HuggingFace.
+    model_cache_pvc = request.config.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.mount_model_cache_pvc(
+            model_cache_pvc, request.config.getoption("--model-cache-mount")
+        )
 
     return spec

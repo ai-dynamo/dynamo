@@ -15,7 +15,7 @@ import shutil
 
 import pytest
 
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -26,26 +26,24 @@ from .utils import DynamoFrontendProcess, run_migration_test
 logger = logging.getLogger(__name__)
 
 pytestmark = [
+    pytest.mark.fault_tolerance,
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
     pytest.mark.parametrize(
         "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
     ),
     pytest.mark.parametrize(
-        "immediate_kill",
+        "migration_max_seq_len",
         [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(
-                False,
-                id="graceful_shutdown",
-                marks=pytest.mark.xfail(
-                    strict=False, reason="TRT-LLM graceful shutdown not yet implemented"
-                ),
-            ),
+            pytest.param(None, id="max_seq_len_disabled"),
+            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
+            pytest.param(1, id="max_seq_len_exceeded"),
         ],
+    ),
+    pytest.mark.parametrize(
+        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
     ),
     pytest.mark.parametrize(
         "request_api",
@@ -82,7 +80,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request: pytest request fixture
         worker_id: Unique identifier for the worker (e.g., "worker1", "prefill1")
         frontend_port: Port where the frontend is running
-        mode: "prefill_and_decode" for aggregated, "prefill" or "decode" for disaggregated
+        mode: "agg" for aggregated, "prefill" or "decode" for disaggregated
     """
 
     def __init__(
@@ -90,10 +88,11 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         self.worker_id = worker_id
-        self.system_port = allocate_port(9100)
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
         self.mode = mode
 
         command = [
@@ -111,7 +110,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--free-gpu-memory-fraction",
             "0.15",  # avoid validation error on TRT-LLM available memory checks
         ]
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             config_file = (
                 f"test_request_migration_trtllm_config_{self.system_port}.yaml"
             )
@@ -137,11 +136,14 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
+        # Disable backend shutdown grace period for all migration tests
+        env["DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"] = "0"
+
         # Configure health check based on worker type
         health_check_urls = [
             (f"http://localhost:{self.system_port}/health", self.is_ready)
         ]
-        if mode in ["decode", "prefill_and_decode"]:
+        if mode in ["decode", "agg"]:
             health_check_urls.append(
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
@@ -195,12 +197,14 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_trtllm_aggregated(
     request,
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -211,12 +215,17 @@ def test_request_migration_trtllm_aggregated(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        migration_max_seq_len: Max sequence length for migration state tracking
         request_api: "chat" for chat completion API, "completion" for completion API
         stream: True for streaming, False for non-streaming
     """
 
     # Step 1: Start the frontend
-    with DynamoFrontendProcess(request, migration_limit=migration_limit) as frontend:
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
@@ -235,22 +244,27 @@ def test_request_migration_trtllm_aggregated(
                     frontend,
                     worker1,
                     worker2,
-                    receiving_pattern="New Request ID: ",
+                    receiving_pattern="AggregatedHandler Request ID: ",
                     migration_limit=migration_limit,
+                    migration_max_seq_len=migration_max_seq_len,
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
                 )
 
 
-@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
+@pytest.mark.skip(
+    reason="Prefill migration not yet supported, XFail eats up CI time due to timeout"
+)
 @pytest.mark.timeout(350)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_trtllm_prefill(
     request,
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -269,7 +283,9 @@ def test_request_migration_trtllm_prefill(
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
     ) as frontend:
         logger.info("Frontend started successfully")
 
@@ -306,6 +322,7 @@ def test_request_migration_trtllm_prefill(
                         prefill2,
                         receiving_pattern="Prefill Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
@@ -315,12 +332,14 @@ def test_request_migration_trtllm_prefill(
 
 @pytest.mark.skip(reason="Decode worker can get stuck downloading kv cache")
 @pytest.mark.timeout(350)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_trtllm_kv_transfer(
     request,
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -339,7 +358,9 @@ def test_request_migration_trtllm_kv_transfer(
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
     ) as frontend:
         logger.info("Frontend started successfully")
 
@@ -376,6 +397,7 @@ def test_request_migration_trtllm_kv_transfer(
                         decode2,
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
@@ -384,12 +406,14 @@ def test_request_migration_trtllm_kv_transfer(
 
 
 @pytest.mark.timeout(350)  # 3x average
+@pytest.mark.nightly
 def test_request_migration_trtllm_decode(
     request,
     runtime_services_dynamic_ports,
     set_ucx_tls_no_mm,
     predownload_models,
     migration_limit,
+    migration_max_seq_len,
     immediate_kill,
     request_api,
     stream,
@@ -412,7 +436,9 @@ def test_request_migration_trtllm_decode(
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
-        request, migration_limit=migration_limit, enforce_disagg=True
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
     ) as frontend:
         logger.info("Frontend started successfully")
 
@@ -449,6 +475,7 @@ def test_request_migration_trtllm_decode(
                         decode2,
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
+                        migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,

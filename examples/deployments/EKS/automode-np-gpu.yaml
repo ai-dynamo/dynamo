@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu
+spec:
+  disruption:
+    budgets:
+      - nodes: 10%
+    consolidateAfter: 300s
+    consolidationPolicy: WhenEmptyOrUnderutilized
+  template:
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - spot
+            - on-demand
+        - key: eks.amazonaws.com/instance-family
+          operator: In
+          values:
+            - g5
+            - g6
+            - g6e
+            - g7e
+            - p5
+            - p5e
+            - p5en
+      taints:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          value: Exists

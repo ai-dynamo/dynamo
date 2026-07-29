@@ -6,8 +6,10 @@
 package dynamo
 
 import (
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -42,14 +44,29 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 // BaseComponentDefaults provides common defaults shared by all components
 type BaseComponentDefaults struct{}
 
+// DiscoveryContext holds resolved discovery settings for a component.
+type DiscoveryContext struct {
+	Backend configv1alpha1.DiscoveryBackend
+	Mode    configv1alpha1.KubeDiscoveryMode
+}
+
+// NewDiscoveryContext resolves discovery settings from operator config and component annotations.
+func NewDiscoveryContext(defaultBackend configv1alpha1.DiscoveryBackend, annotations map[string]string) DiscoveryContext {
+	return DiscoveryContext{
+		Backend: controller_common.GetDiscoveryBackend(defaultBackend, annotations),
+		Mode:    controller_common.GetKubeDiscoveryMode(annotations),
+	}
+}
+
 type ComponentContext struct {
 	numberOfNodes                  int32
 	DynamoNamespace                string
 	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
-	DiscoveryBackend               string
-	EPPConfig                      *v1alpha1.EPPConfig
+	Discovery                      DiscoveryContext
+	EPPConfig                      *v1beta1.EPPConfig
+	WorkerHashSuffix               string
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -119,10 +136,21 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 
 	// Set discovery backend env var to "kubernetes" unless explicitly set to "etcd"
-	if context.DiscoveryBackend != "etcd" {
+	if context.Discovery.Backend != "etcd" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
 			Value: "kubernetes",
+		})
+	}
+
+	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "CONTAINER_NAME",
+			Value: commonconsts.MainContainerName,
+		})
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "DYN_KUBE_DISCOVERY_MODE",
+			Value: string(configv1alpha1.KubeDiscoveryModeContainer),
 		})
 	}
 

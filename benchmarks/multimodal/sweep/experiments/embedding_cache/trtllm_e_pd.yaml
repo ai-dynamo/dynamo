@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Full 3-way comparison: cache-off vs cache-on vs disaggregated EPD.
+#
+# Usage:
+#   python -m benchmarks.multimodal.sweep --config benchmarks/multimodal/sweep/experiments/embedding_cache/trtllm_e_pd.yaml
+
+model: Qwen/Qwen3-VL-2B-Instruct
+concurrencies: [16, 32, 64, 128, 256]
+osl: 150
+request_count: 1000
+warmup_count: 5
+port: 8000
+timeout: 900
+output_dir: benchmarks/results/embedding_cache/trtllm_e_pd
+
+input_files:
+  - benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl
+  - benchmarks/multimodal/jsonl/1000req_1img_800pool_400word_http.jsonl
+
+configs:
+  - label: cache-off
+    workflow: benchmarks/multimodal/sweep/experiments/embedding_cache/trtllm_e_pd.sh
+    extra_args: [--multimodal-embedding-cache-capacity-gb, "0"]
+
+  - label: cache-on
+    workflow: benchmarks/multimodal/sweep/experiments/embedding_cache/trtllm_e_pd.sh
+    extra_args: [--multimodal-embedding-cache-capacity-gb, "10"]

@@ -10,6 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
 use super::kserve;
@@ -20,7 +21,7 @@ use validator::Validate;
 use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
 };
 
 use crate::protocols::tensor;
@@ -31,7 +32,7 @@ use crate::protocols::tensor::{
 use crate::grpc::service::kserve::inference;
 use crate::grpc::service::kserve::inference::DataType;
 
-use tonic::Status;
+use tonic::{Status, metadata::MetadataMap};
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -57,16 +58,29 @@ pub async fn tensor_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateTensorRequest,
     streaming: bool,
+    metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
-    let request = Context::with_id(request, request_id.clone());
+    let model_name = request.model.clone();
+    let cancellation_labels = CancellationLabels {
+        model: model_name.clone(),
+        endpoint: Endpoint::Tensor.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
+    let metadata = extract_metadata_from_grpc(metadata)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();
 
     // [gluo TODO] revisit metrics to properly expose it
     // create the connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -76,14 +90,21 @@ pub async fn tensor_response_stream(
     let engine = state
         .manager()
         .get_tensor_engine(model)
-        .map_err(|_| Status::not_found("model not found"))?;
+        .map_err(|e| match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                Status::unavailable("model temporarily unavailable")
+            }
+            _ => Status::not_found("model not found"),
+        })?;
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
-    let inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Tensor, streaming);
+    let inflight_guard = state.metrics_clone().create_inflight_guard(
+        model,
+        Endpoint::Tensor,
+        streaming,
+        &request_id,
+    );
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -92,6 +113,12 @@ pub async fn tensor_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
+        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
+            return Status::resource_exhausted(e.to_string());
+        }
         Status::internal(format!("Failed to generate tensor response stream: {}", e))
     })?;
 

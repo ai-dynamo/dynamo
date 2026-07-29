@@ -3,14 +3,13 @@
 
 use super::*;
 use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use pyo3::exceptions::PyValueError;
 
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct ModelDeploymentCard {
     pub(crate) inner: RsModelDeploymentCard,
 }
-
-impl ModelDeploymentCard {}
 
 #[pymethods]
 impl ModelDeploymentCard {
@@ -31,5 +30,35 @@ impl ModelDeploymentCard {
     fn to_json_str(&self) -> PyResult<String> {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
+    }
+
+    fn source_path(&self) -> &str {
+        self.inner.source_path()
+    }
+
+    /// Resolved metadata directory (post-`download_config`).
+    fn local_dir(&self) -> PyResult<String> {
+        self.inner
+            .local_dir()
+            .into_os_string()
+            .into_string()
+            .map_err(|os| {
+                PyValueError::new_err(format!("MDC local_dir contains non-UTF-8 bytes: {os:?}"))
+            })
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn model_type(&self) -> ModelType {
+        ModelType {
+            inner: self.inner.model_type,
+        }
+    }
+
+    fn runtime_config(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let rc = pythonize::pythonize(py, &self.inner.runtime_config).map_err(to_pyerr)?;
+        Ok(rc.unbind())
     }
 }

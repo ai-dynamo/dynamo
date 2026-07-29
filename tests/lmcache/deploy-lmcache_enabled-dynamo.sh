@@ -23,14 +23,8 @@ echo "🚀 Starting dynamo setup with LMCache:"
 echo "   Model: $MODEL_URL"
 echo "   Port: 8000"
 echo "   !! Remmber to kill the old dynamo processes other wise the port will be busy !! "
-
-# Kill any existing dynamo processes
-echo "🧹 Cleaning up any existing dynamo processes..."
-pkill -f "dynamo-run" || true
-sleep 2
-
 echo "🔧 Starting dynamo worker with LMCache enabled..."
 
 python -m dynamo.frontend &
 
-python3 -m dynamo.vllm --model $MODEL_URL --connector lmcache
+python3 -m dynamo.vllm --model $MODEL_URL --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

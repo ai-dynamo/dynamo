@@ -1,47 +1,52 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
-from dynamo.vllm.multimodal_utils.chat_processor import (
-    ChatProcessor,
-    CompletionsProcessor,
-    ProcessMixIn,
+from dynamo.vllm.multimodal_utils.custom_encoder_adapter import (
+    CustomEncoderAdapter,
+    create_custom_encoder_adapter,
 )
+from dynamo.vllm.multimodal_utils.embed_assembler import build_mixed_embeds
 from dynamo.vllm.multimodal_utils.encode_utils import (
     encode_image_embeddings,
     get_embedding_hash,
     get_encoder_components,
 )
-from dynamo.vllm.multimodal_utils.http_client import get_http_client
-from dynamo.vllm.multimodal_utils.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.model import (
-    SupportedModels,
+    ModelFamily,
     construct_mm_data,
     load_vision_model,
+    resolve_model_family,
 )
+from dynamo.vllm.multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
     MyRequestOutput,
     PatchedTokensPrompt,
-    VLLMNativeEncoderRequest,
-    VLLMNativeEncoderResponse,
     vLLMMultimodalRequest,
+)
+from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    Preprocessed,
+    VisionEncoderBackend,
 )
 
 __all__ = [
-    "ChatProcessor",
-    "CompletionsProcessor",
-    "ProcessMixIn",
+    "build_mixed_embeds",
+    "CustomEncoderAdapter",
+    "create_custom_encoder_adapter",
     "encode_image_embeddings",
     "extract_user_text",
     "get_encoder_components",
-    "get_http_client",
+    "Preprocessed",
+    "VisionEncoderBackend",
     "ImageLoader",
-    "SupportedModels",
+    "ModelFamily",
     "construct_mm_data",
     "load_vision_model",
+    "resolve_model_family",
     "MultiModalInput",
     "MultiModalGroup",
     "PatchedTokensPrompt",
@@ -49,6 +54,5 @@ __all__ = [
     "MultiModalRequest",
     "MyRequestOutput",
     "vLLMMultimodalRequest",
-    "VLLMNativeEncoderRequest",
-    "VLLMNativeEncoderResponse",
+    "MultiModalEmbeddingLoader",
 ]

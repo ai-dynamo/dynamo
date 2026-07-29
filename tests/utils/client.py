@@ -39,8 +39,10 @@ def _sanitize_payload_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
-                        image_url = part.get("image_url", {})
-                        if "url" in image_url:
+                        image_url = part.get("image_url")
+                        if isinstance(image_url, dict) and isinstance(
+                            image_url.get("url"), str
+                        ):
                             image_url["url"] = _truncate_base64_url(image_url["url"])
 
     return sanitized
@@ -52,6 +54,7 @@ def send_request(
     timeout: float = 30.0,
     method: str = "POST",
     log_level: int = 20,
+    stream: bool = False,
 ) -> requests.Response:
     """
     Send an HTTP request to the engine with detailed logging.
@@ -97,7 +100,7 @@ def send_request(
         if method_upper == "GET":
             response = requests.get(url, params=payload, timeout=timeout)
         elif method_upper == "POST":
-            response = requests.post(url, json=payload, timeout=timeout)
+            response = requests.post(url, json=payload, timeout=timeout, stream=stream)
         else:
             # Fallback for other methods if needed
             response = requests.request(
@@ -117,20 +120,26 @@ def send_request(
         logger.debug("Response headers: %s", dict(response.headers))
 
         # Try to log response body (truncated if too long)
-        try:
-            if response.headers.get("content-type", "").startswith("application/json"):
-                response_data = response.json()
-                response_str = json.dumps(response_data, indent=2)
-                if len(response_str) > 1000:
-                    response_str = response_str[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_str)
-            else:
-                response_text = response.text
-                if len(response_text) > 1000:
-                    response_text = response_text[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_text)
-        except Exception as e:
-            logger.debug("Could not parse response body: %s", e)
+        # Skip body logging for streaming responses to avoid consuming the stream
+        if stream:
+            logger.debug("Response body: <streaming, not logged>")
+        else:
+            try:
+                if response.headers.get("content-type", "").startswith(
+                    "application/json"
+                ):
+                    response_data = response.json()
+                    response_str = json.dumps(response_data, indent=2)
+                    if len(response_str) > 1000:
+                        response_str = response_str[:1000] + "... (truncated)"
+                    logger.debug("Response body: %s", response_str)
+                else:
+                    response_text = response.text
+                    if len(response_text) > 1000:
+                        response_text = response_text[:1000] + "... (truncated)"
+                    logger.debug("Response body: %s", response_text)
+            except Exception as e:
+                logger.debug("Could not parse response body: %s", e)
 
         return response
 
@@ -152,6 +161,7 @@ def wait_for_model_availability(
     logger: logging.Logger,
     max_attempts: int = 15,
     attempt_timeouts: list[float] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> bool:
     """
     Wait for model to be available by sending test requests.
@@ -190,7 +200,9 @@ def wait_for_model_availability(
             logger.debug(
                 f"Testing model availability at {test_url} (attempt {attempt+1}/{max_attempts}, timeout={timeout_val}s)"
             )
-            response = requests.post(test_url, json=test_payload, timeout=timeout_val)
+            response = requests.post(
+                test_url, json=test_payload, timeout=timeout_val, headers=headers
+            )
 
             if response.status_code == 200:
                 logger.info(f"Model '{model}' is available and responding")

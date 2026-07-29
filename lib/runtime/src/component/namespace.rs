@@ -30,4 +30,9 @@ impl MetricsHierarchy for Namespace {
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
+
+    fn connection_id(&self) -> Option<u64> {
+        use crate::traits::DistributedRuntimeProvider;
+        Some(self.drt().connection_id())
+    }
 }

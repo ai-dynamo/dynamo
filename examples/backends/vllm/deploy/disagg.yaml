@@ -21,6 +21,10 @@ spec:
       resources:
         limits:
           gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -32,7 +36,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --is-decode-worker
+            - --disaggregation-mode
+            - decode
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -41,6 +46,10 @@ spec:
       resources:
         limits:
           gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
@@ -52,4 +61,7 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

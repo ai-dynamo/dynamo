@@ -26,7 +26,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
     decode:
       componentType: worker
       subComponentType: decode
@@ -52,7 +52,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
@@ -97,6 +97,8 @@ spec:
             - "512"
             - --compilation_config
             - '{"pass_config":{"fuse_norm_quant":true,"eliminate_noops":true},"cudagraph_mode":"FULL_DECODE_ONLY"}'
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
     prefill:
       componentType: worker
       subComponentType: prefill
@@ -122,7 +124,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
@@ -142,7 +144,10 @@ spec:
           args:
             - --model
             - /model-cache/deepseek-r1
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --all2all-backend

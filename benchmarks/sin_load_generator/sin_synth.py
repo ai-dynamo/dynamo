@@ -20,7 +20,7 @@ import math
 import random
 
 import numpy as np
-from aiperf.dataset.synthesis import RollingHasher
+from prefix_data_generator.hasher import RollingHasher
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -135,16 +135,28 @@ if __name__ == "__main__":
     # isl-osl-ratio(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * pi / period * t - pi / 2)
     # Then, we sample [isl1/osl1, isl2/osl2] from the distribution [isl-osl-ratio(t), 1 - isl-osl-ratio(t)]
     parser.add_argument(
-        "--isl1", type=int, default=100, help="Minimum input sequence length"
+        "--isl1",
+        type=int,
+        default=100,
+        help="Input sequence length of the first preset ISL/OSL pair",
     )
     parser.add_argument(
-        "--osl1", type=int, default=2000, help="Minimum output sequence length"
+        "--osl1",
+        type=int,
+        default=2000,
+        help="Output sequence length of the first preset ISL/OSL pair",
     )
     parser.add_argument(
-        "--isl2", type=int, default=5000, help="Maximum input sequence length"
+        "--isl2",
+        type=int,
+        default=5000,
+        help="Input sequence length of the second preset ISL/OSL pair",
     )
     parser.add_argument(
-        "--osl2", type=int, default=100, help="Maximum output sequence length"
+        "--osl2",
+        type=int,
+        default=100,
+        help="Output sequence length of the second preset ISL/OSL pair",
     )
     parser.add_argument(
         "--isl-osl-ratio-min",

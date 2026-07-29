@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: llama-3-70b-topology
+title: Llama-3.3-70B Topology Benchmark
+page: benchmarks/llama-3-70b-topology.mdx
+claim: Agg (4 GPU), single-node disagg (8 GPU), and multi-node disagg (16 GPU) vLLM topologies compared at 16 concurrency/GPU,
+  normalized by TPS/GPU
+subtype: topology
+features:
+- disaggregated-serving
+- multi-node
+model:
+  name: Llama-3.3-70B-Instruct FP8-dynamic
+  hf_id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+hardware:
+  gpu: H100/H200
+  count: 4-16
+traffic: Synthetic 8192 ISL / 1024 OSL, stddev 0, concurrency 16/GPU, request count 10x concurrency
+arms:
+- role: baseline
+  name: vLLM aggregated (TP4)
+  deploy: recipes/llama-3-70b/vllm/agg/deploy.yaml
+  perf: recipes/llama-3-70b/vllm/agg/perf.yaml
+- role: treatment
+  name: vLLM disagg single-node
+  deploy: recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml
+  perf: recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml
+- role: treatment
+  name: vLLM disagg multi-node
+  deploy: recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml
+  perf: recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml
+results:
+  available: false
+  summary: perf.yaml exists for all arms but no result numbers published in source
+related_recipes:
+- llama-3-3-70b
+maintainer: null
+gaps:
+- no result numbers published in source — Results omitted
+- maintainer unknown

@@ -4,15 +4,23 @@
 import enum
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from typing import Any, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
+from transformers import PretrainedConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
 
 logger = logging.getLogger(__name__)
+
+# Model architectures without standalone encoder support in TRT-LLM
+# (missing @register_vision_encoder). These handle vision encoding
+# inside the main model (prefill/decode) instead.
+_UNSUPPORTED_STANDALONE_ENCODER_ARCHS = {"Llama4ForConditionalGeneration"}
 
 
 class Backend(str, enum.Enum):
@@ -25,10 +33,11 @@ class Backend(str, enum.Enum):
 class TensorRTLLMEngine:
     def __init__(
         self,
-        engine_args,
+        engine_args: dict[str, Any],
         disaggregation_mode: Optional[DisaggregationMode] = None,
-    ):
+    ) -> None:
         self._llm: Optional[LLM] = None
+        self._health_monitor: Optional[TrtllmEngineMonitor] = None
         self.disaggregation_mode = (
             disaggregation_mode
             if disaggregation_mode is not None
@@ -52,36 +61,60 @@ class TensorRTLLMEngine:
 
         self.engine_args = engine_args
 
-    async def initialize(self):
+    @property
+    def encoder_available(self) -> bool:
+        """Whether the multimodal encoder LLM is initialized."""
+        return self._llm is not None
+
+    async def initialize(self) -> None:
         if not self._llm:
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
                 # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
                 # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
-                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
-                max_batch_size = self.engine_args.get("max_batch_size", 1)
+                # Keep an explicit allowlist so LLM-only arguments are not forwarded.
                 model = self.engine_args.get("model")
+
+                # Skip MultimodalEncoder for architectures that handle vision
+                # encoding inside the main model (e.g. Llama4).
+                if self._is_unsupported_encoder_arch(model):  # type: ignore[arg-type]
+                    return
+
+                max_batch_size = self.engine_args.get("max_batch_size", 1)
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )
+                encoder_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "max_batch_size": max_batch_size,
+                }
+                for arg_name in (
+                    "trust_remote_code",
+                    "tensor_parallel_size",
+                    "model_kwargs",
+                ):
+                    if arg_name in self.engine_args:
+                        encoder_kwargs[arg_name] = self.engine_args[arg_name]
+
                 # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
                 # so storing either in self._llm is valid.
-                self._llm = MultimodalEncoder(
-                    model=model,
-                    max_batch_size=max_batch_size,
-                )
+                self._llm = MultimodalEncoder(**encoder_kwargs)
             else:
                 # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
+        await self.stop_health_monitor()
+        self.shutdown()
+
+    def shutdown(self) -> None:
         if self._llm:
             try:
                 self._llm.shutdown()
             except Exception as e:
-                logging.error(f"Error during cleanup: {e}")
+                logging.error(f"Error during shutdown: {e}")
             finally:
                 self._llm = None
 
@@ -90,6 +123,50 @@ class TensorRTLLMEngine:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm
+
+    def supports_health_check(self) -> bool:
+        return self._get_health_check_fn() is not None
+
+    def check_health(self) -> bool:
+        if self._llm is None:
+            return False
+        check_health = self._get_health_check_fn()
+        if check_health is None:
+            return True
+        return bool(check_health())
+
+    def get_health_check_fatal_error(self) -> Optional[BaseException]:
+        if self._llm is None:
+            return None
+        executor = getattr(self._llm, "_executor", None)
+        return getattr(executor, "_fatal_error", None)
+
+    def start_health_monitor(
+        self, runtime: Optional[Any] = None, shutdown_event: Optional[Any] = None
+    ) -> Optional[TrtllmEngineMonitor]:
+        if self._health_monitor is None:
+            self._health_monitor = TrtllmEngineMonitor(
+                self, runtime=runtime, shutdown_event=shutdown_event
+            )
+        return self._health_monitor
+
+    async def stop_health_monitor(self) -> None:
+        if self._health_monitor is None:
+            return
+        await self._health_monitor.stop()
+        self._health_monitor = None
+
+    def _get_health_check_fn(self):
+        if self._llm is None:
+            return None
+        check_health = getattr(self._llm, "_check_health", None)
+        if callable(check_health):
+            return check_health
+        executor = getattr(self._llm, "_executor", None)
+        check_health = getattr(executor, "check_health", None)
+        if callable(check_health):
+            return check_health
+        return None
 
     def get_attention_dp_size(self) -> int:
         """Return attention_dp_size (tensor_parallel_size if attention DP enabled, else 1).
@@ -100,6 +177,14 @@ class TensorRTLLMEngine:
         enable_attention_dp = getattr(self.llm.args, "enable_attention_dp", False)
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
+
+    def get_kv_cache_capacity(self) -> dict[str, int]:
+        """Return the initialized engine's primary GPU KV-cache capacity."""
+        try:
+            get_capacity = self.llm.get_kv_cache_capacity
+        except AttributeError:
+            return {}
+        return get_capacity()
 
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
@@ -135,12 +220,23 @@ class TensorRTLLMEngine:
             field_name,
         )
 
+    @staticmethod
+    def _is_unsupported_encoder_arch(model_path: str) -> bool:
+        """Return True if *model_path*'s architecture is not supported by
+        TRT-LLM's standalone MultimodalEncoder."""
+        try:
+            config, _ = PretrainedConfig.get_config_dict(model_path)
+            archs = config.get("architectures") or []
+            return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
+        except Exception:
+            return False
+
 
 @asynccontextmanager
 async def get_llm_engine(
-    engine_args,
+    engine_args: dict[str, Any],
     disaggregation_mode: Optional[DisaggregationMode] = None,
-    component_gauges=None,
+    component_gauges: Any = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     """Get TensorRT-LLM engine instance with load time tracking.
 

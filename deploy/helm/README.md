@@ -17,7 +17,19 @@ limitations under the License.
 
 # Dynamo Kubernetes Helm Charts
 
-There are two Helm charts available for the Dynamo Kubernetes Platform:
+The following Helm chart is available for the Dynamo Kubernetes Platform:
 
 - [platform](./charts/platform/README.md) - This chart installs the complete Dynamo Kubernetes Platform, including the Dynamo Operator, NATS, etcd, Grove, and Kai Scheduler.
-- [crds](./charts/crds/README.md) - This chart installs the CRDs for the Dynamo.
+
+## CRD Management
+
+The cluster-wide operator manages Custom Resource Definitions (CRDs) automatically. CRD manifests
+are generated under [`deploy/operator/config/crd/bases`](../operator/config/crd/bases/) and bundled
+in the operator image.
+
+- **Initial installation and upgrades**: The operator Deployment's `crd-apply` init container applies
+  CRDs from the operator image using server-side apply before the manager starts.
+- **External management**: Set `dynamo-operator.upgradeCRD=false` when another process manages CRDs.
+  With this setting, the chart installs no CRDs. Apply them separately before starting a cluster-wide
+  operator. Namespace-restricted operators require this setting and use the CRDs managed by the
+  cluster-wide operator.

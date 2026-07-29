@@ -72,7 +72,7 @@ async def worker(runtime: DistributedRuntime):
     service.add_completions_model(model_name, checksum, engine)
 
     print("Starting KServe gRPC service...")
-    shutdown_signal = service.run(runtime.child_token())
+    shutdown_signal = service.run(runtime)
 
     try:
         print(
@@ -86,6 +86,7 @@ async def worker(runtime: DistributedRuntime):
         print(f"Unexpected error occurred: {err}")
     finally:
         print("Shutting down worker...")
+        service.shutdown()  # Shutdown service first
         runtime.shutdown()
 
 

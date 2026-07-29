@@ -67,6 +67,8 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentScalingAdapter is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentScalingAdapter"
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"

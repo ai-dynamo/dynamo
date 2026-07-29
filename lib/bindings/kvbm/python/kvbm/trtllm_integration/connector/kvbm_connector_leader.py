@@ -7,12 +7,12 @@ from typing import List, Optional
 
 import tensorrt_llm
 from kvbm import KvbmLeader
-from kvbm.trtllm_integration.consolidator_config import is_truthy
+from kvbm.trtllm_integration.consolidator_config import get_consolidator_mode, is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
-from kvbm.utils import is_dyn_runtime_enabled
-from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
+from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
+from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
 )
@@ -55,7 +55,9 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         trtllm_ep = None
         consolidator_output_ep = None
+        consolidator_mode = None
         if consolidator_enabled:
+            consolidator_mode = get_consolidator_mode()
             # Get consolidator endpoint from environment variable
             # DYN_KVBM_TRTLLM_ZMQ_PORT contains just the port number (e.g., "20081")
             zmq_port = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
@@ -105,8 +107,10 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             leader,
             consolidator_trtllm_endpoint=trtllm_ep,
             consolidator_output_endpoint=consolidator_output_ep,
+            consolidator_mode=consolidator_mode,
         )
 
+    @nvtx_annotate(category="scheduler")
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         """
         Build the metadata for the worker.
@@ -131,6 +135,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
                 req.priorities,  # Pass retention priorities for offload filtering
+                list(req.block_hashes),
             )
 
         resumed_from_preemption = False
@@ -142,6 +147,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_block_ids,
                 req.computed_position,
                 req.priorities,  # Pass retention priorities for offload filtering
+                list(req.block_hashes),
             )
 
         output.add_num_scheduled_tokens(
@@ -154,6 +160,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         return self._connector.build_connector_metadata(output)
 
+    @nvtx_annotate(category="scheduler")
     def get_num_new_matched_tokens(
         self, request: LlmRequest, num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -174,6 +181,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             num_computed_tokens,
         )
 
+    @nvtx_annotate(category="scheduler")
     def update_state_after_alloc(self, request: LlmRequest, block_ids: List[int]):
         """
         Called after get_num_new_matched_tokens is called to provide the block ids to the scheduler.
@@ -185,6 +193,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             str(request.request_id), block_ids, request.context_current_position
         )
 
+    @nvtx_annotate(category="scheduler")
     def request_finished(self, request: LlmRequest, cache_block_ids: list[int]) -> bool:
         """
         Called when a request is finished generating tokens.

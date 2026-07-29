@@ -88,16 +88,20 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	// EPP-specific environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
-			Name:  "DYN_KV_BLOCK_SIZE",
-			Value: "16",
-		},
-		{
 			Name:  "USE_STREAMING",
 			Value: "true",
 		},
 		{
 			Name:  "RUST_LOG",
-			Value: "debug,dynamo_llm::kv_router=trace",
+			Value: "info",
+		},
+		{
+			Name:  "DYN_ENFORCE_DISAGG",
+			Value: "false",
+		},
+		{
+			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
+			Value: context.DynamoNamespace,
 		},
 	}...)
 
@@ -110,14 +114,14 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	container.Command = []string{}
 
 	container.Args = []string{
-		"-pool-name", poolName,
-		"-pool-namespace", poolNamespace,
-		"-pool-group", epp.InferencePoolGroup,
+		"--pool-name", poolName,
+		"--pool-namespace", poolNamespace,
+		"--pool-group", epp.InferencePoolGroup,
 		"-v", "4",
 		"--zap-encoder", "json",
-		"-grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
-		"-grpc-health-port", "9003",
-		"-config-file", configFilePath,
+		"--grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
+		"--grpc-health-port", "9003",
+		"--config-file", configFilePath,
 	}
 
 	// Mount EPP config

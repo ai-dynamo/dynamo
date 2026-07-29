@@ -8,6 +8,14 @@ from unittest import mock
 
 import pydantic
 import pytest
+import torch
+
+if not torch.cuda.is_available():
+    pytest.skip(
+        "Skipping to avoid errors during collection with '-m gpu_0'. "
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 from tensorrt_llm._torch.auto_deploy import LlmArgs as ADLlmArgs
 
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
@@ -20,6 +28,7 @@ pytestmark = [
     # the `gpu_0` marker.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 _PYTORCH_LLM_CLS_NAME = "dynamo.trtllm.engine.LLM"
 _AUTODEPLOY_LLM_CLS_NAME = "tensorrt_llm._torch.auto_deploy.LLM"
@@ -45,6 +54,25 @@ class TestTensorRTLLMEngine:
             await engine.initialize()
 
         mocked_cls.assert_called_once()
+
+    def test_get_kv_cache_capacity_delegates_to_llm(self):
+        capacity = {
+            "maxNumBlocks": 123,
+            "tokensPerBlock": 64,
+            "maxNumTokens": 7872,
+        }
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock()
+        engine._llm.get_kv_cache_capacity.return_value = capacity
+
+        assert engine.get_kv_cache_capacity() == capacity
+        engine._llm.get_kv_cache_capacity.assert_called_once_with()
+
+    def test_get_kv_cache_capacity_returns_empty_when_api_is_unavailable(self):
+        engine = TensorRTLLMEngine(engine_args={})
+        engine._llm = mock.Mock(spec=[])
+
+        assert engine.get_kv_cache_capacity() == {}
 
     @pytest.mark.parametrize(
         "engine_args, is_forbidden",
@@ -72,9 +100,11 @@ class TestTensorRTLLMEngine:
         engine_args["backend"] = Backend.AUTODEPLOY
         # This allows us to catch cases where a field being pruned away is now supported by
         # AutoDeploy when bumping TRT-LLM.
-        with pytest.raises(
-            pydantic.ValidationError
-        ) if is_forbidden else contextlib.nullcontext():
+        with (
+            pytest.raises(pydantic.ValidationError)
+            if is_forbidden
+            else contextlib.nullcontext()
+        ):
             ADLlmArgs(model="foo", **engine_args)
 
         engine = TensorRTLLMEngine(engine_args=engine_args)

@@ -6,9 +6,7 @@ use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
-use dynamo_llm::block_manager::kv_consolidator::{
-    EventSource, KvEventConsolidatorConfig,
-};
+use dynamo_llm::block_manager::kv_consolidator::{EventSource, KvEventConsolidationMode};
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use dynamo_runtime::DistributedRuntime;
@@ -23,7 +21,7 @@ mod distributed;
 
 pub mod vllm;
 
-/// Add bingings from this crate to the provided module
+/// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockManager>()?;
     m.add_class::<distributed::KvbmWorker>()?;
@@ -31,6 +29,9 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<controller::BlockManagerClient>()?;
     m.add_class::<controller::BlockPoolStatus>()?;
     m.add_class::<controller::ResetBlocksResponse>()?;
+
+    m.add_class::<distributed::PyNcclBootstrap>()?;
+    m.add_class::<distributed::PyNcclCommRef>()?;
 
     vllm::add_to_module(m)?;
 
@@ -57,9 +58,8 @@ fn create_disk_offload_filter(
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<Arc<FrequencyFilter>>> {
     // Check if disk offload filter is disabled via environment variable
-    let disable_filter = std::env::var(env_kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER)
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let disable_filter =
+        dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER);
 
     if disable_filter {
         return Ok(None);
@@ -251,7 +251,12 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
-    consolidator_config: Option<(String, Option<String>, EventSource)>, // (engine_endpoint, output_endpoint (optional), engine_source)
+    consolidator_config: Option<(
+        String,
+        Option<String>,
+        EventSource,
+        KvEventConsolidationMode,
+    )>, // (engine_endpoint, output_endpoint (optional), engine_source, mode)
 }
 
 impl BlockManagerBuilder {
@@ -292,8 +297,9 @@ impl BlockManagerBuilder {
         engine_endpoint: String,
         output_endpoint: Option<String>,
         engine_source: EventSource,
+        mode: KvEventConsolidationMode,
     ) -> Self {
-        self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source));
+        self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source, mode));
         self
     }
 
@@ -367,8 +373,9 @@ impl BlockManagerBuilder {
             config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
         }
 
-        if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
+        if let Some((engine_ep, output_ep, engine_source, mode)) = self.consolidator_config {
+            config_builder =
+                config_builder.consolidator_config(engine_ep, output_ep, engine_source, mode);
         }
 
         let config = config_builder.build()?;

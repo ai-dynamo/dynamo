@@ -12,12 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
----
-{{- if .Capabilities.APIVersions.Has "scheduling.run.ai/v2" }}
-
-{{- /* Create parent queue first */ -}}
-{{- $defaultQueue := lookup "scheduling.run.ai/v2" "Queue" "" "dynamo-default" }}
-{{- if not $defaultQueue }}
+{{- if or (index .Values.global "kai-scheduler").enabled (index .Values.global "kai-scheduler").install }}
 ---
 apiVersion: scheduling.run.ai/v2
 kind: Queue
@@ -25,8 +20,8 @@ metadata:
   name: dynamo-default
   annotations:
     "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "100"
     "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "100"
 spec:
   resources:
     cpu:
@@ -41,11 +36,6 @@ spec:
       quota: -1
       limit: -1
       overQuotaWeight: 1
-{{- end }}
-
-{{- /* Create child queue second */ -}}
-{{- $dynamoQueue := lookup "scheduling.run.ai/v2" "Queue" "" "dynamo" }}
-{{- if not $dynamoQueue }}
 ---
 apiVersion: scheduling.run.ai/v2
 kind: Queue
@@ -53,8 +43,8 @@ metadata:
   name: dynamo
   annotations:
     "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "110"
     "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-weight": "110"
 spec:
   parentQueue: dynamo-default
   resources:
@@ -70,6 +60,4 @@ spec:
       quota: -1
       limit: -1
       overQuotaWeight: 1
-{{- end }}
-
 {{- end }}

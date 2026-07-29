@@ -36,7 +36,7 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
     if not types:
         raise ValueError("No valid endpoint types provided")
 
-    result = None
+    result: ModelType | None = None
     for t in types:
         if t == "chat":
             flag = ModelType.Chat
@@ -49,4 +49,6 @@ def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
 
         result = flag if result is None else result | flag
 
+    # `types` is validated as non-empty above, so result is guaranteed to be set.
+    assert result is not None
     return result

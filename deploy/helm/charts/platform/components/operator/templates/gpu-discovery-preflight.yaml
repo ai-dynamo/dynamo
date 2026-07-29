@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Best-effort template-time check for cluster-scoped RBAC access required by GPU discovery.
+# Runs only when namespaceRestriction.enabled=true and gpuDiscovery.enabled=true (the default).
+#
+# Limitation: Helm's lookup function can only test list/get access, not create. This check
+# verifies the installer can read ClusterRole resources as a proxy for full cluster RBAC
+# access. In the rare case where an installer has create but not list permissions, this
+# check will false-fail; if that happens Helm's native error on the actual ClusterRole
+# creation (in gpu-discovery-rbac.yaml) will still be clear about the missing permission.
+{{- if and .Values.namespaceRestriction.enabled .Values.gpuDiscovery.enabled }}
+{{- /*
+  GPU discovery (gpu-discovery-rbac.yaml) creates a ClusterRole + ClusterRoleBinding to grant
+  the namespace-scoped operator read-only node access.
+
+  This is a best-effort check: lookup runs as the installing user and tests list/get access
+  on ClusterRoles — not the create permission that gpu-discovery-rbac.yaml actually needs.
+  There is no mechanism in Helm templates to test create permissions directly. In practice,
+  installers with create access almost always have list access too, so this catches the
+  common case. If the check is wrong, the actual resource creation will fail with a clear
+  Helm RBAC error.
+
+  lookup returns an empty dict during helm template / --dry-run, so we use a two-probe
+  heuristic to distinguish dry-run mode from insufficient permissions:
+    1. Probe ClusterRoles — if non-empty, the installer has cluster RBAC read access.
+    2. If empty, probe the release Namespace.  All authenticated users can read their own
+       namespace during a real install.  If this succeeds but ClusterRoles did not, the
+       installer likely lacks cluster-scoped access.
+    3. If both are empty we are in dry-run / template mode — skip the check.
+*/ -}}
+{{- $clusterProbe := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" "" -}}
+{{- if not $clusterProbe -}}
+  {{- $nsProbe := lookup "v1" "Namespace" "" .Release.Namespace -}}
+  {{- if $nsProbe -}}
+    {{- fail (join "\n" (list ""
+      "ERROR: GPU discovery requires cluster-scoped RBAC permissions, but the installer"
+      "does not have them. This is needed to grant the namespace-scoped operator"
+      "read-only node access for automatic GPU hardware discovery."
+      ""
+      "Options:"
+      "  1. Ask your cluster admin to grant ClusterRole creation permissions and re-run."
+      ""
+      "  2. Disable GPU discovery and provide hardware config manually in each DGDR:"
+      "     helm install ... --set dynamo-operator.gpuDiscovery.enabled=false"
+      ""
+      "     Then in your DynamoGraphDeploymentRequest:"
+      "     spec:"
+      "       profilingConfig:"
+      "         config:"
+      "           hardware:"
+      "             numGpusPerNode: 8"
+      "             gpuModel: \"H100-SXM5-80GB\""
+      "             gpuVramMib: 81920"
+      ""
+    )) -}}
+  {{- end -}}
+{{- end -}}
+{{- end }}

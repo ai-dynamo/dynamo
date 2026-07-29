@@ -2,18 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose};
+use dynamo_memory::SystemStorage;
+use dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView};
+use flate2::{Compression, write::ZlibEncoder};
 use ndarray::{ArrayBase, Dimension, OwnedRepr};
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "media-nixl")]
-use {
-    base64::{Engine as _, engine::general_purpose},
-    dynamo_memory::SystemStorage,
-    dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView},
-    flate2::{Compression, write::ZlibEncoder},
-    std::io::Write,
-    std::sync::Arc,
-};
+use std::io::Write;
+use std::sync::Arc;
 
 use super::decoders::DecodedMediaMetadata;
 
@@ -33,7 +29,6 @@ pub struct MediaTensorInfo {
 // Decoded media data (image RGB, video frames pixels, ...)
 #[derive(Debug)]
 pub struct DecodedMediaData {
-    #[cfg(feature = "media-nixl")]
     pub(crate) data: SystemStorage,
     pub(crate) tensor_info: MediaTensorInfo,
 }
@@ -43,10 +38,8 @@ pub struct DecodedMediaData {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
     // b64 agent metadata
-    #[cfg(feature = "media-nixl")]
     pub(crate) nixl_metadata: String,
     // tensor descriptor
-    #[cfg(feature = "media-nixl")]
     pub(crate) nixl_descriptor: NixlDescriptor,
 
     #[serde(flatten)]
@@ -55,12 +48,57 @@ pub struct RdmaMediaDataDescriptor {
     // reference to the actual data, kept alive while the rdma descriptor is alive
     #[serde(skip, default)]
     #[allow(dead_code)]
-    #[cfg(feature = "media-nixl")]
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
+impl RdmaMediaDataDescriptor {
+    /// xxh3-64 of `(shape, dtype, decoded byte payload)`. Returns `None` if
+    /// the descriptor was deserialized from the wire and no longer holds
+    /// local storage. Used by MM-aware KV routing to produce a
+    /// content-addressed `mm_hash` so the same image reached through
+    /// different (signed) URLs collides on the same routing key.
+    ///
+    /// `shape` + `dtype` are included in the preimage so two images that
+    /// happen to share a raw byte buffer but differ in dimensions or
+    /// element layout (e.g. `3x224x224` vs `224x224x3`) don't collide on
+    /// the same routing hash.
+    #[cfg(feature = "mm-routing")]
+    pub(crate) fn content_hash(&self) -> Option<u64> {
+        use dynamo_memory::MemoryDescriptor;
+        use xxhash_rust::xxh3::Xxh3;
+        let registered = self.source_storage.as_ref()?;
+        let storage = registered.storage();
+        let len = storage.size();
+        if len == 0 {
+            return None;
+        }
+        let mut hasher = Xxh3::new();
+        // shape (rank + per-dim u64s) — fixed width so distinct shapes
+        // can't alias each other after concatenation.
+        hasher.update(&(self.tensor_info.shape.len() as u64).to_le_bytes());
+        for &dim in &self.tensor_info.shape {
+            hasher.update(&(dim as u64).to_le_bytes());
+        }
+        // dtype as a single discriminant byte; widen if DataType ever grows.
+        let dtype_byte: u8 = match self.tensor_info.dtype {
+            DataType::UINT8 => 0,
+        };
+        hasher.update(&[dtype_byte]);
+        // raw payload via SystemStorage's Slice impl.
+        // SAFETY: `storage` is borrowed for the duration of this call;
+        // SystemStorage owns the malloc'd buffer and won't free or
+        // relocate it while the borrow is alive. The Slice trait's
+        // safety contract about no concurrent mutable access is upheld
+        // because `content_hash` is only invoked on descriptors during
+        // request building, before they're sent to NIXL.
+        use dynamo_memory::actions::Slice;
+        let bytes = unsafe { storage.as_slice().ok()? };
+        hasher.update(bytes);
+        Some(hasher.digest())
+    }
+}
+
 impl DecodedMediaData {
-    #[cfg(feature = "media-nixl")]
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
         let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
@@ -88,17 +126,13 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     fn try_from(array: ArrayBase<OwnedRepr<u8>, D>) -> Result<Self, Self::Error> {
         let shape = array.shape().to_vec();
 
-        #[cfg(feature = "media-nixl")]
         let (data_vec, _) = array.into_raw_vec_and_offset();
-        #[cfg(feature = "media-nixl")]
         let mut storage = SystemStorage::new(data_vec.len())?;
-        #[cfg(feature = "media-nixl")]
         unsafe {
             std::ptr::copy_nonoverlapping(data_vec.as_ptr(), storage.as_mut_ptr(), data_vec.len());
         }
 
         Ok(Self {
-            #[cfg(feature = "media-nixl")]
             data: storage,
             tensor_info: MediaTensorInfo {
                 shape,
@@ -113,7 +147,6 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
 // Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
 // This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
-#[cfg(feature = "media-nixl")]
 pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
     // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
     let nixl_md = agent.raw_agent().get_local_md()?;
@@ -130,7 +163,6 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
     Ok(format!("b64:{}", b64_encoded))
 }
 
-#[cfg(feature = "media-nixl")]
 pub fn get_nixl_agent() -> Result<NixlAgent> {
     let name = format!("media-loader-{}", uuid::Uuid::new_v4());
     let nixl_agent = NixlAgent::with_backends(&name, &["UCX"])?;

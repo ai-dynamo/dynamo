@@ -6,7 +6,13 @@
 //! This module provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
+pub mod frontend_perf;
 pub mod prometheus_names;
+pub mod request_plane;
+pub mod tokio_perf;
+pub mod transport_metrics;
+pub mod work_handler_perf;
+pub mod work_handler_pool;
 
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -33,10 +39,6 @@ use crate::pipeline::{
 use crate::protocols::annotated::Annotated;
 use crate::stream;
 use crate::stream::StreamExt;
-
-// If set to true, then metrics will be labeled with the namespace, component, and endpoint labels.
-// These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
-pub const USE_AUTO_LABELS: bool = true;
 
 // Prometheus imports
 use prometheus::Encoder;
@@ -224,45 +226,78 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
-    if USE_AUTO_LABELS {
-        // Validate that user-provided labels don't conflict with auto-generated labels
-        for (key, _) in labels {
-            if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
+    // Auto-label injection: Always add dynamo_namespace, dynamo_component, dynamo_endpoint labels
+    // based on the hierarchy. Label constants defined in prometheus_names.rs labels module.
+    //
+    // Python counterpart: components/src/dynamo/common/utils/prometheus.py register_engine_metrics_callback()
+
+    // Validate that user-provided labels don't conflict with auto-generated labels
+    for (key, _) in labels {
+        if *key == labels::NAMESPACE
+            || *key == labels::COMPONENT
+            || *key == labels::ENDPOINT
+            || *key == labels::WORKER_ID
+        {
+            return Err(anyhow::anyhow!(
+                "Label '{}' is automatically added by auto-label injection and cannot be manually set",
+                key
+            ));
+        }
+    }
+
+    // Also validate that vector label names (const_labels) don't collide with auto-injected
+    // const labels. A variable label named "worker_id" would conflict with the auto-injected
+    // worker_id const label, causing a prometheus registration error or ambiguous output.
+    if let Some(label_names) = const_labels {
+        for name in label_names.iter() {
+            if *name == labels::NAMESPACE
+                || *name == labels::COMPONENT
+                || *name == labels::ENDPOINT
+                || *name == labels::WORKER_ID
+            {
                 return Err(anyhow::anyhow!(
-                    "Label '{}' is automatically added by auto_label feature and cannot be manually set",
-                    key
+                    "Variable label name '{}' conflicts with auto-injected const label and cannot be used",
+                    name
                 ));
             }
         }
+    }
 
-        // Add auto-generated labels with sanitized values
-        if hierarchy_names.len() > 1 {
-            let namespace = &hierarchy_names[1];
-            if !namespace.is_empty() {
-                let valid_namespace = sanitize_prometheus_label(namespace)?;
-                if !valid_namespace.is_empty() {
-                    updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
-                }
+    // Add auto-generated labels with sanitized values
+    // Hierarchy: [drt, namespace, component, endpoint]
+    if hierarchy_names.len() > 1 {
+        let namespace = &hierarchy_names[1];
+        if !namespace.is_empty() {
+            let valid_namespace = sanitize_prometheus_label(namespace)?;
+            if !valid_namespace.is_empty() {
+                updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
             }
         }
-        if hierarchy_names.len() > 2 {
-            let component = &hierarchy_names[2];
-            if !component.is_empty() {
-                let valid_component = sanitize_prometheus_label(component)?;
-                if !valid_component.is_empty() {
-                    updated_labels.push((labels::COMPONENT.to_string(), valid_component));
-                }
+    }
+    if hierarchy_names.len() > 2 {
+        let component = &hierarchy_names[2];
+        if !component.is_empty() {
+            let valid_component = sanitize_prometheus_label(component)?;
+            if !valid_component.is_empty() {
+                updated_labels.push((labels::COMPONENT.to_string(), valid_component));
             }
         }
-        if hierarchy_names.len() > 3 {
-            let endpoint = &hierarchy_names[3];
-            if !endpoint.is_empty() {
-                let valid_endpoint = sanitize_prometheus_label(endpoint)?;
-                if !valid_endpoint.is_empty() {
-                    updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
-                }
+    }
+    if hierarchy_names.len() > 3 {
+        let endpoint = &hierarchy_names[3];
+        if !endpoint.is_empty() {
+            let valid_endpoint = sanitize_prometheus_label(endpoint)?;
+            if !valid_endpoint.is_empty() {
+                updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
             }
         }
+    }
+
+    // Auto-inject worker_id label from the hierarchy's connection_id (discovery instance ID).
+    // This provides a stable per-worker identity label so metrics from different workers
+    // serving the same endpoint can be distinguished without relying on Kubernetes labels.
+    if let Some(conn_id) = hierarchy.connection_id() {
+        updated_labels.push((labels::WORKER_ID.to_string(), format!("{:x}", conn_id)));
     }
 
     // Add user labels
@@ -563,6 +598,15 @@ pub trait MetricsHierarchy: Send + Sync {
     // Provided methods - have default implementations
     // ========================================================================
 
+    /// Get the connection ID (discovery instance ID) for this hierarchy level.
+    ///
+    /// Returns `Some(id)` when the hierarchy has access to the DistributedRuntime
+    /// (e.g. Namespace, Component, Endpoint). Used by `create_metric()` to auto-inject
+    /// the `worker_id` label. Returns `None` by default.
+    fn connection_id(&self) -> Option<u64> {
+        None
+    }
+
     /// Access the metrics interface for this hierarchy
     /// This is a provided method that works for any type implementing MetricsHierarchy
     fn metrics(&self) -> Metrics<&Self>
@@ -585,6 +629,10 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         (**self).get_metrics_registry()
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        (**self).connection_id()
     }
 }
 
@@ -733,7 +781,7 @@ impl MetricsRegistry {
         for registry in &registries {
             for result in registry.execute_update_callbacks() {
                 if let Err(e) = result {
-                    tracing::error!("Error executing metrics callback: {}", e);
+                    tracing::error!("Error executing metrics callback: {e}");
                 }
             }
         }
@@ -870,7 +918,7 @@ impl MetricsRegistry {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error executing exposition text callback: {}", e);
+                    tracing::error!("Error executing exposition text callback: {e}");
                 }
             }
         }
@@ -887,6 +935,13 @@ impl MetricsRegistry {
             .unwrap()
             .register(collector)
             .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
+    }
+
+    /// Add a Prometheus metric collector, logging a warning on failure instead of returning an error.
+    pub fn add_metric_or_warn(&self, collector: Box<dyn prometheus::core::Collector>, name: &str) {
+        if let Err(e) = self.add_metric(collector) {
+            tracing::warn!(error = %e, metric = name, "Failed to register metric");
+        }
     }
 
     /// Get a read guard to the Prometheus registry for scraping
@@ -984,6 +1039,32 @@ mod test_helpers {
         };
 
         Some((name, labels, value))
+    }
+
+    /// Injects a `worker_id` label into Prometheus metric data lines.
+    /// Prometheus places const labels (like worker_id) before special labels
+    /// (like histogram `le`), so for histogram bucket lines we insert before
+    /// `,le=`. For all other metric lines, we insert before the closing `}`.
+    /// Comment lines and lines without labels are left unchanged.
+    pub fn inject_worker_id(expected: &str, wid: &str) -> String {
+        let wid_label = format!(",worker_id=\"{}\"", wid);
+        expected
+            .lines()
+            .map(|line| {
+                if line.starts_with('#') || line.trim().is_empty() || !line.contains('{') {
+                    line.to_string()
+                } else if let Some(le_pos) = line.find(",le=") {
+                    // Histogram bucket lines: worker_id is a const label, `le` is special,
+                    // so worker_id sorts before `le` in Prometheus output.
+                    let mut s = line.to_string();
+                    s.insert_str(le_pos, &wid_label);
+                    s
+                } else {
+                    line.replacen("}", &format!("{}}}", wid_label), 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -1360,9 +1441,17 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         println!("Endpoint output:");
         println!("{}", endpoint_output_raw);
 
-        let expected_endpoint_output = r#"# HELP dynamo_component_testcounter A test counter
+        // worker_id is runtime-generated (etcd lease ID), so we grab it from the DRT
+        // and inject it into expected strings via the inject_worker_id helper.
+        let wid = format!("{:x}", drt.connection_id());
+        use super::test_helpers::inject_worker_id;
+
+        let expected_endpoint_output = inject_worker_id(
+            r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#.to_string();
+dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#,
+            &wid,
+        );
 
         assert_eq!(
             endpoint_output_raw.trim_end_matches('\n'),
@@ -1388,12 +1477,15 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
         println!("Component output:");
         println!("{}", component_output_raw);
 
-        let expected_component_output = r#"# HELP dynamo_component_testcounter A test counter
+        let expected_component_output = inject_worker_id(
+            r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#.to_string();
+dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#,
+            &wid,
+        );
 
         assert_eq!(
             component_output_raw.trim_end_matches('\n'),
@@ -1418,7 +1510,8 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
         println!("Namespace output:");
         println!("{}", namespace_output_raw);
 
-        let expected_namespace_output = r#"# HELP dynamo_component_testcounter A test counter
+        let expected_namespace_output = inject_worker_id(
+            r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testgauge A test gauge
@@ -1426,7 +1519,9 @@ dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",
 dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000
 # HELP dynamo_component_testintcounter A test int counter
 # TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
+dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#,
+            &wid,
+        );
 
         assert_eq!(
             namespace_output_raw.trim_end_matches('\n'),
@@ -1491,7 +1586,10 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
         println!("DRT output:");
         println!("{}", drt_output_raw);
 
-        let expected_drt_output = r#"# HELP dynamo_component_testcounter A test counter
+        // The uptime_seconds value is dynamic (depends on elapsed wall-clock time),
+        // so we check all other lines exactly and validate uptime separately.
+        let expected_drt_output_without_uptime = inject_worker_id(
+            r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
 dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testcountervec A test counter vector
@@ -1526,20 +1624,62 @@ dynamo_component_testintgauge{dynamo_namespace="ns345"} 42
 # HELP dynamo_component_testintgaugevec A test int gauge vector
 # TYPE dynamo_component_testintgaugevec gauge
 dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server1",service="api",status="active"} 10
-dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0
-# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_component_uptime_seconds gauge
-dynamo_component_uptime_seconds 0"#.to_string();
+dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0"#,
+            &wid,
+        );
 
+        // Split actual output into non-uptime lines and validate the uptime value line.
+        // The uptime metric now carries a worker_id label, so we match on the metric name
+        // prefix and extract the value as the last whitespace-delimited token.
+        let mut non_uptime_lines = Vec::new();
+        let mut saw_uptime_value = false;
+        for line in drt_output_raw.trim_end_matches('\n').lines() {
+            if line.starts_with("dynamo_component_uptime_seconds") && !line.starts_with('#') {
+                let val_str = line.split_whitespace().last().unwrap();
+                val_str.parse::<f64>().expect("uptime should be a float");
+                saw_uptime_value = true;
+            } else if line.starts_with("# HELP dynamo_component_uptime_seconds")
+                || line.starts_with("# TYPE dynamo_component_uptime_seconds")
+            {
+                // Skip HELP/TYPE lines for uptime (we just verify it exists via the value)
+            } else {
+                non_uptime_lines.push(line);
+            }
+        }
+        assert!(
+            saw_uptime_value,
+            "uptime_seconds metric should be present in initial scrape"
+        );
+
+        let actual_without_uptime = non_uptime_lines.join("\n");
         assert_eq!(
-            drt_output_raw.trim_end_matches('\n'),
-            expected_drt_output.trim_end_matches('\n'),
-            "\n=== DRT COMPARISON FAILED ===\n\
+            actual_without_uptime,
+            expected_drt_output_without_uptime.trim_end_matches('\n'),
+            "\n=== DRT COMPARISON FAILED (excluding uptime) ===\n\
              Expected:\n{}\n\
-             Actual (filtered):\n{}\n\
+             Actual:\n{}\n\
              ==============================",
-            expected_drt_output,
-            drt_output_raw
+            expected_drt_output_without_uptime,
+            actual_without_uptime
+        );
+
+        // Wait briefly so the uptime gauge is clearly positive on the next scrape.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let drt_output_after = drt.metrics().prometheus_expfmt().unwrap();
+        let uptime_line = drt_output_after
+            .lines()
+            .find(|l| l.starts_with("dynamo_component_uptime_seconds") && !l.starts_with('#'))
+            .expect("uptime_seconds metric should be present after sleep");
+        let uptime_after: f64 = uptime_line
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse()
+            .expect("uptime should be a float");
+        assert!(
+            uptime_after > 0.0,
+            "uptime_seconds should be > 0 after 10ms sleep, got {}",
+            uptime_after
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
@@ -1597,10 +1737,16 @@ dynamo_component_errors_total 5"#;
         // Get merged Prometheus output from component level
         let output = component.metrics().prometheus_expfmt().unwrap();
 
-        let expected_output = r#"# HELP dynamo_component_requests_total Total requests
+        let wid = format!("{:x}", drt.connection_id());
+        use super::test_helpers::inject_worker_id;
+
+        let expected_output = inject_worker_id(
+            r#"# HELP dynamo_component_requests_total Total requests
 # TYPE dynamo_component_requests_total counter
 dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep1",dynamo_namespace="ns_test"} 100
-dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep2",dynamo_namespace="ns_test"} 200"#;
+dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep2",dynamo_namespace="ns_test"} 200"#,
+            &wid,
+        );
 
         assert_eq!(
             output.trim_end_matches('\n'),
@@ -1643,9 +1789,15 @@ dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep
         // Get merged output - duplicates should be deduplicated
         let output = component.metrics().prometheus_expfmt().unwrap();
 
-        let expected_output = r#"# HELP dynamo_component_dup_metric Duplicate metric test
+        let wid = format!("{:x}", drt.connection_id());
+        use super::test_helpers::inject_worker_id;
+
+        let expected_output = inject_worker_id(
+            r#"# HELP dynamo_component_dup_metric Duplicate metric test
 # TYPE dynamo_component_dup_metric counter
-dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same",dynamo_namespace="ns_dup"} 50"#;
+dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same",dynamo_namespace="ns_dup"} 50"#,
+            &wid,
+        );
 
         assert_eq!(
             output.trim_end_matches('\n'),

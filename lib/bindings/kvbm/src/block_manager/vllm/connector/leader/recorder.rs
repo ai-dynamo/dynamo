@@ -13,6 +13,7 @@ pub enum Action {
     RequestFinished(RequestFinishedInput, RequestFinishedOutput),
     HasSlot(HasSlotInput, HasSlotOutput),
     CreateSlot(CreateSlotInput, CreateSlotOutput),
+    ResetCache(ResetCacheInput, ResetCacheOutput),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,14 @@ pub struct CreateSlotInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSlotOutput {}
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCacheInput {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCacheOutput {
+    result: bool,
+}
+
 #[derive(Debug)]
 pub struct KvConnectorLeaderRecorder {
     _recorder: Recorder<Action>, // Keep recorder alive
@@ -92,6 +101,7 @@ impl KvConnectorLeaderRecorder {
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        consolidator_mode: Option<String>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
@@ -131,6 +141,7 @@ impl KvConnectorLeaderRecorder {
             // Capture consolidator endpoints for the async block
             let consolidator_vllm_ep = consolidator_vllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
+            let consolidator_mode = super::parse_consolidator_mode(consolidator_mode.clone());
 
             handle.spawn(async move {
                 let ready = leader.wait_worker_sync_ready().await;
@@ -152,12 +163,12 @@ impl KvConnectorLeaderRecorder {
                 if let (Some(vllm_ep), Some(output_ep)) =
                     (consolidator_vllm_ep, consolidator_output_ep)
                 {
-                    block_manager_builder =
-                        block_manager_builder.consolidator_config(
-                            vllm_ep,
-                            Some(output_ep),
-                            EventSource::Vllm,
-                        );
+                    block_manager_builder = block_manager_builder.consolidator_config(
+                        vllm_ep,
+                        Some(output_ep),
+                        EventSource::Vllm,
+                        consolidator_mode,
+                    );
                 }
 
                 let block_manager = match block_manager_builder.build().await {
@@ -350,5 +361,14 @@ impl Leader for KvConnectorLeaderRecorder {
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
         Ok(())
+    }
+
+    fn reset_cache(&mut self) -> anyhow::Result<bool> {
+        let output = self.connector_leader.reset_cache()?;
+        let _ = self.unbounded_tx.send(Action::ResetCache(
+            ResetCacheInput {},
+            ResetCacheOutput { result: output },
+        ));
+        Ok(output)
     }
 }

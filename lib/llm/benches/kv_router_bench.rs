@@ -15,8 +15,11 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use dynamo_bench::common::{
+    ChatCompletionRequest, ChatMessage, LatencySample, LatencyStats, TimeBucketStats,
+    compute_time_bucket_stats, fetch_model_name, print_time_bucket_report,
+};
 use dynamo_runtime::transports::event_plane::EventEnvelope;
-use hf_hub;
 use indicatif::{ProgressBar, ProgressStyle};
 use minijinja::{Environment, context, value::Value};
 use rayon::prelude::*;
@@ -27,15 +30,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, Semaphore};
 
-use dynamo_llm::kv_router::protocols::{
+use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_hash,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_block_hash,
     compute_seq_hash_for_block,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::preprocessor::prompt::{
-    ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-};
+use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
+use dynamo_mocker::loadgen::RouterSequence;
+use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
 
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
@@ -141,6 +144,10 @@ struct Args {
     #[arg(long, default_value = "backend")]
     component: String,
 
+    /// Endpoint name used to discover routable workers
+    #[arg(long, default_value = "generate")]
+    endpoint: String,
+
     // Output
     /// Write results to JSON file
     #[arg(long)]
@@ -187,7 +194,7 @@ fn compute_block_hashes(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHas
         .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
             let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
-            LocalBlockHash(compute_hash(&bytes))
+            compute_block_hash(&bytes)
         })
         .collect()
 }
@@ -314,7 +321,7 @@ fn try_load_prompt_renderer(model_or_path: &str) -> Option<PromptRenderer> {
     }
 
     let card = ModelDeploymentCard::load_from_disk(path, None).ok()?;
-    let formatter = PromptFormatter::from_mdc(&card).ok()?;
+    let formatter = prompt_formatter_from_mdc(&card).ok()?;
     Some(PromptRenderer::Formatter(formatter))
 }
 
@@ -528,52 +535,45 @@ impl PrefixData {
 }
 
 /// Pre-generated sequence data for benchmarking
-#[derive(Clone)]
-struct SequenceData {
+type SequenceData = RouterSequence;
+
+fn sequence_from_request_content(
+    content: &str,
     worker_id: WorkerId,
-    local_hashes: Vec<LocalBlockHash>,
-    external_hashes: Vec<ExternalSequenceBlockHash>,
+    kv_block_size: u32,
+    tokenizer: &Tokenizer,
+    prompt_renderer: Option<&PromptRenderer>,
+) -> Result<SequenceData> {
+    let (local_hashes, external_hashes) =
+        compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
+
+    Ok(SequenceData {
+        worker_id,
+        local_hashes,
+        external_hashes,
+    })
 }
 
-impl SequenceData {
-    /// Create a sequence from the exact request content.
-    fn from_request_content(
-        content: &str,
-        worker_id: WorkerId,
-        kv_block_size: u32,
-        tokenizer: &Tokenizer,
-        prompt_renderer: Option<&PromptRenderer>,
-    ) -> Result<Self> {
-        let (local_hashes, external_hashes) =
-            compute_hashes_for_content(content, tokenizer, kv_block_size, prompt_renderer)?;
-
-        Ok(Self {
-            worker_id,
-            local_hashes,
-            external_hashes,
-        })
-    }
-
-    fn to_router_event(&self, event_id: u64) -> RouterEvent {
-        let kv_event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: self
-                    .local_hashes
-                    .iter()
-                    .zip(self.external_hashes.iter())
-                    .map(|(local, ext)| KvCacheStoredBlockData {
-                        block_hash: *ext,
-                        tokens_hash: *local,
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-            dp_rank: 0,
-        };
-        RouterEvent::new(self.worker_id, kv_event)
-    }
+fn sequence_to_router_event(sequence: &SequenceData, event_id: u64) -> RouterEvent {
+    let kv_event = KvCacheEvent {
+        event_id,
+        data: KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: None,
+            start_position: None,
+            blocks: sequence
+                .local_hashes
+                .iter()
+                .zip(sequence.external_hashes.iter())
+                .map(|(local, ext)| KvCacheStoredBlockData {
+                    block_hash: *ext,
+                    tokens_hash: *local,
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }),
+        dp_rank: 0,
+    };
+    RouterEvent::new(sequence.worker_id, kv_event)
 }
 
 /// Response from the frontend's /health endpoint
@@ -588,68 +588,20 @@ struct HealthResponse {
 #[derive(Debug, Deserialize)]
 struct HealthInstance {
     instance_id: u64,
-    #[allow(dead_code)]
+    namespace: String,
+    component: String,
     endpoint: String,
-}
-
-/// Response from the frontend's /v1/models endpoint
-#[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelInfo>,
-}
-
-/// Model info from /v1/models endpoint
-#[derive(Debug, Deserialize)]
-struct ModelInfo {
-    id: String,
-}
-
-/// Fetch the model name from the frontend's /v1/models endpoint.
-///
-/// Returns the model ID if exactly one model is available.
-/// Returns an error if zero or multiple models are found (requiring explicit --model).
-async fn fetch_model_name(frontend_url: &str) -> Result<String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/v1/models", frontend_url);
-
-    println!("  Auto-detecting model from {}...", url);
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .context("Failed to connect to frontend /v1/models endpoint")?;
-
-    if !response.status().is_success() {
-        anyhow::bail!("Models endpoint returned status: {}", response.status());
-    }
-
-    let models: ModelsResponse = response
-        .json()
-        .await
-        .context("Failed to parse models response")?;
-
-    match models.data.len() {
-        0 => anyhow::bail!("No models found at endpoint. Is a backend running?"),
-        1 => {
-            let model_id = models.data[0].id.clone();
-            println!("  Auto-detected model: {}", model_id);
-            Ok(model_id)
-        }
-        n => {
-            println!("  Multiple models available ({}):", n);
-            for m in &models.data {
-                println!("    - {}", m.id);
-            }
-            anyhow::bail!("Multiple models available. Please specify --model explicitly.")
-        }
-    }
 }
 
 /// Discover worker IDs from the frontend's /health endpoint.
 ///
 /// Returns a list of instance_ids (worker_ids) that are currently registered.
-async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
+async fn discover_worker_ids(
+    frontend_url: &str,
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
+) -> Result<Vec<WorkerId>> {
     let client = reqwest::Client::new();
     let url = format!("{}/health", frontend_url);
 
@@ -670,17 +622,33 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
         .await
         .context("Failed to parse health response")?;
 
-    let worker_ids: Vec<WorkerId> = health.instances.iter().map(|i| i.instance_id).collect();
+    let worker_ids: Vec<WorkerId> = health
+        .instances
+        .iter()
+        .filter(|i| i.namespace == namespace && i.component == component && i.endpoint == endpoint)
+        .map(|i| i.instance_id)
+        .collect();
 
-    // Deduplicate (in case of multiple endpoints per worker)
+    // Deduplicate in case discovery reports the same endpoint instance more than once.
     let mut unique_ids: Vec<WorkerId> = worker_ids.clone();
     unique_ids.sort_unstable();
     unique_ids.dedup();
 
-    println!("  Discovered {} workers", unique_ids.len());
+    println!(
+        "  Discovered {} workers for {}.{}.{}",
+        unique_ids.len(),
+        namespace,
+        component,
+        endpoint
+    );
 
     if unique_ids.is_empty() {
-        anyhow::bail!("No workers discovered from frontend. Are kv_stress_workers running?");
+        anyhow::bail!(
+            "No workers discovered from frontend for {}.{}.{}. Are kv_stress_workers running?",
+            namespace,
+            component,
+            endpoint
+        );
     }
 
     Ok(unique_ids)
@@ -698,6 +666,7 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
 ///
 /// Worker IDs are taken from the provided list (discovered from frontend).
 /// Uses parallel processing for tokenization to speed up generation.
+#[allow(clippy::too_many_arguments)]
 fn generate_sequences_for_requests(
     num_sequences: usize,
     worker_ids: &[WorkerId],
@@ -742,7 +711,7 @@ fn generate_sequences_for_requests(
                 num_prefix_prompts,
                 seed,
             );
-            let seq = SequenceData::from_request_content(
+            let seq = sequence_from_request_content(
                 &content,
                 worker_id,
                 kv_block_size,
@@ -799,8 +768,9 @@ async fn build_tree_via_nats(
     };
 
     for (event_id, seq) in sequences.iter().enumerate() {
-        let event = seq.to_router_event(event_id as u64);
-        let data = encode_event_with_envelope(&event, KV_EVENT_SUBJECT)?;
+        let event = sequence_to_router_event(seq, event_id as u64);
+        let event_batch = vec![event];
+        let data = encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT)?;
         nats_client
             .publish(subject.clone(), data.into())
             .await
@@ -836,32 +806,6 @@ struct RequestResult {
     /// Time when request completed, relative to measurement start
     completion_time: Duration,
     success: bool,
-}
-
-/// Individual latency sample for raw data export
-#[derive(Debug, Clone, Serialize)]
-struct LatencySample {
-    /// Latency in microseconds
-    latency_us: u64,
-    /// Completion time in milliseconds from measurement start
-    completion_time_ms: u64,
-    /// Whether the request succeeded
-    success: bool,
-}
-
-/// OpenAI-style chat completion request
-#[derive(Debug, Serialize)]
-struct ChatCompletionRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
 }
 
 /// Generate prefix text content.
@@ -1030,6 +974,7 @@ fn build_routing_request_with_prefix(
 
 /// Send HTTP requests at a specified rate.
 /// Returns the Unix timestamp (seconds since epoch) when warmup ended.
+#[allow(clippy::too_many_arguments)]
 async fn send_requests_at_rate(
     client: reqwest::Client,
     frontend_url: String,
@@ -1241,9 +1186,10 @@ async fn publish_events_at_rate(
 
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
-        let event = seq.to_router_event(event_id);
+        let event = sequence_to_router_event(seq, event_id);
+        let event_batch = vec![event];
 
-        match encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
+        match encode_event_with_envelope(&event_batch, KV_EVENT_SUBJECT) {
             Ok(data) => {
                 if let Err(e) = nats_client.publish(subject.clone(), data.into()).await {
                     publish_failures += 1;
@@ -1298,129 +1244,6 @@ async fn publish_events_at_rate(
         println!(
             "  [publish_events] Completed: {} events published with no failures",
             total_attempts
-        );
-    }
-}
-
-/// Latency statistics
-struct LatencyStats {
-    min: Duration,
-    max: Duration,
-    p50: Duration,
-    p95: Duration,
-    p99: Duration,
-}
-
-impl LatencyStats {
-    fn from_durations(durations: &[Duration]) -> Option<Self> {
-        if durations.is_empty() {
-            return None;
-        }
-
-        let mut sorted = durations.to_vec();
-        sorted.sort();
-        let n = sorted.len();
-
-        Some(Self {
-            min: sorted[0],
-            max: sorted[n - 1],
-            p50: sorted[n / 2],
-            p95: sorted[n * 95 / 100],
-            p99: sorted[n * 99 / 100],
-        })
-    }
-}
-
-/// Time-bucketed latency statistics for tracking latency over time
-#[derive(Debug, Clone, Serialize)]
-struct TimeBucketStats {
-    /// Bucket start time in seconds from measurement start
-    bucket_start_sec: u64,
-    /// Bucket end time in seconds
-    bucket_end_sec: u64,
-    /// Number of requests completed in this bucket
-    count: usize,
-    /// Latency stats for this bucket (in microseconds)
-    latency_min_us: u64,
-    latency_p50_us: u64,
-    latency_p95_us: u64,
-    latency_max_us: u64,
-}
-
-/// Compute per-bucket latency statistics
-fn compute_time_bucket_stats(
-    results: &[RequestResult],
-    bucket_size_secs: u64,
-) -> Vec<TimeBucketStats> {
-    if results.is_empty() {
-        return Vec::new();
-    }
-
-    // Find the max completion time to determine bucket count
-    let max_completion = results
-        .iter()
-        .map(|r| r.completion_time)
-        .max()
-        .unwrap_or(Duration::ZERO);
-
-    let num_buckets = (max_completion.as_secs() / bucket_size_secs) + 1;
-
-    let mut bucket_latencies: Vec<Vec<Duration>> = vec![Vec::new(); num_buckets as usize];
-
-    // Group latencies by completion time bucket
-    for result in results {
-        let bucket_idx = (result.completion_time.as_secs() / bucket_size_secs) as usize;
-        if bucket_idx < bucket_latencies.len() {
-            bucket_latencies[bucket_idx].push(result.latency);
-        }
-    }
-
-    // Compute stats for each bucket
-    bucket_latencies
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, latencies)| {
-            if latencies.is_empty() {
-                return None;
-            }
-
-            let stats = LatencyStats::from_durations(latencies)?;
-            Some(TimeBucketStats {
-                bucket_start_sec: idx as u64 * bucket_size_secs,
-                bucket_end_sec: (idx as u64 + 1) * bucket_size_secs,
-                count: latencies.len(),
-                latency_min_us: stats.min.as_micros() as u64,
-                latency_p50_us: stats.p50.as_micros() as u64,
-                latency_p95_us: stats.p95.as_micros() as u64,
-                latency_max_us: stats.max.as_micros() as u64,
-            })
-        })
-        .collect()
-}
-
-/// Print time-bucket latency report
-fn print_time_bucket_report(buckets: &[TimeBucketStats]) {
-    if buckets.is_empty() {
-        println!("  No time bucket data available");
-        return;
-    }
-
-    println!(
-        "  {:>8} {:>8} {:>12} {:>12} {:>12} {:>12}",
-        "Time(s)", "Count", "Min(ms)", "P50(ms)", "P95(ms)", "Max(ms)"
-    );
-    println!("  {}", "-".repeat(68));
-
-    for bucket in buckets {
-        println!(
-            "  {:>3}-{:<4} {:>8} {:>12.1} {:>12.1} {:>12.1} {:>12.1}",
-            bucket.bucket_start_sec,
-            bucket.bucket_end_sec,
-            bucket.count,
-            bucket.latency_min_us as f64 / 1000.0,
-            bucket.latency_p50_us as f64 / 1000.0,
-            bucket.latency_p95_us as f64 / 1000.0,
-            bucket.latency_max_us as f64 / 1000.0,
         );
     }
 }
@@ -1545,6 +1368,7 @@ async fn main() -> Result<()> {
     println!("  Tokenizer: {}", tokenizer_path);
     println!("  Namespace: {}", args.namespace);
     println!("  Component: {}", args.component);
+    println!("  Endpoint: {}", args.endpoint);
     println!(
         "  NATS subject: namespace.{}.component.{}.kv-events",
         args.namespace, args.component
@@ -1610,7 +1434,8 @@ async fn main() -> Result<()> {
         if let Some(contents) = contents {
             match serde_json::from_str::<ChatTemplate>(&contents) {
                 Ok(chat_template) => {
-                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[])) {
+                    match PromptFormatter::from_parts(chat_template, ContextMixins::new(&[]), true)
+                    {
                         Ok(formatter) => {
                             println!(
                                 "  Prompt formatter loaded from tokenizer_config.json (using frontend-compatible renderer)"
@@ -1708,7 +1533,13 @@ async fn main() -> Result<()> {
     println!("\nPhase 2: Discover Workers & Generate Sequences");
 
     // Discover actual worker IDs from the frontend
-    let discovered_worker_ids = discover_worker_ids(&args.frontend_url).await?;
+    let discovered_worker_ids = discover_worker_ids(
+        &args.frontend_url,
+        &args.namespace,
+        &args.component,
+        &args.endpoint,
+    )
+    .await?;
 
     if discovered_worker_ids.len() != args.num_workers {
         println!(
@@ -1847,7 +1678,11 @@ async fn main() -> Result<()> {
 
     // Compute time-bucketed stats for latency-over-time tracking
     let time_buckets = if args.bucket_size > 0 {
-        compute_time_bucket_stats(&results, args.bucket_size)
+        let pairs: Vec<(Duration, Duration)> = results
+            .iter()
+            .map(|r| (r.latency, r.completion_time))
+            .collect();
+        compute_time_bucket_stats(&pairs, args.bucket_size)
     } else {
         Vec::new()
     };

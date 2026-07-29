@@ -32,6 +32,9 @@ S3:
 
 
 """
+import asyncio
+from typing import Optional
+
 import fsspec
 from fsspec.implementations.dirfs import DirFileSystem
 
@@ -64,3 +67,51 @@ def get_fs(fs_url: str) -> DirFileSystem:
         fs_opts = {"auto_mkdir": True}
 
     return DirFileSystem(fs=fsspec.filesystem(protocol, **fs_opts), path=root_path)
+
+
+def get_media_url(
+    fs: DirFileSystem, storage_path: str, base_url: Optional[str] = None
+) -> str:
+    """Build a public URL for a file stored in the media filesystem.
+
+    Args:
+        fs: The DirFileSystem returned by ``get_fs()``.
+        storage_path: Relative path within the filesystem (e.g. "videos/req-id.mp4").
+        base_url: Optional CDN / proxy base URL.  When set, the returned URL is
+            ``{base_url}/{storage_path}``.  When *None*, the URL is constructed
+            from the filesystem's protocol and root path.
+
+    Returns:
+        Public URL string for the uploaded file.
+    """
+    if base_url:
+        return f"{base_url.rstrip('/')}/{storage_path}"
+
+    protocol = fs.fs.protocol
+    if isinstance(protocol, (list, tuple)):
+        protocol = protocol[0]
+    return f"{protocol}://{fs.path}/{storage_path}"
+
+
+async def upload_to_fs(
+    fs: DirFileSystem,
+    storage_path: str,
+    data: bytes,
+    base_url: Optional[str] = None,
+) -> str:
+    """Upload bytes to the media filesystem and return the public URL.
+
+    This is the canonical helper for all backends (vLLM, SGLang, TRT-LLM)
+    to store generated images/videos and produce a response URL.
+
+    Args:
+        fs: The DirFileSystem returned by ``get_fs()``.
+        storage_path: Relative path within the filesystem (e.g. "images/req-id/file.png").
+        data: Raw bytes to upload.
+        base_url: Optional CDN / proxy base URL for URL rewriting.
+
+    Returns:
+        Public URL string for the uploaded file.
+    """
+    await asyncio.to_thread(fs.pipe, storage_path, data)
+    return get_media_url(fs, storage_path, base_url)

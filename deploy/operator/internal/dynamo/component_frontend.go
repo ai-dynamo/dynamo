@@ -76,6 +76,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 			Name:  "DYN_HTTP_PORT", // TODO: need to reconcile DYNAMO_PORT and DYN_HTTP_PORT
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
+		{
+			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
+			Value: context.DynamoNamespace,
+		},
 	}...)
 
 	return container, nil

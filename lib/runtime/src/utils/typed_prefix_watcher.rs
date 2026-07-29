@@ -12,6 +12,7 @@ use etcd_client::KeyValue;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::Hash;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -100,49 +101,20 @@ where
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    tracing::debug!("TypedPrefixWatcher for prefix '{}' cancelled", prefix_str);
+                    tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' cancelled");
                     break;
                 }
                 event = events_rx.recv() => {
                     let Some(event) = event else {
-                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{}'", prefix_str);
+                        tracing::debug!("TypedPrefixWatcher watch stream closed for prefix '{prefix_str}'");
                         break;
                     };
 
                     match event {
                         WatchEvent::Put(kv) => {
-                            // Extract the key
-                            let Some(key) = key_extractor(&kv) else {
-                                tracing::trace!("Skipping entry - key extractor returned None");
-                                continue;
-                            };
-
-                            // Deserialize the value
-                            let deserialized = match serde_json::from_slice::<T>(kv.value()) {
-                                Ok(val) => val,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to deserialize value from etcd. Key: {}, Error: {}",
-                                        kv.key_str().unwrap_or("<invalid>"),
-                                        e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Extract the value
-                            match value_extractor(deserialized) {
-                                Some(v) => {
-                                    state.insert(key.clone(), v);
-                                    tracing::trace!("Updated entry for key {:?}", key);
-                                }
-                                None => {
-                                    state.remove(&key);
-                                    tracing::trace!("Removed entry for key {:?} (extractor returned None)", key);
-                                }
-                            }
-
-                            if watch_tx.send(state.clone()).is_err() {
+                            if apply_put_event(&mut state, &kv, &key_extractor, &value_extractor)
+                                && watch_tx.send(state.clone()).is_err()
+                            {
                                 tracing::error!("Failed to send update; receiver dropped");
                                 break;
                             }
@@ -158,15 +130,77 @@ where
                                 }
                             }
                         }
+                        WatchEvent::Resync(kvs) => {
+                            let old_count = state.len();
+                            let mut rebuilt = HashMap::with_capacity(kvs.len());
+
+                            for kv in kvs {
+                                apply_put_event(&mut rebuilt, &kv, &key_extractor, &value_extractor);
+                            }
+
+                            state = rebuilt;
+                            tracing::warn!(
+                                prefix = %prefix_str,
+                                old_count,
+                                new_count = state.len(),
+                                "TypedPrefixWatcher rebuilt state from etcd watch resync"
+                            );
+
+                            if watch_tx.send(state.clone()).is_err() {
+                                tracing::error!("Failed to send update; receiver dropped");
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        tracing::debug!("TypedPrefixWatcher for prefix '{}' stopped", prefix_str);
+        tracing::debug!("TypedPrefixWatcher for prefix '{prefix_str}' stopped");
     });
 
     Ok(TypedPrefixWatcher { rx: watch_rx })
+}
+
+fn apply_put_event<K, V, T>(
+    state: &mut HashMap<K, V>,
+    kv: &KeyValue,
+    key_extractor: &impl Fn(&KeyValue) -> Option<K>,
+    value_extractor: &impl Fn(T) -> Option<V>,
+) -> bool
+where
+    K: Clone + Eq + Hash + Debug,
+    T: DeserializeOwned,
+{
+    let Some(key) = key_extractor(kv) else {
+        tracing::trace!("Skipping entry - key extractor returned None");
+        return false;
+    };
+
+    let deserialized = match serde_json::from_slice::<T>(kv.value()) {
+        Ok(val) => val,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to deserialize value from etcd. Key: {}, Error: {}",
+                kv.key_str().unwrap_or("<invalid>"),
+                e
+            );
+            return false;
+        }
+    };
+
+    match value_extractor(deserialized) {
+        Some(v) => {
+            state.insert(key.clone(), v);
+            tracing::trace!("Updated entry for key {:?}", key);
+        }
+        None => {
+            state.remove(&key);
+            tracing::trace!("Removed entry for key {:?} (extractor returned None)", key);
+        }
+    }
+
+    true
 }
 
 /// Watch an etcd prefix and maintain a HashMap of values without field extraction

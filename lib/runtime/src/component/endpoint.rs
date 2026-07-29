@@ -10,13 +10,70 @@ use educe::Educe;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    component::{Endpoint, Instance, TransportType},
+    component::{DeviceType, Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::nats,
 };
+
+fn endpoint_device_type() -> Option<DeviceType> {
+    // Common CUDA masks that explicitly disable GPU visibility.
+    if std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()
+        .map(|v| {
+            let l = v.trim().to_ascii_lowercase();
+            l.is_empty() || l == "-1" || l == "none" || l == "void"
+        })
+        .unwrap_or(false)
+    {
+        return Some(DeviceType::Cpu);
+    }
+
+    // Container runtimes often use NVIDIA_VISIBLE_DEVICES to gate GPU visibility.
+    if std::env::var("NVIDIA_VISIBLE_DEVICES")
+        .ok()
+        .map(|v| {
+            let l = v.trim().to_ascii_lowercase();
+            l == "none" || l == "void"
+        })
+        .unwrap_or(false)
+    {
+        return Some(DeviceType::Cpu);
+    }
+
+    // Default: no explicit CPU override means this endpoint is CUDA-capable.
+    Some(DeviceType::Cuda)
+}
+
+/// A registered endpoint whose exact callable instance is ready for use.
+///
+/// Dropping this handle does not stop the endpoint. Call [`shutdown`](Self::shutdown)
+/// for scoped endpoint lifetimes, or [`wait`](Self::wait) for the traditional
+/// runtime-owned lifetime.
+pub struct StartedEndpoint {
+    instance: Instance,
+    shutdown_token: CancellationToken,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl StartedEndpoint {
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        self.shutdown_token.cancel();
+        self.task.await??;
+        Ok(())
+    }
+
+    pub async fn wait(self) -> Result<()> {
+        self.task.await??;
+        Ok(())
+    }
+}
 
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
@@ -67,6 +124,11 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
+        self.start_with_registration().await?.wait().await
+    }
+
+    /// Start an endpoint and return once its exact discovery instance is callable.
+    pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
@@ -86,25 +148,6 @@ impl EndpointConfigBuilder {
 
         let system_health = endpoint.drt().system_health();
 
-        // Register with graceful shutdown tracker if needed
-        if graceful_shutdown {
-            tracing::debug!(
-                "Registering endpoint '{}' with graceful shutdown tracker",
-                endpoint.name
-            );
-            let tracker = endpoint.drt().graceful_shutdown_tracker();
-            tracker.register_endpoint();
-        } else {
-            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
-        }
-
-        // Launch endpoint based on request plane mode
-        let tracker_clone = if graceful_shutdown {
-            Some(endpoint.drt().graceful_shutdown_tracker())
-        } else {
-            None
-        };
-
         // Create clones for the async closure
         let namespace_name_for_task = endpoint_id.namespace.clone();
         let component_name_for_task = endpoint_id.component.clone();
@@ -112,18 +155,32 @@ impl EndpointConfigBuilder {
 
         // Get the unified request plane server
         let server = endpoint.drt().request_plane_server().await?;
+        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
-            // Build transport based on request plane mode
-            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+            if system_health.lock().health_check_enabled()
+                && endpoint
+                    .drt()
+                    .local_endpoint_registry()
+                    .get(&endpoint.name)
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                     but no local engine is registered. Call .register_local_engine() \
+                     before .start() so the canary health check can function.",
+                    endpoint.name
+                );
+            }
 
             let instance = Instance {
                 component: endpoint_id.component.clone(),
                 endpoint: endpoint_id.name.clone(),
                 namespace: endpoint_id.namespace.clone(),
                 instance_id: connection_id,
-                transport,
+                transport: transport.clone(),
+                device_type: endpoint_device_type(),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -155,20 +212,72 @@ impl EndpointConfigBuilder {
             )
             .await?;
 
-        // Create cleanup task that unregisters on cancellation
-        let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
-        let server_for_cleanup = server.clone();
+        let tracker_clone = if graceful_shutdown {
+            tracing::debug!(
+                "Registering endpoint '{}' with graceful shutdown tracker",
+                endpoint.name
+            );
+            let tracker = endpoint.drt().graceful_shutdown_tracker();
+            tracker.register_endpoint();
+            Some(tracker)
+        } else {
+            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
+            None
+        };
+
+        // Register this endpoint instance in the discovery plane
+        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
+        // consistent registration/discovery across the system.
+        let discovery = endpoint.drt().discovery();
+
+        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+            transport,
+            device_type: endpoint_device_type(),
+        };
+
+        let discovery_instance = match discovery.register(discovery_spec).await {
+            Ok(instance) => instance,
+            Err(e) => {
+                tracing::error!(
+                    %endpoint_id,
+                    error = %e,
+                    "Unable to register service for discovery"
+                );
+                let _ = server.unregister_endpoint(&endpoint_name_for_task).await;
+                if let Some(tracker) = tracker_clone {
+                    tracker.unregister_endpoint();
+                }
+                anyhow::bail!(
+                    "Unable to register service for discovery. Check discovery service status"
+                );
+            }
+        };
+        let instance = match &discovery_instance {
+            crate::discovery::DiscoveryInstance::Endpoint(instance) => instance.clone(),
+            _ => unreachable!("endpoint discovery spec returned a non-endpoint instance"),
+        };
+
+        // Create cleanup task that unregisters on cancellation.
+        let endpoint_name_for_cleanup = endpoint_name_for_task;
+        let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
+        let discovery_for_cleanup = discovery;
 
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
+
+            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
+                tracing::warn!(%error, "Failed to unregister endpoint from discovery");
+            }
 
             tracing::debug!(
                 endpoint = %endpoint_name_for_cleanup,
                 "Unregistering endpoint from request plane server"
             );
 
-            // Unregister from server
             if let Err(e) = server_for_cleanup
                 .unregister_endpoint(&endpoint_name_for_cleanup)
                 .await
@@ -180,7 +289,6 @@ impl EndpointConfigBuilder {
                 );
             }
 
-            // Unregister from graceful shutdown tracker
             if let Some(tracker) = tracker_clone {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
@@ -189,36 +297,11 @@ impl EndpointConfigBuilder {
             anyhow::Ok(())
         });
 
-        // Register this endpoint instance in the discovery plane
-        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
-        // consistent registration/discovery across the system.
-        let discovery = endpoint.drt().discovery();
-
-        // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
-
-        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-            transport,
-        };
-
-        if let Err(e) = discovery.register(discovery_spec).await {
-            tracing::error!(
-                %endpoint_id,
-                error = %e,
-                "Unable to register service for discovery"
-            );
-            endpoint_shutdown_token.cancel();
-            anyhow::bail!(
-                "Unable to register service for discovery. Check discovery service status"
-            );
-        }
-
-        task.await??;
-
-        Ok(())
+        Ok(StartedEndpoint {
+            instance,
+            shutdown_token: endpoint_shutdown_token,
+            task,
+        })
     }
 }
 
@@ -226,7 +309,6 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
@@ -238,29 +320,14 @@ fn build_transport_type_inner(
     connection_id: u64,
 ) -> Result<TransportType> {
     match mode {
-        RequestPlaneMode::Http => {
-            let http_host = crate::utils::get_http_rpc_host_from_env();
-            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8888);
-            let rpc_root =
-                std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
-
-            let http_endpoint = format!(
-                "http://{http_host}:{http_port}{rpc_root}/{}",
-                endpoint_id.name
-            );
-
-            Ok(TransportType::Http(http_endpoint))
-        }
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            let tcp_host = crate::utils::tcp_rpc_host_from_env();
             // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
             // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include instance_id and endpoint name for proper TCP routing.
@@ -293,17 +360,20 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    if mode == RequestPlaneMode::Tcp {
-        // Only force server init when we *don't* have a valid explicit port.
-        let has_fixed_port = std::env::var("DYN_TCP_RPC_PORT")
+    // For TCP with OS-assigned ports, we must ensure the server is initialized
+    // (bound to a port) before we can construct a correct transport address.
+    let has_fixed_port = match mode {
+        RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .is_some();
+            .filter(|&p| p != 0)
+            .is_some(),
+        RequestPlaneMode::Nats => true, // NATS doesn't need port init
+    };
 
-        if !has_fixed_port {
-            // Ensure request plane server is initialized before building transport.
-            let _ = endpoint.drt().request_plane_server().await?;
-        }
+    if !has_fixed_port {
+        // Ensure request plane server is initialized before building transport.
+        let _ = endpoint.drt().request_plane_server().await?;
     }
 
     build_transport_type_inner(mode, endpoint_id, connection_id)
@@ -329,6 +399,7 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             instance_id,
             transport,
+            device_type: endpoint_device_type(),
         });
 
         let discovery = drt.discovery();
@@ -370,6 +441,7 @@ impl Endpoint {
             component: endpoint_id.component,
             endpoint: endpoint_id.name,
             transport,
+            device_type: endpoint_device_type(),
         };
 
         let discovery = drt.discovery();

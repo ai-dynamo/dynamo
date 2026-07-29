@@ -1,0 +1,48 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Top slow syscalls (write, epoll_wait, futex, sendmsg).
+// Identifies which syscalls are consuming time in the frontend.
+//
+// Usage: sudo bpftrace syscall_latency.bt
+//        sudo bpftrace -p <PID> syscall_latency.bt
+
+tracepoint:raw_syscalls:sys_enter
+/comm == "tokio-runtime-w" || comm == "dynamo-frontend"/
+{
+    @start[tid] = nsecs;
+    @syscall_id[tid] = args.id;
+}
+
+tracepoint:raw_syscalls:sys_exit
+/@start[tid]/
+{
+    $delta = nsecs - @start[tid];
+    $id = @syscall_id[tid];
+
+    // Only record syscalls taking > 10us
+    if ($delta > 10000) {
+        @latency_us[$id] = hist($delta / 1000);
+        @slow_count[$id] = count();
+    }
+
+    delete(@start[tid]);
+    delete(@syscall_id[tid]);
+}
+
+interval:s:10
+{
+    printf("\n--- Slow Syscall Latency (us) by syscall number ---\n");
+    print(@latency_us);
+    printf("\n--- Slow Syscall Count ---\n");
+    print(@slow_count, 10);
+    clear(@latency_us);
+    clear(@slow_count);
+}
+
+END
+{
+    clear(@start);
+    clear(@syscall_id);
+}

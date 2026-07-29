@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::{
     common::StopConditionsProvider,
     openai::{
         chat_completions::NvCreateChatCompletionRequest,
         common_ext::{CommonExt, CommonExtProvider},
         completions::NvCreateCompletionRequest,
-        nvext::NvExt,
     },
 };
 
@@ -68,7 +68,9 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     };
 
@@ -276,11 +278,11 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
-        inner: dynamo_async_openai::types::CreateChatCompletionRequest {
+        inner: dynamo_protocols::types::CreateChatCompletionRequest {
             model: "test-model".to_string(),
-            messages: vec![dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                    content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+            messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                    content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                         "Hello".to_string(),
                     ),
                     ..Default::default()
@@ -298,7 +300,9 @@ fn test_serialization_preserves_structure() {
             ..Default::default()
         }),
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     };
 
@@ -350,7 +354,9 @@ fn test_sampling_parameters_extraction() {
             .unwrap(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     };
 

@@ -13,15 +13,19 @@ from typing import Any, AsyncGenerator, Optional
 import torch
 from PIL import Image
 
-from dynamo._core import Component, Context
+from dynamo._core import Context
+from dynamo.common.protocols.image_protocol import ImageNvExt
+from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse, NvExt
+from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
 MAX_NUM_INFERENCE_STEPS = 50
+DEFAULT_NUM_INFERENCE_STEPS = 50
+DEFAULT_GUIDANCE_SCALE = 7.5
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -33,7 +37,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     def __init__(
         self,
-        component: Component,
         generator: Any,  # DiffGenerator, not sgl.Engine
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
@@ -42,18 +45,17 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         """Initialize diffusion worker handler.
 
         Args:
-            component: The Dynamo runtime component.
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
         """
-        super().__init__(component, config, publisher)
+        super().__init__(config, publisher)
 
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.fs_url = config.dynamo_args.image_diffusion_fs_url
-        self.base_url = config.dynamo_args.image_diffusion_base_url
+        self.fs_url = config.dynamo_args.media_output_fs_url
+        self.base_url = config.dynamo_args.media_output_http_url
 
         logger.info(
             f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
@@ -82,21 +84,34 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated images (OpenAI-compatible format).
         """
-        logger.info(f"Image diffusion request: {request}")
+        prompt = request.get("prompt")
+        logger.info(
+            "Image diffusion request: prompt_len=%s has_n=%s has_input_reference=%s has_nvext=%s",
+            len(prompt) if isinstance(prompt, str) else None,
+            "n" in request,
+            request.get("input_reference") is not None,
+            "nvext" in request,
+        )
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = self._get_trace_header(context)
+        trace_header = context.trace_headers() if self.enable_trace else None
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
         try:
             req = CreateImageRequest(**request)
 
-            # get extra parameters
-            nvext = req.nvext or NvExt()
-            nvext.num_inference_steps = min(
-                nvext.num_inference_steps or 50, MAX_NUM_INFERENCE_STEPS
-            )
+            nvext = req.nvext or ImageNvExt()
+
+            # Apply SGLang-specific defaults for unset values
+            raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
+            if raw_steps > MAX_NUM_INFERENCE_STEPS:
+                logger.warning(
+                    f"num_inference_steps={raw_steps} exceeds max "
+                    f"{MAX_NUM_INFERENCE_STEPS}, clamping"
+                )
+            num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
+            guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
 
             width, height = self._parse_size(req.size)
 
@@ -105,18 +120,20 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                 negative_prompt=nvext.negative_prompt,
                 width=width,
                 height=height,
-                num_inference_steps=nvext.num_inference_steps,
-                guidance_scale=nvext.guidance_scale,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
                 seed=nvext.seed,
+                input_reference=req.input_reference,
             )
 
-            user_id = req.user if req.user else context.id()
-
+            context_id = context.id()
+            assert context_id is not None
+            user_id = req.user or context_id
             image_data = []
             for img in images:
                 # uploading or encoding the image
                 if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context.id())
+                    url = await self._upload_to_fs(img, user_id, context_id)
                     image_data.append(ImageData(url=url))
                 else:
                     b64 = self._encode_base64(img)
@@ -144,6 +161,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         guidance_scale: float,
         seed: Optional[int],
         negative_prompt: Optional[str] = None,
+        input_reference: Optional[str] = None,
     ) -> list[bytes]:
         """Generate images using SGLang DiffGenerator"""
         args = {
@@ -154,24 +172,34 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
             "guidance_scale": guidance_scale,
-            "seed": seed if seed else random.randint(0, 1000000),
+            "seed": seed if seed is not None else random.randint(0, 1000000),
         }
+
+        # Add image_path for I2I/TI2I if provided
+        if input_reference is not None:
+            if not input_reference.strip():
+                raise ValueError("input_reference must be a non-empty string")
+            args["image_path"] = input_reference
+
         result = await asyncio.to_thread(
             self.generator.generate,
             sampling_params_kwargs=args,
         )
 
+        # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
             raise RuntimeError("No result from generator")
+        if isinstance(result, list):
+            result = result[0]
 
-        images = result["frames"] if "frames" in result else []
+        images = result.frames if result.frames else []
 
         # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
         image_bytes_list = []
         for img in images:
             if isinstance(img, bytes):
                 image_bytes_list.append(img)
-            elif Image is not None and isinstance(img, Image.Image):
+            elif isinstance(img, Image.Image):
                 # Convert PIL Image to bytes
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
@@ -225,10 +253,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        # send image to filesystem
-        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
-
-        return f"{self.base_url}/{storage_path}"
+        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

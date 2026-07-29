@@ -6,23 +6,35 @@ mod daemon;
 mod utils;
 
 pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
+// hash_pod_name is used by C bindings (EPP) for pod-level worker ID mapping.
 pub use utils::hash_pod_name;
 
 use crd::{apply_cr, build_cr};
 use daemon::DiscoveryDaemon;
-use utils::PodInfo;
+use utils::{KubeDiscoveryMode, PodInfo};
 
 use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
-    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
+    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use kube::Client as KubeClient;
+use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
+    if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
+        anyhow::bail!(
+            "Kubernetes discovery publisher ID {publisher_id} exceeds the JSON-safe maximum \
+             {MAX_JSON_SAFE_PUBLISHER_ID}"
+        );
+    }
+
+    Ok(())
+}
 
 /// Kubernetes-based discovery client
 #[derive(Clone)]
@@ -45,11 +57,14 @@ impl KubeDiscoveryClient {
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         let pod_info = PodInfo::from_env()?;
-        let instance_id = hash_pod_name(&pod_info.pod_name);
+        let instance_id = pod_info.target.instance_id();
+        let cr_name = pod_info.target.cr_name();
 
         tracing::info!(
-            "Initializing KubeDiscoveryClient: pod_name={}, instance_id={:x}, namespace={}, pod_uid={}",
-            pod_info.pod_name,
+            "Initializing KubeDiscoveryClient: mode={:?}, target={:?}, cr_name={}, instance_id={:x}, namespace={}, pod_uid={}",
+            pod_info.mode,
+            pod_info.target,
+            cr_name,
             instance_id,
             pod_info.pod_namespace,
             pod_info.pod_uid
@@ -59,6 +74,27 @@ impl KubeDiscoveryClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
+        // In container mode, delete any stale CR from a previous incarnation of this container.
+        // In failover pods, the pod stays alive when a container crashes and restarts,
+        // so the old CR persists. Deleting it ensures the daemon doesn't see stale data.
+        // In pod mode this is unnecessary — pod restart creates a new pod (and new CR name).
+        if pod_info.mode == KubeDiscoveryMode::Container {
+            let cr_api: Api<DynamoWorkerMetadata> =
+                Api::namespaced(kube_client.clone(), &pod_info.pod_namespace);
+            match cr_api.delete(&cr_name, &DeleteParams::default()).await {
+                Ok(_) => tracing::info!("Deleted stale CR: {}", cr_name),
+                Err(kube::Error::Api(err_resp)) if err_resp.code == 404 => {
+                    tracing::debug!("No stale CR to delete: {}", cr_name);
+                }
+                Err(e) => {
+                    panic!(
+                        "Failed to clear stale CR '{}': {} — cannot start with stale discovery state",
+                        cr_name, e
+                    );
+                }
+            }
+        }
+
         // Create watch channel with initial empty snapshot
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
 
@@ -67,7 +103,7 @@ impl KubeDiscoveryClient {
 
         tokio::spawn(async move {
             if let Err(e) = daemon.run(watch_tx).await {
-                tracing::error!("Discovery daemon failed: {}", e);
+                tracing::error!("Discovery daemon failed: {e}");
             }
         });
 
@@ -89,12 +125,19 @@ impl Discovery for KubeDiscoveryClient {
         self.instance_id
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+        match &spec {
+            DiscoverySpec::EventChannel { publisher_id, .. }
+            | DiscoverySpec::EventSource { publisher_id, .. } => {
+                validate_kubernetes_publisher_id(*publisher_id)?;
+            }
+            _ => {}
+        }
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}",
+            "Registering discovery instance: {:?}, instance_id={:x}",
             instance,
             instance_id
         );
@@ -132,26 +175,35 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Registering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
             }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.register_event_source(instance.clone())?;
+            }
         }
 
         // Build and apply the CR with the updated metadata
         // This persists the metadata to Kubernetes for other pods to discover
-        let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
+        let cr_name = self.pod_info.target.cr_name();
+        let cr = build_cr(
+            &cr_name,
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            &metadata,
+        )?;
 
         if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
             // Rollback local state on CR persistence failure
@@ -169,7 +221,7 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = self.instance_id();
+        let instance_id = instance.instance_id();
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
@@ -204,26 +256,35 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.unregister_model_card(&instance)?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Unregistering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.unregister_event_channel(&instance)?;
             }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.unregister_event_source(&instance)?;
+            }
         }
 
         // Build and apply the CR with the updated metadata
         // This persists the removal to Kubernetes for other pods to see
-        let cr = build_cr(&self.pod_info.pod_name, &self.pod_info.pod_uid, &metadata)?;
+        let cr_name = self.pod_info.target.cr_name();
+        let cr = build_cr(
+            &cr_name,
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            &metadata,
+        )?;
 
         if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
             // Rollback local state on CR persistence failure
@@ -458,5 +519,17 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publisher_ids_must_fit_kubernetes_json_safe_range() {
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID).is_ok());
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID + 1).is_err());
+        assert!(validate_kubernetes_publisher_id(u64::MAX).is_err());
     }
 }

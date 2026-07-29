@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(rustc --print sysroot:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(env:*)",
+      "Bash(ldd:*)",
+      "Bash(cargo test:*)"
+    ]
+  }
+}

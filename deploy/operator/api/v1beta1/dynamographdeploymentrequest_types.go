@@ -1,0 +1,661 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package v1beta1
+
+import (
+	batchv1 "k8s.io/api/batch/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	runtime "k8s.io/apimachinery/pkg/runtime"
+)
+
+// DGDRPhase represents the lifecycle phase of a DynamoGraphDeploymentRequest.
+// +kubebuilder:validation:Enum=Pending;Profiling;Ready;Deploying;Deployed;Failed
+type DGDRPhase string
+
+const (
+	DGDRPhasePending   DGDRPhase = "Pending"
+	DGDRPhaseProfiling DGDRPhase = "Profiling"
+	DGDRPhaseReady     DGDRPhase = "Ready"
+	DGDRPhaseDeploying DGDRPhase = "Deploying"
+	DGDRPhaseDeployed  DGDRPhase = "Deployed"
+	DGDRPhaseFailed    DGDRPhase = "Failed"
+
+	// Condition types
+	// ConditionTypeSucceeded is the aggregate condition for the DGDR lifecycle.
+	// True = pipeline completed successfully; False = in progress or failed.
+	// Reason and Message reflect the current stage or error.
+	ConditionTypeSucceeded = "Succeeded"
+
+	ConditionTypeValidation      = "Validation"
+	ConditionTypeProfiling       = "Profiling"
+	ConditionTypeSpecGenerated   = "SpecGenerated"
+	ConditionTypeDeploymentReady = "DeploymentReady"
+
+	// Event reasons
+	EventReasonInitialized          = "Initialized"
+	EventReasonValidationFailed     = "ValidationFailed"
+	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
+	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
+	EventReasonSpecGenerated        = "SpecGenerated"
+	EventReasonSpecChangeRejected   = "SpecChangeRejected"
+	EventReasonDeploymentCreated    = "DeploymentCreated"
+	EventReasonDeploymentReady      = "DeploymentReady"
+	EventReasonDeploymentDegraded   = "DeploymentDegraded"
+	EventReasonDeploymentDeleted    = "DeploymentDeleted"
+	EventReasonImagePullFailed      = "ImagePullFailed"
+
+	// Label keys
+	LabelApp           = "app"
+	LabelDGDR          = "dgdr"
+	LabelDGDRName      = "dgdr.nvidia.com/name"
+	LabelDGDRNamespace = "dgdr.nvidia.com/namespace"
+	LabelManagedBy     = "nvidia.com/managed-by"
+
+	// Label values
+	LabelValueDynamoProfiler = "dynamo-profiler"
+	LabelValueAICProfiler    = "aic-profiler"
+	LabelValueDynamoOperator = "dynamo-operator"
+)
+
+// ProfilingPhase represents a sub-phase within the profiling pipeline.
+// When the DGDR Phase is "Profiling", this value indicates which step
+// of the profiling pipeline is currently executing.
+// +kubebuilder:validation:Enum=Initializing;SweepingPrefill;SweepingDecode;SelectingConfig;BuildingCurves;GeneratingDGD;Done
+type ProfilingPhase string
+
+const (
+	// Profiler is loading the DGD template, detecting GPU hardware,
+	// and resolving the model architecture from HuggingFace.
+	ProfilingPhaseInitializing ProfilingPhase = "Initializing"
+
+	// Sweeping parallelization strategies (TP/TEP/DEP) across GPU counts
+	// for prefill, measuring TTFT at each configuration.
+	ProfilingPhaseSweepingPrefill ProfilingPhase = "SweepingPrefill"
+
+	// Sweeping parallelization strategies and concurrency levels
+	// for decode, measuring ITL at each configuration.
+	ProfilingPhaseSweepingDecode ProfilingPhase = "SweepingDecode"
+
+	// Filtering results against SLA targets and selecting the most
+	// cost-efficient configuration that meets TTFT/ITL requirements.
+	ProfilingPhaseSelectingConfig ProfilingPhase = "SelectingConfig"
+
+	// Building detailed interpolation curves (ISL→TTFT for prefill,
+	// KV-usage×context-length→ITL for decode) using the selected configs.
+	ProfilingPhaseBuildingCurves ProfilingPhase = "BuildingCurves"
+
+	// Packaging profiling data into a ConfigMap and generating
+	// the final DGD YAML with planner integration.
+	ProfilingPhaseGeneratingDGD ProfilingPhase = "GeneratingDGD"
+
+	// Profiling pipeline finished successfully.
+	ProfilingPhaseDone ProfilingPhase = "Done"
+)
+
+// Profiling condition Reasons.
+//
+// Hybrid A+D approach: the status.profilingPhase field is the canonical source
+// of the current profiling sub-phase, while the Profiling condition's Reason
+// mirrors the phase for kubectl-describe readability. On failure, the Reason
+// is set to "<Phase>Failed" to encode both the phase and the error in one field.
+const (
+	// ProfilingReasonInitializing indicates the profiler is loading the DGD template,
+	// detecting GPU hardware, and resolving the model architecture.
+	ProfilingReasonInitializing = "Initializing"
+
+	// ProfilingReasonSweepingPrefill indicates the profiler is sweeping parallelization
+	// strategies (TP/TEP/DEP) across GPU counts for prefill, measuring TTFT.
+	ProfilingReasonSweepingPrefill = "SweepingPrefill"
+
+	// ProfilingReasonSweepingDecode indicates the profiler is sweeping parallelization
+	// strategies and concurrency levels for decode, measuring ITL.
+	ProfilingReasonSweepingDecode = "SweepingDecode"
+
+	// ProfilingReasonSelectingConfig indicates the profiler is filtering results against
+	// SLA targets and selecting the most cost-efficient configuration.
+	ProfilingReasonSelectingConfig = "SelectingConfig"
+
+	// ProfilingReasonBuildingCurves indicates the profiler is building interpolation
+	// curves (ISL→TTFT, KV-usage×context-length→ITL) for planner integration.
+	ProfilingReasonBuildingCurves = "BuildingCurves"
+
+	// ProfilingReasonGeneratingDGD indicates the profiler is packaging data into a
+	// ConfigMap and generating the final DGD YAML.
+	ProfilingReasonGeneratingDGD = "GeneratingDGD"
+
+	// ProfilingReasonInitializingFailed indicates the initialization phase failed.
+	ProfilingReasonInitializingFailed = "InitializingFailed"
+
+	// ProfilingReasonSweepingPrefillFailed indicates the prefill sweep phase failed.
+	ProfilingReasonSweepingPrefillFailed = "SweepingPrefillFailed"
+
+	// ProfilingReasonSweepingDecodeFailed indicates the decode sweep phase failed.
+	ProfilingReasonSweepingDecodeFailed = "SweepingDecodeFailed"
+
+	// ProfilingReasonSelectingConfigFailed indicates the config selection phase failed.
+	ProfilingReasonSelectingConfigFailed = "SelectingConfigFailed"
+
+	// ProfilingReasonBuildingCurvesFailed indicates the curve-building phase failed.
+	ProfilingReasonBuildingCurvesFailed = "BuildingCurvesFailed"
+
+	// ProfilingReasonGeneratingDGDFailed indicates the DGD generation phase failed.
+	ProfilingReasonGeneratingDGDFailed = "GeneratingDGDFailed"
+
+	// ProfilingReasonCompleted indicates the profiling pipeline finished successfully.
+	ProfilingReasonCompleted = "Completed"
+
+	// ProfilingReasonJobCreationFailed indicates the Kubernetes Job for profiling
+	// could not be created.
+	ProfilingReasonJobCreationFailed = "JobCreationFailed"
+)
+
+// SearchStrategy controls the profiling search depth.
+// +kubebuilder:validation:Enum=rapid;thorough
+type SearchStrategy string
+
+const (
+	SearchStrategyRapid    SearchStrategy = "rapid"
+	SearchStrategyThorough SearchStrategy = "thorough"
+)
+
+// GPUSKUType is the AIC hardware system identifier for a supported GPU.
+// +kubebuilder:validation:Enum=gb200_sxm;gb10;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+type GPUSKUType string
+
+const (
+	// --- Blackwell ---
+	GPUSKUTypeGB200SXM GPUSKUType = "gb200_sxm"
+	GPUSKUTypeGB10     GPUSKUType = "gb10"
+	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
+	// --- Hopper ---
+	GPUSKUTypeH200SXM  GPUSKUType = "h200_sxm"
+	GPUSKUTypeH100SXM  GPUSKUType = "h100_sxm"
+	GPUSKUTypeH100PCIe GPUSKUType = "h100_pcie"
+	// --- Ampere ---
+	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
+	GPUSKUTypeA100PCIe GPUSKUType = "a100_pcie"
+	GPUSKUTypeA30      GPUSKUType = "a30"
+	// --- Ada ---
+	GPUSKUTypeL40S GPUSKUType = "l40s"
+	GPUSKUTypeL40  GPUSKUType = "l40"
+	GPUSKUTypeL4   GPUSKUType = "l4"
+	// --- Older NVIDIA ---
+	GPUSKUTypeV100SXM  GPUSKUType = "v100_sxm"
+	GPUSKUTypeV100PCIe GPUSKUType = "v100_pcie"
+	GPUSKUTypeT4       GPUSKUType = "t4"
+	// --- AMD ---
+	GPUSKUTypeMI200 GPUSKUType = "mi200"
+	GPUSKUTypeMI300 GPUSKUType = "mi300"
+)
+
+// BackendType specifies the inference backend.
+// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
+type BackendType string
+
+const (
+	BackendTypeAuto   BackendType = "auto"
+	BackendTypeSglang BackendType = "sglang"
+	BackendTypeTrtllm BackendType = "trtllm"
+	BackendTypeVllm   BackendType = "vllm"
+)
+
+// WorkloadSpec defines the workload characteristics for SLA-based profiling.
+type WorkloadSpec struct {
+	// ISL is the Input Sequence Length (number of tokens).
+	// +optional
+	// +kubebuilder:default=4000
+	ISL *int32 `json:"isl,omitempty"`
+
+	// OSL is the Output Sequence Length (number of tokens).
+	// +optional
+	// +kubebuilder:default=1000
+	OSL *int32 `json:"osl,omitempty"`
+
+	// Concurrency is the target concurrency level.
+	// Required (or RequestRate) when the planner is disabled.
+	// +optional
+	Concurrency *float64 `json:"concurrency,omitempty"`
+
+	// RequestRate is the target request rate (req/s).
+	// Required (or Concurrency) when the planner is disabled.
+	// +optional
+	RequestRate *float64 `json:"requestRate,omitempty"`
+}
+
+// OptimizationType defines the optimization target for SLA-based profiling.
+// +kubebuilder:validation:Enum=latency;throughput
+type OptimizationType string
+
+const (
+	OptimizationTypeLatency    OptimizationType = "latency"
+	OptimizationTypeThroughput OptimizationType = "throughput"
+)
+
+// SLASpec defines the service-level agreement targets for profiling optimization.
+type SLASpec struct {
+	// TTFT is the Time To First Token target in milliseconds.
+	// +optional
+	// +python-default=2000
+	TTFT *float64 `json:"ttft,omitempty"`
+
+	// ITL is the Inter-Token Latency target in milliseconds.
+	// +optional
+	// +python-default=30
+	ITL *float64 `json:"itl,omitempty"`
+
+	// E2ELatency is the target end-to-end request latency in milliseconds.
+	// Alternative to specifying TTFT + ITL.
+	// +optional
+	E2ELatency *float64 `json:"e2eLatency,omitempty"`
+
+	// OptimizationType is the optimization target for SLA profiling.
+	// Valid values: latency, throughput.
+	// +optional
+	OptimizationType *OptimizationType `json:"optimizationType,omitempty"`
+}
+
+// ModelCacheSpec references a PVC containing pre-downloaded model weights.
+type ModelCacheSpec struct {
+	// PVCName is the name of the PersistentVolumeClaim containing model weights.
+	// The PVC must exist in the same namespace as the DGDR.
+	// +optional
+	PVCName string `json:"pvcName,omitempty"`
+
+	// PVCModelPath is the path to the model checkpoint directory within the PVC
+	// (e.g. "deepseek-r1" or "models/Llama-3.1-405B-FP8").
+	// +optional
+	PVCModelPath string `json:"pvcModelPath,omitempty"`
+
+	// PVCMountPath is the mount path for the PVC inside the container.
+	// +optional
+	// +kubebuilder:default="/opt/model-cache"
+	PVCMountPath string `json:"pvcMountPath,omitempty"`
+}
+
+// OverridesSpec allows customizing the profiling job and the generated DynamoGraphDeployment.
+type OverridesSpec struct {
+	// ProfilingJob allows overriding the profiling Job specification.
+	// Fields set here are merged into the controller-generated Job spec.
+	// +optional
+	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
+
+	// DGD provides a partial, versioned DynamoGraphDeployment override for the
+	// profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
+	// nvidia.com/v1beta1 and kind to DynamoGraphDeployment.
+	//
+	// The profiler merges the override using the schema for its declared version.
+	// If the generated DGD uses another supported version, the complete DGD is
+	// converted before the merge and converted back afterward. The final DGD
+	// selected or created by a DGDR is nvidia.com/v1beta1.
+	//
+	// The override can update DGD fields, but topology entries are limited to
+	// services or components already present in the generated DGD. Metadata labels
+	// and annotations are merged, metadata.name selects the final DGD name, and
+	// other identity or runtime metadata is ignored.
+	// V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows
+	// structural schema merge behavior, including map-list merging and atomic-list
+	// replacement.
+	//
+	// The raw embedded resource preserves either supported schema. The API server
+	// validates that it has apiVersion and kind; override processing validates the
+	// DGD kind, supported version, and field schema.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	DGD *runtime.RawExtension `json:"dgd,omitempty"`
+}
+
+// MockerSpec configures the simulated (mocker) backend.
+type MockerSpec struct {
+	// Enabled indicates whether to deploy mocker workers instead of real inference workers.
+	// Useful for large-scale testing without GPUs.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// KVRouterSpec configures KV-cache-aware routing.
+type KVRouterSpec struct {
+	// Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+	// KV routing optimizes request scheduling based on KV cache locality.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// FeaturesSpec controls optional Dynamo platform features in the generated deployment.
+type FeaturesSpec struct {
+	// Planner contains the raw Planner configuration passed to the Planner service.
+	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
+	// See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.
+	// DGDR passes this object through without field-level validation; the Planner
+	// service validates it at startup.
+	// The presence of this field (non-null) enables the planner in the generated DGD.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Planner *runtime.RawExtension `json:"planner,omitempty"`
+
+	// TODO: KVRouter support is not yet implemented in the operator.
+	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+
+	// Mocker configures the simulated (mocker) backend for testing without GPUs.
+	// +optional
+	Mocker *MockerSpec `json:"mocker,omitempty"`
+}
+
+// HardwareSpec describes the GPU hardware for profiling and deployment.
+// All fields are auto-detected from cluster GPU nodes when omitted
+// (requires cluster-wide mode with GPU discovery enabled).
+// gpuSku is a selector (restricts which nodes are considered);
+// the other fields are pure overrides passed to the profiler.
+// If all four fields are set, discovery is skipped.
+type HardwareSpec struct {
+	// GPUSKU selects the GPU type to target.
+	// When omitted, auto-detected by selecting the GPU with the highest
+	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// choose which GPU type to use. Discovery and totalGpus are then
+	// restricted to nodes matching this SKU.
+	// +optional
+	// +kubebuilder:validation:Enum=gb200_sxm;gb10;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
+
+	// VRAMMB is the VRAM per GPU in MiB.
+	// When omitted, auto-detected from cluster GPU nodes.
+	// +optional
+	VRAMMB *float64 `json:"vramMb,omitempty"`
+
+	// TotalGPUs is the GPU budget for profiling and deployment.
+	// The profiler uses this to determine parallelism and replica count.
+	// When omitted, computed by counting GPUs on discovered nodes
+	// (filtered by gpuSku when set), temporarily capped at 32 to
+	// limit profiler search space. This cap may be removed in a future
+	// release. Set this field explicitly to override.
+	// +optional
+	TotalGPUs *int32 `json:"totalGpus,omitempty"`
+
+	// NumGPUsPerNode is the number of GPUs per node.
+	// When omitted, auto-detected from cluster GPU nodes.
+	// +optional
+	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
+	// Interconnect describes the primary GPU-to-GPU interconnect *within a node*.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.
+	//   - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"
+	//     vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.
+	//
+	// Impact of wrong / missing values:
+	//   - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance
+	//     models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,
+	//     resulting in degraded performance compared to expectations.
+	//   - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may
+	//     choose conservative plans and leave performance on the table.
+	//   - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to
+	//     conservative assumptions.
+	//
+	// Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected.
+	//
+	// +optional
+	Interconnect string `json:"interconnect,omitempty"`
+
+	// RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.
+	//
+	// Semantics / usage:
+	//   - This is capability metadata used for profiling, planning, and deployment decisions.
+	//   - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,
+	//     GPUDirect settings). It only expresses availability/intent.
+	//   - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating
+	//     RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery
+	//     is unavailable, it may remain unset.
+	//
+	// Impact of wrong / missing values:
+	//   - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or
+	//     deployments to assume RDMA is available; depending on the runtime transport selection and
+	//     fallback behavior, this can lead to connection/setup failures or performance regressions.
+	//   - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and
+	//     fall back to non-RDMA transports, usually remaining functional but potentially slower.
+	//   - If unset and undiscovered, consumers should treat RDMA availability as unknown and use
+	//     conservative defaults / fallback transports.
+	//
+	// +optional
+	RDMA *bool `json:"rdma,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// Only the Model field is required; all other fields are optional and have sensible defaults.
+type DynamoGraphDeploymentRequestSpec struct {
+	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
+	// Can be a HuggingFace ID or a private model name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Model string `json:"model"`
+
+	// Backend specifies the inference backend to use for profiling and deployment.
+	// +optional
+	// +kubebuilder:default=auto
+	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
+	Backend BackendType `json:"backend,omitempty"`
+
+	// Image is the container image reference for the profiling job (planner image).
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+	// For Dynamo < 1.1.0, use dynamo-frontend.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ModelCache provides optional PVC configuration for pre-downloaded model weights.
+	// When provided, weights are loaded from the PVC instead of downloading from HuggingFace.
+	// +optional
+	ModelCache *ModelCacheSpec `json:"modelCache,omitempty"`
+
+	// Hardware describes the hardware resources available for profiling and deployment.
+	// Typically auto-filled by the operator from cluster discovery.
+	// +optional
+	Hardware *HardwareSpec `json:"hardware,omitempty"`
+
+	// Workload defines the expected workload characteristics for SLA-based profiling.
+	// +optional
+	Workload *WorkloadSpec `json:"workload,omitempty"`
+
+	// SLA defines service-level agreement targets that drive profiling optimization.
+	// +optional
+	SLA *SLASpec `json:"sla,omitempty"`
+
+	// Overrides allows customizing the profiling job and the generated DynamoGraphDeployment.
+	// +optional
+	Overrides *OverridesSpec `json:"overrides,omitempty"`
+
+	// Features controls optional Dynamo platform features in the generated deployment.
+	// +optional
+	Features *FeaturesSpec `json:"features,omitempty"`
+
+	// SearchStrategy controls the profiling search depth.
+	// "rapid" performs a fast sweep; "thorough" explores more configurations.
+	// +optional
+	// +kubebuilder:default=rapid
+	// +kubebuilder:validation:Enum=rapid;thorough
+	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
+
+	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
+	// after profiling completes. If false, the generated spec is stored in status
+	// for manual review and application.
+	// +optional
+	// +kubebuilder:default=true
+	AutoApply *bool `json:"autoApply,omitempty"`
+}
+
+// ParetoConfig is retained for compatibility with status objects produced by
+// older profiler releases.
+// Deprecated: The profiler no longer generates Pareto configurations.
+type ParetoConfig struct {
+	// Config is the full deployment configuration for this Pareto point.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Config runtime.RawExtension `json:"config"`
+}
+
+// ProfilingResultsStatus contains the output of the profiling process.
+type ProfilingResultsStatus struct {
+	// Pareto is retained for compatibility with existing status objects.
+	// Deprecated: The controller no longer populates this field.
+	// +optional
+	Pareto []ParetoConfig `json:"pareto,omitempty"`
+
+	// SelectedConfig is the recommended configuration chosen by the profiler
+	// based on the SLA targets. This is the configuration used for deployment
+	// when autoApply is true.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	SelectedConfig *runtime.RawExtension `json:"selectedConfig,omitempty"`
+}
+
+// DeploymentInfoStatus tracks the state of the deployed DynamoGraphDeployment.
+type DeploymentInfoStatus struct {
+	// Replicas is the desired number of replicas.
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// AvailableReplicas is the number of replicas that are available and ready.
+	// +optional
+	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+type DynamoGraphDeploymentRequestStatus struct {
+	// Phase is the high-level lifecycle phase of the deployment request.
+	// +optional
+	Phase DGDRPhase `json:"phase,omitempty"`
+
+	// ProfilingPhase indicates the current sub-phase of the profiling pipeline.
+	// Only meaningful when Phase is "Profiling". Cleared when profiling completes or fails.
+	// +optional
+	ProfilingPhase ProfilingPhase `json:"profilingPhase,omitempty"`
+
+	// DGDName is the name of the generated or created DynamoGraphDeployment.
+	// +optional
+	DGDName string `json:"dgdName,omitempty"`
+
+	// ProfilingJobName is the name of the Kubernetes Job running the profiler.
+	// +optional
+	ProfilingJobName string `json:"profilingJobName,omitempty"`
+
+	// Conditions contains the latest observed conditions of the deployment request.
+	// Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+
+	// ProfilingResults contains the selected deployment configuration produced by profiling.
+	// Deprecated compatibility fields may remain on objects created by older releases.
+	// +optional
+	ProfilingResults *ProfilingResultsStatus `json:"profilingResults,omitempty"`
+
+	// DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.
+	// Populated when a DGD has been created (either via autoApply or manually).
+	// +optional
+	DeploymentInfo *DeploymentInfoStatus `json:"deploymentInfo,omitempty"`
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
+// DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
+// It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
+// Users specify a model and optional performance targets; the controller handles profiling,
+// configuration selection, and deployment.
+//
+// Lifecycle:
+//  1. Pending: Spec validated, preparing for profiling
+//  2. Profiling: Profiling job is running to discover optimal configurations
+//  3. Ready: Profiling complete, generated DGD spec available in status
+//  4. Deploying: DGD is being created and rolled out (when autoApply=true)
+//  5. Deployed: DGD is running and healthy
+//  6. Failed: An unrecoverable error occurred
+//
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:storageversion
+// +kubebuilder:resource:shortName=dgdr
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
+// +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backend`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Profiling",type=string,JSONPath=`.status.profilingPhase`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].reason`
+// +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
+// +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+type DynamoGraphDeploymentRequest struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec defines the desired state for this deployment request.
+	Spec DynamoGraphDeploymentRequestSpec `json:"spec,omitempty"`
+
+	// Status reflects the current observed state of this deployment request.
+	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// DynamoGraphDeploymentRequestList contains a list of DynamoGraphDeploymentRequest resources.
+type DynamoGraphDeploymentRequestList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []DynamoGraphDeploymentRequest `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
+}
+
+// SetPhase updates the Phase field in the DGDR status.
+func (d *DynamoGraphDeploymentRequest) SetPhase(phase DGDRPhase) {
+	d.Status.Phase = phase
+}
+
+// GetPhase returns the current lifecycle phase.
+func (d *DynamoGraphDeploymentRequest) GetPhase() DGDRPhase {
+	return d.Status.Phase
+}
+
+// GetState implements the observability.StateProvider interface, returning the
+// phase as a string so v1beta1 DGDRs can be counted by the resource counter
+// without registering a v1alpha1 cache informer.
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	return string(d.Status.Phase)
+}
+
+// SetProfilingPhase updates the profiling sub-phase.
+func (d *DynamoGraphDeploymentRequest) SetProfilingPhase(phase ProfilingPhase) {
+	d.Status.ProfilingPhase = phase
+}
+
+// ClearProfilingPhase resets the profiling sub-phase (e.g., on completion or failure).
+func (d *DynamoGraphDeploymentRequest) ClearProfilingPhase() {
+	d.Status.ProfilingPhase = ""
+}
+
+// AddStatusCondition adds or updates a condition in the status.
+// Uses apimeta.SetStatusCondition to correctly preserve LastTransitionTime.
+func (d *DynamoGraphDeploymentRequest) AddStatusCondition(condition metav1.Condition) {
+	apimeta.SetStatusCondition(&d.Status.Conditions, condition)
+}

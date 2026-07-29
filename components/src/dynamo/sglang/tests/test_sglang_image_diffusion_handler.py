@@ -5,7 +5,8 @@
 
 import base64
 import io
-from unittest.mock import MagicMock, Mock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image
@@ -24,12 +25,6 @@ pytestmark = [
 
 
 @pytest.fixture
-def mock_component():
-    """Mock Dynamo Component."""
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_generator():
     """Mock SGLang DiffGenerator."""
     generator = MagicMock()
@@ -42,8 +37,8 @@ def mock_config():
     """Mock Config object."""
     config = MagicMock()
     config.dynamo_args = MagicMock()
-    config.dynamo_args.image_diffusion_fs_url = "file:///tmp/images"
-    config.dynamo_args.image_diffusion_base_url = "file:///tmp/images"
+    config.dynamo_args.media_output_fs_url = "file:///tmp/images"
+    config.dynamo_args.media_output_http_url = "file:///tmp/images"
     return config
 
 
@@ -67,12 +62,9 @@ def mock_context():
 
 
 @pytest.fixture
-def handler(
-    mock_component, mock_generator, mock_config, mock_fs
-) -> ImageDiffusionWorkerHandler:
+def handler(mock_generator, mock_config, mock_fs) -> ImageDiffusionWorkerHandler:
     """Create ImageDiffusionWorkerHandler instance."""
     return ImageDiffusionWorkerHandler(
-        component=mock_component,
         generator=mock_generator,
         config=mock_config,
         publisher=None,
@@ -90,17 +82,14 @@ class TestImageDiffusionWorkerHandler:
         assert handler.fs_url == "file:///tmp/images"
         assert handler.base_url == "file:///tmp/images"
 
-    def test_initialization_with_url_base(
-        self, mock_component, mock_generator, mock_fs
-    ):
+    def test_initialization_with_url_base(self, mock_generator, mock_fs):
         """Test handler initialization with URL base."""
         config = MagicMock()
         config.dynamo_args = MagicMock()
-        config.dynamo_args.image_diffusion_fs_url = "s3://my-bucket/images"
-        config.dynamo_args.image_diffusion_base_url = "http://localhost:8008/images"
+        config.dynamo_args.media_output_fs_url = "s3://my-bucket/images"
+        config.dynamo_args.media_output_http_url = "http://localhost:8008/images"
 
         handler = ImageDiffusionWorkerHandler(
-            component=mock_component,
             generator=mock_generator,
             config=config,
             publisher=None,
@@ -146,7 +135,7 @@ class TestImageDiffusionWorkerHandler:
 
         # Mock generator response
         handler.generator.generate = Mock(
-            return_value={"frames": [test_image.convert("RGB")]}
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
         )
 
         request = {
@@ -185,7 +174,7 @@ class TestImageDiffusionWorkerHandler:
 
         # Mock generator response
         handler.generator.generate = Mock(
-            return_value={"frames": [test_image.convert("RGB")]}
+            return_value=SimpleNamespace(frames=[test_image.convert("RGB")])
         )
 
         request = {
@@ -225,7 +214,9 @@ class TestImageDiffusionWorkerHandler:
     ):
         """Test that num_inference_steps defaults to 50."""
         test_image = Image.new("RGB", (256, 256), color="green")
-        handler.generator.generate = Mock(return_value={"frames": [test_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
 
         request = {
             "prompt": "A green square",
@@ -293,7 +284,9 @@ class TestImageDiffusionWorkerHandler:
         # Create a numpy array representing an image
         np_image = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
 
-        handler.generator.generate = Mock(return_value={"frames": [np_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[np_image])
+        )
 
         images = await handler._generate_images(
             prompt="test",
@@ -312,7 +305,9 @@ class TestImageDiffusionWorkerHandler:
         """Test _generate_images handles PIL Images."""
         pil_image = Image.new("RGB", (256, 256), color="red")
 
-        handler.generator.generate = Mock(return_value={"frames": [pil_image]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[pil_image])
+        )
 
         images = await handler._generate_images(
             prompt="test",
@@ -331,7 +326,9 @@ class TestImageDiffusionWorkerHandler:
         """Test _generate_images handles bytes directly."""
         img_bytes = b"raw image bytes"
 
-        handler.generator.generate = Mock(return_value={"frames": [img_bytes]})
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[img_bytes])
+        )
 
         images = await handler._generate_images(
             prompt="test",
@@ -350,10 +347,7 @@ class TestImageDiffusionWorkerHandler:
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = Mock(return_value=[test_image.tobytes()])
-        handler._get_trace_header = Mock(
-            return_value={"traceparent": "00-1234567890-1234567890-01"}
-        )
+        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
 
         request = {
             "prompt": "A yellow square",
@@ -371,6 +365,9 @@ class TestImageDiffusionWorkerHandler:
 
         # Execute generation
         results = []
+        mock_context.trace_headers = MagicMock(
+            return_value={"traceparent": "00-1234567890-1234567890-01"}
+        )
         async for result in handler.generate(request, mock_context):
             results.append(result)
 
@@ -383,4 +380,59 @@ class TestImageDiffusionWorkerHandler:
             guidance_scale=7.5,
             seed=42,
             negative_prompt="negative",
+            input_reference=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_passes_image_path(
+        self, handler, mock_context, tmp_path
+    ):
+        """Test that input_reference is passed as image_path to the generator."""
+        test_image = Image.new("RGB", (256, 256), color="green")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        input_ref = str(tmp_path / "test_input.png")
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": input_ref,
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was passed to the generator
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert sampling_params["image_path"] == input_ref
+
+    @pytest.mark.asyncio
+    async def test_generate_t2i_no_image_path(self, handler, mock_context):
+        """Test that image_path is NOT passed when input_reference is absent."""
+        test_image = Image.new("RGB", (256, 256), color="red")
+
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+        request = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+        }
+
+        results = []
+        async for result in handler.generate(request, mock_context):
+            results.append(result)
+
+        # Verify image_path was NOT passed
+        call_args = handler.generator.generate.call_args
+        sampling_params = call_args[1]["sampling_params_kwargs"]
+        assert "image_path" not in sampling_params

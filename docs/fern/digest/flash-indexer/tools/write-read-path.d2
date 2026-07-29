@@ -1,0 +1,61 @@
+# Flash Indexer: Write/Read Path (grid layout with containers)
+# Tree placed inside Read Path for grid alignment; container border
+# adjusted in SVG post-processing to exclude it.
+# Read Lock label + arrow added in SVG post-processing.
+...@theme.d2
+
+direction: right
+
+writes: Write Path {
+  class: container_l1
+  grid-rows: 3
+  grid-gap: 150
+
+  ev: KV Events {
+    shape: queue
+    class: event
+    width: 300
+    height: 72
+  }
+  sr: Sticky Router {
+    class: load_balancer
+    width: 300
+    height: 72
+  }
+  pool: "Thread Pool (x3)" {
+    class: cpu
+    width: 300
+    height: 72
+  }
+
+  ev -> sr { class: data_flow }
+  sr -> pool { class: control_flow }
+}
+
+reads: Read Path {
+  class: container_l1
+  grid-rows: 3
+  grid-gap: 150
+
+  req: Incoming Request {
+    shape: hexagon
+    class: neutral
+    width: 300
+    height: 72
+  }
+  fm: "find_matches()" {
+    class: api
+    width: 300
+    height: 72
+  }
+  tree: Concurrent Radix Tree {
+    shape: cylinder
+    class: database
+    width: 300
+    height: 72
+  }
+
+  req -> fm { class: control_flow }
+}
+
+writes.pool -> reads.tree: Write Lock { class: critical_path }

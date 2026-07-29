@@ -15,7 +15,7 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
   - `dynamo` package (with vllm and frontend modules)
   - `aiperf` for benchmarking
   - `matplotlib` for plotting results
-  - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
+  - `data-generator` package (install with `uv pip install -e ./benchmarks` from repo root)
 
 > [!Note]
 > If running outside a container, set `DYNAMO_HOME` to the root path of your Dynamo repository:
@@ -30,7 +30,7 @@ This benchmark requires etcd and NATS. To quickly set them up, run:
 
 ```bash
 # From the repository root:
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 This will start both etcd and NATS with the required configurations in the background.
@@ -42,7 +42,6 @@ This will start both etcd and NATS with the required configurations in the backg
 - **`prefix_ratio_benchmark.py`** - Main benchmarking script that sweeps prefix ratios
 - **`real_data_benchmark.py`** - Benchmarking script that uses real mooncake-style trace data
 - **`agent_benchmark.py`** - Concurrency-based benchmarking for multi-turn conversation traces
-- **`mock_server.py`** - Simple mock server to receive and log requests from aiperf
 
 ## Usage Instructions
 
@@ -90,7 +89,7 @@ You can launch separate decode and prefill workers for disaggregated serving. Th
 
 #### Alternative: Launch vLLM Mock Workers
 
-We also supports running lightweight mock engines that simulate vLLM behavior without performing actual model inference. Mocker engines are useful for testing router logic and performance without GPU requirements. Use the `--mockers` flag to run mocker engines instead of real vLLM workers.
+We also support running lightweight mock engines that simulate vLLM behavior without performing actual model inference. Mocker engines are useful for testing router logic and performance without GPU requirements. Use the `--mockers` flag to run mocker engines instead of real vLLM workers.
 
 ```bash
 # Example: Running mocker engines for testing (no GPU required)
@@ -103,6 +102,44 @@ We also supports running lightweight mock engines that simulate vLLM behavior wi
 
 **Note**: The `--speedup-ratio` parameter controls the inference speed of mocker engines. A higher value (e.g., 2.0) makes the mocker engines simulate faster inference, allowing benchmarks to complete more quickly. This is particularly useful for testing router performance without waiting for realistic inference times.
 
+#### Disaggregated Serving with Mockers (No GPU Required)
+
+You can test disaggregated serving entirely with mockers by launching separate prefill and decode mocker groups that share a namespace. This is useful for validating routing logic, metrics, and the prefill-decode handoff without any GPUs.
+
+```bash
+NAMESPACE="test-disagg"
+MODEL="Qwen/Qwen3-0.6B"
+
+# Terminal 1: Decode mockers (2 workers)
+python -m dynamo.mocker --model-path "$MODEL" \
+    --endpoint "dyn://${NAMESPACE}.backend.generate" \
+    --disaggregation-mode decode --num-workers 2 \
+    --speedup-ratio 10 --block-size 16
+
+# Terminal 2: Prefill mockers (2 workers)
+python -m dynamo.mocker --model-path "$MODEL" \
+    --endpoint "dyn://${NAMESPACE}.prefill.generate" \
+    --disaggregation-mode prefill --num-workers 2 \
+    --speedup-ratio 10 --block-size 16
+
+# Terminal 3: Frontend with KV router
+# --model-path must be the on-disk snapshot directory
+MODEL_PATH=$(find ~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots -mindepth 1 -maxdepth 1 -type d | head -1)
+python -m dynamo.frontend --namespace "$NAMESPACE" \
+    --model-name "$MODEL" --model-path "$MODEL_PATH" \
+    --router-mode kv --http-port 8000 --kv-cache-block-size 16
+```
+
+Verify it works:
+```bash
+# Send a request (should show prefill_worker_id and decode_worker_id in nvext)
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" \
+    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}' | python3 -m json.tool
+
+# Check router metrics
+curl -s localhost:8000/metrics | grep "^# HELP dynamo_component_router"
+```
+
 ### Step 2: Start the Router
 
 In a **new terminal**, launch the Dynamo router using the Python CLI:
@@ -113,13 +150,11 @@ export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
 
 python -m dynamo.frontend \
     --router-mode kv \
-    --router-reset-states \
     --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
-- `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8000
 
 To see all available router arguments, run:
@@ -127,16 +162,16 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/components/router/router_guide.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/fern/components/router/router-guide.md).
 
 > [!Note]
-> If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
+> If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-router-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
 >
 > ```bash
 > python -m dynamo.frontend \
 >     --router-mode kv \
 >     --http-port 8000 \
->     --no-kv-events
+>     --no-router-kv-events
 > ```
 
 #### Disaggregated Serving with Automatic Prefill Routing
@@ -146,7 +181,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 - Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/components/router/router_guide.md#disaggregated-serving) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/fern/components/router/router-guide.md#disaggregated-serving) for more details.
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
@@ -172,7 +207,7 @@ python prefix_ratio_benchmark.py
 ```
 
 Default configuration:
-- Tests prefix ratios: 0.5 (can be customized with `--prefix-ratios 0.1 0.3 0.5 0.7 0.9`)
+- Tests prefix ratios: 0.1, 0.3, 0.5, 0.7, 0.9
 - Input sequence length: 14000 tokens
 - Output sequence length: 200 tokens
 - Requests: 200
@@ -190,14 +225,14 @@ python prefix_ratio_benchmark.py --isl 10000 --osl 500
 # Change request count and concurrency
 python prefix_ratio_benchmark.py --requests 500 --concurrency 50
 
-# Use multiple router endpoints for parallel benchmarking (for testing multiple Router replicas)
-python prefix_ratio_benchmark.py --url http://localhost:8000 http://localhost:8001
+# Use a non-default router endpoint
+python prefix_ratio_benchmark.py --url http://localhost:8001
 
 # Specify output directory
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
 
-### Step 4 (Alternative): Run Benchmarks with Real Trace Data
+### Step 5 (Alternative): Run Benchmarks with Real Trace Data
 
 Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data. This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
@@ -239,14 +274,69 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-len-multiplie
 python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multiplier 3
 ```
 
-> [!Note]
-> At the time of writing this documentation, you may need to install the latest aiperf from the main source branch to loadgen on the trace files:
-> ```bash
-> pip install git+https://github.com/ai-dynamo/aiperf.git
-> ```
-> However, by the time of release, the aiperf version included in the vLLM runtime container should be up to date enough to use as-is.
+### Step 6 (Alternative): Priority Queue Benchmark
 
-### Step 4 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
+`real_data_priority_benchmark.py` measures whether the router's priority queue correctly differentiates high-, medium-, and low-priority requests. It splits a trace into three tiers, runs a **baseline** (no priority tagging) and a **priority-tagged** run using the same split, then produces a bar chart comparing TTFT across tiers.
+
+#### How it works
+
+1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
+2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every trace row carries an OpenAI-compatible extension field:
+   ```json
+   {"nvext": {"agent_hints": {"priority": <value>}}}
+   ```
+   The `priority` value raises the request's router queue priority -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
+3. The baseline and priority runs use the same aiperf seed and split so prompt content matches. The priority run offsets `hash_ids` to keep its KV cache cold relative to the baseline and prevent mocker KV cache cross-contamination.
+
+#### Prerequisites: tune the priority queue
+
+The router queue is disabled by default. To make priority effects visible under benchmark load, set `--router-queue-threshold`; `0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens.
+
+```bash
+# Launch the router with a sensitive priority queue threshold.
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-queue-threshold 0.0
+```
+
+#### Running the benchmark
+
+Because the mocker default speedup ratio is 1.0 (real-time), you need a sufficiently high `--speedup-ratio` to generate enough concurrent load for requests to actually queue up. A ratio of 8 or higher is recommended:
+
+```bash
+python real_data_priority_benchmark.py \
+    --input-dataset mooncake_trace.jsonl \
+    --num-requests 5000 \
+    --speedup-ratio 8 \
+    --prefix-len-multiplier 4 \
+    --prefix-root-multiplier 4
+```
+
+**Priority-specific parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--priority-distribution` | `0.5,0.3,0.2` | Fraction of requests assigned to low/medium/high tiers (must sum to 1.0) |
+| `--priority-values` | `0,1,2` | `priority` values for low/medium/high tiers |
+
+Examples:
+
+```bash
+# Equal tier sizes with aggressive priority differentiation.
+# --priority-values sets the request priority per tier (low, medium, high).
+# Higher values move the request further ahead in the router queue.
+# Here low gets no boost, medium gets priority 2, and high gets priority 5.
+python real_data_priority_benchmark.py \
+    --input-dataset mooncake_trace.jsonl \
+    --num-requests 5000 \
+    --speedup-ratio 8 \
+    --priority-distribution 0.33,0.34,0.33 \
+    --priority-values 0,2,5
+```
+
+The benchmark outputs a `ttft_comparison.png` bar chart in the results directory showing TTFT (p50 with p25-p75 error bars) for each tier, comparing baseline vs. priority-tagged runs. If the priority queue is working correctly, high-priority requests should show lower TTFT in the priority run compared to baseline, while low-priority requests may show slightly higher TTFT.
+
+### Step 7 (Alternative): Agent Benchmark (Concurrency-Based Multi-Turn)
 
 For benchmarking with multi-turn conversation traces using concurrency-based load generation (instead of timestamp-based replay), use `agent_benchmark.py`. This is useful for testing how the system handles multiple concurrent agent sessions.
 

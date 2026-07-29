@@ -1,0 +1,113 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Agentic Coding Throughput Stack - Kimi-K2.5"
+subtitle: "How much throughput and interactivity do we gain as KV routing, Eagle3, disaggregation, and KV offload are composed?"
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+<p className="dynamo-recipe-eyebrow">Feature composition</p>
+
+Four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL) against a Mooncake-style agentic coding trace (~200K-token context, multi-turn), starting from plain aggregated round-robin serving and adding one feature at a time — KV routing, Eagle3 speculation, disaggregation, and KV offload — up to the full disaggregated stack. The full stack delivers roughly **3x the per-GPU throughput** of the baseline while also improving per-user token speed.
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Benchmark setup</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Model</b> nvidia/Kimi-K2.5-NVFP4</span>
+<span><b>GPUs</b> 24x GB200 (6 nodes, MNNVL)</span>
+<span><b>Runtime</b> TensorRT-LLM</span>
+<span><b>Workload</b> Mooncake-style agentic coding trace (~200K-token context, multi-turn), one-hour replay</span>
+<span><b>Metrics</b> tok/s/user, tok/s/GPU, goodput at TTFT 5s / ITL 10ms</span>
+<span><b>Held constant</b> Model, runtime, GPU count, trace, duration, and goodput thresholds across all configurations</span>
+</div>
+</div>
+
+## Results
+
+The disaggregated configuration with KV-aware routing, Eagle3 decoding, and KV offloading achieves the best system throughput and interactivity. Each row is that configuration's chosen operating point on the source Pareto plot — concurrency differs by row and the values are approximate plot readings, so read them as per-configuration operating points rather than an equal-load sweep:
+
+| Configuration | Concurrency | tok/s/user (avg) | tok/s/GPU |
+| --- | ---: | ---: | ---: |
+| Disagg + Eagle3 + KV routing + offload | 32 | ~130 | ~5,400 |
+| Agg + Eagle3 + KV routing | 24 | ~85 | ~4,400 |
+| Agg + Eagle3 + round-robin | 24 | ~95 | ~4,000 |
+| Agg + round-robin (no Eagle3) | 8 | ~105 | ~1,700 |
+
+The full disaggregated stack dominates the throughput-interactivity Pareto frontier in the source plot: roughly **3x the per-GPU throughput** of the plain aggregated baseline with better per-user token speed.
+
+## Compared Configurations
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Configuration</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role winner">Winner</em></td>
+<td><strong>Disagg + Eagle3 + KV router + offload</strong><span>3x DEP4 prefill + 3x TEP4 decode, concurrency 32</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>Agg + Eagle3 + KV router</strong><span>3x TEP8 aggregated, concurrency 24 — routing plus speculation</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>Agg + Eagle3 + round-robin</strong><span>3x TEP8 aggregated, concurrency 24 — speculation without KV-aware routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Agg + round-robin</strong><span>3x TEP8 aggregated, concurrency 8 — no speculation, no P/D split</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Reproduce
+
+The trace emulates a long-context, KV-reuse-heavy agentic coding workload (~200k-token context window, multi-turn sessions with restart-splits and a layered prefix-cache model). Generate it following the [dataset instructions in the AIPerf repository](https://github.com/ai-dynamo/aiperf/blob/1ecc2eac988eedc0e3a79b4c2d1063bfc295a014/src/aiperf/dataset/agentic_code_gen/datasets/1k_sessions_200k_ctx/manifest.json), then copy it to `/model-cache/traces/agent_trace_data/dataset.jsonl` on the PVC.
+
+Each configuration's `perf.yaml` runs a warmup pass and then wraps this AIPerf command (concurrency 32 for the disaggregated configuration, 24 for the aggregated Eagle3 configurations, 8 for the baseline):
+
+```bash
+aiperf profile -m nvidia/Kimi-K2.5-NVFP4 \
+  --tokenizer nvidia/Kimi-K2.5-NVFP4 --tokenizer-trust-remote-code \
+  --input-file /model-cache/traces/agent_trace_data/dataset.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --url http://<frontend>:8000 \
+  --streaming --extra-inputs ignore_eos:true \
+  --concurrency <8|24|32> --random-seed 42 \
+  --benchmark-duration 3600 --concurrency-ramp-duration 60 \
+  --goodput "time_to_first_token:5000 inter_token_latency:10"
+```
+
+Deploy one configuration at a time — each is sized for the full 24 GPUs:
+
+```bash
+export NAMESPACE=your-namespace
+
+# One-time prep: storage, ComputeDomain, model + Eagle3 head download
+kubectl apply -f recipes/kimi-k2.5/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k2.5/model-cache/compute-domain.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k2.5/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+
+# Pick one configuration from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f recipes/kimi-k2.5/trtllm/<configuration>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k2.5/trtllm/<configuration>/perf.yaml -n ${NAMESPACE}
+```
+
+## Notes
+
+- The manifests ship with a placeholder image tag (`nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>`) — set a Dynamo TRT-LLM runtime image (v1.1.1~) that supports Kimi-K2.5 + Eagle3 in each `deploy.yaml` before applying.
+- Your HuggingFace token needs access to both `nvidia/Kimi-K2.5-NVFP4` and the `nvidia/Kimi-K2.5-Thinking-Eagle3` speculative-decoding head.
+- If you rename the ComputeDomain CR, mirror the change in every `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
+- Source: [recipes/kimi-k2.5](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5)
+
+## Winning Configuration
+
+The disaggregated Eagle3 + KV router + offload configuration is the winner and is deployable from its assets above. A recommended Recipe may be promoted from this benchmark in a future release; the aggregated configurations exist as benchmark steps and controls.

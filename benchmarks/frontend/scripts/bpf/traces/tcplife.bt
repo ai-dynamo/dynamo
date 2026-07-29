@@ -1,0 +1,52 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// TCP connection lifetimes (pool health).
+// Short-lived connections indicate pool churn; long-lived indicate healthy pooling.
+//
+// Usage: sudo bpftrace tcplife.bt
+
+#include <net/sock.h>
+
+kprobe:tcp_set_state
+{
+    $sk = (struct sock *)arg0;
+    $newstate = arg1;
+
+    if ($newstate == 1) {
+        // TCP_ESTABLISHED
+        @birth[$sk] = nsecs;
+        @saddr[$sk] = ntop($sk->__sk_common.skc_rcv_saddr);
+        @daddr[$sk] = ntop($sk->__sk_common.skc_daddr);
+        @dport[$sk] = ($sk->__sk_common.skc_dport >> 8) |
+            (($sk->__sk_common.skc_dport & 0xff) << 8);
+    }
+
+    if ($newstate == 7) {
+        // TCP_CLOSE
+        $start = @birth[$sk];
+        if ($start) {
+            $delta_ms = (nsecs - $start) / 1000000;
+            printf("%-16s %-6d %-16s -> %-16s:%-5d lifetime=%dms\n",
+                comm, pid,
+                @saddr[$sk], @daddr[$sk], @dport[$sk],
+                $delta_ms);
+            @lifetime_ms = hist($delta_ms);
+        }
+        delete(@birth[$sk]);
+        delete(@saddr[$sk]);
+        delete(@daddr[$sk]);
+        delete(@dport[$sk]);
+    }
+}
+
+END
+{
+    printf("\n--- TCP Connection Lifetime (ms) ---\n");
+    print(@lifetime_ms);
+    clear(@birth);
+    clear(@saddr);
+    clear(@daddr);
+    clear(@dport);
+}

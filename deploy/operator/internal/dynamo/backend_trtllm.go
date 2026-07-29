@@ -3,10 +3,9 @@ package dynamo
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -17,18 +16,18 @@ type TRTLLMBackend struct {
 	MpiRunSecretName string
 }
 
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Check for volumeMounts with useAsCompilationCache=true
-	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.UseAsCompilationCache {
-			logger := log.Log.WithName("trtllm-backend")
-			logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
-				"backend", "trtllm",
-				"status", "partial-support",
-				"use-as-compilation-cache", true,
-				"env-vars-set", false,
-				"next-steps", "upstream TensorRT-LLM changes needed")
-		}
+// UpdateContainer configures the container for TRT-LLM multinode deployments.
+// For single-node deployments it is a no-op. For multinode, it mounts the SSH
+// keypair secret and injects the appropriate SSH setup and launch commands for
+// leader (mpirun) and worker (sshd) roles.
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if component.CompilationCache != nil {
+		logger := log.Log.WithName("trtllm-backend")
+		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
+			"backend", "trtllm",
+			"status", "partial-support",
+			"env-vars-set", false,
+			"next-steps", "upstream TensorRT-LLM changes needed")
 	}
 
 	// For single node, nothing to do
@@ -74,7 +73,9 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string) {
+// UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
+// multinode deployments so that leader and worker containers can mount it.
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
@@ -101,7 +102,7 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1alpha1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1beta1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -111,12 +112,15 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
-		var parts []string
-		parts = append(parts, container.Command...)
-		if len(container.Args) > 0 {
-			parts = append(parts, container.Args...)
+		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
+		var quotedParts []string
+		for _, part := range container.Command {
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}
-		originalCommand = strings.Join(parts, " ")
+		for _, part := range container.Args {
+			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+		}
+		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
 		// Shell command (sh -c): args contains the full command
 		originalCommand = strings.Join(container.Args, " ")
@@ -126,19 +130,26 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	}
 
 	// Setup SSH and run mpirun command
+	// Use $HOME instead of ~ because the container may set HOME=/home/dynamo via Dockerfile
+	// while the shell user is root (from securityContext.runAsUser: 0). ~ follows /etc/passwd
+	// but $HOME follows the environment, and SSH/mpirun need to find keys where we put them.
 	sshSetupCommands := []string{
-		"mkdir -p ~/.ssh",
+		"mkdir -p $HOME/.ssh",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
-		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
-		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
-		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
-		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
+		"cp /ssh-pk/private.key $HOME/.ssh/id_rsa",
+		"cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub",
+		"cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys",
+		"chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys",
+		"chmod 644 $HOME/.ssh/id_rsa.pub",
+		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
-	// Calculate total number of GPUs across all nodes
-	gpusPerNode := getGPUsPerNode(component.Resources)
+	// Calculate total number of GPUs across all nodes. In the normal pod
+	// generation path container.Resources has already been merged from the
+	// component podTemplate; keep the component fallback for direct backend
+	// callers and focused unit tests.
+	resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
+	gpusPerNode := getGPUsPerNode(&resources)
 	totalGPUs := numberOfNodes * gpusPerNode
 
 	// Build mpirun command with explicit SSH configuration and environment variables
@@ -148,7 +159,10 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Generate environment variable flags for mpirun
 	envVarsStr := generateEnvVarFlags(container.Env)
 
-	mpirunCmd := fmt.Sprintf("mpirun --allow-run-as-root --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
+	// Use --allow-run-as-root only when the container is running as root (UID 0).
+	// When running as a non-root user, mpirun works without this flag and omitting
+	// it avoids masking accidental root execution.
+	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		allHostnames,
 		commonconsts.MpiRunSshPort,
@@ -176,22 +190,33 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 // setupWorkerContainer configures worker nodes with SSH setup and daemon
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
+	// Use $HOME instead of ~ for the same reasons as setupLeaderContainer (see comment above).
 	sshSetupCommands := []string{
-		"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
+		"mkdir -p $HOME/.ssh $HOME/.ssh/host_keys $HOME/.ssh/run",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
-		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
-		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
-		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
-		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
+		"cp /ssh-pk/private.key $HOME/.ssh/id_rsa",
+		"cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub",
+		"cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys",
+		"chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys",
+		"chmod 644 $HOME/.ssh/id_rsa.pub",
+		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 		// Generate host keys in user writable directory
-		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
-		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
-		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
-		// Create SSH daemon config to use custom host keys location and non-privileged port
-		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
-		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
+		"ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''",
+		"ssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
+		"ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key -N ''",
+		// Create SSH daemon config using $HOME for absolute paths.
+		// sshd expands ~ via /etc/passwd (-> /root/) not the HOME env var,
+		// so we break out of single quotes to let the shell expand $HOME.
+		// AuthorizedKeysFile also needs absolute $HOME path because sshd resolves
+		// relative paths from the connecting user's /etc/passwd home (-> /root/).
+		// StrictModes disabled because /home/dynamo may be owned by a non-root UID
+		// while sshd runs as root, causing permission check failures.
+		// Note: /run/sshd (the privilege separation directory) is not needed here
+		// because sshd started as a non-root user skips the privsep directory check
+		// entirely — privsep requires forking a privileged monitor process, which is
+		// only possible when sshd starts as UID 0.
+		fmt.Sprintf("printf 'Port %d\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_rsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey '$HOME'/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile '$HOME'/.ssh/run/sshd.pid\\nStrictModes no\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile '$HOME'/.ssh/authorized_keys\\n' > $HOME/.ssh/sshd_config", commonconsts.MpiRunSshPort),
+		"/usr/sbin/sshd -D -f $HOME/.ssh/sshd_config",
 	}
 
 	fullCommand := strings.Join(sshSetupCommands, " && ")
@@ -207,27 +232,20 @@ func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, m
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *v1alpha1.Resources) int32 {
-	if resources != nil && resources.Requests != nil && resources.Requests.GPU != "" {
-		if gpus, err := strconv.ParseInt(resources.Requests.GPU, 10, 32); err == nil {
-			return int32(gpus)
-		}
+func getGPUsPerNode(resources *corev1.ResourceRequirements) int32 {
+	if resources == nil {
+		return 0
 	}
-	if resources != nil && resources.Limits != nil && resources.Limits.GPU != "" {
-		if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 32); err == nil {
-			return int32(gpus)
-		}
-	}
-	return 0 // Default to 0 GPUs if not specified
+	return int32(getGPUQuantity(resources))
 }
 
 // getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments
 func getCommonTRTLLMEnvVars() map[string]bool {
 	return map[string]bool{
-		"CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
+		"CPATH": true, "CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
 		"TOKENIZERS_PARALLELISM": true, "NCCL_DEBUG": true, "NCCL_IB_DISABLE": true, "NCCL_P2P_DISABLE": true,
 		"TENSORRT_LLM_CACHE_DIR": true, "HF_HOME": true, "TRANSFORMERS_CACHE": true, "HF_DATASETS_CACHE": true,
-		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRTLLM_USE_UCX_KVCACHE": true,
+		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRITON_PTXAS_PATH": true, "TRTLLM_USE_UCX_KVCACHE": true,
 	}
 }
 

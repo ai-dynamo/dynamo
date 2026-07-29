@@ -1,26 +1,41 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, EngineFactoryCallback, RouterConfig, input::common},
-    http::service::service_v2::{self, HttpService},
-    namespace::is_global_namespace,
+    entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
+    http::service::{
+        FrontendRouteExtension,
+        service_v2::{self, HttpService},
+    },
+    local_model::runtime_config::TokenizerBackend,
+    namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Build and run an HTTP service
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
+) -> anyhow::Result<()> {
+    run_with_frontend_route_extensions(distributed_runtime, engine_config, Vec::new()).await
+}
+
+/// Build and run an HTTP service with additional system route extensions.
+pub async fn run_with_frontend_route_extensions(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+    frontend_route_extensions: Vec<FrontendRouteExtension>,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
@@ -49,37 +64,64 @@ pub async fn run(
         http_service_builder = http_service_builder.host(http_host);
     }
     http_service_builder =
+        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
+    http_service_builder = http_service_builder
+        .metrics_config(local_model.metrics_config().clone())
+        .frontend_api_config(local_model.frontend_api_config().clone());
+    // Inject the DRT's metrics registry so that component-scoped metrics
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
+    http_service_builder =
+        http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
+
+    // Wire DRT discovery so that router metrics (dynamo_router_*) are registered
+    // with the instance_id as the router_id label.
+    http_service_builder =
+        http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
+    http_service_builder =
+        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    for extension in frontend_route_extensions {
+        http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
+    }
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
-            ref engine_factory,
+            ref chat_engine_factory,
+            ref prefill_load_estimator,
         } => {
-            // This allows the /health endpoint to query store for active instances
-            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
+            // Pass the discovery client so the /health endpoint can query active instances
+            http_service_builder =
+                http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
-            // Check if we should filter by namespace (based on the local model's namespace)
-            // Get namespace from the model, fallback to endpoint_id namespace if not set
-            let namespace = model.namespace().unwrap_or("");
-            let target_namespace = if is_global_namespace(namespace) {
-                None
-            } else {
-                Some(namespace.to_string())
-            };
+            // Create namespace filter from model configuration
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
+            let local_model_path =
+                (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
+            let generate_engine_enabled = http_service.generate_api_enabled();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
-                target_namespace,
+                migration_max_seq_len,
+                namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
-                engine_factory.clone(),
+                chat_engine_factory.clone(),
+                prefill_load_estimator.clone(),
+                local_model_path,
+                model.runtime_config().tokenizer_backend,
+                generate_engine_enabled,
             )
             .await?;
             http_service
@@ -107,19 +149,18 @@ pub async fn run(
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer_hf = model.card().tokenizer_hf()?;
-            let chat_pipeline =
-                common::build_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
-                .await?;
+            let tokenizer = model.card().tokenizer()?;
+            let chat_pipeline = common::build_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer_hf)
+            >(model.card(), inner_engine, tokenizer)
             .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
@@ -154,19 +195,37 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
-    target_namespace: Option<String>,
+    migration_max_seq_len: Option<u32>,
+    namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
-    engine_factory: Option<EngineFactoryCallback>,
+    chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_model_path: Option<PathBuf>,
+    tokenizer_backend: Option<TokenizerBackend>,
+    generate_engine_enabled: bool,
 ) -> anyhow::Result<()> {
+    // Start the LoRA allocation controller when LoRA serving is enabled. The
+    // controller itself is additionally gated on the allocation config
+    // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
+    if crate::lora::lora_serving_enabled() {
+        let cancel_token = runtime.primary_token();
+        let _controller_handle = model_manager.start_lora_controller(cancel_token);
+    }
+
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
-        engine_factory,
+        migration_max_seq_len,
+        chat_engine_factory,
+        prefill_load_estimator,
         metrics.clone(),
     );
+    watch_obj.set_local_model_path(local_model_path);
+    watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_generate_engine_enabled(generate_engine_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -179,6 +238,7 @@ async fn run_watcher(
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     watch_obj.set_notify_on_model_update(tx);
+    let watch_obj = Arc::new(watch_obj);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {
@@ -190,9 +250,7 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj
-            .watch(discovery_stream, target_namespace.as_deref())
-            .await;
+        watch_obj.watch(discovery_stream, namespace_filter).await;
     });
 
     Ok(())
@@ -207,13 +265,19 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
     match model_type {
         ModelUpdate::Added(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, true);
             }
         }
         ModelUpdate::Removed(card) => {
             // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card.model_type.as_endpoint_types() {
+            for endpoint_type in card
+                .model_type
+                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+            {
                 service.enable_model_endpoint(endpoint_type, false);
             }
         }

@@ -6,10 +6,14 @@ mod utils;
 mod zmq;
 
 mod leader;
+#[cfg(feature = "nccl")]
+mod nccl_bootstrap;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
-pub use transfer::BlockTransferHandler;
+#[cfg(feature = "nccl")]
+pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};
+pub use transfer::{BlockTransferHandler, NcclConfig};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };
@@ -56,10 +60,7 @@ mod tests {
     use anyhow::Result;
     use rstest::*;
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     use dynamo_runtime::logging::init as init_logging;

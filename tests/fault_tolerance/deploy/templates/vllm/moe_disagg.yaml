@@ -126,7 +126,8 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

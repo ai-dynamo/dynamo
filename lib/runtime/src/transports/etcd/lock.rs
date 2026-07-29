@@ -222,7 +222,7 @@ impl DistributedRWLock {
             // Execute the atomic transaction
             match etcd_client.etcd_client().kv_client().txn(txn).await {
                 Ok(response) if response.succeeded() => {
-                    tracing::debug!("Acquired read lock for reader {}", reader_id);
+                    tracing::debug!("Acquired read lock for reader {reader_id}");
                     return Ok(ReadLockGuard {
                         rwlock: self,
                         etcd_client,
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_distributed_rwlock() {
         // Setup: Create etcd client
-        let runtime = Runtime::from_settings().unwrap();
+        let runtime = Runtime::from_current().unwrap();
         let etcd_client = Client::builder()
             .etcd_url(vec!["http://localhost:2379".to_string()])
             .build()

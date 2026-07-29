@@ -1,0 +1,562 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Profiler main entry point."""
+
+import logging
+import os
+from typing import Any
+
+import yaml
+from aiconfigurator.generator.enumerate import check_model_hardware_support
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
+from dynamo.profiler.interpolation import run_interpolation
+from dynamo.profiler.rapid import run_rapid
+from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
+    PickedParallelConfig,
+)
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.defaults import SearchStrategy
+from dynamo.profiler.utils.dgd_generation import (
+    assemble_final_config,
+    build_aic_interpolation_spec,
+    build_aic_perf_model_spec,
+)
+from dynamo.profiler.utils.dgd_materialization import (
+    DGDMaterializationPurpose,
+    materialize_dgd,
+)
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    BackendType,
+    DynamoGraphDeploymentRequestSpec,
+    ProfilingPhase,
+)
+from dynamo.profiler.utils.dgdr_validate import (
+    valid_dgdr_spec,
+    validate_dgdr_dynamo_features,
+)
+from dynamo.profiler.utils.profile_common import (
+    ProfilerOperationalConfig,
+    determine_picking_mode,
+    get_profiling_job_tolerations,
+    needs_profile_data,
+    picked_config_from_row,
+    resolve_model_path,
+    warn_and_update_sla,
+    warn_gpu_shortage,
+)
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
+
+logger = logging.getLogger(__name__)
+
+_CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
+
+
+def _check_auto_backend_support(model: str, system: str) -> bool:
+    """
+    Return True if *any* concrete backend is AIC-supported for this model/system.
+    TODO: move this function to AIC and handle partially supported model x backend x hardware
+    """
+    return any(
+        check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
+    )
+
+
+def _check_dgdr_aic_support(
+    dgdr: DynamoGraphDeploymentRequestSpec, backend: str, system: str
+) -> bool:
+    """Check AIC support using a mounted model config when one is available."""
+    model_path = resolve_model_path(dgdr)
+    if backend == "auto":
+        return _check_auto_backend_support(model_path, system)
+    return check_model_hardware_support(model_path, system, backend)
+
+
+def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
+    """Pull all profiler parameters from dgdr and log them."""
+    model = dgdr.model
+    backend = BackendType(dgdr.backend).value.lower()
+    system = dgdr.hardware.gpuSku.lower()
+    total_gpus = dgdr.hardware.totalGpus
+    isl = dgdr.workload.isl
+    osl = dgdr.workload.osl
+    request_latency = dgdr.sla.e2eLatency
+    if request_latency is not None:
+        target_ttft = request_latency
+        target_tpot = request_latency
+    else:
+        target_ttft = dgdr.sla.ttft
+        target_tpot = dgdr.sla.itl
+    search_strategy = SearchStrategy(dgdr.searchStrategy)
+    picking_mode = determine_picking_mode(dgdr)
+    logger.info(
+        "Profiler config: model=%s, backend=%s, system=%s, total_gpus=%s, "
+        "isl=%d, osl=%d, ttft=%.1f, itl=%.1f, e2e_latency=%s, strategy=%s, picking=%s",
+        model,
+        backend,
+        system,
+        total_gpus,
+        isl,
+        osl,
+        target_ttft,
+        target_tpot,
+        request_latency,
+        search_strategy.value,
+        picking_mode,
+    )
+    return (
+        model,
+        backend,
+        system,
+        total_gpus,
+        isl,
+        osl,
+        request_latency,
+        target_ttft,
+        target_tpot,
+        search_strategy,
+        picking_mode,
+    )
+
+
+async def _execute_strategy(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    ops: ProfilerOperationalConfig,
+    picking_mode: str,
+    aic_supported: bool,
+    model: str,
+    system: str,
+    backend: str,
+    total_gpus: int,
+    isl: int,
+    osl: int,
+    target_ttft: float,
+    target_tpot: float,
+    request_latency: float | None,
+    deployment_clients: list,
+    search_strategy: SearchStrategy,
+) -> tuple[dict, PickedParallelConfig, PickedParallelConfig, float, float]:
+    """Dispatch dry-run / RAPID / THOROUGH; extract configs; update SLA targets."""
+    if ops.dry_run:
+        logger.info("Dry run mode — skipping deployment and benchmarking.")
+        best_prefill_config = PickedParallelConfig(tp=1)
+        best_decode_config = PickedParallelConfig(tp=1)
+        pick_result: dict = {}
+    else:
+        if search_strategy == SearchStrategy.RAPID:
+            pick_result = run_rapid(
+                dgdr,
+                picking_mode,
+                aic_supported,
+                model,
+                system,
+                backend,
+                total_gpus,
+                isl,
+                osl,
+                target_ttft,
+                target_tpot,
+                request_latency,
+            )
+        else:
+            pick_result = await run_thorough(
+                dgdr,
+                ops,
+                picking_mode,
+                model,
+                system,
+                backend,
+                total_gpus,
+                isl,
+                osl,
+                target_ttft,
+                target_tpot,
+                request_latency,
+                deployment_clients,
+            )
+
+        ops.current_phase = ProfilingPhase.SelectingConfig
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Filtering results and selecting cost-efficient configuration",
+            phase=ProfilingPhase.SelectingConfig,
+        )
+
+        best_config_df = pick_result["best_config_df"]
+        best_latencies = pick_result["best_latencies"]
+
+        target_ttft, target_tpot = warn_and_update_sla(
+            best_latencies,
+            target_ttft,
+            target_tpot,
+        )
+        warn_gpu_shortage(picking_mode, best_latencies, total_gpus or 0)
+
+        if best_config_df is not None and not best_config_df.empty:
+            row = best_config_df.iloc[0]
+            best_prefill_config = picked_config_from_row("(p)", row)
+            best_decode_config = picked_config_from_row("(d)", row)
+        else:
+            best_prefill_config = PickedParallelConfig(tp=1)
+            best_decode_config = PickedParallelConfig(tp=1)
+
+    logger.info(
+        "Selected prefill: %s (%d GPUs, tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d), "
+        "decode: %s (%d GPUs, tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d)",
+        best_prefill_config.label(),
+        best_prefill_config.num_gpus,
+        best_prefill_config.tp,
+        best_prefill_config.pp,
+        best_prefill_config.dp,
+        best_prefill_config.moe_tp,
+        best_prefill_config.moe_ep,
+        best_decode_config.label(),
+        best_decode_config.num_gpus,
+        best_decode_config.tp,
+        best_decode_config.pp,
+        best_decode_config.dp,
+        best_decode_config.moe_tp,
+        best_decode_config.moe_ep,
+    )
+    return (
+        pick_result,
+        best_prefill_config,
+        best_decode_config,
+        target_ttft,
+        target_tpot,
+    )
+
+
+def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bool:
+    """Write final_config.yaml and profiler status. Returns False on unrecoverable failure."""
+    output_file = f"{ops.output_dir}/final_config.yaml"
+    if not final_config:
+        if ops.dry_run:
+            logger.warning("Dry run mode — no DGD config produced (expected).")
+            with open(output_file, "w") as f:
+                yaml.safe_dump(None, f, sort_keys=False)
+        else:
+            error_msg = "Profiler did not produce a DGD config."
+            logger.error(error_msg)
+            write_profiler_status(
+                ops.output_dir,
+                status=ProfilerStatus.FAILED,
+                error=error_msg,
+                message=error_msg,
+                phase=ProfilingPhase.GeneratingDGD,
+            )
+            return False
+    else:
+        with open(output_file, "w") as f:
+            if isinstance(final_config, list):
+                yaml.safe_dump_all(final_config, f, sort_keys=False)
+            else:
+                yaml.safe_dump(final_config, f, sort_keys=False)
+        logger.info("Final DGD config saved to %s", output_file)
+
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.SUCCESS,
+        message="Profiler completed successfully",
+        outputs={
+            "final_config": "final_config.yaml",
+        },
+        phase=ProfilingPhase.Done,
+    )
+    return True
+
+
+_MAX_COMBINED_RESOURCE_NAME_LENGTH = 45
+
+
+def _validate_dgd_service_name_lengths(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    final_config: Any,
+) -> None:
+    """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
+    dgdr_name = os.environ.get("DGDR_NAME", "")
+    dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
+
+    if dgdr_name:
+        # Operator path: compute the DGD name exactly as the Go controller does.
+        dgd_name = dgdr_name + "-dgd"
+        if dgdr.overrides and dgdr.overrides.dgd:
+            metadata = dgdr.overrides.dgd.get("metadata")
+            if isinstance(metadata, dict):
+                override_name = metadata.get("name", "")
+                if override_name:
+                    dgd_name = override_name
+    else:
+        # Non-operator path (e.g. standalone CLI): fall back to the name already
+        # embedded in the generated config. These template names ("vllm-disagg",
+        # "trtllm-disagg", …) are always short, so violations are unlikely here,
+        # but we still run the check to catch any edge cases.
+        dgd_name = dgd_spec.get("metadata", {}).get("name", "")
+        if not dgd_name:
+            logger.debug(
+                "DGDR_NAME unset and no metadata.name in config; "
+                "skipping DGD service name length validation."
+            )
+            return
+    services = dgd_spec.get("spec", {}).get("services", {})
+    violations = []
+    for svc_name in services:
+        combined = len(dgd_name) + len(svc_name)
+        if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
+            violations.append(
+                f"'{svc_name}' ({len(svc_name)}): combined length {combined}"
+            )
+
+    if violations:
+        raise ValueError(
+            f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with service "
+            f"name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
+            f"pod-naming limit. Shorten the DGDR name '{dgdr_name}'. "
+            f"Violations: {'; '.join(violations)}"
+        )
+
+
+async def run_profile(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    ops: ProfilerOperationalConfig | None = None,
+) -> None:
+    """Run the profiling pipeline.
+
+    Args:
+        dgdr: The DynamoGraphDeploymentRequest spec describing the model,
+              hardware, workload, SLA, and feature configuration.
+        ops:  Operational knobs (output dir, namespace, granularity, etc.).
+              Uses defaults when ``None``.
+    """
+    if ops is None:
+        ops = ProfilerOperationalConfig()
+
+    deployment_clients: list = []
+
+    os.makedirs(ops.output_dir, exist_ok=True)
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Profiler job started",
+        phase=ProfilingPhase.Initializing,
+    )
+
+    try:
+        # Validate DGDR spec — after this, required fields are guaranteed non-None
+        valid_dgdr_spec(dgdr)
+        (
+            model,
+            backend,
+            system,
+            total_gpus,
+            isl,
+            osl,
+            request_latency,
+            target_ttft,
+            target_tpot,
+            search_strategy,
+            picking_mode,
+        ) = _extract_profiler_params(dgdr)
+        aic_supported = _check_dgdr_aic_support(dgdr, backend, system)
+        # then validate DGDR features based on AIC support
+        validate_dgdr_dynamo_features(dgdr, aic_supported)
+
+        ops.current_phase = ProfilingPhase.SweepingPrefill
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Sweeping parallelization strategies",
+            phase=ops.current_phase,
+        )
+
+        (
+            pick_result,
+            best_prefill_config,
+            best_decode_config,
+            target_ttft,
+            target_tpot,
+        ) = await _execute_strategy(
+            dgdr,
+            ops,
+            picking_mode,
+            aic_supported,
+            model,
+            system,
+            backend,
+            total_gpus,
+            isl,
+            osl,
+            target_ttft,
+            target_tpot,
+            request_latency,
+            deployment_clients,
+            search_strategy,
+        )
+
+        base_dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
+        resolved_backend = pick_result.get("resolved_backend", backend)
+
+        dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
+        job_tolerations = get_profiling_job_tolerations(dgdr)
+
+        # ---------------------------------------------------------------
+        # Interpolation curves — only needed when something consumes the
+        # per-engine performance data on disk (thorough-mode planner or
+        # mocker). Rapid-mode planner bootstraps AIC in-process at
+        # startup, so the profiler skips the NPZ sweep for that case.
+        # ---------------------------------------------------------------
+        chosen_exp = pick_result.get("chosen_exp", "")
+        is_disagg_config = chosen_exp not in ("agg",) and bool(chosen_exp)
+
+        # Compute max context length unconditionally — both the NPZ sweep
+        # (thorough, mocker) and the planner's rapid-mode AIC spec need it.
+        try:
+            model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
+            sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
+        except Exception:
+            logger.warning("Could not fetch model max context length.")
+            sweep_max_context_length = 0
+        if not sweep_max_context_length:
+            sweep_max_context_length = isl * 2 if isl > 0 else 8192
+
+        if not ops.dry_run and base_dgd_config and needs_profile_data(dgdr):
+            ops.current_phase = ProfilingPhase.BuildingCurves
+            write_profiler_status(
+                ops.output_dir,
+                status=ProfilerStatus.RUNNING,
+                message="Building interpolation curves for planner integration",
+                phase=ops.current_phase,
+            )
+            if not is_disagg_config:
+                # TODO: agg + throughput-scaling has no profiling-data
+                # fallback today. The NPZ sweep (thorough) and the AIC
+                # spec (rapid, see build_aic_interpolation_spec) are both
+                # shaped around prefill + decode picks. For agg picks the
+                # planner currently falls back to DYN_BENCHMARK_MODE at
+                # runtime only. Extend AICInterpolationSpec and
+                # run_interpolation to carry an agg_pick so both paths
+                # work for aggregated deployments too.
+                logger.info(
+                    "Picked config is aggregated (chosen_exp=%r) — "
+                    "skipping interpolation (requires disaggregated config).",
+                    chosen_exp,
+                )
+            else:
+                # Materialize an independent interpolation input while preserving
+                # the clean picked blueprint for final assembly. Overrides can
+                # append worker arguments, so repeated application is not safe.
+                interpolation_dgd_config = materialize_dgd(
+                    base_dgd_config,
+                    purpose=DGDMaterializationPurpose.INTERPOLATION,
+                    override=dgd_override,
+                    tolerations=job_tolerations,
+                    runtime_backend=resolved_backend,
+                    model_name_or_path=resolve_model_path(dgdr),
+                )
+                if resolved_backend == "trtllm":
+                    enable_trtllm_chunked_prefill(interpolation_dgd_config)
+                await run_interpolation(
+                    dgdr,
+                    ops,
+                    interpolation_dgd_config,
+                    best_prefill_config,
+                    best_decode_config,
+                    resolved_backend,
+                    sweep_max_context_length,
+                    deployment_clients,
+                    job_tolerations=job_tolerations,
+                )
+
+        # ---------------------------------------------------------------
+        # Final DGD assembly
+        # ---------------------------------------------------------------
+        ops.current_phase = ProfilingPhase.GeneratingDGD
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message="Packaging data and generating final DGD YAML",
+            phase=ops.current_phase,
+        )
+        aic_spec = (
+            build_aic_interpolation_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                isl=isl,
+                osl=osl,
+                sweep_max_context_length=sweep_max_context_length,
+                resolved_backend=resolved_backend,
+                system=system,
+                prefill_interpolation_granularity=ops.prefill_interpolation_granularity,
+                decode_interpolation_granularity=ops.decode_interpolation_granularity,
+            )
+            if is_disagg_config and not ops.dry_run
+            else None
+        )
+        aic_perf_model = (
+            build_aic_perf_model_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                resolved_backend=resolved_backend,
+                system=system,
+            )
+            if not ops.dry_run
+            else None
+        )
+        final_config = assemble_final_config(
+            dgdr,
+            ops,
+            base_dgd_config,
+            best_prefill_config,
+            best_decode_config,
+            aic_spec=aic_spec,
+            aic_perf_model=aic_perf_model,
+            resolved_backend=resolved_backend,
+        )
+
+        final_config = materialize_dgd(
+            final_config,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            override=dgd_override,
+            tolerations=job_tolerations,
+            runtime_backend=resolved_backend,
+            model_name_or_path=resolve_model_path(dgdr),
+        )
+
+        if final_config:
+            _validate_dgd_service_name_lengths(dgdr, final_config)
+
+        if not _write_final_output(ops, final_config):
+            return
+
+    except Exception as e:
+        logger.exception("Profile job failed with error")
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.FAILED,
+            error=str(e),
+            message=f"Profiler failed with exception: {type(e).__name__}",
+            phase=ops.current_phase,
+        )
+        raise
+    finally:
+        logger.info("Performing final cleanup of any remaining deployments...")
+        await cleanup_remaining_deployments(deployment_clients, ops.k8s_namespace)
+        logger.info("Final cleanup completed.")

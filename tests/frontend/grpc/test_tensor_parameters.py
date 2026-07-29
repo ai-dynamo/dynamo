@@ -16,7 +16,11 @@ import shutil
 
 import numpy as np
 import pytest
-import tritonclient.grpc as grpcclient
+
+try:
+    import tritonclient.grpc as grpcclient
+except ImportError:
+    grpcclient = None
 
 from tests.utils.managed_process import ManagedProcess
 

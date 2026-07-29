@@ -8,6 +8,7 @@ package dynamo
 import (
 	"fmt"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,6 +32,11 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Protocol:      corev1.ProtocolTCP,
 			Name:          commonconsts.DynamoSystemPortName,
 			ContainerPort: int32(commonconsts.DynamoSystemPort),
+		},
+		{
+			Protocol:      corev1.ProtocolTCP,
+			Name:          commonconsts.DynamoNixlPortName,
+			ContainerPort: int32(commonconsts.DynamoNixlPort),
 		},
 	}
 
@@ -90,7 +96,87 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Name:  "DYN_HEALTH_CHECK_ENABLED",
 			Value: "false",
 		},
+		{
+			Name:  "NIXL_TELEMETRY_ENABLE",
+			Value: "n",
+		},
+		{
+			Name:  "NIXL_TELEMETRY_EXPORTER",
+			Value: "prometheus",
+		},
+		{
+			Name:  "NIXL_TELEMETRY_PROMETHEUS_PORT",
+			Value: fmt.Sprintf("%d", commonconsts.DynamoNixlPort),
+		},
+		{
+			Name:  "DYN_FORWARDPASS_METRIC_PORT",
+			Value: fmt.Sprintf("%d", commonconsts.DynamoFPMBasePort),
+		},
 	}...)
 
+	if context.WorkerHashSuffix != "" {
+		container.Env = append(container.Env, []corev1.EnvVar{
+			{
+				Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
+				Value: context.WorkerHashSuffix,
+			},
+		}...)
+	}
+
 	return container, nil
+}
+
+const (
+	topologyVolumeName = "topology-labels"
+	topologyMountPath  = "/etc/dynamo/topology"
+)
+
+// TopologyLabelVolume returns a Downward API volume that projects topology pod
+// labels into files. The volume updates dynamically when labels are added or
+// changed, so the runtime can poll until the files have content.
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) corev1.Volume {
+	return corev1.Volume{
+		Name: topologyVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: topologyLabelVolumeItems(policy, groveClusterTopologyDomains),
+			},
+		},
+	}
+}
+
+func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) []corev1.DownwardAPIVolumeFile {
+	if policy == nil {
+		return nil
+	}
+	if policy.LabelKey != "" {
+		return []corev1.DownwardAPIVolumeFile{
+			{
+				Path: string(policy.Domain),
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
+				},
+			},
+		}
+	}
+
+	items := make([]corev1.DownwardAPIVolumeFile, 0, len(groveClusterTopologyDomains))
+	for _, domain := range groveClusterTopologyDomains {
+		items = append(items, corev1.DownwardAPIVolumeFile{
+			Path: string(domain),
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: fmt.Sprintf("metadata.labels['%s']", commonconsts.DynamoTopologyLabelKey(string(domain))),
+			},
+		})
+	}
+	return items
+}
+
+// TopologyLabelVolumeMount returns the volume mount for the topology label volume.
+func TopologyLabelVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      topologyVolumeName,
+		MountPath: topologyMountPath,
+		ReadOnly:  true,
+	}
 }

@@ -1,0 +1,116 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3-32B"
+subtitle: "Serve Qwen3-32B with Dynamo and vLLM — disaggregated serving with KV-aware routing for multi-turn conversational traffic."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+This recipe deploys `Qwen/Qwen3-32B` on 16x H200 with prefill/decode disaggregation and KV-aware routing — the winning configuration from the [KV routing A/B benchmark](../benchmarks/qwen3-32b-kv-routing.mdx), validated against a real Mooncake conversation trace (12,031 requests, 12K average input length, 36.64% cache efficiency). It fits multi-turn conversational workloads where requests share long prefixes that KV-aware routing can exploit.
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Deployment target</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>GPUs</b> 16x H200, 2 nodes: 6x TP2 prefill + 2x TP2 decode</span>
+<span><b>Techniques</b> Disaggregated P/D + KV-aware routing</span>
+<span><b>Workload</b> Multi-turn conversation with prefix reuse (Mooncake trace, 12K avg ISL / 343 avg OSL)</span>
+<span><b>SLA</b> Goodput at TTFT 2s / ITL 25ms</span>
+</div>
+</div>
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo platform installed and **16x H200 across 2 nodes** available.
+- A Hugging Face token with access to `Qwen/Qwen3-32B`.
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
+</Warning>
+
+## Deploy
+
+Prepare the model cache and download the checkpoint (`cache.yaml` creates the `model-cache`, `compilation-cache`, and `perf-cache` PVCs):
+
+```bash
+# Edit storageClassName in cache.yaml to match your cluster first.
+kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
+```
+
+Then deploy:
+
+```bash
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=disagg-router-6p-2d \
+  -n ${NAMESPACE} --timeout=1200s
+```
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic:
+
+```bash
+kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE} &
+sleep 3
+
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark
+
+The checked-in `perf.yaml` downloads the Mooncake conversation trace (FAST25; 12,031 requests over ~59 minutes) and replays it on a fixed schedule, so throughput is set by the trace and latency is what you measure. It wraps this AIPerf run:
+
+```bash
+aiperf profile -m Qwen/Qwen3-32B \
+  --input-file conversation_trace.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --fixed-schedule \
+  --url http://disagg-router-6p-2d-frontend:8000 \
+  --streaming \
+  --goodput "time_to_first_token:2000 inter_token_latency:25"
+```
+
+```bash
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
+
+# The benchmark runs in a tmux session; attach to watch intermediate results.
+kubectl get pods -n ${NAMESPACE} | grep benchmark
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
+```
+
+Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
+
+## Related Feature Benchmarks
+
+- [Qwen3-32B KV routing A/B](../benchmarks/qwen3-32b-kv-routing.mdx) — the evidence behind this recipe: this configuration vs. aggregated round-robin on the same trace.
+
+## Notes
+
+- The aggregated round-robin manifest is a benchmark control and lives on the related Feature Benchmarks page, not in this recipe.
+- For 80 GB GPUs (H100), use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) — BF16 weights are ~64 GB and leave little KV headroom.
+
+## Source
+
+- Source README: [recipes/qwen3-32b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/README.md)
+- Deploy and benchmark: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml)
+- Setup assets: [model-cache/cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/cache.yaml) and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/model-download.yaml)

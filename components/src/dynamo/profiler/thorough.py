@@ -1,0 +1,554 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""THOROUGH search strategy: enumerate candidates, deploy, benchmark, pick."""
+
+import logging
+import os
+from itertools import chain
+
+import pandas as pd
+import yaml
+from aiconfigurator.generator.enumerate import enumerate_profiling_configs
+from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
+from aiconfigurator.sdk.task import TaskConfig
+
+from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
+from dynamo.profiler.rapid import _generate_dgd_from_pick
+from dynamo.profiler.utils.aic_dataframe import (
+    build_decode_row,
+    build_disagg_df_from_static,
+    build_prefill_row,
+    make_parallel_label,
+)
+from dynamo.profiler.utils.aiperf import (
+    get_decode_itl_and_thpt_per_gpu,
+    get_prefill_ttft,
+)
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.dgd_materialization import (
+    DGDMaterializationPurpose,
+    materialize_dgd,
+)
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    ModelCacheSpec,
+    ProfilingPhase,
+)
+from dynamo.profiler.utils.profile_common import (
+    ProfilerOperationalConfig,
+    derive_backend_image,
+    get_profiling_job_tolerations,
+    pick_decode_component,
+    resolve_model_path,
+)
+from dynamo.profiler.utils.profile_decode import get_num_request_range
+from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
+
+logger = logging.getLogger(__name__)
+
+
+def _enable_chunked_prefill_for_trtllm_candidates(
+    prefill_candidates, decode_candidates
+) -> None:
+    """Enable chunked prefill on every TRT-LLM profiling candidate."""
+    for candidate in [*prefill_candidates, *decode_candidates]:
+        candidate.dgd_config = enable_trtllm_chunked_prefill(candidate.dgd_config)
+
+
+def _normalize_candidate_model_identity(
+    candidates,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    model_cache: ModelCacheSpec,
+    config_modifier,
+) -> None:
+    """Keep the DGDR model name separate from its PVC runtime path."""
+    if not model_cache.pvcName or not model_cache.pvcModelPath:
+        return
+
+    for candidate in candidates:
+        candidate.dgd_config = config_modifier.update_model_from_pvc(
+            candidate.dgd_config,
+            model_name=dgdr.model,
+            pvc_name=model_cache.pvcName,
+            pvc_mount_path=model_cache.pvcMountPath,
+            pvc_path=model_cache.pvcModelPath,
+        )
+
+
+async def _benchmark_prefill_candidates(
+    prefill_candidates,
+    ops: ProfilerOperationalConfig,
+    isl: int,
+    osl: int,
+    model: str,
+    system: str,
+    backend: str,
+    deployment_clients: list,
+    config_modifier,
+) -> pd.DataFrame:
+    """Deploy each prefill candidate, measure TTFT, return prefill_df."""
+    prefill_rows: list[dict] = []
+    total_prefill = len(prefill_candidates)
+    for idx, candidate in enumerate(prefill_candidates, 1):
+        num_gpus = candidate.num_gpus
+        label = make_parallel_label(
+            candidate.tp,
+            candidate.pp,
+            candidate.dp,
+            candidate.moe_tp,
+            candidate.moe_ep,
+        )
+        tag = label.replace("=", "").replace("/", "_")
+        work_dir = f"{ops.output_dir}/prefill_{num_gpus}gpus_{tag}"
+        os.makedirs(work_dir, exist_ok=True)
+
+        config_fn = f"{work_dir}/config.yaml"
+        with open(config_fn, "w") as f:
+            yaml.dump(candidate.dgd_config, f)
+
+        model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
+        frontend_port = config_modifier.get_port(candidate.dgd_config)
+
+        progress_msg = (
+            f"Benchmarking prefill candidate {idx}/{total_prefill}: "
+            f"{label} ({num_gpus} GPUs)"
+        )
+        logger.info("Profiling prefill candidate %s with %d GPUs...", label, num_gpus)
+        ops.current_phase = ProfilingPhase.SweepingPrefill
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message=progress_msg,
+            phase=ProfilingPhase.SweepingPrefill,
+        )
+
+        client = DynamoDeploymentClient(
+            namespace=ops.k8s_namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            frontend_port=frontend_port,
+            deployment_name=candidate.dgd_config["metadata"]["name"],
+        )
+        deployment_clients.append(client)
+        await client.create_deployment(config_fn)
+        logger.info("Waiting for prefill deployment to be ready...")
+        try:
+            await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
+        except TimeoutError:
+            logger.error("Prefill %s with %d GPUs timed out", label, num_gpus)
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Prefill %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        logger.info("Prefill deployment ready")
+
+        await client.get_deployment_logs()
+
+        base_url = client.get_service_url()
+        ai_perf_dir = f"{work_dir}/aiperf_isl{isl}"
+        ttft = get_prefill_ttft(
+            isl,
+            ai_perf_dir,
+            model_name,
+            model_path,
+            base_url,
+            attention_dp_size=candidate.dp,
+        )
+
+        await client.delete_deployment()
+        deployment_clients.remove(client)
+
+        if ttft is not None:
+            prefill_rows.append(
+                build_prefill_row(
+                    model=model,
+                    isl=isl,
+                    osl=osl,
+                    ttft=ttft,
+                    tp=candidate.tp,
+                    pp=candidate.pp,
+                    dp=candidate.dp,
+                    moe_tp=candidate.moe_tp,
+                    moe_ep=candidate.moe_ep,
+                    backend=backend,
+                    system=system,
+                )
+            )
+
+    return pd.DataFrame(prefill_rows) if prefill_rows else pd.DataFrame()
+
+
+async def _benchmark_decode_candidates(
+    decode_candidates,
+    ops: ProfilerOperationalConfig,
+    isl: int,
+    osl: int,
+    model: str,
+    system: str,
+    backend: str,
+    deployment_clients: list,
+    config_modifier,
+) -> pd.DataFrame:
+    """Deploy each decode candidate, sweep num_request, return decode_df."""
+    decode_rows: list[dict] = []
+    total_decode = len(decode_candidates)
+    for idx, candidate in enumerate(decode_candidates, 1):
+        num_gpus = candidate.num_gpus
+        label = make_parallel_label(
+            candidate.tp,
+            candidate.pp,
+            candidate.dp,
+            candidate.moe_tp,
+            candidate.moe_ep,
+        )
+        tag = label.replace("=", "").replace("/", "_")
+        work_dir = f"{ops.output_dir}/decode_{num_gpus}gpus_{tag}"
+        os.makedirs(work_dir, exist_ok=True)
+
+        config_fn = f"{work_dir}/config.yaml"
+        with open(config_fn, "w") as f:
+            yaml.dump(candidate.dgd_config, f)
+
+        model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
+        frontend_port = config_modifier.get_port(candidate.dgd_config)
+
+        progress_msg = (
+            f"Benchmarking decode candidate {idx}/{total_decode}: "
+            f"{label} ({num_gpus} GPUs)"
+        )
+        logger.info("Profiling decode candidate %s with %d GPUs...", label, num_gpus)
+        ops.current_phase = ProfilingPhase.SweepingDecode
+        write_profiler_status(
+            ops.output_dir,
+            status=ProfilerStatus.RUNNING,
+            message=progress_msg,
+            phase=ProfilingPhase.SweepingDecode,
+        )
+
+        client = DynamoDeploymentClient(
+            namespace=ops.k8s_namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            frontend_port=frontend_port,
+            deployment_name=candidate.dgd_config["metadata"]["name"],
+        )
+        deployment_clients.append(client)
+        await client.create_deployment(config_fn)
+        logger.info("Waiting for decode deployment to be ready...")
+        try:
+            await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
+        except TimeoutError:
+            logger.error("Decode %s with %d GPUs timed out", label, num_gpus)
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Decode %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        logger.info("Decode deployment ready")
+
+        await client.get_deployment_logs()
+
+        # Log paths are stored under {work_dir}/{deployment_name}/{component}/0.log
+        # where component names are the lowercase versions of the DGD service names.
+        # client.components is populated by create_deployment() based on the actual
+        # deployment spec.
+        decode_service_name = pick_decode_component(client)
+
+        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+            f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
+            attention_dp_size=candidate.dp,
+        )
+        max_concurrency = max_kv_tokens // (isl + osl)
+
+        sweep_num_request = get_num_request_range(
+            candidate.dp,
+            max_concurrency,
+            ops.decode_interpolation_granularity,
+        )
+        logger.info("Sweeping num_request: %s", sweep_num_request)
+
+        base_url = client.get_service_url()
+        for num_request in sweep_num_request:
+            ai_perf_dir = f"{work_dir}/aiperf_request{num_request}_isl{isl}_osl{osl}_n{num_request}"
+            itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
+                isl,
+                osl,
+                num_request,
+                ai_perf_dir,
+                model_name,
+                model_path,
+                base_url=base_url,
+                num_gpus=num_gpus,
+                attention_dp_size=candidate.dp,
+            )
+            if itl is not None and thpt_per_gpu is not None:
+                decode_rows.append(
+                    build_decode_row(
+                        tpot=itl,
+                        thpt_per_gpu=thpt_per_gpu,
+                        num_request=num_request,
+                        num_gpus=num_gpus,
+                        osl=osl,
+                        tp=candidate.tp,
+                        pp=candidate.pp,
+                        dp=candidate.dp,
+                        moe_tp=candidate.moe_tp,
+                        moe_ep=candidate.moe_ep,
+                        backend=backend,
+                        system=system,
+                    )
+                )
+
+        await client.delete_deployment()
+        deployment_clients.remove(client)
+
+    return pd.DataFrame(decode_rows) if decode_rows else pd.DataFrame()
+
+
+def _pick_thorough_best_config(
+    prefill_df: pd.DataFrame,
+    decode_df: pd.DataFrame,
+    picking_mode: str,
+    target_ttft: float,
+    target_tpot: float,
+    request_latency: float | None,
+    total_gpus: int,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+) -> dict:
+    """Dispatch to pick_autoscale / pick_load_match / pick_default, return result dict."""
+    if picking_mode == "autoscale":
+        return pick_autoscale(prefill_df, decode_df, target_ttft, target_tpot)
+    elif picking_mode == "load_match":
+        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
+        lm_kwargs: dict = {
+            "pareto_df": disagg_df,
+            "serving_mode": "disagg",
+            "top_n": 5,
+        }
+        if request_latency is not None:
+            lm_kwargs["target_request_latency"] = request_latency
+        else:
+            lm_kwargs["target_tpot"] = target_tpot
+        if dgdr.workload and dgdr.workload.requestRate is not None:
+            lm_kwargs["target_request_rate"] = dgdr.workload.requestRate
+        if dgdr.workload and dgdr.workload.concurrency is not None:
+            lm_kwargs["target_concurrency"] = dgdr.workload.concurrency
+        if total_gpus:
+            lm_kwargs["max_total_gpus"] = total_gpus
+        return pick_load_match(**lm_kwargs)
+    else:
+        disagg_df = build_disagg_df_from_static(prefill_df, decode_df)
+        pk_kwargs: dict = {
+            "pareto_df": disagg_df,
+            "total_gpus": total_gpus,
+            "serving_mode": "disagg",
+            "top_n": 5,
+        }
+        if request_latency is not None:
+            pk_kwargs["target_request_latency"] = request_latency
+        else:
+            pk_kwargs["target_tpot"] = target_tpot
+        return pick_default(**pk_kwargs)
+
+
+async def run_thorough(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    ops: ProfilerOperationalConfig,
+    picking_mode: str,
+    model: str,
+    system: str,
+    backend: str,
+    total_gpus: int,
+    isl: int,
+    osl: int,
+    target_ttft: float,
+    target_tpot: float,
+    request_latency: float | None,
+    deployment_clients: list,
+) -> dict:
+    """Enumerate candidates, deploy + benchmark each, build DataFrames, pick."""
+    logger.warning("THOROUGH mode: only disagg configurations are supported.")
+
+    # --- Stage 1: Enumeration ---
+    model_cache = dgdr.modelCache or ModelCacheSpec()
+    local_or_hf_model = resolve_model_path(dgdr)
+    enumerated = enumerate_profiling_configs(
+        model_path=local_or_hf_model,
+        system=system,
+        backend=backend,
+        image=derive_backend_image(dgdr.image, backend),
+        isl=isl,
+        osl=osl,
+        num_gpus_per_node=dgdr.hardware.numGpusPerNode,
+        total_gpus=total_gpus,
+        k8s_pvc_name=model_cache.pvcName,
+        k8s_pvc_mount_path=model_cache.pvcMountPath,
+        k8s_model_path_in_pvc=model_cache.pvcModelPath,
+    )
+    prefill_candidates, decode_candidates = enumerated[:2]
+
+    logger.info(
+        "Enumerated %d prefill candidates, %d decode candidates",
+        len(prefill_candidates),
+        len(decode_candidates),
+    )
+
+    config_modifier = CONFIG_MODIFIERS[backend]
+    dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
+    job_tolerations = get_profiling_job_tolerations(dgdr)
+    for candidate in chain(prefill_candidates, decode_candidates):
+        candidate.dgd_config = materialize_dgd(
+            candidate.dgd_config,
+            purpose=DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
+            override=dgd_override,
+            tolerations=job_tolerations,
+            runtime_backend=backend,
+            model_name_or_path=local_or_hf_model,
+        )
+
+    if backend == "trtllm":
+        _enable_chunked_prefill_for_trtllm_candidates(
+            prefill_candidates, decode_candidates
+        )
+
+    # Overrides may carry stale model arguments, so reassert the DGDR model
+    # identity and PVC runtime path after all user-controlled transforms.
+    _normalize_candidate_model_identity(
+        prefill_candidates, dgdr, model_cache, config_modifier
+    )
+    _normalize_candidate_model_identity(
+        decode_candidates, dgdr, model_cache, config_modifier
+    )
+    logger.info(
+        "Materialized %d prefill + %d decode benchmark candidates.",
+        len(prefill_candidates),
+        len(decode_candidates),
+    )
+
+    # --- Stage 2: Benchmarking ---
+    ops.current_phase = ProfilingPhase.SweepingPrefill
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Sweeping parallelization strategies for prefill, measuring TTFT",
+        phase=ops.current_phase,
+    )
+    prefill_df = await _benchmark_prefill_candidates(
+        prefill_candidates,
+        ops,
+        isl,
+        osl,
+        model,
+        system,
+        backend,
+        deployment_clients,
+        config_modifier,
+    )
+    ops.current_phase = ProfilingPhase.SweepingDecode
+    write_profiler_status(
+        ops.output_dir,
+        status=ProfilerStatus.RUNNING,
+        message="Sweeping parallelization strategies for decode, measuring ITL",
+        phase=ops.current_phase,
+    )
+    decode_df = await _benchmark_decode_candidates(
+        decode_candidates,
+        ops,
+        isl,
+        osl,
+        model,
+        system,
+        backend,
+        deployment_clients,
+        config_modifier,
+    )
+
+    # --- Stage 3: Picking ---
+    if prefill_df.empty:
+        logger.error("No prefill results produced in THOROUGH mode.")
+        return {
+            "best_config_df": pd.DataFrame(),
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": None,
+            "chosen_exp": None,
+        }
+    if decode_df.empty:
+        logger.error("No decode results produced in THOROUGH mode.")
+        return {
+            "best_config_df": pd.DataFrame(),
+            "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+            "dgd_config": None,
+            "chosen_exp": None,
+        }
+
+    result = _pick_thorough_best_config(
+        prefill_df,
+        decode_df,
+        picking_mode,
+        target_ttft,
+        target_tpot,
+        request_latency,
+        total_gpus,
+        dgdr,
+    )
+
+    best_config_df = result.get("best_config_df", pd.DataFrame())
+
+    # --- Stage 4: DGD generation ---
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path=local_or_hf_model,
+        system_name=system,
+        backend_name=backend,
+        total_gpus=total_gpus,
+        isl=isl,
+        osl=osl,
+        ttft=target_ttft,
+        tpot=target_tpot,
+        request_latency=request_latency,
+    )
+    dgd_config = _generate_dgd_from_pick(
+        dgdr, best_config_df, "disagg", {"disagg": task}, picking_mode
+    )
+
+    return {
+        "best_config_df": best_config_df,
+        "best_latencies": result.get(
+            "best_latencies", {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
+        ),
+        "dgd_config": dgd_config,
+        "chosen_exp": "disagg",
+    }

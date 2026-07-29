@@ -14,15 +14,13 @@
 # limitations under the License.
 
 import hashlib
-import json
 import logging
 import os
 from typing import Any, Dict, Optional
 
 import torch
-from vllm.config import ECTransferConfig
 
-from .model import SupportedModels, is_model_supported, is_qwen_vl_model
+from .model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +64,8 @@ def get_qwen_image_features(
         if grid_thw is None:
             raise ValueError("grid_thw is not provided")
         grid_thw = grid_thw.tolist()
-        image_embeds = vision_encoder(pixel_values, grid_thw=grid_thw)
-        return image_embeds
+        image_features = vision_encoder(pixel_values, grid_thw=grid_thw)
+        return image_features
 
     pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
 
@@ -108,8 +106,8 @@ def encode_image_embeddings(
         NotImplementedError: If model is not supported
     """
     with torch.no_grad():
-        # Route through the correct encoder based on model
-        if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+        family = resolve_model_family(model_name)
+        if family is ModelFamily.LLAVA:
             pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
             vision_outputs = vision_encoder(pixel_values)
 
@@ -118,7 +116,7 @@ def encode_image_embeddings(
 
             embeddings = projector(vision_outputs.last_hidden_state)
 
-        elif is_qwen_vl_model(model_name):
+        elif family is ModelFamily.QWEN_VL:
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
         else:
@@ -129,7 +127,7 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
-        return embeddings
+    return embeddings
 
 
 def get_encoder_components(
@@ -148,63 +146,16 @@ def get_encoder_components(
     Raises:
         NotImplementedError: If model is not supported
     """
-    if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
+    family = resolve_model_family(model_name)
+    if family is ModelFamily.LLAVA:
         vision_encoder = vision_model.vision_tower
         projector = getattr(vision_model, "multi_modal_projector", None)
         return vision_encoder, projector
 
-    elif is_qwen_vl_model(model_name):
+    elif family is ModelFamily.QWEN_VL:
         vision_encoder = vision_model
         projector = None
         return vision_encoder, projector
 
     else:
         raise NotImplementedError(f"Model not supported: {model_name}")
-
-
-def create_ec_transfer_config(
-    engine_id: str,
-    ec_role: str,
-    ec_connector_backend: str = "ECExampleConnector",
-    ec_storage_path: Optional[str] = None,
-    ec_extra_config: Optional[str] = None,
-) -> ECTransferConfig:
-    """
-    Create ECTransferConfig for vLLM encoder disaggregation.
-
-    Args:
-        engine_id: Unique identifier for this engine instance
-        ec_role: Role of this instance - "ec_producer" (encoder) or "ec_consumer" (PD worker)
-        ec_connector_backend: ECConnector implementation class name
-        ec_storage_path: Storage path for disk-based connectors
-        ec_extra_config: Additional connector config as JSON string
-
-    Returns:
-        ECTransferConfig configured for the specified role
-    """
-    # Parse extra config if provided
-    extra_config: Dict[str, Any] = {}
-    if ec_extra_config:
-        try:
-            extra_config = json.loads(ec_extra_config)
-            logger.debug(f"Parsed ec_extra_config: {extra_config}")
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in --ec-extra-config: {e}")
-
-    # Add storage path to config if provided
-    if ec_storage_path:
-        extra_config["shared_storage_path"] = ec_storage_path
-    else:
-        raise ValueError("ec_storage_path is not provided")
-
-    logger.info(
-        f"Creating ECTransferConfig: engine_id={engine_id}, role={ec_role}, "
-        f"backend={ec_connector_backend}, config={extra_config}"
-    )
-
-    return ECTransferConfig(
-        engine_id=engine_id,
-        ec_role=ec_role,
-        ec_connector=ec_connector_backend,
-        ec_connector_extra_config=extra_config,
-    )

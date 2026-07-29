@@ -114,7 +114,7 @@ def start_nats_and_etcd_default_ports():
     nats_port = 4222
     etcd_client_port = 2379
 
-    # No data directories needed - use defaults
+    # Data directories are set below after the reuse check.
     nats_data_dir = None
     etcd_data_dir = None
 
@@ -140,9 +140,16 @@ def start_nats_and_etcd_default_ports():
     print(f"Using NATS on default port {nats_port}")
     print(f"Using ETCD on default client port {etcd_client_port}")
 
+    # Create writable temp dirs for service state; avoids permission/state issues
+    # when the pytest CWD is not writable in CI containers.
+    nats_data_dir = tempfile.mkdtemp(prefix="nats_data_")
+    etcd_data_dir = tempfile.mkdtemp(prefix="etcd_data_")
+
     # Start services with default ports
-    nats_server = subprocess.Popen(["nats-server", "-js", "--trace"])
-    etcd = subprocess.Popen(["etcd"])
+    nats_server = subprocess.Popen(
+        ["nats-server", "-js", "--trace", "-sd", str(nats_data_dir)]
+    )
+    etcd = subprocess.Popen(["etcd", "--data-dir", str(etcd_data_dir)])
 
     return nats_server, etcd, nats_port, etcd_client_port, nats_data_dir, etcd_data_dir
 
@@ -403,12 +410,12 @@ def temp_file_store():
 
 
 @pytest.fixture
-def store_kv(request):
+def discovery_backend(request):
     """
-    KV store for runtime. Defaults to "file".
+    Discovery backend for runtime. Defaults to "file".
 
-    To iterate over multiple stores in a test:
-        @pytest.mark.parametrize("store_kv", ["file", "etcd"], indirect=True)
+    To iterate over multiple backends in a test:
+        @pytest.mark.parametrize("discovery_backend", ["file", "etcd"], indirect=True)
         async def test_example(runtime):
             ...
     """
@@ -429,7 +436,7 @@ def request_plane(request):
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def runtime(request, store_kv, request_plane):
+async def runtime(request, discovery_backend, request_plane):
     """
     Create a DistributedRuntime for testing.
 
@@ -440,11 +447,11 @@ async def runtime(request, store_kv, request_plane):
     Without @pytest.mark.forked in isolated mode, you will get "Worker already initialized"
     errors when multiple tests try to create runtimes in the same process.
 
-    The store_kv and request_plane can be customized by overriding their fixtures
+    The discovery_backend and request_plane can be customized by overriding their fixtures
     or using @pytest.mark.parametrize with indirect=True:
 
         @pytest.mark.forked
-        @pytest.mark.parametrize("store_kv", ["etcd"], indirect=True)
+        @pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
         async def test_with_etcd(runtime):
             ...
     """
@@ -469,6 +476,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, store_kv, request_plane)
+    runtime = DistributedRuntime(loop, discovery_backend, request_plane)
     yield runtime
     runtime.shutdown()

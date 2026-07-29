@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-planner
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment": "kubernetes", "backend": "vllm", "optimization_target": "sla",
+            "enable_throughput_scaling": true, "enable_load_scaling": true, "pre_deployment_sweeping_mode":
+            "none", "throughput_adjustment_interval_seconds": 60, "load_adjustment_interval_seconds": 5}'
+          command:
+          - python3
+          - -m
+          - dynamo.planner
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>.
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          name: main
+    replicas: 1
+    type: planner
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - Qwen/Qwen3-0.6B
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: prefill

@@ -96,7 +96,11 @@ async def recv_message(
         raw_msg, fds, _flags, _addr = await loop.run_in_executor(
             None, lambda: socket.recv_fds(raw_sock, 65536, 1)
         )
+        for extra_fd in fds[1:]:
+            os.close(extra_fd)
         if not raw_msg:
+            if fds:
+                os.close(fds[0])
             raise ConnectionResetError("Connection closed")
         recv_buffer.extend(raw_msg)
         fd = fds[0] if fds else -1
@@ -107,21 +111,25 @@ async def recv_message(
         recv_buffer.extend(chunk)
 
     # Try to extract message, read more if needed
-    msg, remaining, bytes_needed = _try_extract_message(recv_buffer)
-    while msg is None and bytes_needed > 0:
-        if raw_sock is not None:
-            # Continue reading from raw socket to avoid buffer inconsistency
-            chunk = await loop.run_in_executor(
-                None, lambda n=bytes_needed: raw_sock.recv(n)
-            )
-        else:
-            chunk = await reader.read(bytes_needed)
-        if not chunk:
-            raise ConnectionResetError("Connection closed")
-        remaining.extend(chunk)
-        msg, remaining, bytes_needed = _try_extract_message(remaining)
-
-    return msg, fd, remaining
+    try:
+        msg, remaining, bytes_needed = _try_extract_message(recv_buffer)
+        while msg is None and bytes_needed > 0:
+            if raw_sock is not None:
+                # Continue reading from raw socket to avoid buffer inconsistency
+                chunk = await loop.run_in_executor(
+                    None, lambda n=bytes_needed: raw_sock.recv(n)
+                )
+            else:
+                chunk = await reader.read(bytes_needed)
+            if not chunk:
+                raise ConnectionResetError("Connection closed")
+            remaining.extend(chunk)
+            msg, remaining, bytes_needed = _try_extract_message(remaining)
+        return msg, fd, remaining
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
 
 
 # ==================== Sync (for client) ====================
@@ -153,18 +161,26 @@ def recv_message_sync(
 
     # Receive more data (with potential FD)
     raw_msg, fds, _flags, _addr = socket.recv_fds(sock, 65536, 1)
+    for extra_fd in fds[1:]:
+        os.close(extra_fd)
     if not raw_msg:
+        if fds:
+            os.close(fds[0])
         raise ConnectionResetError("Connection closed")
     recv_buffer.extend(raw_msg)
     fd = fds[0] if fds else -1
 
     # Try to extract message, read more if needed
-    msg, remaining, bytes_needed = _try_extract_message(recv_buffer)
-    while msg is None and bytes_needed > 0:
-        chunk = sock.recv(bytes_needed)
-        if not chunk:
-            raise ConnectionResetError("Connection closed")
-        remaining.extend(chunk)
-        msg, remaining, bytes_needed = _try_extract_message(remaining)
-
-    return msg, fd, remaining
+    try:
+        msg, remaining, bytes_needed = _try_extract_message(recv_buffer)
+        while msg is None and bytes_needed > 0:
+            chunk = sock.recv(bytes_needed)
+            if not chunk:
+                raise ConnectionResetError("Connection closed")
+            remaining.extend(chunk)
+            msg, remaining, bytes_needed = _try_extract_message(remaining)
+        return msg, fd, remaining
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise

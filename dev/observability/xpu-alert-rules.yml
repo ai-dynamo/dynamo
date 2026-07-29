@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+groups:
+  - name: xpu_health
+    interval: 15s
+    rules:
+      - alert: XPUHighTemperature
+        expr: xpu_temperature_celsius{location="gpu"} > 85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Intel XPU temperature too high"
+          description: "XPU device {{ $labels.device_id }} GPU temperature is {{ $value | printf \"%.1f\" }}°C (threshold: 85°C)"
+
+      - alert: XPUCriticalTemperature
+        expr: xpu_temperature_celsius{location="gpu"} > 95
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Intel XPU temperature critical"
+          description: "XPU device {{ $labels.device_id }} GPU temperature is {{ $value | printf \"%.1f\" }}°C — immediate action required"
+
+      - alert: XPUMemoryAlmostFull
+        expr: xpu_memory_used_bytes / (xpu_memory_used_bytes + xpu_memory_free_bytes) > 0.90
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Intel XPU memory usage above 90%"
+          description: "XPU device {{ $labels.device_id }} memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: XPUMemoryCritical
+        expr: xpu_memory_used_bytes / (xpu_memory_used_bytes + xpu_memory_free_bytes) > 0.98
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Intel XPU memory usage critical (>98%)"
+          description: "XPU device {{ $labels.device_id }} memory is almost exhausted: {{ $value | humanizePercentage }} used"
+
+      - alert: XPUHighPowerDraw
+        expr: xpu_power_watts > 400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Intel XPU sustained high power draw"
+          description: "XPU device {{ $labels.device_id }} power draw is {{ $value | printf \"%.1f\" }}W for over 5 minutes"
+
+      - alert: XPUExporterDown
+        expr: up{job="xpu-smi-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Intel XPU-SMI exporter is down"
+          description: "Cannot scrape XPU metrics from {{ $labels.instance }}. XPU health monitoring is unavailable."
+
+  - name: xpu_sla
+    interval: 30s
+    rules:
+      - alert: XPULowComputeUtilizationDuringLoad
+        expr: |
+          xpu_engine_group_compute_engine_util < 10
+          and on() sum(rate(dynamo_frontend_requests_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "XPU compute utilization low while requests are active"
+          description: "XPU device {{ $labels.device_id }} compute utilization is only {{ $value | printf \"%.1f\" }}% despite active frontend traffic. Possible scheduling or dispatch issue."
+
+      - alert: XPUWorkerLivenessLost
+        expr: |
+          absent(xpu_engine_group_compute_engine_util)
+          and on() sum(rate(dynamo_frontend_requests_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "XPU worker liveness lost — no XPU metrics while serving requests"
+          description: "No XPU metrics are being reported while Dynamo frontend is receiving requests. XPU worker may have crashed."

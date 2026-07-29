@@ -22,12 +22,6 @@ fi
 echo "🚀 Starting dynamo setup without LMCache:"
 echo "   Model: $MODEL_URL"
 echo "   Port: 8000"
-
-# Kill any existing dynamo processes
-echo "🧹 Cleaning up any existing dynamo processes..."
-pkill -f "dynamo-run" || true
-sleep 2
-
 echo "🔧 Starting dynamo worker without LMCache..."
 
 python -m dynamo.frontend &

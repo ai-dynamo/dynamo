@@ -22,6 +22,11 @@ from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
+pytestmark = [
+    pytest.mark.fault_tolerance,
+    pytest.mark.trtllm,
+]
+
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TRT-LLM backend and ETCD HA support"""
@@ -30,7 +35,7 @@ class DynamoWorkerProcess(ManagedProcess):
         self,
         request,
         etcd_endpoints: list,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         """
         Initialize TRT-LLM worker process with ETCD HA support.
@@ -38,7 +43,7 @@ class DynamoWorkerProcess(ManagedProcess):
         Args:
             request: pytest request object
             etcd_endpoints: List of ETCD endpoints for HA
-            mode: One of "prefill_and_decode", "prefill", "decode"
+            mode: One of "agg", "prefill", "decode"
         """
         command = [
             "python3",
@@ -55,7 +60,7 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
 
         # Add disaggregation-specific configuration
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             with open("test_etcd_ha_trtllm_config.yaml", "w") as f:
                 f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
                 f.write("disable_overlap_scheduler: true\n")
@@ -76,7 +81,7 @@ class DynamoWorkerProcess(ManagedProcess):
         elif mode == "decode":
             port = "8081"
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
-        else:  # prefill_and_decode
+        else:  # agg
             port = "8081"
 
         # Set debug logging and ETCD endpoints
@@ -125,7 +130,6 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -165,9 +169,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start an aggregated TRT-LLM worker
-                with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode="prefill_and_decode"
-                ):
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg"):
                     logger.info("Aggregated TRT-LLM worker started successfully")
 
                     # Step 5: Send initial inference request to verify system is working
@@ -199,7 +201,6 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
                         etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -280,7 +281,6 @@ def test_etcd_ha_failover_trtllm_disaggregated(
                             etcd_cluster.restart_replica(i)
 
 
-@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
@@ -314,9 +314,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
                 logger.info("Frontend started successfully")
 
                 # Step 4: Start an aggregated TRT-LLM worker
-                with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode="prefill_and_decode"
-                ) as worker:
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg") as worker:
                     logger.info("Aggregated TRT-LLM worker started successfully")
 
                     # TODO: Fix disagg health checks
@@ -341,7 +339,6 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.trtllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly

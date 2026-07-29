@@ -23,9 +23,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Get endpoint
-    endpoint = (
-        runtime.namespace("hello_world").component("backend").endpoint("generate")
-    )
+    endpoint = runtime.endpoint("hello_world.backend.generate")
 
     # Create client and wait for service to be ready
     client = await endpoint.client()

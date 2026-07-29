@@ -24,8 +24,10 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -44,13 +46,31 @@ type ExcludedNamespaces interface {
 	Contains(namespace string) bool
 }
 
-// StartResourceCounter starts a background goroutine that periodically updates resource count metrics.
+var _ manager.Runnable = (*ResourceCounter)(nil)
+var _ manager.LeaderElectionRunnable = (*ResourceCounter)(nil)
+
+// ResourceCounter runs resource inventory collection as a manager runnable.
+// It runs on every replica so each /metrics endpoint exposes current gauges.
+type ResourceCounter struct {
+	client             client.Client
+	excludedNamespaces ExcludedNamespaces
+}
+
+// NewResourceCounter creates a resource counter using the manager's cached client.
+func NewResourceCounter(c client.Client, excludedNamespaces ExcludedNamespaces) *ResourceCounter {
+	return &ResourceCounter{
+		client:             c,
+		excludedNamespaces: excludedNamespaces,
+	}
+}
+
+// Start periodically updates resource count metrics after the manager starts its cache.
 // It uses the manager's cached client to avoid loading the API server.
 // The client's cache scope is automatically determined by the manager's configuration:
 // - Namespace-restricted operators: cache is scoped to specific namespace
 // - Cluster-wide operators: cache includes all namespaces (except those filtered by excludedNamespaces)
 // The excludedNamespaces parameter allows filtering out namespaces managed by namespace-restricted operators.
-func StartResourceCounter(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces) {
+func (r *ResourceCounter) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("resource-counter")
 	logger.Info("Starting resource counter", "interval", resourceCountInterval)
 
@@ -58,17 +78,22 @@ func StartResourceCounter(ctx context.Context, c client.Client, excludedNamespac
 	defer ticker.Stop()
 
 	// Initial update
-	updateResourceMetrics(ctx, c, excludedNamespaces, logger)
+	updateResourceMetrics(ctx, r.client, r.excludedNamespaces, logger)
 
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Stopping resource counter")
-			return
+			return nil
 		case <-ticker.C:
-			updateResourceMetrics(ctx, c, excludedNamespaces, logger)
+			updateResourceMetrics(ctx, r.client, r.excludedNamespaces, logger)
 		}
 	}
+}
+
+// NeedLeaderElection returns false because metrics are exposed per replica.
+func (r *ResourceCounter) NeedLeaderElection() bool {
+	return false
 }
 
 // updateResourceMetrics queries all CRDs and updates gauges
@@ -159,7 +184,7 @@ func updateDynamoModelCounts(ctx context.Context, c client.Client, excludedNames
 }
 
 func updateDynamoGraphDeploymentRequestCounts(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces, logger logr.Logger) {
-	dgdrList := &v1alpha1.DynamoGraphDeploymentRequestList{}
+	dgdrList := &v1beta1.DynamoGraphDeploymentRequestList{}
 	if err := c.List(ctx, dgdrList); err != nil {
 		logger.Error(err, "failed to list DynamoGraphDeploymentRequests")
 		return
@@ -168,7 +193,7 @@ func updateDynamoGraphDeploymentRequestCounts(ctx context.Context, c client.Clie
 		dgdrList.Items,
 		excludedNamespaces,
 		consts.ResourceTypeDynamoGraphDeploymentRequest,
-		func(d *v1alpha1.DynamoGraphDeploymentRequest) *v1alpha1.DynamoGraphDeploymentRequest { return d },
+		func(d *v1beta1.DynamoGraphDeploymentRequest) *v1beta1.DynamoGraphDeploymentRequest { return d },
 	)
 }
 

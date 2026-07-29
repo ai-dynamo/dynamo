@@ -45,20 +45,22 @@ impl DynamoWorkerMetadataSpec {
 
 /// Build a DynamoWorkerMetadata CR with owner reference set to the pod
 /// # Arguments
-/// * `pod_name` - Name of the pod (used as CR name and in owner reference)
+/// * `cr_name` - Name of the CR (from KubeDiscoveryTarget::cr_name)
+/// * `pod_name` - Name of the pod (used in owner reference)
 /// * `pod_uid` - UID of the pod (for owner reference - enables garbage collection)
 /// * `metadata` - The DiscoveryMetadata to serialize into the CR's data field
 ///
 /// # Returns
 /// A `DynamoWorkerMetadata` CR ready to be applied to the cluster
 pub fn build_cr(
+    cr_name: &str,
     pod_name: &str,
     pod_uid: &str,
     metadata: &DiscoveryMetadata,
 ) -> Result<DynamoWorkerMetadata> {
     let data = serde_json::to_value(metadata)?;
     let spec = DynamoWorkerMetadataSpec::new(data);
-    let mut cr = DynamoWorkerMetadata::new(pod_name, spec);
+    let mut cr = DynamoWorkerMetadata::new(cr_name, spec);
 
     // Set owner reference to the pod for automatic garbage collection
     cr.metadata.owner_references = Some(vec![OwnerReference {
@@ -66,8 +68,9 @@ pub fn build_cr(
         kind: "Pod".to_string(),
         name: pod_name.to_string(),
         uid: pod_uid.to_string(),
-        // Mark pod as the controlling owner - CR will be garbage collected when pod is deleted
-        controller: Some(true),
+        // Mark pod as the controlling owner - CR will be garbage collected when pod is deleted.
+        // In container mode multiple CRs may share one pod; only one can be controller.
+        controller: Some(cr_name == pod_name),
         // Don't block pod deletion - allow CR cleanup to happen asynchronously
         block_owner_deletion: Some(false),
     }]);
@@ -119,6 +122,10 @@ pub async fn apply_cr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{
+        DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery, MAX_JSON_SAFE_PUBLISHER_ID,
+    };
+    use crate::protocols::EndpointId;
     use kube::Resource;
 
     #[test]
@@ -156,5 +163,41 @@ mod tests {
             serde_json::from_str(&json).expect("Failed to deserialize CR");
 
         assert_eq!(deserialized.spec.data, data);
+    }
+
+    #[test]
+    fn event_source_round_trips_through_kubernetes_metadata() {
+        let mut metadata = DiscoveryMetadata::new();
+        let endpoint = EndpointId {
+            namespace: "workers".to_string(),
+            component: "backend".to_string(),
+            name: "kv-state".to_string(),
+        };
+        let source = DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id: MAX_JSON_SAFE_PUBLISHER_ID,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+        };
+        metadata.register_event_source(source.clone()).unwrap();
+
+        let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
+        let publisher_id = cr.spec.data["event_sources"]
+            .as_object()
+            .and_then(|sources| sources.values().next())
+            .and_then(|source| source.get("publisher_id"))
+            .expect("serialized event source publisher ID");
+        assert_eq!(publisher_id.as_u64(), Some(MAX_JSON_SAFE_PUBLISHER_ID));
+
+        let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
+
+        assert_eq!(
+            round_trip.filter(&DiscoveryQuery::EventSources(
+                EventSourceQuery::endpoint_topic(endpoint, "kv-events")
+            )),
+            vec![source]
+        );
     }
 }

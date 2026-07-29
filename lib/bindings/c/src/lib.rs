@@ -6,19 +6,45 @@ use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
 use std::ffi::CStr;
+use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
-use dynamo_llm::{
-    discovery::{KvWorkerMonitor, ModelWatcher},
-    kv_router::{protocols::*, publisher::KvEventPublisher},
+use dynamo_kv_router::{
+    config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env},
+    protocols::*,
 };
-use dynamo_runtime::discovery::DiscoveryQuery;
+use dynamo_llm::kv_router::publisher::KvEventPublisher;
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::{
+    NvExt, request_cache_salt, routing_constraints_to_kv,
+};
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
+
+use dynamo_runtime::Runtime;
+
+use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_runtime::pipeline::RouterMode;
+
+use std::collections::HashSet;
+
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+struct DiscoveredModelBootstrap {
+    preprocessor: Arc<OpenAIPreprocessor>,
+    card: ModelDeploymentCard,
+    actual_namespace: String,
+}
 
 /// Convert a C string pointer to a Rust string, falling back to a default when:
 /// - the pointer is NULL,
@@ -46,9 +72,9 @@ fn initialize_tracing() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    tracing::debug!("Tracing initialized");
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        tracing::debug!("Tracing initialized");
+    }
 }
 
 #[repr(u32)]
@@ -87,11 +113,12 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
 }
 
 /// # Safety
-/// the namespace_c_str and component_c_str are passed as pointers to C strings
+/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
+    endpoint_c_str: *const c_char,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -139,9 +166,25 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
     let component: String = component_cow.into_owned();
 
+    if endpoint_c_str.is_null() {
+        tracing::error!("Serving endpoint name is required");
+        return DynamoLlmResult::ERR;
+    }
+    let endpoint = match unsafe { CStr::from_ptr(endpoint_c_str) }.to_str() {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Serving endpoint name must not be empty");
+            return DynamoLlmResult::ERR;
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to convert serving endpoint name to UTF-8");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, endpoint, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -183,16 +226,17 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
+    endpoint: String,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
-    tracing::info!("Creating KV Publisher for model: {}", component);
+    tracing::info!(%namespace, %component, %endpoint, "Creating endpoint-scoped KV publisher");
     match DRT
         .get()
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, kv_block_size, None)
+            KvEventPublisher::new(backend.endpoint(endpoint), kv_block_size, None)
         }
         Err(e) => Err(e),
     }
@@ -203,12 +247,16 @@ fn kv_event_create_stored_block_from_parts(
     token_ids: *const u32,
     num_tokens: usize,
     kv_block_size: u32,
-    _lora_id: u64,
+    lora_name: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
-        None,
+        BlockHashOptions {
+            lora_name,
+            cache_namespace: None,
+            ..Default::default()
+        },
     )[0];
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash(block_hash),
@@ -255,7 +303,7 @@ fn kv_event_create_stored_from_parts(
             tokens,
             num_toks,
             kv_block_size,
-            kv_params.lora_id,
+            kv_params.lora_name.as_deref(),
         ));
     }
 
@@ -263,6 +311,7 @@ fn kv_event_create_stored_from_parts(
         data: KvCacheEventData::Stored(KvCacheStoreData {
             blocks,
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
+            start_position: None,
         }),
         event_id: kv_params.event_id,
         dp_rank: 0,
@@ -294,12 +343,13 @@ pub struct DynamoKvStoredEventParams {
     pub block_ids: *const u64,
     pub num_blocks: usize,
     pub parent_hash: Option<u64>,
-    pub lora_id: u64,
+    pub lora_name: Option<String>,
 }
 
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
-/// has a parent hash or not. nullptr is used to represent no parent hash
+/// has a parent hash or not. nullptr is used to represent no parent hash.
+/// lora_name is an optional null-terminated C string; pass nullptr for base model.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     event_id: u64,
@@ -308,13 +358,24 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     block_ids: *const u64,
     num_blocks: usize,
     parent_hash: *const u64,
-    lora_id: u64,
+    lora_name: *const c_char,
 ) -> DynamoLlmResult {
     let parent_hash = {
         if parent_hash.is_null() {
             None
         } else {
             Some(unsafe { *parent_hash })
+        }
+    };
+    let lora_name = if lora_name.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(lora_name) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to convert C string to Rust string (lora_name)");
+                return DynamoLlmResult::ERR;
+            }
         }
     };
     let kv_params = DynamoKvStoredEventParams {
@@ -324,7 +385,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         block_ids,
         num_blocks,
         parent_hash,
-        lora_id,
+        lora_name,
     };
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
@@ -354,543 +415,566 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
     }
 }
 
-// Need to setup etcd and nats to run these tests
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::ffi::CString;
-
-//     #[test]
-//     fn test_dynamo_llm_init() {
-//         // Create C-compatible strings
-//         let namespace = CString::new("test_namespace").unwrap();
-//         let component = CString::new("test_component").unwrap();
-
-//         // Call the init function
-//         let result = unsafe {
-//             dynamo_llm_init(
-//                 namespace.as_ptr(),
-//                 component.as_ptr(),
-//                 1,  // worker_id
-//                 32, // kv_block_size
-//             )
-//         };
-
-//         assert_eq!(result as u32, DynamoLlmResult::OK as u32);
-
-//         assert!(WK.get().is_some());
-
-//         let shutdown_result = dynamo_llm_shutdown();
-//         assert_eq!(shutdown_result as u32, DynamoLlmResult::OK as u32);
-//     }
-// }
 /* ------------------------------------------------------------------------
- * Worker selection pipeline
+ *  Router Bindings for GAIE EPP
  * ------------------------------------------------------------------------ */
-use std::pin::Pin;
 
-const GENERATE_ENDPOINT: &str = "generate";
-
-use anyhow::Context;
-use dynamo_runtime::{Runtime, traits::DistributedRuntimeProvider};
-
-use dynamo_llm::discovery::ModelManager;
-use dynamo_llm::entrypoint::build_routed_pipeline;
-use dynamo_llm::http::service::metrics::Metrics;
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::protocols::openai::nvext::NvExt;
-use dynamo_llm::types::{
-    Annotated,
-    openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-    },
-};
-use dynamo_runtime::{
-    engine::AsyncEngineStream,
-    pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn},
-};
-/// Opaque handle exposed to C — it owns its own Worker/runtime and engine.
-pub struct WorkerSelectionPipeline {
-    wk: Worker,
-    engine: ServiceEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    >,
-    /// KV router for bookkeeping operations (only present when router_mode is KV)
-    kv_router: Option<Arc<dynamo_llm::kv_router::KvRouter>>,
+// Default timeout for bookkeeping operations
+const BOOKKEEPING_TIMEOUT_SEC: u64 = 5;
+/// Complete routing result for a chat completion request (C-compatible)
+#[repr(C)]
+pub struct CRoutingResult {
+    /// Whether disaggregated mode is active
+    pub is_disaggregated: bool,
+    /// Prefill worker ID (only valid if is_disaggregated is true)
+    pub prefill_worker_id: u64,
+    /// Decode worker ID
+    pub decode_worker_id: u64,
+    /// Data parallel rank selected for the prefill worker
+    pub prefill_dp_rank: u32,
+    /// Data parallel rank selected for the decode worker
+    pub decode_dp_rank: u32,
+    /// Token IDs (needed for add_request callback)
+    pub token_ids: *mut u32,
+    /// Number of tokens in the request
+    pub token_count: usize,
+    /// UTF-8 cache namespace bytes (needed for add_request callback)
+    pub cache_namespace: *mut u8,
+    /// Number of bytes in the cache namespace
+    pub cache_namespace_len: usize,
 }
 
-/// Create a worker-selection pipeline ("generate" endpoint).
-///
-/// # Safety
-/// - `namespace_c_str`, `component_c_str`, and `model_name_c_str` must be **non-null** pointers to
-///   **NUL-terminated** C strings that contain **valid UTF-8**. They must remain valid for the
-///   duration of this call.
-/// - `pipeline_out` must be **non-null** and point to writable memory for a `*mut WorkerSelectionPipeline`.
-///   On success this function writes exactly once to `*pipeline_out`. The caller becomes the owner of
-///   that pointer and **must** later free it by calling `dynamo_destroy_worker_selection_pipeline`.
-/// - Must be called **after** a successful `dynamo_llm_init()`; otherwise behavior is undefined.
-/// - This function is not signal-safe and must not be called from a signal handler.
-/// - This function may block internally; do not call it from contexts that forbid blocking.
-///
-/// # Errors
-/// Returns `DynamoLlmResult::ERR` on failure and does not write to `pipeline_out`.
-/// # Safety
-/// See detailed safety docs above. Additional parameter:
-/// - `enforce_disagg`: If true, requests fail when disaggregated serving is unavailable.
-///   If false, falls back to aggregated serving.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
-    namespace_c_str: *const c_char,
-    component_c_str: *const c_char,
-    model_name_c_str: *const c_char,
-    use_kv_routing: bool,
-    busy_threshold: f64,
-    overlap_score_weight: f64,
-    router_temperature: f64,
-    use_kv_events: bool,
-    router_replica_sync: bool,
-    enforce_disagg: bool,
-    pipeline_out: *mut *mut WorkerSelectionPipeline,
-) -> DynamoLlmResult {
-    if pipeline_out.is_null() {
-        tracing::error!("pipeline_out pointer is null");
-        return DynamoLlmResult::ERR;
+impl Default for CRoutingResult {
+    fn default() -> Self {
+        Self {
+            is_disaggregated: false,
+            prefill_worker_id: 0,
+            decode_worker_id: 0,
+            prefill_dp_rank: 0,
+            decode_dp_rank: 0,
+            token_ids: ptr::null_mut(),
+            token_count: 0,
+            cache_namespace: ptr::null_mut(),
+            cache_namespace_len: 0,
+        }
+    }
+}
+
+/// Container holding routers and preprocessor for query routing
+pub struct RouterHandles {
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+    #[allow(dead_code)]
+    model_manager: Arc<ModelManager>,
+    #[allow(dead_code)]
+    namespace: String,
+    /// Cached runtime for executing async operations (avoids creating new runtime per call)
+    runtime: Runtime,
+    /// Preprocessor for tokenization and template application (fetched via discovery)
+    preprocessor: Option<Arc<OpenAIPreprocessor>>,
+}
+
+impl RouterHandles {
+    /// Query optimal prefill worker for a request.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
+    /// Returns worker_id on success.
+    #[expect(clippy::too_many_arguments)]
+    async fn query_prefill_worker(
+        &self,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
+        let outcome = self
+            .prefill_router
+            .query_prefill_worker(
+                tokens,
+                block_mm_infos,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Prefill query failed");
+                QueryRouterResult::ErrQueryFailed
+            })?;
+        match outcome {
+            // Advisory only: the external caller owns dispatch and lifecycle state.
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 
-    let wk = match WK.get() {
-        Some(w) => w.clone(),
-        None => {
-            tracing::error!("Worker not initialized. Call dynamo_llm_init first.");
-            return DynamoLlmResult::ERR;
+    /// Query optimal decode worker for a request.
+    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
+    /// (since KV cache is being transferred from prefill, not reused).
+    ///
+    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
+    ///
+    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
+    /// This does NOT overwrite the router's internal worker state — it only filters this decision.
+    ///
+    /// Note: The C bindings are query-only and must not mutate router state during worker
+    /// selection. State updates require a `context_id` (request id) and are managed via the
+    /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
+    /// Returns (worker, overlap_blocks) on success.
+    #[expect(clippy::too_many_arguments)]
+    async fn query_decode_worker(
+        &self,
+        tokens: &[u32],
+        is_disaggregated: bool,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.decode_router.register_workers(ids);
         }
-    };
 
-    let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            tracing::error!(error = ?e, "bad namespace");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
-    if let Cow::Borrowed("backend") = &component_cow {
-        tracing::info!("defaulting to \"backend\" for component");
-    }
-    let component: String = component_cow.into_owned();
-
-    let model = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            tracing::error!(error = ?e, "bad model");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let make_engine = || async {
-        let router_mode = if use_kv_routing {
-            RouterMode::KV
-        } else {
-            RouterMode::RoundRobin
-        };
-
-        let kv_router_config = if use_kv_routing {
-            Some(KvRouterConfig {
-                overlap_score_weight,
-                router_temperature,
-                use_kv_events,
-                router_replica_sync,
-                ..KvRouterConfig::default()
+        // For decode phase in disaggregated mode, use overlap_score_credit=0
+        // This matches prefill_router.rs
+        let config_override = if is_disaggregated {
+            Some(RouterConfigOverride {
+                overlap_score_credit: Some(0.0),
+                assume_kv_reuse: Some(false),
+                track_prefill_tokens: Some(false),
+                ..Default::default()
             })
         } else {
             None
         };
 
-        create_worker_selection_pipeline_chat(
-            &namespace,
-            &component,
-            &model,
-            router_mode,
-            (busy_threshold >= 0.0).then_some(busy_threshold),
-            kv_router_config,
-            enforce_disagg,
-        )
-        .await
-    };
-
-    let (engine, kv_router) = match wk.runtime().secondary().block_on(make_engine()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = ?e, "create_worker_selection_pipeline_chat failed");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let handle = Box::new(WorkerSelectionPipeline {
-        wk,
-        engine,
-        kv_router,
-    });
-    unsafe {
-        *pipeline_out = Box::into_raw(handle);
-    }
-    DynamoLlmResult::OK
-}
-
-/// Query worker selection on an existing pipeline and return:
-/// - `decode_worker_id_out` (`i64`): The decode worker ID (primary worker)
-/// - `prefill_worker_id_out` (`i64`): The prefill worker ID (-1 if not in disaggregated mode)
-/// - `token_ids_out` (heap-allocated `*mut u32`; caller must free via
-///   `dynamo_free_worker_selection_result`)
-/// - `token_count_out` (`usize`)
-/// - `annotated_request_json_out` (`*mut c_char` to a NUL-terminated C string;
-///   caller frees via the same free function)
-///
-/// # Safety
-/// - `pipeline`
-///   - Must be a **non-null** pointer previously returned by
-///     `dynamo_create_worker_selection_pipeline` and not yet passed to
-///     `dynamo_destroy_worker_selection_pipeline`.
-///   - Must remain valid for the entire duration of this call.
-///   - **Do not** call this function concurrently on the same `pipeline` pointer
-///     from multiple threads unless the surrounding code guarantees synchronization.
-/// - `request_json_c_str`
-///   - Must be a **non-null**, **NUL-terminated** C string containing **valid UTF-8**.
-///   - The JSON must represent a valid `NvCreateChatCompletionRequest`; otherwise this
-///     function returns `DynamoLlmResult::ERR`.
-///   - Must remain valid for the duration of this call.
-/// - Output pointers:
-///   - `decode_worker_id_out`, `prefill_worker_id_out`, `token_ids_out`, `token_count_out`,
-///     and `annotated_request_json_out` must each be **non-null** and point to
-///     writable memory for their respective types. On success, this function
-///     writes to all five outputs exactly once.
-///   - On **error**, outputs are left unmodified.
-/// - Ownership & deallocation:
-///   - On success, if there are zero tokens, `*token_ids_out` may be set to `NULL`
-///     and `*token_count_out` set to `0`.
-///   - If non-null, the buffer written to `*token_ids_out` is allocated with the
-///     Rust global allocator and **must** be freed by calling
-///     `dynamo_free_worker_selection_result` with the same `token_count_out` value.
-///   - The pointer written to `*annotated_request_json_out` is a `CString` allocated
-///     by Rust and **must** be freed by calling `dynamo_free_worker_selection_result`.
-///   - **Do not** free these with `free(3)` or any other allocator; doing so is
-///     undefined behavior.
-/// - Blocking & context:
-///   - This function may **block** internally while it performs async work; do not
-///     call it from contexts that forbid blocking (e.g., signal handlers).
-/// - Process/ABI assumptions:
-///   - The caller and callee must run in the same process and use the same Rust
-///     global allocator for the paired allocation/free described above.
-///   - This function is not signal-safe.
-///
-/// # Errors
-/// Returns `DynamoLlmResult::ERR` if any precondition fails (null/invalid pointers,
-/// malformed UTF-8/JSON, pipeline errors, allocation failures, etc.). On error, no
-/// output pointer is written.
-///
-/// # Output values
-/// - `decode_worker_id_out`: The decode worker ID (primary worker in aggregated mode)
-/// - `prefill_worker_id_out`: The prefill worker ID (only set in disaggregated mode, -1 if not present)
-/// - `token_ids_out`, `token_count_out`: Token IDs and count
-/// - `annotated_request_json_out`: The annotated request JSON
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
-    pipeline: *mut WorkerSelectionPipeline,
-    request_json_c_str: *const c_char,
-    decode_worker_id_out: *mut i64,
-    prefill_worker_id_out: *mut i64,
-    token_ids_out: *mut *mut u32,
-    token_count_out: *mut usize,
-    annotated_request_json_out: *mut *mut c_char,
-) -> DynamoLlmResult {
-    if pipeline.is_null() {
-        tracing::error!("Pipeline pointer is null");
-        return DynamoLlmResult::ERR;
-    }
-    if decode_worker_id_out.is_null()
-        || prefill_worker_id_out.is_null()
-        || token_ids_out.is_null()
-        || token_count_out.is_null()
-        || annotated_request_json_out.is_null()
-    {
-        tracing::error!("One or more output pointers are null");
-        return DynamoLlmResult::ERR;
-    }
-
-    let req_str = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = ?e, "bad request json");
-            return DynamoLlmResult::ERR;
-        }
-    };
-    let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = ?e, "parse request failed");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let pl = unsafe { &*pipeline };
-    let fut = async { query_worker_selection_and_annotate(&pl.engine, request).await };
-    let (result, annotated_req) = match pl.wk.runtime().secondary().block_on(fut) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = ?e, "query_worker_selection_and_annotate failed");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let tokens_ptr = if result.tokens.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let len = result.tokens.len();
-        let layout = std::alloc::Layout::array::<u32>(len).unwrap();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
-        if ptr.is_null() {
-            tracing::error!("alloc tokens failed");
-            return DynamoLlmResult::ERR;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(result.tokens.as_ptr(), ptr, len);
-        }
-        ptr
-    };
-
-    let annotated_json = match serde_json::to_string(&annotated_req) {
-        Ok(s) => s,
-        Err(e) => {
-            if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
-                unsafe {
-                    std::alloc::dealloc(tokens_ptr as *mut u8, layout);
-                }
-                tracing::error!(error = ?e, "serialize annotated request failed");
+        let outcome = self
+            .decode_router
+            .find_best_match_details(
+                None,
+                tokens,
+                None,
+                config_override.as_ref(),
+                false,
+                false,
+                None,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Decode query failed");
+                QueryRouterResult::ErrQueryFailed
+            })?;
+        match outcome {
+            dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
             }
-            return DynamoLlmResult::ERR;
         }
-    };
-    let cjson = match std::ffi::CString::new(annotated_json) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = ?e, "CString::new for annotated JSON failed");
-            if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(result.tokens.len()).unwrap();
-                unsafe {
-                    std::alloc::dealloc(tokens_ptr as *mut u8, layout);
-                }
-            }
-            return DynamoLlmResult::ERR;
-        }
-    };
-    unsafe {
-        *decode_worker_id_out = result.decode_worker_id.unwrap_or(0);
-        *prefill_worker_id_out = result.prefill_worker_id.unwrap_or(-1);
-        *token_ids_out = tokens_ptr;
-        *token_count_out = result.tokens.len();
-        *annotated_request_json_out = cjson.into_raw();
     }
-    DynamoLlmResult::OK
 }
 
-/// Destroy a previously created pipeline.
+/// Extract the router queue `priority_jump` from an OpenAI request's
+/// `nvext.agent_hints.priority`.
+///
+/// Negative values from either `priority` or the deprecated
+/// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
+/// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
+/// or `agent_hints` is absent.
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
+        .map(|v| v.max(0.0))
+        .unwrap_or(0.0)
+}
+
+fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
+    nvext
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
+}
+/// Opaque handle for the router pair
+pub type RouterHandlesPtr = *mut RouterHandles;
+
+/// Result codes for query router C FFI.
+///
+/// Numbering is append-only. Existing variants must keep their integer
+/// values so out-of-tree consumers (notably
+/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
+/// these integers in a Go shim) keep working without recompilation. When
+/// adding a new variant, use the next free integer at the end.
+#[repr(u32)]
+pub enum QueryRouterResult {
+    Ok = 0,
+    ErrInvalidHandle = 1,
+    ErrInvalidParam = 2,
+    ErrInitFailed = 3,
+    ErrQueryFailed = 4,
+    ErrDisaggEnforced = 5,
+    ErrTimeout = 6,
+    ErrBackpressure = 7,
+}
+
+/// Create router handles for query-only routing
+///
+/// This function waits for at least one decode worker to be discovered before returning.
+/// It auto-detects disaggregated mode by checking if prefill workers are present.
+/// The KV cache block size is automatically fetched from the model card via discovery.
+///
+/// # Arguments
+/// - `namespace`: Namespace for the model
+/// - `component`: Component name (defaults to "backend" if NULL or empty)
+/// - `enforce_disagg`: Deprecated compatibility parameter. The value is ignored.
+/// - `out_handle`: Output handle
 ///
 /// # Safety
-/// - `pipeline`
-///   - **Must** be a non-null pointer that was **originally returned by**
-///     `dynamo_create_worker_selection_pipeline` (i.e., obtained via
-///     `Box::into_raw` on a `WorkerSelectionPipeline`).
-///   - **Must not** have been passed to this function (or otherwise freed)
-///     before. Passing the same pointer twice is a **double free** and is
-///     undefined behavior.
-///   - **Must not** be used by any other thread while this function runs.
-///     Ensure no concurrent calls are in flight that read or write through
-///     this handle (e.g., `dynamo_query_worker_selection_and_annotate`).
-///   - After a successful call, the pointer is **invalid** and must not be
-///     dereferenced or used again in any way.
-/// - Allocator/ABI
-///   - The caller and callee must be in the same process and share the same
-///     allocator; this function reclaims the allocation that was created by
-///     Rust for the handle.
-/// - Lifetime/FFI
-///   - Do not call from contexts that forbid blocking or running destructors
-///     (e.g., signal handlers).
-///
-/// # Errors
-/// - Returns `DynamoLlmResult::ERR` if `pipeline` is null.
-/// - On `OK`, ownership of `pipeline` is taken and the underlying resources
-///   are dropped; using the pointer after return is undefined behavior.
+/// - All string parameters must be valid null-terminated C strings
+/// - The returned handle must be freed with `destroy`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
-    pipeline: *mut WorkerSelectionPipeline,
-) -> DynamoLlmResult {
-    if pipeline.is_null() {
-        tracing::error!("Pipeline pointer is null");
-        return DynamoLlmResult::ERR;
-    }
-    let _boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
-    DynamoLlmResult::OK
-}
+pub unsafe extern "C" fn create_routers(
+    namespace: *const c_char,
+    component: *const c_char,
+    enforce_disagg: bool,
+    out_handle: *mut RouterHandlesPtr,
+) -> QueryRouterResult {
+    initialize_tracing();
 
-/// Free buffers allocated by `dynamo_query_worker_selection_and_annotate`.
-///
-/// # Safety
-/// - `token_ids` and `annotated_request_json` **must come from this library**:
-///   - `token_ids` must be the exact pointer previously returned by
-///     `dynamo_query_worker_selection_and_annotate` for the tokens buffer,
-///     allocated with Rust’s global allocator in this process.
-///   - `annotated_request_json` must be the exact pointer previously returned by
-///     `CString::into_raw` inside `dynamo_query_worker_selection_and_annotate`.
-/// - **Call at most once** per pointer. Passing the same pointer again is a
-///   double-free and is undefined behavior.
-/// - Pointer/length invariants:
-///   - If `token_ids` is non-null, `token_count` **must** be the exact length
-///     originally returned. Mismatched lengths cause invalid deallocation.
-///   - If `token_ids` is null, `token_count` should be `0`.
-///   - Passing a non-null `token_ids` with `token_count == 0` will leak in this
-///     implementation (we only dealloc when `token_count > 0`).
-/// - After return, the pointers are **invalid** and must not be used again.
-/// - The caller and callee must be in the same process and share the same
-///   allocator/ABI (these deallocations use Rust’s global allocator).
-/// - Ensure no other threads are concurrently reading/writing these buffers when
-///   freeing them.
-/// - Do not call from contexts that forbid running destructors (e.g., signal handlers).
-///
-/// Returns `DynamoLlmResult::OK` on success.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_free_worker_selection_result(
-    token_ids: *mut u32,
-    token_count: usize,
-    annotated_request_json: *mut c_char,
-) -> DynamoLlmResult {
-    if token_count > 0 {
-        match std::alloc::Layout::array::<u32>(token_count) {
-            Ok(layout) if !token_ids.is_null() => unsafe {
-                std::alloc::dealloc(token_ids as *mut u8, layout);
-            },
-            _ => {}
-        }
-    }
-    if !annotated_request_json.is_null() {
-        unsafe {
-            drop(std::ffi::CString::from_raw(annotated_request_json));
-        }
-    }
-    DynamoLlmResult::OK
-}
-
-/// Default timeout for GAIE bookkeeping operations (30 seconds)
-const GAIE_BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
-
-/// Helper to validate pipeline pointer and extract request_id from C string.
-/// Returns `Err(DynamoLlmResult::ERR)` on validation failure, `Ok((pipeline_ref, request_id))` on success.
-unsafe fn validate_pipeline_and_request_id(
-    pipeline: *mut WorkerSelectionPipeline,
-    request_id_c_str: *const c_char,
-    operation: &str,
-) -> Result<(&'static WorkerSelectionPipeline, String), DynamoLlmResult> {
-    if pipeline.is_null() {
-        tracing::error!("[GAIE] {} failed: pipeline pointer is null", operation);
-        return Err(DynamoLlmResult::ERR);
+    if enforce_disagg {
+        tracing::warn!(
+            "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+        );
     }
 
-    let request_id = match unsafe { CStr::from_ptr(request_id_c_str) }.to_str() {
+    if namespace.is_null() || out_handle.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let namespace_str = match unsafe { CStr::from_ptr(namespace) }.to_str() {
         Ok(s) => s.to_owned(),
-        Err(e) => {
-            tracing::error!(error = ?e, "[GAIE] {} failed: bad request_id", operation);
-            return Err(DynamoLlmResult::ERR);
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    let component_str = if component.is_null() {
+        "backend".to_string()
+    } else {
+        match unsafe { CStr::from_ptr(component) }.to_str() {
+            Ok(s) if !s.is_empty() => s.to_owned(),
+            _ => "backend".to_string(),
         }
     };
 
-    // SAFETY: Caller guarantees pipeline is valid for the duration of the call
-    let pl: &'static WorkerSelectionPipeline = unsafe { &*pipeline };
-    Ok((pl, request_id))
-}
+    // Create the runtime once - it will be stored in RouterHandles and reused
+    let runtime = match Runtime::from_settings() {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to create runtime");
+            return QueryRouterResult::ErrInitFailed;
+        }
+    };
 
-/// Helper to run an async bookkeeping operation with timeout.
-/// Returns `OK` on success or timeout, `ERR` only on validation failures (handled by caller).
-fn run_bookkeeping_with_timeout<F, Fut>(
-    pl: &WorkerSelectionPipeline,
-    operation: &'static str,
-    request_id: &str,
-    f: F,
-) -> DynamoLlmResult
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    use std::time::Duration;
+    // Clone for use inside the async block (the original will be moved into handles)
+    let runtime_for_async = runtime.clone();
 
-    let timeout_duration = Duration::from_secs(GAIE_BOOKKEEPING_TIMEOUT_SECS);
-    let fut = f();
+    let result = runtime_for_async.secondary().block_on(async {
+        let drt = match DistributedRuntime::from_settings(runtime_for_async.clone()).await {
+            Ok(drt) => drt,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to create distributed runtime");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
 
-    let result = pl
-        .wk
-        .runtime()
-        .secondary()
-        .block_on(async { tokio::time::timeout(timeout_duration, fut).await });
+        let DiscoveredModelBootstrap {
+            preprocessor,
+            card,
+            actual_namespace,
+        } = match init_preprocessor(&drt, &namespace_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize preprocessor");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+        let block_size = card.kv_cache_block_size;
+        let model_name = card.display_name.clone();
+        let enable_eagle = card.runtime_config.enable_eagle;
+
+        if actual_namespace != namespace_str {
+            tracing::info!(
+                base_namespace = %namespace_str,
+                actual_namespace = %actual_namespace,
+                "Worker namespace has rolling-update suffix"
+            );
+        }
+
+        let mut kv_router_config = match try_kv_router_config_from_dynamo_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "Invalid KV router environment configuration");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+        kv_router_config.skip_initial_worker_wait = true;
+
+        // Build endpoint using the actual namespace discovered from workers,
+        // which may include a rolling-update hash suffix.
+        let component_handle = match drt.namespace(&actual_namespace) {
+            Ok(ns) => match ns.component(&component_str) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = ?e, "Failed to get component");
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to get namespace");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+        let endpoint = component_handle.endpoint("generate");
+
+        let model_manager = Arc::new(ModelManager::new());
+
+        // Create decode router
+        let decode_router = match model_manager
+            .kv_chooser_for_with_worker_role(
+                &endpoint,
+                block_size,
+                Some(kv_router_config.clone()),
+                None,
+                card.worker_type,
+                WORKER_TYPE_DECODE,
+                Some(model_name.clone()),
+                enable_eagle,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to create decode router");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+
+        // Wait for the runtime config watch to be populated with at least one
+        // decode worker's ModelRuntimeConfig. skip_initial_worker_wait=true
+        // skips this inside KvRouter::new, but the selector needs workers in
+        // workers_with_configs to avoid NoEndpoints on the first request.
+        // discovery sync already confirmed workers exist; this just waits for
+        // the async join of instance IDs + configs to complete in the watch.
+        {
+            let mut config_watch = model_manager
+                .get_or_create_runtime_config_watcher(&endpoint)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = ?e, "Failed to get runtime config watcher");
+                    QueryRouterResult::ErrInitFailed
+                })?;
+            tracing::info!(
+                "Waiting for decode workers to register ModelRuntimeConfig \
+                 (no timeout - controlled by K8s StartupProbe)..."
+            );
+            let wait_result = config_watch.wait_for(|m| !m.is_empty()).await.map(|_| ());
+            match wait_result {
+                Ok(()) => {
+                    let count = config_watch.borrow().len();
+                    tracing::info!(
+                        worker_count = count,
+                        "Runtime config watch populated with decode workers"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "Runtime config watch closed before any workers appeared. \
+                         Decode routing will fail. \
+                         Verify workers are running and publishing to discovery."
+                    );
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            }
+        }
+
+        // Create PrefillRouter with a pending activation channel.
+        // A background task watches discovery for prefill workers and activates
+        // the router when one appears. Before activation, requests gracefully
+        // fallback to decode-only routing.
+        let mut prefill_config = kv_router_config;
+        prefill_config.router_track_active_blocks = false;
+
+        let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
+        let prefill_router = PrefillRouter::new(
+            prefill_rx,
+            model_manager.clone(),
+            RouterMode::KV,
+            block_size,
+            Some(prefill_config),
+            None,
+            None,
+            model_name.clone(),
+            actual_namespace.clone(),
+            enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
+        );
+
+        // Spawn background discovery watcher for prefill workers.
+        // Polls discovery until a prefill-only worker appears in the same
+        // rolling-update namespace, then sends its endpoint through the channel
+        // to activate the PrefillRouter.
+        spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.clone(), prefill_tx);
+
+        Ok((
+            prefill_router,
+            decode_router,
+            model_manager,
+            namespace_str,
+            Some(preprocessor),
+        ))
+    });
 
     match result {
-        Ok(()) => DynamoLlmResult::OK,
-        Err(_elapsed) => {
-            tracing::warn!(
-                request_id = %request_id,
-                timeout_secs = GAIE_BOOKKEEPING_TIMEOUT_SECS,
-                "[GAIE] {} timed out",
-                operation
-            );
-            // Return OK to avoid blocking the caller - the operation may still complete
-            DynamoLlmResult::OK
+        Ok((prefill_router, decode_router, model_manager, namespace_str, preprocessor)) => {
+            let handles = RouterHandles {
+                prefill_router,
+                decode_router,
+                model_manager,
+                namespace: namespace_str,
+                runtime, // Store the runtime for reuse
+                preprocessor,
+            };
+            unsafe { *out_handle = Box::into_raw(Box::new(handles)) };
+            QueryRouterResult::Ok
         }
+        Err(code) => code,
     }
 }
 
-/// Router bookkeeping functions for GAIE integration
 /// Add a request to the router's bookkeeping after worker selection.
-/// Call this from GAIE Stage 1 after `dynamo_query_worker_selection_and_annotate`.
 ///
-/// This function computes the overlap_blocks internally by querying the indexer,
-/// so the caller doesn't need to provide it.
+/// Register the request with the KvRouter's scheduler for tracking active blocks
+/// and managing prefill/decode lifecycle. Call this after `query_decode` returns
+/// worker IDs and before sending the request to the worker.
 ///
 /// # Safety
-/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
-/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
 /// - `token_ids` must point to at least `token_count` valid u32 values
-/// - Must not be called concurrently on the same pipeline without synchronization
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_router_add_request(
-    pipeline: *mut WorkerSelectionPipeline,
-    request_id_c_str: *const c_char,
+pub unsafe extern "C" fn add_request(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
     token_ids: *const u32,
     token_count: usize,
     worker_id: u64,
     dp_rank: u32,
-) -> DynamoLlmResult {
-    let (pl, request_id) = match unsafe {
-        validate_pipeline_and_request_id(pipeline, request_id_c_str, "add_request")
-    } {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
+) -> QueryRouterResult {
+    unsafe {
+        add_request_with_cache_namespace(
+            handle,
+            request_id,
+            token_ids,
+            token_count,
+            worker_id,
+            dp_rank,
+            ptr::null(),
+            0,
+        )
+    }
+}
 
-    let Some(ref kv_router) = pl.kv_router else {
-        tracing::debug!(
-            "[GAIE] KV router not available (router_mode is not KV), skipping add_request (no-op)"
-        );
-        return DynamoLlmResult::OK;
-    };
+/// Add a cache-namespaced request to the router's bookkeeping after worker selection.
+///
+/// This preserves the original `add_request` ABI for unsalted callers while allowing callers
+/// that routed with a namespace to use the same hashes for scheduler bookkeeping.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+/// - `cache_namespace` must point to at least `cache_namespace_len` valid UTF-8 bytes when the
+///   length is non-zero
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn add_request_with_cache_namespace(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+    cache_namespace: *const u8,
+    cache_namespace_len: usize,
+) -> QueryRouterResult {
+    if handle.is_null() || request_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
 
-    // Log after kv_router check to reduce noise
-    tracing::debug!(
-        request_id = %request_id,
-        worker_id = worker_id,
-        dp_rank = dp_rank,
-        token_count = token_count,
-        "[GAIE] dynamo_router_add_request processing"
-    );
+    let handles = unsafe { &*handle };
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+    let cache_namespace = if cache_namespace_len == 0 {
+        None
+    } else if cache_namespace.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    } else {
+        match std::str::from_utf8(unsafe {
+            std::slice::from_raw_parts(cache_namespace, cache_namespace_len)
+        }) {
+            Ok("") => None,
+            Ok(namespace) => Some(namespace.to_owned()),
+            Err(_) => return QueryRouterResult::ErrInvalidParam,
+        }
+    };
 
     let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
         unsafe { std::slice::from_raw_parts(token_ids, token_count) }.to_vec()
@@ -898,611 +982,850 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         Vec::new()
     };
 
-    let kv_router = kv_router.clone();
-    let request_id_clone = request_id.clone();
+    let decode_router = handles.decode_router.clone();
 
-    run_bookkeeping_with_timeout(pl, "add_request", &request_id, || async move {
-        let worker = dynamo_llm::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
+    let result = handles.runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
 
-        // Compute overlap_blocks using the public method
-        let overlap_blocks = match kv_router.get_overlap_blocks(&tokens, worker).await {
-            Ok(overlap) => overlap,
-            Err(e) => {
-                tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
-                0
-            }
-        };
+        tokio::time::timeout(timeout_duration, async {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+            let router_config_override = RouterConfigOverride {
+                overlap_score_credit: Some(0.0),
+                assume_kv_reuse: Some(false),
+                track_prefill_tokens: Some(false),
+                ..Default::default()
+            };
 
-        kv_router
-            .add_request(
-                request_id_clone.clone(),
-                &tokens,
-                overlap_blocks,
-                None,
-                worker,
-                None, // lora_name not exposed in C API yet
-            )
-            .await;
-
-        tracing::debug!(
-            request_id = %request_id_clone,
-            worker_id = worker_id,
-            dp_rank = dp_rank,
-            overlap_blocks = overlap_blocks,
-            token_count = tokens.len(),
-            "[GAIE] dynamo_router_add_request completed - request registered in router bookkeeping"
-        );
-    })
-}
-
-/// Mark prefill as completed for a request.
-/// Call this from the EPP extension point when the first token is generated.
-///
-/// # Safety
-/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
-/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_router_mark_prefill_complete(
-    pipeline: *mut WorkerSelectionPipeline,
-    request_id_c_str: *const c_char,
-) -> DynamoLlmResult {
-    let (pl, request_id) = match unsafe {
-        validate_pipeline_and_request_id(pipeline, request_id_c_str, "mark_prefill_complete")
-    } {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let Some(ref kv_router) = pl.kv_router else {
-        tracing::debug!(
-            "[GAIE] KV router not available (router_mode is not KV), skipping mark_prefill_complete (no-op)"
-        );
-        return DynamoLlmResult::OK;
-    };
-
-    // Log after kv_router check to reduce noise
-    tracing::debug!(
-        request_id = %request_id,
-        "[GAIE] dynamo_router_mark_prefill_complete processing"
-    );
-
-    let kv_router = kv_router.clone();
-    let request_id_clone = request_id.clone();
-
-    run_bookkeeping_with_timeout(pl, "mark_prefill_complete", &request_id, || async move {
-        if let Err(e) = kv_router.mark_prefill_completed(&request_id_clone).await {
-            tracing::warn!(
-                "Failed to mark prefill completed for {}: {}",
-                request_id_clone,
-                e
-            );
-        } else {
-            tracing::debug!(
-                request_id = %request_id_clone,
-                "[GAIE] dynamo_router_mark_prefill_complete completed - prefill tokens released"
-            );
-        }
-    })
-}
-
-/// Free a request from the router's bookkeeping.
-/// Call this from GAIE hook when the stream is closed (completed or cancelled).
-///
-/// # Safety
-/// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
-/// - `request_id_c_str` must be a valid NUL-terminated UTF-8 C string
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_router_free_request(
-    pipeline: *mut WorkerSelectionPipeline,
-    request_id_c_str: *const c_char,
-) -> DynamoLlmResult {
-    let (pl, request_id) = match unsafe {
-        validate_pipeline_and_request_id(pipeline, request_id_c_str, "free_request")
-    } {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let Some(ref kv_router) = pl.kv_router else {
-        tracing::debug!(
-            "[GAIE] KV router not available (router_mode is not KV), skipping free_request (no-op)"
-        );
-        return DynamoLlmResult::OK;
-    };
-
-    // Log after kv_router check to reduce noise
-    tracing::debug!(
-        request_id = %request_id,
-        "[GAIE] dynamo_router_free_request processing"
-    );
-
-    let kv_router = kv_router.clone();
-    let request_id_clone = request_id.clone();
-
-    run_bookkeeping_with_timeout(pl, "free_request", &request_id, || async move {
-        if let Err(e) = kv_router.free(&request_id_clone).await {
-            tracing::warn!("Failed to free request {}: {}", request_id_clone, e);
-        } else {
-            tracing::debug!(
-                request_id = %request_id_clone,
-                "[GAIE] dynamo_router_free_request completed - request removed from bookkeeping"
-            );
-        }
-    })
-}
-
-/// Result of worker selection extraction
-#[derive(Debug, Clone, Default)]
-pub struct WorkerSelectionResult {
-    /// Decode worker ID (primary worker for aggregated, decode-only for disaggregated)
-    pub decode_worker_id: Option<i64>,
-    /// Prefill worker ID (only present in disaggregated mode)
-    pub prefill_worker_id: Option<i64>,
-    /// Token IDs from tokenization
-    pub tokens: Vec<u32>,
-}
-
-/// Helper function to extract worker selection information from the annotation stream
-///
-/// The response format (from disaggregated_params in nvext):
-/// - worker_id: {"prefill_worker_id": 123, "decode_worker_id": 456}
-/// - token_ids: [1, 2, 3, ...]
-pub async fn extract_worker_selection_from_stream(
-    mut stream: Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
-) -> anyhow::Result<WorkerSelectionResult> {
-    use dynamo_llm::protocols::openai::nvext::WorkerIdInfo;
-    use futures::StreamExt;
-
-    let mut result = WorkerSelectionResult::default();
-
-    while let Some(response) = stream.next().await {
-        // Check for data in nvext (worker_id and token_ids are direct fields)
-        // nvext is a serde_json::Value, so we access it as a JSON object
-        if let Some(data) = &response.data
-            && let Some(nvext) = &data.nvext
-        {
-            // Extract worker_id
-            if let Some(worker_id_value) = nvext.get("worker_id")
-                && let Ok(worker_info) =
-                    serde_json::from_value::<WorkerIdInfo>(worker_id_value.clone())
+            // Compute overlap_blocks using the public method
+            let overlap_blocks = match decode_router
+                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
+                .await
             {
-                result.decode_worker_id = worker_info.decode_worker_id.map(|id| id as i64);
-                result.prefill_worker_id = worker_info.prefill_worker_id.map(|id| id as i64);
-                tracing::debug!(
-                    decode_worker_id = ?result.decode_worker_id,
-                    prefill_worker_id = ?result.prefill_worker_id,
-                    "Parsed worker_id from nvext"
-                );
-            }
-
-            // Extract token_ids
-            if let Some(token_ids_value) = nvext.get("token_ids")
-                && let Ok(parsed_tokens) =
-                    serde_json::from_value::<Vec<u32>>(token_ids_value.clone())
-            {
-                result.tokens = parsed_tokens;
-                tracing::debug!(
-                    "Successfully parsed {} tokens from nvext",
-                    result.tokens.len()
-                );
-            }
-        }
-    }
-
-    tracing::info!(
-        decode_worker_id = ?result.decode_worker_id,
-        prefill_worker_id = ?result.prefill_worker_id,
-        token_count = result.tokens.len(),
-        "Worker selection extraction complete"
-    );
-    Ok(result)
-}
-
-/// Utility function to add the "query_instance_id" annotation to an OpenAI request
-///
-/// This function modifies the request to include the annotation that signals the KV router
-/// to return worker selection information (worker_fid and token_data) instead of
-/// performing actual inference.
-///
-/// # Parameters
-/// - `request`: Mutable reference to the OpenAI chat completion request
-///
-/// # Returns
-/// The same request with the "query_instance_id" annotation added
-pub fn add_query_instance_id(
-    request: &mut NvCreateChatCompletionRequest,
-) -> &mut NvCreateChatCompletionRequest {
-    // Send empty value - router treats empty as aggregated / aggregated worker selection
-    set_kv_annotation(request, "query_instance_id".to_string(), "")
-}
-
-// Note: set_worker_ids_for_stage2 and set_token_data_for_stage2 have been removed.
-// The EPP now handles routing configuration via HTTP headers:
-// - `x-worker-instance-id`: decode worker ID
-// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
-// - `x-enable-local-updates`: set to "false" to disable router bookkeeping
-//
-// Body modifications are NOT sent to the inference engine (only headers are forwarded),
-// so these functions were ineffective.
-
-/// Ensure `nvext` exists and return a mutable slice of annotations.
-fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<String> {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-    nvext.annotations.get_or_insert_with(Vec::new)
-}
-
-/// Set a `key:value` annotation.
-fn set_kv_annotation(
-    request: &mut NvCreateChatCompletionRequest,
-    key: String, // <- owned, only one borrowed param remains
-    value: impl Into<String>,
-) -> &mut NvCreateChatCompletionRequest {
-    let prefix = format!("{}:", key);
-    let kv = format!("{}{}", prefix, value.into());
-    let annotations = ensure_annotations(request);
-    annotations.retain(|a| !a.starts_with(&prefix));
-    annotations.push(kv);
-    request
-}
-
-/// Wrapper function that queries worker selection for GAIE Stage 1
-///
-/// This function performs the complete GAIE Stage 1 flow:
-/// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
-/// 2. Calls engine.generate() with the modified request
-/// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Returns WorkerSelectionResult and the original request
-///
-/// Note: The EPP (caller) is responsible for setting HTTP headers for Stage 2:
-/// - `x-worker-instance-id`: decode worker ID
-/// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
-/// - `x-enable-local-updates`: "false" to disable router bookkeeping
-///
-/// Body modifications are NOT forwarded to the inference engine, so this function
-/// does not modify the request body.
-///
-/// # Parameters
-/// - `engine`: The worker selection pipeline engine
-/// - `original_request`: The original OpenAI request to process
-///
-/// # Returns
-/// A tuple containing (WorkerSelectionResult, original_request)
-pub async fn query_worker_selection_and_annotate(
-    engine: &ServiceEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    >,
-    original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
-    // GAIE Stage 1: Query for worker selection
-    let mut query_request = original_request.clone();
-    add_query_instance_id(&mut query_request);
-    let single_in = SingleIn::new(query_request);
-    let response_stream = engine.generate(single_in).await?;
-    let result = extract_worker_selection_from_stream(response_stream).await?;
-
-    // Return the original request unchanged.
-    // The EPP sets routing headers (worker IDs, enable_local_updates) which the
-    // Dynamo frontend reads via apply_header_routing_overrides().
-    Ok((result, original_request))
-}
-
-/// Spawn a background task to watch for prefill models and activate prefill routers.
-/// This is a lightweight watcher that only handles prefill model discovery.
-fn spawn_prefill_watcher(
-    drt: DistributedRuntime,
-    model_manager: Arc<ModelManager>,
-    target_namespace: String,
-) {
-    use dynamo_llm::model_card::ModelDeploymentCard;
-    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
-    use dynamo_runtime::protocols::EndpointId;
-    use futures::StreamExt;
-
-    tokio::spawn(async move {
-        let discovery = drt.discovery();
-        let mut stream = match discovery
-            .list_and_watch(DiscoveryQuery::AllModels, None)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to start prefill discovery stream");
-                return;
-            }
-        };
-
-        while let Some(result) = stream.next().await {
-            let event = match result {
-                Ok(e) => e,
+                Ok(overlap) => overlap,
                 Err(e) => {
-                    tracing::error!(error = %e, "Error in prefill discovery stream");
-                    continue;
+                    tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
+                    0
                 }
             };
 
-            match event {
-                DiscoveryEvent::Added(instance) => {
-                    let (endpoint_id, card) = match &instance {
-                        DiscoveryInstance::Model {
-                            namespace,
-                            component,
-                            endpoint,
-                            ..
-                        } => {
-                            // Filter by namespace
-                            if namespace != &target_namespace {
-                                continue;
-                            }
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
+            decode_router
+                .add_request(
+                    request_id_str.clone(),
+                    &tokens,
+                    None,
+                    cached_tokens,
+                    None,
+                    worker,
+                    None, // lora_name
+                    cache_namespace.clone(),
+                    Some(&router_config_override),
+                )
+                .await;
 
-                            let eid = EndpointId {
-                                namespace: namespace.clone(),
-                                component: component.clone(),
-                                name: endpoint.clone(),
-                            };
+            tracing::debug!(
+                request_id = %request_id_str,
+                worker_id = worker_id,
+                dp_rank = dp_rank,
+                has_cache_namespace = cache_namespace.is_some(),
+                overlap_blocks = overlap_blocks,
+                token_count = tokens.len(),
+                "add_request completed"
+            );
+        })
+        .await
+    });
 
-                            match instance.deserialize_model::<ModelDeploymentCard>() {
-                                Ok(card) => (eid, card),
-                                Err(_) => continue,
-                            }
-                        }
-                        _ => continue,
-                    };
+    match result {
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
+                "add_request timed out"
+            );
+            QueryRouterResult::ErrTimeout
+        }
+    }
+}
 
-                    // Only handle prefill models
-                    if !card.model_type.supports_prefill() {
-                        continue;
-                    }
+/// Mark prefill as completed for a request.
+///
+/// Call when the first token is generated to release prefill tokens from decode worker's load
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mark_prefill_complete(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+) -> QueryRouterResult {
+    if handle.is_null() || request_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
 
-                    tracing::info!(
-                        model_name = card.name(),
-                        "Prefill model discovered, activating prefill router"
-                    );
+    let handles = unsafe { &*handle };
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
 
-                    // Get the endpoint and activate the prefill router
-                    if let Ok(ns) = drt.namespace(&endpoint_id.namespace)
-                        && let Ok(comp) = ns.component(&endpoint_id.component)
-                    {
-                        let endpoint = comp.endpoint(&endpoint_id.name);
-                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
-                        {
-                            tracing::warn!(
-                                model_name = card.name(),
-                                error = %e,
-                                "Failed to activate prefill router"
-                            );
-                        } else {
-                            tracing::info!(
-                                model_name = card.name(),
-                                "Prefill router activated successfully"
-                            );
-                        }
+    let decode_router = handles.decode_router.clone();
+
+    let result = handles.runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
+
+        tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = decode_router.mark_prefill_completed(&request_id_str).await {
+                tracing::warn!(
+                    request_id = %request_id_str,
+                    error = %e,
+                    "Failed to mark prefill complete"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id_str,
+                    "mark_prefill_complete completed"
+                );
+            }
+        })
+        .await
+    });
+
+    match result {
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
+                "mark_prefill_complete timed out"
+            );
+            QueryRouterResult::ErrTimeout
+        }
+    }
+}
+
+/// Free a request from the router's bookkeeping.
+///
+/// Call this when the stream is closed (completed or cancelled) to release all resources.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_request(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+) -> QueryRouterResult {
+    if handle.is_null() || request_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    let decode_router = handles.decode_router.clone();
+
+    let result = handles.runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
+
+        tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = decode_router.free(&request_id_str).await {
+                tracing::warn!(
+                    request_id = %request_id_str,
+                    error = %e,
+                    "Failed to free request"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id_str,
+                    "free_request completed"
+                );
+            }
+        })
+        .await
+    });
+
+    match result {
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
+                "free_request timed out"
+            );
+            QueryRouterResult::ErrTimeout
+        }
+    }
+}
+
+/// Destroy router handles
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle or null
+/// - After this call, `handle` must not be used
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
+    if !handle.is_null() {
+        drop(unsafe { Box::from_raw(handle) });
+    }
+}
+
+/// Free a routing result.
+///
+/// # Safety
+/// - `result` must be a valid pointer to a CRoutingResult previously returned by route functions
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
+    if result.is_null() {
+        return;
+    }
+
+    let res = unsafe { &mut *result };
+
+    // Free token IDs
+    if !res.token_ids.is_null() && res.token_count > 0 {
+        drop(unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                res.token_ids,
+                res.token_count,
+            ))
+        });
+        res.token_ids = ptr::null_mut();
+        res.token_count = 0;
+    }
+
+    // Free cache namespace bytes
+    if !res.cache_namespace.is_null() && res.cache_namespace_len > 0 {
+        drop(unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                res.cache_namespace,
+                res.cache_namespace_len,
+            ))
+        });
+        res.cache_namespace = ptr::null_mut();
+        res.cache_namespace_len = 0;
+    }
+}
+
+/// Parse a JSON request string, collect completion prompts directly or apply
+/// the chat template and tokenize, then lift router queue priorities
+/// out of `nvext.agent_hints`.
+///
+/// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
+/// or a `QueryRouterResult` error code. Queue priorities default to zero when
+/// absent. This mirrors the standalone Dynamo preprocessor lift in
+/// `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces the same queue
+/// ordering as a non-EPP deployment.
+type PreprocessedRequest = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
+
+unsafe fn preprocess_request(
+    handles: &RouterHandles,
+    request_json: *const c_char,
+) -> Result<PreprocessedRequest, QueryRouterResult> {
+    let preprocessor = match &handles.preprocessor {
+        Some(p) => p,
+        None => {
+            tracing::error!("Preprocessor not available");
+            return Err(QueryRouterResult::ErrInitFailed);
+        }
+    };
+
+    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(QueryRouterResult::ErrInvalidParam),
+    };
+
+    let request_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    if request_json.get("prompt").is_some() {
+        let request: NvCreateCompletionRequest = match serde_json::from_value(request_json) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse completion request JSON");
+                return Err(QueryRouterResult::ErrInvalidParam);
+            }
+        };
+        let priority_jump = extract_priority_jump(request.nvext.as_ref());
+        let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+        let (token_ids, _) = match handles
+            .runtime
+            .secondary()
+            .block_on(preprocessor.gather_tokens(&request, None, None))
+        {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to collect completion prompt tokens");
+                return Err(QueryRouterResult::ErrQueryFailed);
+            }
+        };
+
+        tracing::debug!(
+            token_count = token_ids.len(),
+            first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+            priority_jump,
+            strict_priority,
+            "[EPP-TOKENIZE] Collected completion prompt tokens in C bindings"
+        );
+
+        return Ok((
+            token_ids,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+        ));
+    }
+
+    let request: NvCreateChatCompletionRequest = match serde_json::from_value(request_json) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse chat completion request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    let priority_jump = extract_priority_jump(request.nvext.as_ref());
+    let strict_priority = extract_strict_priority(request.nvext.as_ref());
+    let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+    let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+
+    let formatted_prompt = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to apply chat template");
+            return Err(QueryRouterResult::ErrQueryFailed);
+        }
+    };
+
+    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+        Ok(enc) => enc,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to tokenize");
+            return Err(QueryRouterResult::ErrQueryFailed);
+        }
+    };
+
+    let token_ids = encoding.token_ids().to_vec();
+    tracing::info!(
+        token_count = token_ids.len(),
+        first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+        priority_jump,
+        strict_priority,
+        "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
+    );
+
+    Ok((
+        token_ids,
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        routing_constraints,
+    ))
+}
+
+/// Parse pods JSON into an optional set of allowed worker IDs.
+unsafe fn parse_pods_filter(pods_json: *const c_char) -> Option<HashSet<WorkerId>> {
+    if pods_json.is_null() {
+        return None;
+    }
+    match unsafe { CStr::from_ptr(pods_json) }.to_str() {
+        Ok(s) if !s.is_empty() => match serde_json::from_str::<Vec<serde_json::Value>>(s) {
+            Ok(pods) => {
+                let mut worker_ids = HashSet::new();
+                for pod in &pods {
+                    let pod_name = pod
+                        .get("pod")
+                        .and_then(|p| p.get("podName"))
+                        .or_else(|| pod.get("podName"))
+                        .and_then(|v| v.as_str());
+                    if let Some(name) = pod_name {
+                        let worker_id = hash_pod_name(name);
+                        tracing::debug!(
+                            pod_name = name,
+                            worker_id = format!("{:x}", worker_id),
+                            "Mapped EPP pod to worker_id"
+                        );
+                        worker_ids.insert(worker_id);
                     }
                 }
-                DiscoveryEvent::Removed(id) => {
-                    // Log removal for observability
-                    // Note: The PrefillRouter remains active - worker availability
-                    // is handled dynamically by the underlying Client's instance tracking
-                    tracing::debug!(
-                        instance_id = id.instance_id(),
-                        "Prefill worker instance removed from discovery"
-                    );
+                tracing::info!(
+                    pod_count = pods.len(),
+                    unique_worker_ids = worker_ids.len(),
+                    "Parsed EPP pods into allowed_worker_ids filter"
+                );
+                if worker_ids.is_empty() {
+                    None
+                } else {
+                    Some(worker_ids)
                 }
             }
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse pods JSON");
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// Write token IDs into a `CRoutingResult`, transferring ownership to the caller.
+fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
+    let token_vec: Vec<u32> = tokens.to_vec();
+    let mut tokens_boxed = token_vec.into_boxed_slice();
+    out.token_ids = tokens_boxed.as_mut_ptr();
+    out.token_count = tokens.len();
+    std::mem::forget(tokens_boxed);
+}
+
+/// Write cache namespace bytes into a `CRoutingResult`, transferring ownership to the caller.
+fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRoutingResult) {
+    let Some(cache_namespace) = cache_namespace.filter(|namespace| !namespace.is_empty()) else {
+        return;
+    };
+    let mut namespace_boxed = cache_namespace.as_bytes().to_vec().into_boxed_slice();
+    out.cache_namespace = namespace_boxed.as_mut_ptr();
+    out.cache_namespace_len = namespace_boxed.len();
+    std::mem::forget(namespace_boxed);
+}
+
+/// Route a request to select the best **prefill** worker only.
+///
+/// This is used in disaggregated mode where the EPP runs separate prefill and decode
+/// scoring profiles.  It tokenizes the request and queries only the prefill router.
+///
+/// The returned `CRoutingResult` contains:
+/// - `prefill_worker_id`: the selected prefill worker
+/// - `decode_worker_id`: 0 (unused — decode is handled by `route_decode_request`)
+/// - `is_disaggregated`: always true (this function is only called in disagg mode)
+/// - `token_ids` / `token_count`: the tokenized request (caller must free via `free_routing_result`)
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_prefill_request(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+
+    let result = handles.runtime.secondary().block_on(async {
+        let (prefill_worker_id, prefill_dp_rank) = handles
+            .query_prefill_worker(
+                &tokens,
+                None,
+                None,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
+
+        tracing::info!(
+            prefill_worker_id = prefill_worker_id,
+            prefill_dp_rank = prefill_dp_rank,
+            token_count = tokens.len(),
+            priority_jump,
+            strict_priority,
+            "Routed prefill request"
+        );
+
+        Ok((prefill_worker_id, prefill_dp_rank))
+    });
+
+    match result {
+        Ok((prefill_worker_id, prefill_dp_rank)) => {
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = true;
+            out.prefill_worker_id = prefill_worker_id;
+            out.prefill_dp_rank = prefill_dp_rank;
+            write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
+/// Route a request to select the best **decode** worker only.
+///
+/// This is used in both aggregated and disaggregated modes.
+/// - When `is_disaggregated` is true, the decode router uses `overlap_score_credit=0`
+///   (KV cache is being transferred from prefill, not reused locally).
+/// - When `is_disaggregated` is false, normal KV-aware scoring is used.
+///
+/// The returned `CRoutingResult` contains:
+/// - `decode_worker_id`: the selected decode worker
+/// - `prefill_worker_id`: 0 (unused — prefill is handled by `route_prefill_request`)
+/// - `is_disaggregated`: mirrors the input parameter
+/// - `token_ids` / `token_count`: the tokenized request (caller must free via `free_routing_result`)
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_decode_request(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    is_disaggregated: bool,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+
+    let result = handles.runtime.secondary().block_on(async {
+        let (decode_worker, _overlap_blocks) = handles
+            .query_decode_worker(
+                &tokens,
+                is_disaggregated,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+
+        tracing::info!(
+            is_disaggregated = is_disaggregated,
+            decode_worker_id = decode_worker.worker_id,
+            decode_dp_rank = decode_worker.dp_rank,
+            token_count = tokens.len(),
+            priority_jump,
+            strict_priority,
+            "Routed decode request"
+        );
+
+        Ok(decode_worker)
+    });
+
+    match result {
+        Ok(decode_worker) => {
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = is_disaggregated;
+            out.decode_worker_id = decode_worker.worker_id;
+            out.decode_dp_rank = decode_worker.dp_rank;
+            write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
+/// Initialize the preprocessor and fetch the model card used for routing.
+///
+/// Waits for discovery to sync (model card must be available for tokenization),
+/// then creates the preprocessor from the model card. Router settings are
+/// derived directly from the returned card by the caller.
+async fn init_preprocessor(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<DiscoveredModelBootstrap> {
+    let instance_count = wait_for_discovery_sync(drt).await;
+    if instance_count == 0 {
+        anyhow::bail!("Discovery sync failed: no worker instances found. Is the backend running?");
+    }
+    tracing::info!(
+        "Discovery sync complete, {} worker(s) found",
+        instance_count
+    );
+
+    // Retry fetching the preprocessor: model card metadata may arrive after
+    // worker endpoints are registered.
+    let bootstrap = loop {
+        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+            Ok(result) => break result,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    target_namespace,
+                    "Model card not available yet, retrying in 5s..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    };
+
+    tracing::info!(
+        kv_cache_block_size = bootstrap.card.kv_cache_block_size,
+        model_name = %bootstrap.card.display_name,
+        actual_namespace = %bootstrap.actual_namespace,
+        enable_eagle = bootstrap.card.runtime_config.enable_eagle,
+        "Preprocessor initialized from model card"
+    );
+
+    Ok(bootstrap)
+}
+
+/// Spawn a background task that watches discovery for a prefill-only worker
+/// in the given namespace. When found, sends its endpoint through `tx` to
+/// activate the PrefillRouter. Polls every 1 second until a match is found.
+fn spawn_prefill_discovery_watcher(
+    drt: DistributedRuntime,
+    target_namespace: String,
+    tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+) {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::DiscoveryInstance;
+
+    tokio::spawn(async move {
+        let discovery = drt.discovery();
+        tracing::info!(
+            namespace = target_namespace,
+            "Background task: watching for prefill workers to register..."
+        );
+
+        loop {
+            if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
+                for instance in instances {
+                    if let DiscoveryInstance::Model {
+                        namespace,
+                        component,
+                        endpoint,
+                        ..
+                    } = &instance
+                    {
+                        if namespace != &target_namespace {
+                            continue;
+                        }
+
+                        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                            Ok(card) => card,
+                            Err(_) => continue,
+                        };
+
+                        // Prefill workers are identified by `worker_type`.
+                        // Skip any card that is not a Prefill worker.
+                        use dynamo_llm::worker_type::WorkerType;
+                        if card.worker_type != Some(WorkerType::Prefill) {
+                            continue;
+                        }
+
+                        tracing::info!(
+                            model_name = card.name(),
+                            namespace = namespace.as_str(),
+                            "Prefill worker discovered, activating PrefillRouter"
+                        );
+
+                        if let Ok(ns) = drt.namespace(namespace)
+                            && let Ok(comp) = ns.component(component)
+                        {
+                            let ep = comp.endpoint(endpoint);
+                            if tx.send(ep).is_err() {
+                                tracing::debug!("PrefillRouter activation channel already closed");
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 }
 
-/// Create a worker selection pipeline for OpenAI Chat Completion requests
+/// Fetch model card via discovery and create preprocessor.
 ///
-/// This is a concrete implementation that works specifically with NvCreateChatCompletionRequest
-/// and is designed for use with C bindings. Uses the "generate" endpoint by default.
-///
-/// # Parameters
-/// - `namespace`: namespace name
-/// - `component_name`: component name
-/// - `model_name`: Name/slug of the model to load
-/// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
-/// - `busy_threshold`: Optional threshold for busy worker detection
-/// - `kv_router_config`: Optional KV router configuration (only used when router_mode is KV)
-/// - `enforce_disagg`: If true, fail requests when disaggregated serving is unavailable
-///
-/// # Returns
-/// A tuple of (engine, kv_router) where kv_router is Some when router_mode is KV
-pub async fn create_worker_selection_pipeline_chat(
-    namespace: &str,
-    component_name: &str,
-    model_name: &str,
-    router_mode: RouterMode,
-    busy_threshold: Option<f64>,
-    kv_router_config: Option<KvRouterConfig>,
-    enforce_disagg: bool,
-) -> anyhow::Result<(
-    ServiceEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    >,
-    Option<Arc<dynamo_llm::kv_router::KvRouter>>,
-)> {
-    use dynamo_llm::discovery::WORKER_TYPE_DECODE;
-    use dynamo_llm::kv_router::PrefillRouter;
+/// This function:
+/// 1. Lists all models via discovery
+/// 2. Finds the first model in the target namespace (Decode or Aggregated only)
+/// 3. Downloads the model config (tokenizer files) if needed
+/// 4. Creates an OpenAIPreprocessor from the model card
+/// 5. Returns the preprocessor, the model card, and the resolved worker namespace
+async fn fetch_preprocessor_from_discovery(
+    drt: &DistributedRuntime,
+    target_namespace: &str,
+) -> anyhow::Result<DiscoveredModelBootstrap> {
+    use dynamo_runtime::discovery::DiscoveryInstance;
 
-    // Use the global DRT singleton - initialize if not already done
-    // Check if already initialized (by dynamo_llm_init) to avoid redundant sync wait
-    let needs_sync = DRT.get().is_none();
+    let discovery = drt.discovery();
 
-    let distributed_runtime = DRT
-        .get_or_try_init(async {
-            tracing::debug!("Initializing DistributedRuntime singleton (standalone mode)");
-            DistributedRuntime::from_settings(Runtime::from_settings()?).await
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize DistributedRuntime: {}", e))?;
+    // List all models
+    let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Only wait for discovery sync if we just initialized the DRT
-    // (dynamo_llm_init already does this when it initializes)
-    // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
-    if needs_sync {
-        wait_for_discovery_sync(distributed_runtime).await;
+    // Find first model card in the target namespace. We want a worker that
+    // owns the OpenAI surface (tokenizer + chat/completions), which is
+    // Decode or Aggregated — Prefill and Encode workers register cards with
+    // no engine and an empty OpenAI surface and must be skipped.
+    // Use prefix matching because workers may append a rolling-update hash
+    // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
+    let mut model_card: Option<(ModelDeploymentCard, String)> = None;
+
+    for instance in instances {
+        if let DiscoveryInstance::Model { namespace, .. } = &instance {
+            if !namespace.starts_with(target_namespace) {
+                continue;
+            }
+
+            let actual_namespace = namespace.clone();
+            match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) => {
+                    use dynamo_llm::worker_type::WorkerType;
+                    if matches!(
+                        card.worker_type,
+                        Some(WorkerType::Prefill) | Some(WorkerType::Encode)
+                    ) {
+                        continue;
+                    }
+                    model_card = Some((card, actual_namespace));
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Failed to deserialize model card, skipping");
+                    continue;
+                }
+            }
+        }
     }
 
-    let component = distributed_runtime
-        .namespace(namespace)?
-        .component(component_name)?;
-    let endpoint = component.endpoint(GENERATE_ENDPOINT);
-    let client = endpoint.client().await?;
-
-    // Discover the model card by searching all instances with this model name
-    tracing::debug!("Looking for model: {}", model_name);
-    tracing::debug!("Namespace: {}", namespace);
-
-    let model_manager = Arc::new(ModelManager::new());
-    let router_config = dynamo_llm::entrypoint::RouterConfig {
-        router_mode,
-        kv_router_config: kv_router_config.unwrap_or_default(),
-        load_threshold_config: dynamo_llm::discovery::LoadThresholdConfig {
-            active_decode_blocks_threshold: busy_threshold,
-            active_prefill_tokens_threshold: None,
-            active_prefill_tokens_threshold_frac: None,
-        },
-        enforce_disagg,
-    };
-    // Create metrics for migration tracking (not exposed via /metrics in C bindings)
-    let metrics = Arc::new(Metrics::new());
-    let watcher = ModelWatcher::new(
-        component.drt().clone(),
-        model_manager.clone(),
-        router_config,
-        0, // migration_limit - default to 0 for C bindings
-        None,
-        metrics.clone(),
-    );
-    let cards = watcher
-        .cards_for_model(model_name, Some(namespace), false)
-        .await
-        .with_context(|| format!("Failed to discover model: {}", model_name))?;
-
-    tracing::debug!("Found {} cards for model {}", cards.len(), model_name);
-
-    let card = cards.into_iter().next().ok_or_else(|| {
-        tracing::error!("No ModelDeploymentCard found for model: {}", model_name);
-        anyhow::anyhow!("ModelDeploymentCard not found for model: {}", model_name)
+    let (mut card, actual_namespace) = model_card.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No model found in namespace '{}' via discovery",
+            target_namespace
+        )
     })?;
 
-    let chooser = if router_mode == RouterMode::KV {
-        Some(
-            model_manager
-                .kv_chooser_for(
-                    &endpoint,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                    WORKER_TYPE_DECODE,
-                )
-                .await?,
-        )
-    } else {
-        None
-    };
-
-    // Create prefill chooser for dynamic disaggregation support
-    // This registers the model and returns a receiver that will be activated
-    // when a prefill worker is discovered
-    let prefill_chooser = model_manager
-        .register_prefill_router(model_name.to_string())
-        .map(|rx| {
-            // Create prefill-specific config with track_active_blocks disabled
-            let mut prefill_config = kv_router_config.unwrap_or_default();
-            prefill_config.router_track_active_blocks = false;
-
-            PrefillRouter::new(
-                rx,
-                model_manager.clone(),
-                router_mode,
-                card.kv_cache_block_size,
-                Some(prefill_config),
-                enforce_disagg,
-                model_name.to_string(),
-            )
-        });
-
-    // Start background watcher for prefill model discovery
-    // This will activate the prefill router when prefill workers join
-    spawn_prefill_watcher(
-        component.drt().clone(),
-        model_manager.clone(),
-        namespace.to_string(),
+    tracing::info!(
+        model_name = %card.display_name,
+        kv_cache_block_size = card.kv_cache_block_size,
+        actual_namespace = %actual_namespace,
+        enable_eagle = card.runtime_config.enable_eagle,
+        "Found model card via discovery"
     );
 
-    // Download model config files from HuggingFace for EPP
-    // The backend's card has NATS URLs which aren't accessible from EPP
-    tracing::debug!(
-        "Downloading model config files for EPP: {}",
-        card.display_name
-    );
+    // Download config (tokenizer files) if not local
+    card.download_config(None).await?;
 
-    let local_path = dynamo_llm::hub::from_hf(&card.display_name, true)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to download model config files for: {}",
-                card.display_name
+    // Create preprocessor
+    let preprocessor = OpenAIPreprocessor::new(card.clone())?;
+    Ok(DiscoveredModelBootstrap {
+        preprocessor,
+        card,
+        actual_namespace,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_jump_lifted_from_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
             )
-        })?;
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
 
-    // Load a fresh card from local files, then copy runtime config from original card
-    tracing::debug!("Loading ModelDeploymentCard from local path...");
-    let mut card_with_local_files = ModelDeploymentCard::load_from_disk(&local_path, None)
-        .with_context(|| format!("Failed to load card from disk: {:?}", local_path))?;
+    #[test]
+    fn strict_priority_lifted_from_agent_hints() {
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"strict_priority": 7}}
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(req.nvext.as_ref()), 7);
 
-    // Copy runtime settings from the backend's card
-    tracing::debug!("Copying runtime config from backend card...");
-    card_with_local_files.runtime_config = card.runtime_config.clone();
-    card_with_local_files.kv_cache_block_size = card.kv_cache_block_size;
-    card_with_local_files.context_length = card.context_length;
+        let default_req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}]
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(default_req.nvext.as_ref()), 0);
+    }
 
-    // Load the tokenizer from the downloaded files
-    tracing::debug!("Loading tokenizer from local files...");
-    let hf_tokenizer = card_with_local_files
-        .tokenizer_hf()
-        .with_context(|| format!("Failed to load tokenizer for: {}", card.display_name))?;
+    #[test]
+    fn priority_jump_lifted_from_completion_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::completions::NvCreateCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+            )
+            .expect("test request must parse as completion");
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
 
-    // Create worker monitor if busy_threshold is set
-    // Note: C bindings don't register with ModelManager, so HTTP endpoint won't see this
-    let worker_monitor = busy_threshold.map(|t| {
-        KvWorkerMonitor::new(
-            client.clone(),
-            dynamo_llm::discovery::LoadThresholdConfig {
-                active_decode_blocks_threshold: Some(t),
-                active_prefill_tokens_threshold: None,
-                active_prefill_tokens_threshold_frac: None,
-            },
-        )
-    });
+    #[test]
+    fn routing_result_round_trips_cache_namespace_bytes() {
+        let mut result = CRoutingResult::default();
+        write_cache_namespace_to_result(Some("tenant\0a"), &mut result);
 
-    // Clone chooser before passing to build_routed_pipeline (which takes ownership)
-    let kv_router = chooser.clone();
+        assert_eq!(result.cache_namespace_len, 8);
+        let namespace = unsafe {
+            std::slice::from_raw_parts(result.cache_namespace, result.cache_namespace_len)
+        };
+        assert_eq!(namespace, b"tenant\0a");
 
-    let engine = build_routed_pipeline::<
-        NvCreateChatCompletionRequest,
-        NvCreateChatCompletionStreamResponse,
-    >(
-        &card_with_local_files,
-        &client,
-        model_manager.clone(),
-        router_mode,
-        worker_monitor,
-        chooser,
-        hf_tokenizer,
-        prefill_chooser,
-        enforce_disagg,
-        0, // migration_limit - default to 0 for C bindings
-        metrics,
-    )
-    .await?;
-
-    Ok((engine, kv_router))
+        unsafe { free_routing_result(&mut result) };
+        assert!(result.cache_namespace.is_null());
+        assert_eq!(result.cache_namespace_len, 0);
+    }
 }

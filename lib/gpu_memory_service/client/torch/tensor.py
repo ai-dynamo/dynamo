@@ -214,7 +214,9 @@ class GMSTensorSpec:
         device_index: int,
     ) -> torch.Tensor:
         """Create a tensor aliasing mapped CUDA memory."""
-        base_va = gms_client_memory_manager.import_allocation(self.allocation_id)
+        base_va = gms_client_memory_manager.create_mapping(
+            allocation_id=self.allocation_id
+        )
         ptr = int(base_va) + int(self.offset_bytes)
 
         return _tensor_from_pointer(

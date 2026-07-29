@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: etcd operator configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: should include etcdAddress when global.etcd.install is true
+    set:
+      global.etcd.install: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "etcdAddress:"
+
+  - it: should not include etcdAddress when global.etcd.install is false
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "etcdAddress:"
+
+  - it: should use explicit etcdAddr over global.etcd.install
+    set:
+      global.etcd.install: true
+      dynamo-operator.etcdAddr: "http://external-etcd:2379"
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'etcdAddress: "http://external-etcd:2379"'
+
+  - it: should generate correct auto-configured etcd address
+    release:
+      name: my-release
+      namespace: my-namespace
+    set:
+      global.etcd.install: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'etcdAddress: "my-release-etcd.my-namespace.svc.cluster.local:2379"'

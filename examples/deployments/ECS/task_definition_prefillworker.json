@@ -15,7 +15,7 @@
                 "-c"
             ],
             "command": [
-                "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker"
+                "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --disaggregation-mode prefill"
             ],
             "environment": [
                 {

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.webhook.enabled }}
 ---
 apiVersion: v1
 kind: Service
@@ -26,6 +25,7 @@ metadata:
     app.kubernetes.io/part-of: dynamo-operator
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
+  publishNotReadyAddresses: {{ .Values.webhook.service.publishNotReadyAddresses }}
   ports:
   - port: 443
     protocol: TCP
@@ -34,5 +34,3 @@ spec:
   selector:
     control-plane: controller-manager
   {{- include "dynamo-operator.selectorLabels" . | nindent 4 }}
-{{- end }}
-

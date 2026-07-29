@@ -24,7 +24,7 @@ limitations under the License.
 // The Dynamo KV scorer sets routing headers that the Lua filter at the
 // gateway uses to inject nvext into the request body:
 //
-//   - x-worker-instance-id: Selected worker ID (decode worker in disagg mode)
+//   - x-dynamo-worker-instance-id: Selected worker ID (decode worker in disagg mode)
 //   - x-prefiller-host-port: Prefill worker ID (disaggregated mode only)
 //   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
 //
@@ -38,19 +38,19 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 
 	// Dynamo plugins
-	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
+	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"
+	labelfilter "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/label_filter"
 )
 
 func main() {
 	// Register Dynamo custom plugins:
-	// - kv-aware-scorer: Implements Scorer, PreRequest, and ResponseStreaming interfaces
-	//   - Score: Calls Dynamo router to select workers based on KV cache, sets routing headers
-	//   - PreRequest: Registers request with router bookkeeping after scheduling is finalized
-	//   - ResponseComplete: Cleans up router bookkeeping when response completes
-	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
+	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
+	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
+	plugins.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
+	plugins.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {

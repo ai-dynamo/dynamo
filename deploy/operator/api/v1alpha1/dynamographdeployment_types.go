@@ -44,8 +44,59 @@ const (
 	ComponentKindLeaderWorkerSet ComponentKind = "LeaderWorkerSet"
 )
 
+// +kubebuilder:validation:Enum=initializing;pending;successful;failed
+type DGDState string
+
+const (
+	DGDStateInitializing DGDState = "initializing"
+	DGDStatePending      DGDState = "pending"
+	DGDStateSuccessful   DGDState = "successful"
+	DGDStateFailed       DGDState = "failed"
+)
+
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment. See the v1beta1
+// PlacementScoreState for the authoritative semantics of each value.
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals can be added without a schema
+// break. See the v1beta1 PlacementStatus for the authoritative field docs.
+type PlacementStatus struct {
+	// Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
+	// where higher is better and 1.0 is the best possible placement.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+	// State indicates placement score reporting state.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
+
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
+	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level annotations take precedence over these values.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level labels take precedence over these values.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+	// PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
@@ -66,6 +117,28 @@ type DynamoGraphDeploymentSpec struct {
 	// Restart specifies the restart policy for the graph deployment.
 	// +kubebuilder:validation:Optional
 	Restart *Restart `json:"restart,omitempty"`
+
+	// TopologyConstraint is the deployment-level topology constraint.
+	// When set, topologyProfile is required and names the ClusterTopology CR to use.
+	// packDomain is optional here — it can be omitted when only services carry constraints.
+	// Services without their own topologyConstraint inherit from this value.
+	// +optional
+	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features. Component-level experimental features are represented separately
+// on component specs.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// KvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 type Restart struct {
@@ -100,8 +173,12 @@ const (
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// State is a high-level textual status of the graph deployment lifecycle.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 	// Conditions contains the latest observed conditions of the graph deployment.
 	// The slice is merged by type on patch updates.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
@@ -109,7 +186,6 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
-
 	// Restart contains the status of the restart of the graph deployment.
 	// +optional
 	Restart *RestartStatus `json:"restart,omitempty"`
@@ -117,6 +193,14 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+	// RollingUpdate tracks the progress of operator manged rolling updates.
+	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
+	// +optional
+	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+	// Placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
@@ -124,10 +208,15 @@ type ServiceCheckpointStatus struct {
 	// CheckpointName is the name of the associated Checkpoint CR
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
+	// CheckpointID is the artifact ID used by the snapshot protocol
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
 	// IdentityHash is the computed hash of the checkpoint identity
+	// Deprecated: automatic checkpoints use CheckpointID. This field is retained
+	// for older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint is ready for use
+	// Ready indicates the checkpoint artifact is ready for future pods to restore.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }
@@ -151,14 +240,64 @@ const (
 	RestartPhaseRestarting RestartPhase = "Restarting"
 	RestartPhaseCompleted  RestartPhase = "Completed"
 	RestartPhaseFailed     RestartPhase = "Failed"
+	RestartPhaseSuperseded RestartPhase = "Superseded"
 )
+
+// RollingUpdatePhase represents the current phase of a rolling update.
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed;""
+type RollingUpdatePhase string
+
+const (
+	RollingUpdatePhasePending    RollingUpdatePhase = "Pending"
+	RollingUpdatePhaseInProgress RollingUpdatePhase = "InProgress"
+	RollingUpdatePhaseCompleted  RollingUpdatePhase = "Completed"
+	RollingUpdatePhaseNone       RollingUpdatePhase = ""
+)
+
+// RollingUpdateStatus tracks the progress of a rolling update.
+type RollingUpdateStatus struct {
+	// Phase indicates the current phase of the rolling update.
+	// +optional
+	Phase RollingUpdatePhase `json:"phase,omitempty"`
+
+	// StartTime is when the rolling update began.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// EndTime is when the rolling update completed (successfully or failed).
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+
+	// UpdatedServices is the list of services that have completed the rolling update.
+	// A service is considered updated when its new replicas are all ready and old replicas are fully scaled down.
+	// Only services of componentType Worker (or Prefill/Decode) are considered.
+	// +optional
+	UpdatedServices []string `json:"updatedServices,omitempty"`
+}
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 	ComponentKind ComponentKind `json:"componentKind"`
-	// ComponentName is the name of the underlying resource.
+
+	// ComponentName is the name of the primary underlying resource.
+	// DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+	// During rolling updates, this reflects the new (target) component name.
+	// +kubebuilder:deprecatedversion:warning="ComponentName is deprecated, view ComponentNames instead"
 	ComponentName string `json:"componentName"`
+
+	// ComponentNames is the list of underlying resource names for this service.
+	// During normal operation, this contains a single name.
+	// During rolling updates, this contains both old and new component names.
+	// +optional
+	ComponentNames []string `json:"componentNames,omitempty"`
+
+	// RuntimeNamespace is the effective Dynamo runtime namespace for this
+	// component. Worker components may include a generation suffix; non-workers and
+	// Grove-backed workers use the base namespace. During rolling updates, worker
+	// status keeps the old active revision namespace until cutover completes.
+	// +optional
+	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
@@ -186,9 +325,19 @@ type ServiceReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// ScheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+	// when the backend cannot derive it reliably. A nil value means "not
+	// reported", never "zero scheduled".
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeployment is deprecated; use nvidia.com/v1beta1 DynamoGraphDeployment"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"
@@ -205,16 +354,13 @@ type DynamoGraphDeployment struct {
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
-func (s *DynamoGraphDeployment) SetState(state string) {
+func (s *DynamoGraphDeployment) SetState(state DGDState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeployment) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // +kubebuilder:object:root=true
@@ -254,6 +400,19 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	s.Status.Conditions = append(s.Status.Conditions, condition)
 }
 
+// HasAnyTopologyConstraint reports whether any topology constraint is set at any level.
+func (s *DynamoGraphDeployment) HasAnyTopologyConstraint() bool {
+	if s.Spec.TopologyConstraint != nil {
+		return true
+	}
+	for _, svc := range s.Spec.Services {
+		if svc != nil && svc.TopologyConstraint != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // HasAnyMultinodeService reports whether any service in the graph is configured with more than one node.
 func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 	for _, svc := range s.Spec.Services {
@@ -264,11 +423,6 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 	return false
 }
 
-// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
-func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
-	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
-}
-
 // HasEPPService returns true if any service in the DGD has EPP component type
 func (dgd *DynamoGraphDeployment) HasEPPService() bool {
 	for _, component := range dgd.Spec.Services {
@@ -277,6 +431,11 @@ func (dgd *DynamoGraphDeployment) HasEPPService() bool {
 		}
 	}
 	return false
+}
+
+// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }
 
 // GetEPPService returns the EPP service name and spec if present

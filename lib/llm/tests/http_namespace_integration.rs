@@ -73,7 +73,7 @@ fn test_model_discovery_scoping_scenarios() {
 
     // Scenario 1: Frontend configured for specific namespace should only see models from that namespace
     let frontend_namespace = "vllm-agg";
-    let available_models = vec![
+    let available_models = [
         create_test_endpoint("vllm-agg", "backend", "generate"),
         create_test_endpoint("vllm-agg", "backend", "generate"),
         create_test_endpoint("sglang-prod", "backend", "generate"),
@@ -120,7 +120,7 @@ fn test_model_discovery_scoping_scenarios() {
 fn test_namespace_boundary_conditions() {
     // Test edge cases and boundary conditions for namespace handling
 
-    let test_models = vec![
+    let test_models = [
         create_test_endpoint("", "backend", "generate"), // Empty namespace
         create_test_endpoint("dynamo", "backend", "generate"), // Global namespace
         create_test_endpoint("ns-with-special-chars_123", "backend", "generate"),

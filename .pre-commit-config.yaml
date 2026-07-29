@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py)
+default_install_hook_types: [pre-commit, commit-msg]
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/vllm/proto/vllm_grpc\.proto$|lib/sidecar/trtllm/proto/trtllm_service\.proto$)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0
@@ -26,7 +27,7 @@ repos:
   - id: black
     types_or: [python, cython]
 - repo: https://github.com/PyCQA/flake8
-  rev: 5.0.4
+  rev: 7.3.0  # 5.0.4 crashes on Python 3.12+ (ast.Str removed)
   hooks:
   - id: flake8
     args: [--max-line-length=88, --select=C,E,F,W,B,B950, --extend-ignore = E203,E501]
@@ -64,16 +65,8 @@ repos:
   - id: mixed-line-ending
   - id: requirements-txt-fixer
   - id: trailing-whitespace
-    exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
-
-# NOTE: removing from pre commit
-# will move to gitlab ci to run in proper
-# container
-#- repo: https://github.com/pre-commit/mirrors-mypy
-#  rev: v1.13.0
-#  hooks:
-#  - id: mypy
-#    exclude: model.py # WAR errors about 'model.py' duplicate module name
+    # spdx_licenses/ holds verbatim upstream license texts — never reformat them.
+    exclude: (lib/llm/tests/data/deepseek-v3.2/.*\.txt$|^container/compliance/spdx_licenses/.*)
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -87,14 +80,36 @@ repos:
 # and give it visiblity into all the local and third_party packages expected.
 - repo: local
   hooks:
+    - id: sync-site-css
+      name: Check CustomFooter SITE_CSS mirrors main.css
+      entry: python3 docs/fern/scripts/sync_site_css.py --check
+      language: system
+      files: ^docs/fern/(main\.css|components/CustomFooter\.tsx|scripts/sync_site_css\.py)$
+      pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
-      entry: python3 scripts/report_pytest_markers.py
+      entry: python3 tests/report_pytest_markers.py
       language: python
       pass_filenames: false
       additional_dependencies:
         - pytest
+        - pytest-asyncio
         - tomli
         - pydantic
         - filelock
         - pyyaml
+        - prometheus_client>=0.23.1
+        - openai
+    - id: validate-skills
+      name: Validate .agents/skills SKILL.md frontmatter and AGENTS.md index
+      entry: python3 scripts/validate_skills.py
+      language: python
+      files: ^(\.agents/skills/|AGENTS\.md$)
+      pass_filenames: false
+      additional_dependencies:
+        - pyyaml
+    - id: DCO check
+      name: Checks the commit message for a developer certificate of origin signature
+      entry: python3 scripts/dco_check.py
+      language: python
+      stages: [commit-msg]

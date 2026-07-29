@@ -5,9 +5,10 @@
 #
 # Start a frontend node. This runs:
 # - OpenAI HTTP server.
-# - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
+# - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded, device-aware-weighted).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -17,21 +18,23 @@
 
 import argparse
 import asyncio
+import importlib.metadata
 import logging
 import os
-import pathlib
 import signal
+import sys
+from argparse import Namespace
+from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.config_dump.config_dumper import add_config_dump_args
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
+    FrontendRoute,
     KvRouterConfig,
-    ModelDeploymentCard,
-    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
@@ -40,287 +43,280 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from . import __version__
+from .frontend_args import FrontendArgGroup, FrontendConfig
 
-DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+if TYPE_CHECKING:
+    from .vllm_processor import EngineFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
+# The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
+# most distros) under high concurrency (see the accept() loop in
+# lib/runtime/src/pipeline/network/tcp/server.rs), causing accept() to fail with
+# EMFILE. At startup we raise the soft limit toward FRONTEND_FD_LIMIT_TARGET,
+# overridable per-deployment via DYN_FRONTEND_FD_LIMIT_TARGET. A non-positive or
+# non-integer value disables the raise, so operators can opt out.
+FRONTEND_FD_LIMIT_ENV = "DYN_FRONTEND_FD_LIMIT_TARGET"
+FRONTEND_FD_LIMIT_TARGET = 8192
 
 
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+def _raise_fd_limit(target: Optional[int] = None) -> None:
+    """Best-effort: raise the process's soft RLIMIT_NOFILE toward `target`
+    (default: the DYN_FRONTEND_FD_LIMIT_TARGET env var, else FRONTEND_FD_LIMIT_TARGET),
+    bounded by the hard limit. A target <= 0 (or a non-integer env value) disables
+    it; also a no-op if already sufficient, if the Unix-only `resource` module is
+    unavailable (e.g. Windows), or if the raise is denied."""
+    if target is None:
+        raw = os.getenv(FRONTEND_FD_LIMIT_ENV, str(FRONTEND_FD_LIMIT_TARGET))
+        try:
+            target = int(raw)
+        except ValueError:
+            target = 0
+    if target <= 0:
+        return
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY:
+            return  # already unlimited; a finite target would only reduce it
+        new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            logger.info(
+                f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
+            )
+    except Exception:
+        # Best-effort hardening; ignore failures (Windows lacks `resource`, or
+        # setrlimit may be denied in a restricted environment).
+        # logger.debug("Could not raise RLIMIT_NOFILE; continuing")
+        pass
+
+
+def setup_engine_factory(
+    config: FrontendConfig,
+    vllm_flags: Namespace,
+) -> "EngineFactory":
     """
-    Called by Rust when a model is discovered.
+    When using vllm pre and post processor, create the EngineFactory that
+    creates the engines that run requests.
     """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+    from .vllm_processor import EngineFactory
+
+    return EngineFactory(config, vllm_flags)
 
 
-def validate_model_name(value):
-    """Validate that model-name is a non-empty string."""
-    if not value or not isinstance(value, str) or len(value.strip()) == 0:
-        raise argparse.ArgumentTypeError(
-            f"model-name must be a non-empty string, got: {value}"
+def setup_sglang_engine_factory(
+    config: FrontendConfig,
+    sglang_flags: Optional[Namespace] = None,
+):
+    """
+    When using sglang pre and post processor, create the SglangEngineFactory
+    that creates the engines that run requests.
+    """
+    from .sglang_processor import SglangEngineFactory
+
+    tool_call_parser = getattr(sglang_flags, "tool_call_parser", None)
+    reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
+    chat_template = getattr(sglang_flags, "chat_template", None)
+
+    return SglangEngineFactory(
+        config,
+        debug_perf=config.debug_perf,
+        tool_call_parser_name=tool_call_parser,
+        reasoning_parser_name=reasoning_parser,
+        chat_template=chat_template,
+    )
+
+
+def _frontend_route_extension_entry_points() -> list[importlib.metadata.EntryPoint]:
+    """Return the entry points registered under the frontend-route group."""
+    # `EntryPoints.select` is the supported API on the Python >= 3.10 floor.
+    return list(
+        importlib.metadata.entry_points().select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP)
+    )
+
+
+def _normalize_frontend_routes(
+    extension_name: str, provided: Any
+) -> list[FrontendRoute]:
+    """Coerce a provider's return value into a list of ``FrontendRoute``.
+
+    Accepts a single ``FrontendRoute`` or any iterable of them, and raises
+    ``TypeError`` if the provider returns anything else.
+    """
+    if provided is None:
+        return []
+    if isinstance(provided, FrontendRoute):
+        return [provided]
+    try:
+        routes = list(provided)
+    except TypeError as exc:
+        raise TypeError(
+            f"Frontend route extension '{extension_name}' must return a FrontendRoute "
+            "or an iterable of FrontendRoute objects"
+        ) from exc
+    for route in routes:
+        if not isinstance(route, FrontendRoute):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' returned unsupported route "
+                f"object {route!r}; expected dynamo.llm.FrontendRoute"
+            )
+    return routes
+
+
+def _resolve_frontend_route_provider(extension_name: str, entry_points: list) -> Any:
+    """Resolve a ``--frontend-route-extension`` value to its provider callable.
+
+    A registered entry-point name (in the ``dynamo.frontend.routes`` group)
+    takes precedence. If the value is not a registered name and is unambiguously
+    a ``module:function`` path (contains ``:``), it is imported directly. Gating
+    the fallback on ``:`` keeps a mistyped name from silently turning into an
+    import attempt, and still surfaces the ``Available: ...`` list otherwise.
+    """
+    matches = [ep for ep in entry_points if ep.name == extension_name]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous frontend route extension '{extension_name}' in entry point "
+            f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
         )
-    return value.strip()
+    if matches:
+        return matches[0].load()
+
+    if ":" in extension_name:
+        module_path, _, attr = extension_name.partition(":")
+        try:
+            obj: Any = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ValueError(
+                f"Could not import module '{module_path}' for frontend route "
+                f"extension '{extension_name}'"
+            ) from exc
+        try:
+            for part in attr.split("."):
+                obj = getattr(obj, part)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Module '{module_path}' has no attribute '{attr}' for frontend "
+                f"route extension '{extension_name}'"
+            ) from exc
+        return obj
+
+    available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
+    raise ValueError(
+        f"Unknown frontend route extension '{extension_name}' in entry point "
+        f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}. "
+        f"Pass a registered name or a 'module:function' path."
+    )
 
 
-def validate_model_path(value):
-    """Validate that model-path is a valid directory on disk."""
-    if not os.path.isdir(value):
-        raise argparse.ArgumentTypeError(
-            f"model-path must be a valid directory on disk, got: {value}"
-        )
-    return value
+def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute]:
+    """Load trusted frontend route extensions.
+
+    Each value is either a name registered under the ``dynamo.frontend.routes``
+    entry-point group (preferred) or a direct ``module:function`` path.
+    """
+
+    if not extension_names:
+        return []
+
+    # Deduplicate names (repeated --frontend-route-extension, or a flag that
+    # overlaps DYN_FRONTEND_ROUTE_EXTENSIONS) so a provider is loaded and its
+    # routes appended only once, preserving first-seen order.
+    unique_names = list(dict.fromkeys(extension_names))
+
+    entry_points = _frontend_route_extension_entry_points()
+    routes: list[FrontendRoute] = []
+    for extension_name in unique_names:
+        provider = _resolve_frontend_route_provider(extension_name, entry_points)
+        if not callable(provider):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' must resolve to a callable"
+            )
+        routes.extend(_normalize_frontend_routes(extension_name, provider()))
+
+    return routes
 
 
-def parse_args():
+def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
     Returns:
-        argparse.Namespace: Parsed command-line arguments.
+        Tuple of (FrontendConfig, vllm_flags, sglang_flags).
     """
+
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
-    parser.add_argument(
-        "--version", action="version", version=f"Dynamo Frontend {__version__}"
-    )
-    parser.add_argument(
-        "-i", "--interactive", action="store_true", help="Interactive text chat"
-    )
-    parser.add_argument(
-        "--kv-cache-block-size",
-        type=int,
-        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
-        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
-    )
-    parser.add_argument(
-        "--http-host",
-        type=str,
-        default=os.environ.get("DYN_HTTP_HOST", "0.0.0.0"),
-        help="HTTP host for the engine (str). Can be set via DYN_HTTP_HOST env var.",
-    )
-    parser.add_argument(
-        "--http-port",
-        type=int,
-        default=int(os.environ.get("DYN_HTTP_PORT", "8000")),
-        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
-    )
-    parser.add_argument(
-        "--tls-cert-path",
-        type=pathlib.Path,
-        default=None,
-        help="TLS certificate path, PEM format.",
-    )
-    parser.add_argument(
-        "--tls-key-path",
-        type=pathlib.Path,
-        default=None,
-        help="TLS certificate key path, PEM format.",
-    )
-    parser.add_argument(
-        "--router-mode",
-        type=str,
-        choices=["round-robin", "random", "kv"],
-        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
-        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
-    )
-    parser.add_argument(
-        "--kv-overlap-score-weight",
-        type=float,
-        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
-        help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
-    )
-    parser.add_argument(
-        "--router-temperature",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
-        help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
-    )
-    parser.add_argument(
-        "--kv-events",
-        action=argparse.BooleanOptionalAction,
-        dest="use_kv_events",
-        default=(
-            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
-        ),  # default is true
-        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
-    )
-    parser.add_argument(
-        "--router-ttl",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
-        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
-    )
-    parser.add_argument(
-        "--router-max-tree-size",
-        type=int,
-        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
-    )
-    parser.add_argument(
-        "--router-prune-target-ratio",
-        type=float,
-        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
-        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
-    )
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
-        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
-    )
-    parser.add_argument(
-        "--router-replica-sync",
-        action="store_true",
-        default=False,
-        help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
-    )
-    parser.add_argument(
-        "--router-snapshot-threshold",
-        type=int,
-        default=1000000,
-        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 1000000.",
-    )
-    parser.add_argument(
-        "--router-reset-states",
-        action="store_true",
-        dest="router_reset_states",
-        default=False,
-        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
-    )
-    parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        dest="durable_kv_events",
-        default=False,
-        help="KV Router: Enable durable KV events using NATS JetStream instead of NATS Core. By default, the router uses the generic event plane (NATS Core or ZMQ) with local_indexer mode. Use this flag when you need durability and multi-replica consistency. Requires NATS with JetStream enabled.",
-    )
-    parser.add_argument(
-        "--no-track-active-blocks",
-        action="store_false",
-        dest="router_track_active_blocks",
-        default=True,
-        help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
-    )
-    parser.add_argument(
-        "--no-assume-kv-reuse",
-        action="store_false",
-        dest="router_assume_kv_reuse",
-        default=True,
-        help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
-    )
-    parser.add_argument(
-        "--track-output-blocks",
-        action="store_true",
-        dest="router_track_output_blocks",
-        default=False,
-        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
-    )
-    parser.add_argument(
-        "--enforce-disagg",
-        action="store_true",
-        default=False,
-        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
-    )
-    parser.add_argument(
-        "--migration-limit",
-        type=int,
-        default=0,
-        help="Maximum number of times a request may be migrated to a different engine worker. When > 0, enables request migration on worker disconnect (default: 0).",
-    )
-    parser.add_argument(
-        "--active-decode-blocks-threshold",
-        type=float,
-        default=None,
-        help="Threshold percentage (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. If not set, blocks-based busy detection is disabled.",
-    )
-    parser.add_argument(
-        "--active-prefill-tokens-threshold",
-        type=int,
-        default=None,
-        help="Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.",
-    )
-    parser.add_argument(
-        "--active-prefill-tokens-threshold-frac",
-        type=float,
-        default=None,
-        help="Fraction of max_num_batched_tokens for busy detection. Worker is busy when active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). Uses OR logic with --active-prefill-tokens-threshold.",
-    )
-    parser.add_argument(
-        "--model-name",
-        type=validate_model_name,
-        help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
-    )
-    parser.add_argument(
-        "--model-path",
-        type=validate_model_path,
-        help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
-    )
-    parser.add_argument(
-        "--metrics-prefix",
-        type=str,
-        default=None,
-        help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
-    )
-    parser.add_argument(
-        "--kserve-grpc-server",
-        action="store_true",
-        default=False,
-        help="Start KServe gRPC server.",
-    )
-    parser.add_argument(
-        "--grpc-metrics-port",
-        type=int,
-        default=8788,
-        help="HTTP metrics port for gRPC service (u16). Only used with --kserve-grpc-server. Defaults to 8788.",
-    )
-    add_config_dump_args(parser)
-    parser.add_argument(
-        "--store-kv",
-        type=str,
-        choices=["etcd", "file", "mem"],
-        default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
-    )
-    parser.add_argument(
-        "--request-plane",
-        type=str,
-        choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
-    )
-    parser.add_argument(
-        "--event-plane",
-        type=str,
-        choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
-    )
-    parser.add_argument(
-        "--exp-python-factory",
-        action="store_true",
-        default=False,
-        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
-    )
 
-    flags = parser.parse_args()
+    FrontendArgGroup().add_arguments(parser)
 
-    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
-        parser.error("--tls-cert-path and --tls-key-path must be provided together")
-    if flags.migration_limit < 0 or flags.migration_limit > 4294967295:
-        parser.error("--migration-limit must be between 0 and 4294967295 (0=disabled)")
+    args, unknown = parser.parse_known_args()
 
-    return flags
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    vllm_flags = None
+    sglang_flags = None
+
+    # parse extra vllm flags using vllm native parser.
+    if config.chat_processor == "vllm":
+        try:
+            from vllm.utils import FlexibleArgumentParser
+        except ImportError:
+            try:
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+            except ModuleNotFoundError:
+                logger.exception(
+                    "Flag '--chat-processor vllm' requires vllm be installed."
+                )
+                sys.exit(1)
+
+        # On a host with no GPU and a CUDA-built wheel, vllm.platforms
+        # auto-detection picks UnspecifiedPlatform and the
+        # AsyncEngineArgs.add_cli_args call below crashes inside
+        # DeviceConfig.__post_init__. Frontend uses vLLM for parsers
+        # only and never constructs an engine, so coerce CpuPlatform.
+        # Must run before importing vllm.engine.arg_utils, which binds
+        # current_platform at module scope.
+        import vllm.platforms
+
+        if vllm.platforms.current_platform.device_type == "":
+            from vllm.platforms.cpu import CpuPlatform
+
+            vllm.platforms.current_platform = CpuPlatform()
+
+        try:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.entrypoints.openai.cli_args import FrontendArgs
+        except ModuleNotFoundError:
+            logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
+            sys.exit(1)
+
+        vllm_parser = FlexibleArgumentParser(add_help=False)
+        vllm_parser = FrontendArgs.add_cli_args(vllm_parser)
+        vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
+        # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
+        vllm_flags = vllm_parser.parse_args(unknown)
+    elif config.chat_processor == "sglang":
+        sglang_parser = argparse.ArgumentParser(add_help=False)
+        sglang_parser.add_argument("--tool-call-parser", default=None)
+        sglang_parser.add_argument("--reasoning-parser", default=None)
+        sglang_parser.add_argument("--chat-template", default=None)
+        sglang_flags, remaining = sglang_parser.parse_known_args(unknown)
+        if remaining:
+            logger.error(f"Unknown arguments specified: {remaining}")
+            sys.exit(1)
+    else:
+        if unknown:
+            logger.error(f"Unknown arguments specified: {unknown}")
+            sys.exit(1)
+    return config, vllm_flags, sglang_flags
 
 
 async def async_main():
@@ -336,12 +332,16 @@ async def async_main():
     # bind that port before the worker, causing port conflicts and/or scraping the
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
-    flags = parse_args()
-    dump_config(flags.dump_config_to, flags)
-    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
+    config, vllm_flags, sglang_flags = parse_args()
+    dump_config(config.dump_config_to, config)
+    max_seq_info = (
+        f", max_seq_len: {config.migration_max_seq_len}"
+        if config.migration_max_seq_len is not None
+        else ""
+    )
     logger.info(
-        f"Request migration {'enabled' if flags.migration_limit > 0 else 'disabled'} "
-        f"(limit: {flags.migration_limit})"
+        f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
+        f"(limit: {config.migration_limit}{max_seq_info})"
     )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -353,30 +353,13 @@ async def async_main():
             "Use --http-port to configure the frontend HTTP API port.\n" + "=" * 80
         )
 
-    # Configure Dynamo frontend HTTP service metrics prefix
-    if flags.metrics_prefix is not None:
-        prefix = flags.metrics_prefix.strip()
-        if prefix:
-            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
-
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Durable KV events (JetStream) is explicitly requested, OR
-    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
-    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
-    enable_nats = flags.request_plane == "nats" or (
-        flags.router_mode == "kv"
-        and (
-            flags.durable_kv_events
-            or (
-                flags.event_plane == "nats"
-                and (flags.use_kv_events or flags.router_replica_sync)
-            )
-        )
-    )
-
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
+    runtime = DistributedRuntime(
+        loop,
+        config.discovery_backend,
+        config.request_plane,
+        event_plane=config.event_plane,
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -384,76 +367,112 @@ async def async_main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    if flags.router_mode == "kv":
+    if config.router_mode == "kv":
         router_mode = RouterMode.KV
-        kv_router_config = KvRouterConfig(
-            overlap_score_weight=flags.kv_overlap_score_weight,
-            router_temperature=flags.router_temperature,
-            use_kv_events=flags.use_kv_events,
-            durable_kv_events=flags.durable_kv_events,
-            router_replica_sync=flags.router_replica_sync,
-            router_track_active_blocks=flags.router_track_active_blocks,
-            router_track_output_blocks=flags.router_track_output_blocks,
-            router_assume_kv_reuse=flags.router_assume_kv_reuse,
-            router_snapshot_threshold=flags.router_snapshot_threshold,
-            router_reset_states=flags.router_reset_states,
-            router_ttl_secs=flags.router_ttl,
-            router_max_tree_size=flags.router_max_tree_size,
-            router_prune_target_ratio=flags.router_prune_target_ratio,
-        )
-    elif flags.router_mode == "random":
+        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
+    elif config.router_mode == "random":
         router_mode = RouterMode.Random
+        kv_router_config = None
+    elif config.router_mode == "direct":
+        router_mode = RouterMode.Direct
+        kv_router_config = None
+    elif config.router_mode == "power-of-two":
+        router_mode = RouterMode.PowerOfTwoChoices
+        kv_router_config = None
+    elif config.router_mode == "least-loaded":
+        router_mode = RouterMode.LeastLoaded
+        kv_router_config = None
+    elif config.router_mode == "device-aware-weighted":
+        router_mode = RouterMode.DeviceAwareWeighted
         kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
-    kwargs = {
-        "http_host": flags.http_host,
-        "http_port": flags.http_port,
-        "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(
-            router_mode,
-            kv_router_config,
-            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
-            enforce_disagg=flags.enforce_disagg,
-        ),
-        "migration_limit": flags.migration_limit,
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    router_config = RouterConfig(
+        router_mode, kv_router_config, **config.router_kwargs()
+    )
+
+    metrics_prefix = (
+        config.metrics_prefix
+        if config.metrics_prefix is not None and config.metrics_prefix.strip()
+        else None
+    )
+    kwargs: dict[str, Any] = {
+        "http_host": config.http_host,
+        "http_port": config.http_port,
+        "kv_cache_block_size": config.kv_cache_block_size,
+        "router_config": router_config,
+        "migration_limit": config.migration_limit,
+        "metrics_prefix": metrics_prefix,
+        "enable_anthropic_api": config.enable_anthropic_api,
+        "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
+        "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "tokenizer_backend": config.tokenizer_backend,
     }
+    if config.migration_max_seq_len is not None:
+        kwargs["migration_max_seq_len"] = config.migration_max_seq_len
 
-    if flags.model_name:
-        kwargs["model_name"] = flags.model_name
-    if flags.model_path:
-        kwargs["model_path"] = flags.model_path
-    if flags.tls_cert_path:
-        kwargs["tls_cert_path"] = flags.tls_cert_path
-    if flags.tls_key_path:
-        kwargs["tls_key_path"] = flags.tls_key_path
-    if flags.namespace:
-        kwargs["namespace"] = flags.namespace
-    if flags.kserve_grpc_server and flags.grpc_metrics_port:
-        kwargs["http_metrics_port"] = flags.grpc_metrics_port
+    if config.model_name:
+        kwargs["model_name"] = config.model_name
+    if config.model_path:
+        kwargs["model_path"] = config.model_path
+    if config.tls_cert_path:
+        kwargs["tls_cert_path"] = config.tls_cert_path
+    if config.tls_key_path:
+        kwargs["tls_key_path"] = config.tls_key_path
+    if config.namespace:
+        kwargs["namespace"] = config.namespace
+    if config.namespace_prefix:
+        kwargs["namespace_prefix"] = config.namespace_prefix
+    if config.kserve_grpc_server and config.grpc_metrics_port:
+        kwargs["http_metrics_port"] = config.grpc_metrics_port
 
-    if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+    if config.chat_processor == "vllm":
+        assert (
+            vllm_flags is not None
+        ), "vllm_flags is required when chat processor is vllm"
+        chat_engine_factory = setup_engine_factory(
+            config, vllm_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
+    elif config.chat_processor == "sglang":
+        chat_engine_factory = setup_sglang_engine_factory(
+            config, sglang_flags
+        ).chat_engine_factory
+        kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
+    # Validate mode compatibility before loading extensions, so an incompatible
+    # mode fails fast without importing/executing third-party provider code.
+    if config.frontend_route_extensions and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        raise ValueError(
+            "frontend route extensions are only supported by HTTP frontend mode"
+        )
+    frontend_route_extensions = load_frontend_route_extensions(
+        config.frontend_route_extensions
+    )
 
     try:
-        if flags.interactive:
+        if config.interactive:
             await run_input(runtime, "text", engine)
-        elif flags.kserve_grpc_server:
+        elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine)
+            await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
 
 
-async def graceful_shutdown(runtime):
+async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
     Args:
@@ -462,8 +481,9 @@ async def graceful_shutdown(runtime):
     runtime.shutdown()
 
 
-def main():
+def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
+    _raise_fd_limit()
     uvloop.run(async_main())
 
 

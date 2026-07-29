@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: nemotron-3-ultra
+title: Nemotron-3-Ultra
+page: recipes/nemotron-3-ultra.mdx
+provider: nvidia
+model:
+  name: Nemotron-3-Ultra-550B-A55B
+  hf_id: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+  precision: NVFP4 + FP8
+status: experimental
+targets:
+- id: agg-b200-chat-mtp
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K/1K chat Moontrace replay (70% KV reuse shape), reference concurrency 18
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 52.0 tok/s/user, 201.4 tok/s/GPU @ c18 (15% raw Moontrace replay)
+- id: agg-b200-agentic-mtp
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay (90% KV reuse shape), reference concurrency 20
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 80.6 tok/s/user, 310.8 tok/s/GPU @ c20 (15% raw Moontrace replay)
+- id: agg-h200-chat-mtp
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8
+  - expert-parallel
+  - mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: chat
+    traffic: 8K/1K chat Moontrace replay, reference concurrency 10
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 58.7 tok/s/user, 46.8 tok/s/GPU @ c10 (300-sample replay evidence)
+- id: agg-h200-agentic-mtp
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8
+  - expert-parallel
+  - mtp-spec-dec
+  - kv-aware-routing
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, reference concurrency 8
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 53.2 tok/s/user, 27.4 tok/s/GPU @ c8 (300-sample replay evidence)
+- id: disagg-b200-agentic
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p1d
+  - tp4-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, reference concurrency 32
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 61.6 tok/s/user, 231.1 tok/s/GPU @ c32, no MTP (15% raw Moontrace replay)
+related_benchmarks: []
+maintainer: null
+gaps:
+- no related Feature Benchmark page exists for this model
+- no SLA/goodput target in source (perf.yaml has no goodput flags)
+- 'status tension: recipes/README.md lists Ultra as benchmarked, but runtime image is Day-0 dev (1.3.0-nemotron-ultra-dev.1);
+  page marks experimental'
+- single shared perf.yaml serves all targets (env-block retargeting)
+- maintainer unknown

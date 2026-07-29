@@ -18,17 +18,25 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
+import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt  # noqa: F401
+
+try:
+    # vllm >= 0.19.0: MultiModalUUIDDict moved to vllm.inputs
+    from vllm.inputs import MultiModalUUIDDict  # noqa: F401
+except ImportError:
+    # vllm < 0.19.0: MultiModalUUIDDict lives in vllm.multimodal.inputs
+    from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
+
 from vllm.logprobs import PromptLogprobs
-from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
 
-import dynamo.nixl_connect as connect
+from dynamo.common.multimodal.embedding_transfer import TransferRequest
 
 
 class Request(BaseModel):
@@ -54,7 +62,7 @@ class PrefillResponse(BaseModel):
 
 # Hack to override the type of multi_modal_data in TokensPrompt
 # as pydantic doesn't understand generic types
-# TokensPrompt is defined here: https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/inputs/data.py#L38
+# TokensPrompt is exported from vllm.inputs and implemented in vllm/inputs/llm.py.
 # multi_modal_data is defined here: https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/inputs.py#L103
 # ModalityData is defined here: https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/inputs.py#L80
 class PatchedTokensPrompt(TokensPrompt):
@@ -156,6 +164,7 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = True
+    stream_options: Optional[dict] = None
 
 
 class MultiModalInput(BaseModel):
@@ -170,38 +179,19 @@ class MultiModalGroup(BaseModel):
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata | str] = None
+    serialized_request: Optional[TransferRequest] = None
+    loaded_embedding: Optional[torch.Tensor] = Field(default=None, exclude=True)
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    # LoRA adapter name (matches the name used in load_lora)
+    model: Optional[str] = None
     # Decode-only worker can have None for multimodal_inputs
     multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
     # Add these fields for Qwen VL (mRoPE) decode-only worker
     image_grid_thw: Optional[List[List[int]]] = None
     embeddings_shape: Optional[List[int]] = None
-
-
-class VLLMNativeEncoderRequest(BaseModel):
-    """Request for vLLM-native encoder worker using ECConnector"""
-
-    request_id: str
-    token_ids: List[
-        int
-    ]  # Pre-tokenized prompt with placeholder tokens (for TokensPrompt)
-    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
-    modality: Optional[
-        Literal["image", "video", "audio"]
-    ] = None  # Can be inferred from inputs
-
-
-class VLLMNativeEncoderResponse(BaseModel):
-    """Response from vLLM-native encoder worker (ECConnector mode)"""
-
-    request_id: str
-    mm_hash: str  # vLLM's multimodal hash identifier
-    modality: str  # "image", "video", "audio"
-    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
 
 
 class MyRequestOutput(BaseModel):

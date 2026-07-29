@@ -3,12 +3,15 @@
 
 //! Disk-backed memory storage using memory-mapped files.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
 use core::ffi::c_char;
+#[cfg(target_os = "linux")]
 use nix::fcntl::{FallocateFlags, fallocate};
+#[cfg(not(target_os = "linux"))]
+use nix::unistd::ftruncate;
 use nix::unistd::unlink;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
@@ -16,15 +19,26 @@ use std::os::fd::BorrowedFd;
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
 
+#[cfg(target_os = "linux")]
+const DISK_OPEN_DIRECT_FLAG: i32 = nix::libc::O_DIRECT;
+#[cfg(not(target_os = "linux"))]
+const DISK_OPEN_DIRECT_FLAG: i32 = 0;
+
+/// Disk-backed storage using memory-mapped files with O_DIRECT support.
 #[derive(Debug)]
 pub struct DiskStorage {
+    /// File descriptor for the backing file.
     fd: u64,
+    /// Path to the backing file.
     path: PathBuf,
+    /// Size of the storage in bytes.
     size: usize,
+    /// Whether the file has been unlinked from the filesystem.
     unlinked: bool,
 }
 
 impl DiskStorage {
+    /// Creates a new disk storage of the given size in the default cache directory.
     pub fn new(size: usize) -> Result<Self> {
         // We need to open our file with some special flags that aren't supported by the tempfile crate.
         // Instead, we'll use the mkostemp function to create a temporary file with the correct flags.
@@ -36,6 +50,7 @@ impl DiskStorage {
         Self::new_at(file_path, size)
     }
 
+    /// Creates a new disk storage at the specified path with the given size.
     pub fn new_at(path: impl AsRef<Path>, len: usize) -> Result<Self> {
         if len == 0 {
             return Err(StorageError::AllocationFailed(
@@ -75,12 +90,7 @@ impl DiskStorage {
             let template = CString::new(path_str).unwrap();
             let mut template_bytes = template.into_bytes_with_nul();
 
-            let fd = unsafe {
-                nix::libc::mkostemp(
-                    template_bytes.as_mut_ptr() as *mut c_char,
-                    nix::libc::O_RDWR | nix::libc::O_DIRECT,
-                )
-            };
+            let fd = unsafe { create_temp_file(template_bytes.as_mut_ptr() as *mut c_char) };
 
             if fd == -1 {
                 return Err(StorageError::AllocationFailed(format!(
@@ -104,7 +114,7 @@ impl DiskStorage {
             let fd = unsafe {
                 nix::libc::open(
                     path_cstr.as_ptr(),
-                    nix::libc::O_CREAT | nix::libc::O_RDWR | nix::libc::O_DIRECT,
+                    nix::libc::O_CREAT | nix::libc::O_RDWR | DISK_OPEN_DIRECT_FLAG,
                     0o644,
                 )
             };
@@ -119,18 +129,7 @@ impl DiskStorage {
             (fd, file_path)
         };
 
-        // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        unsafe {
-            fallocate(
-                BorrowedFd::borrow_raw(raw_fd),
-                FallocateFlags::empty(),
-                0,
-                len as i64,
-            )
-            .map_err(|e| {
-                StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
-            })?
-        };
+        allocate_file(raw_fd, len)?;
 
         Ok(Self {
             fd: raw_fd as u64,
@@ -140,15 +139,17 @@ impl DiskStorage {
         })
     }
 
+    /// Returns the file descriptor of the backing file.
     pub fn fd(&self) -> u64 {
         self.fd
     }
 
+    /// Returns the path to the backing file.
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
-    /// Unlink our temp file.
+    /// Unlinks the backing file from the filesystem.
     /// This means that when this process terminates, the file will be automatically deleted by the OS.
     /// Unfortunately, GDS requires that files we try to register must be linked.
     /// To get around this, we unlink the file only after we've registered it with NIXL.
@@ -163,9 +164,39 @@ impl DiskStorage {
         Ok(())
     }
 
+    /// Returns whether the backing file has been unlinked from the filesystem.
     pub fn unlinked(&self) -> bool {
         self.unlinked
     }
+}
+
+fn allocate_file(raw_fd: i32, len: usize) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        fallocate(
+            BorrowedFd::borrow_raw(raw_fd),
+            FallocateFlags::empty(),
+            0,
+            len as i64,
+        )
+        .map_err(|e| StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e)))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        ftruncate(BorrowedFd::borrow_raw(raw_fd), len as i64)
+            .map_err(|e| StorageError::AllocationFailed(format!("Failed to size temp file: {}", e)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn create_temp_file(template: *mut c_char) -> i32 {
+    unsafe { nix::libc::mkostemp(template, nix::libc::O_RDWR | DISK_OPEN_DIRECT_FLAG) }
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn create_temp_file(template: *mut c_char) -> i32 {
+    unsafe { nix::libc::mkstemp(template) }
 }
 
 impl Drop for DiskStorage {
@@ -177,7 +208,7 @@ impl Drop for DiskStorage {
     }
 }
 
-impl MemoryDescription for DiskStorage {
+impl MemoryDescriptor for DiskStorage {
     fn addr(&self) -> usize {
         0
     }
@@ -345,7 +376,7 @@ impl super::nixl::NixlCompatible for DiskStorage {
 //         }
 //     }
 
-//     impl MemoryDescription for MemMappedFileStorage {
+//     impl MemoryDescriptor for MemMappedFileStorage {
 //         fn addr(&self) -> usize {
 //             self.mmap.as_ptr() as usize
 //         }
