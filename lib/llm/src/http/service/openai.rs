@@ -2016,6 +2016,11 @@ async fn chat_completions(
         ),
     );
 
+    // When parallel_tool_calls is false, limit the response to a single tool call.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
+    let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2077,8 +2082,23 @@ async fn chat_completions(
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
 
-            while let Some(response) = stream.next().await {
+            while let Some(mut response) = stream.next().await {
                 events.clear();
+
+                // When parallel_tool_calls is false, surface only the first tool call
+                // Keep index 0 and drop any higher indexes
+                if enforce_single_tool_call
+                    && let Some(data) = response.data.as_mut()
+                {
+                    for choice in data.inner.choices.iter_mut() {
+                        if let Some(tool_calls) = choice.delta.tool_calls.as_mut() {
+                            tool_calls.retain(|tc| tc.index == 0);
+                            if tool_calls.is_empty() {
+                                choice.delta.tool_calls = None;
+                            }
+                        }
+                    }
+                }
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {

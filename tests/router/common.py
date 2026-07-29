@@ -1283,19 +1283,20 @@ def _parse_frontend_rejection_metric(
     return 0
 
 
-def _verify_frontend_rejection_metrics(
+def _get_frontend_rejection_metric(
     frontend_port: int,
     model_name: str,
     endpoint: str,
-    expected_count: int,
-) -> None:
-    """Verify frontend rejection metrics by scraping the /metrics endpoint.
+) -> int:
+    """Read the frontend rejection counter from the /metrics endpoint.
 
     Args:
         frontend_port: Port where the frontend /metrics is served
         model_name: The model name label value
         endpoint: The endpoint label value (e.g. "chat_completions")
-        expected_count: Expected rejection count to match exactly
+
+    Returns:
+        The current rejection count
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
     try:
@@ -1306,9 +1307,17 @@ def _verify_frontend_rejection_metrics(
             f"Failed to fetch frontend metrics from {metrics_url}: {e}"
         ) from e
 
-    metric_count = _parse_frontend_rejection_metric(
-        metrics_response.text, model_name, endpoint
-    )
+    return _parse_frontend_rejection_metric(metrics_response.text, model_name, endpoint)
+
+
+def _verify_frontend_rejection_metrics(
+    frontend_port: int,
+    model_name: str,
+    endpoint: str,
+    expected_count: int,
+) -> None:
+    """Verify frontend rejection metrics by scraping the /metrics endpoint."""
+    metric_count = _get_frontend_rejection_metric(frontend_port, model_name, endpoint)
     logger.info(f"Frontend rejection metric: model_rejection_total={metric_count}")
     assert metric_count == expected_count, (
         f"Frontend model_rejection_total ({metric_count}) does not match "
@@ -1331,12 +1340,17 @@ def _probe_overload_529_and_assert(
     asserts:
     1. At least one request is rejected with 529 (the threshold gates the pool)
     2. No other status codes appear
-    3. The frontend ``model_rejection_total`` metric matches the 529 count
+    3. The frontend ``model_rejection_total`` metric increases by the 529 count
 
     Successes are not required: a single overload-shaped request can exceed the
     threshold before dispatch, so an all-529 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    model_name = test_payload.get("model", "")
+    # Read after readiness because its retries can contribute unrelated 529s.
+    initial_rejection_count = _get_frontend_rejection_metric(
+        frontend_port, model_name, "chat_completions"
+    )
     test_payload_529 = {
         **test_payload,
         "max_tokens": max_tokens,
@@ -1346,6 +1360,7 @@ def _probe_overload_529_and_assert(
 
     async def exhaust_resources_and_verify_529():
         stop_event = asyncio.Event()
+        observed_statuses = []
 
         async with aiohttp.ClientSession() as session:
             tasks = []
@@ -1353,25 +1368,28 @@ def _probe_overload_529_and_assert(
             async def send_request(req_id, payload):
                 try:
                     async with session.post(url, json=payload) as response:
-                        if response.status == 200:
+                        status = response.status
+                        observed_statuses.append(status)
+
+                        if status == 200:
                             logger.info("Request %s accepted", req_id)
                             await stop_event.wait()
-                            return response.status
+                            return status
 
-                        if response.status == 529:
+                        if status == 529:
+                            stop_event.set()
                             body = await response.text()
                             logger.info("Request %s got expected 529: %s", req_id, body)
-                            stop_event.set()
-                            return response.status
+                            return status
 
                         body = await response.text()
                         logger.info(
                             "Request %s got unexpected status %s: %s",
                             req_id,
-                            response.status,
+                            status,
                             body,
                         )
-                        return response.status
+                        return status
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -1405,22 +1423,16 @@ def _probe_overload_529_and_assert(
                         logger.error("Timed out waiting for overload 529")
             finally:
                 stop_event.set()
-                # Drain quickly and count only requests that received a status.
-                # This does not race the rejection-metric assertion: a 529 is
-                # returned synchronously by send_request (so every rejected
-                # request is in `done`, never `pending`), and the accepted (200)
-                # requests unblock from stop_event and return immediately. Any
-                # task still pending here received no HTTP status yet — cancelling
-                # it can neither drop a counted 529 nor desync model_rejection_total
-                # (which only counts emitted 529s). Some configs (e.g. slow decode
-                # with large max_tokens) leave such in-flight requests, so we must
-                # not block on or fail them.
+                # Statuses are recorded when headers arrive, so cancelling a task
+                # that is still draining its body cannot drop an observed 529.
                 done, pending = await asyncio.wait(tasks, timeout=5)
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
 
-            return [t.result() for t in done]
+            return observed_statuses
 
     results = asyncio.run(exhaust_resources_and_verify_529())
 
@@ -1443,9 +1455,11 @@ def _probe_overload_529_and_assert(
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
 
     # Verify rejection metrics from frontend /metrics endpoint
-    model_name = test_payload.get("model", "")
     _verify_frontend_rejection_metrics(
-        frontend_port, model_name, "chat_completions", num_rejected
+        frontend_port,
+        model_name,
+        "chat_completions",
+        initial_rejection_count + num_rejected,
     )
 
     logger.info(
@@ -1473,9 +1487,9 @@ def _test_router_overload_529(
     Uses limited resources to intentionally trigger the overload condition.
 
     Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
-    1. At least one request succeeds (routed before busy state propagates)
+    1. Every observed response is either 200 or 529
     2. At least one request is rejected with 529 (worker busy)
-    3. The frontend model_rejection_total metric matches the observed 529 count
+    3. The frontend model_rejection_total increase matches the observed 529 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
