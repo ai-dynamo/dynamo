@@ -25,28 +25,6 @@
  * and community/README.mdx.
  */
 const LANDING_CSS = `
-/* ===================== Community page ===================== */
-
-:root {
-    --dynamo-community-green: #76b900;
-    --dynamo-community-green-bright: #8ed600;
-    --dynamo-community-ink: var(--grayscale-a12);
-    --dynamo-community-muted: var(--grayscale-a10);
-    --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
-    --dynamo-community-soft: color-mix(in srgb, var(--grayscale-a12) 4%, transparent);
-}
-
-@keyframes dynamo-cursor-blink {
-  0%,
-  45% {
-    opacity: 1;
-  }
-  46%,
-  100% {
-    opacity: 0;
-  }
-}
-
 /* ===================== Welcome (Home) landing page ===================== */
 
 /* The marker component scopes every override to the Home page. */
@@ -204,6 +182,19 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   vertical-align: -0.16em;
   background: #76b900;
   animation: dynamo-cursor-blink 0.9s steps(1, end) infinite;
+}
+
+
+
+@keyframes dynamo-cursor-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  46%,
+  100% {
+    opacity: 0;
+  }
 }
 
 .dynamo-welcome__sr-only {
@@ -441,7 +432,8 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 @media (prefers-reduced-motion: reduce) {
-.dynamo-welcome__demo-reveal::before,
+
+  .dynamo-welcome__demo-reveal::before,
   .dynamo-welcome__demo-reveal p,
   .dynamo-welcome__demo-reveal h2,
   .dynamo-welcome__terminal-stage {
@@ -704,7 +696,7 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   place-items: center;
   padding: clamp(2rem, 5vw, 4.5rem);
   opacity: 0;
-  transform: translateY(24px) scale(0.98);
+  transform: translateY(24px);
   pointer-events: none;
   transition:
     opacity 320ms ease,
@@ -749,20 +741,40 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-story-windowbar {
+  position: relative;
   display: flex;
-  height: 2.8rem;
+  height: 3rem;
+  flex: none;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.48rem;
   padding: 0 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  background: #24243d;
+  border-bottom: 1px solid #d7d8d7;
+  background: #f3f4f3;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
-.dynamo-story-windowbar > span:not(.dynamo-story-window-label) {
-  width: 0.68rem;
-  height: 0.68rem;
+.dark .dynamo-story-windowbar {
+  border-bottom-color: #171817;
+  background: #2b2c2b;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.dynamo-story-windowbar > span {
+  width: 0.72rem;
+  min-width: 0.72rem;
+  max-width: 0.72rem;
+  height: 0.72rem;
+  min-height: 0.72rem;
+  max-height: 0.72rem;
+  flex: 0 0 0.72rem;
+  border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 50%;
   background: #ff5f57;
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  animation: none;
+  transform: none;
+  transition: none;
 }
 
 .dynamo-story-windowbar > span:nth-child(2) {
@@ -774,27 +786,38 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-story-window-label {
-  display: block;
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: #d7d7e2;
-  font-family: RobotoMono, ui-monospace, monospace;
-  font-size: 0.72rem;
-  font-weight: 500;
+  position: absolute;
+  left: 50%;
+  margin: 0;
+  transform: translateX(-50%);
+  color: #555755;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
   line-height: 1;
-  box-shadow: none;
+  white-space: nowrap;
+}
+
+.dark .dynamo-story-window-label {
+  color: #d4d5d4;
 }
 
 .dynamo-story-graphic--performance,
 .dynamo-story-graphic--engines {
+  display: flex;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  flex-direction: column;
+  border: 1px solid #d7d8d7;
   border-radius: 18px;
-  background: #0d1117;
+  background: linear-gradient(#f3f4f3 0 3rem, #0d1117 3rem);
   color: #f5f5f5;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+}
+
+.dark .dynamo-story-graphic--performance,
+.dark .dynamo-story-graphic--engines {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: linear-gradient(#2b2c2b 0 3rem, #0d1117 3rem);
 }
 
 .dynamo-story-metrics {
@@ -1057,8 +1080,17 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   align-items: center;
   gap: 0.5rem;
   padding: 0 1rem;
-  background: #24243d;
-  color: #d9d9e5;
+  border-bottom: 1px solid #d7d8d7;
+  background: #f3f4f3;
+  color: #555755;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.dark .dynamo-calendar__chrome {
+  border-bottom-color: #171817;
+  background: #2b2c2b;
+  color: #d4d5d4;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .dynamo-calendar__chrome > span {
@@ -1076,9 +1108,10 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   position: absolute;
   left: 50%;
   margin: 0;
-  color: #e7e7ef;
+  color: inherit;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   font-size: 0.78rem;
-  font-weight: 650;
+  font-weight: 600;
   transform: translateX(-50%);
 }
 
@@ -1088,11 +1121,16 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   gap: 0.45rem;
   margin-left: auto;
   padding: 0.45rem 0.7rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(31, 35, 31, 0.18);
   border-radius: 8px;
-  color: #e7e7ef !important;
+  color: #555755 !important;
   font-size: 0.7rem;
   text-decoration: none !important;
+}
+
+.dark .dynamo-calendar__chrome a {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #d4d5d4 !important;
 }
 
 .dynamo-calendar__chrome a svg {
@@ -1393,40 +1431,47 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 @media (max-width: 1360px) {
-.dynamo-welcome__community {
+
+  .dynamo-welcome__community {
     position: static;
     width: min(100%, 720px);
     margin: 2rem auto 0;
     flex-direction: row;
   }
-.dynamo-welcome__notification {
+
+  .dynamo-welcome__notification {
     flex: 1;
     min-width: 0;
   }
 }
 
 @media (max-width: 960px) {
-.dynamo-story {
+
+  .dynamo-story {
     display: block;
     margin-top: 2rem;
   }
-.dynamo-story__stage {
+
+  .dynamo-story__stage {
     display: none;
   }
-.dynamo-story__step {
+
+  .dynamo-story__step {
     display: block;
     min-height: 0;
     margin-bottom: 4.5rem;
     opacity: 1;
   }
-.dynamo-story__step-copy,
+
+  .dynamo-story__step-copy,
   .dynamo-story__step[data-active="true"] .dynamo-story__step-copy {
     max-width: 680px;
     margin-bottom: 1.5rem;
     border-color: #76b900;
     transform: none;
   }
-.dynamo-story__mobile-graphic {
+
+  .dynamo-story__mobile-graphic {
     display: grid;
     min-height: 480px;
     place-items: center;
@@ -1445,138 +1490,172 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 @media (max-width: 640px) {
-article:has(.dynamo-welcome) {
+
+  article:has(.dynamo-welcome) {
     padding-inline: 0.75rem;
   }
-article:has(.dynamo-welcome) > header {
+
+  article:has(.dynamo-welcome) > header {
     padding-top: 2.75rem;
   }
-article:has(.dynamo-welcome) > header::before {
+
+  article:has(.dynamo-welcome) > header::before {
     width: 60px;
     height: 60px;
     margin-bottom: 1rem;
     border-radius: 14px;
   }
-article:has(.dynamo-welcome) > header .fern-page-heading {
+
+  article:has(.dynamo-welcome) > header .fern-page-heading {
     font-size: clamp(3.5rem, 18vw, 4.75rem);
   }
-article:has(.dynamo-welcome) > header .fern-page-subtitle {
+
+  article:has(.dynamo-welcome) > header .fern-page-subtitle {
     max-width: 340px;
     white-space: normal;
   }
-.dynamo-welcome__terminal {
+
+  .dynamo-welcome__terminal {
     margin-top: 6.5rem;
   }
-.dynamo-welcome__demo-reveal {
+
+  .dynamo-welcome__demo-reveal {
     top: -5.25rem;
     width: 100%;
     margin: 0;
     padding: 0.5rem 0.55rem 0.2rem;
   }
-.dynamo-welcome__demo-reveal h2 {
+
+  .dynamo-welcome__demo-reveal h2 {
     font-size: 1.7rem;
   }
-.dynamo-welcome__terminal-stage {
+
+  .dynamo-welcome__terminal-stage {
     padding: 0.6rem;
     border-radius: 21px;
   }
-.dynamo-welcome__statement {
+
+  .dynamo-welcome__statement {
     width: 100%;
     min-height: 6.5rem;
     font-size: 0.95rem;
     line-height: 1.65;
   }
-.dynamo-welcome__community {
+
+  .dynamo-welcome__community {
     width: min(100%, 350px);
     flex-direction: column;
   }
-.dynamo-welcome__notification {
+
+  .dynamo-welcome__notification {
     width: 100%;
   }
-.dynamo-story__step {
+  .dynamo-story__step {
     margin-bottom: 3.5rem;
   }
-.dynamo-story__step h3 {
+
+  .dynamo-story__step h3 {
     font-size: 2.15rem;
   }
-.dynamo-story__step-copy > p:last-child {
+
+  .dynamo-story__step-copy > p:last-child {
     font-size: 0.98rem;
   }
-.dynamo-story__mobile-graphic {
+
+  .dynamo-story__mobile-graphic {
     min-height: 390px;
     padding: 1rem;
     border-radius: 20px;
   }
-.dynamo-story-graphic {
+
+  .dynamo-story-graphic {
     min-height: 330px;
   }
-.dynamo-story-orbit {
+
+  .dynamo-story-orbit {
     width: 300px;
   }
-.dynamo-story-core {
+
+  .dynamo-story-core {
     width: 5.8rem;
     height: 5.8rem;
     border-radius: 22px;
   }
-.dynamo-story-orbit .node {
+
+  .dynamo-story-orbit .node {
     min-width: 5.7rem;
     min-height: 2.7rem;
     font-size: 0.64rem;
   }
-.dynamo-story-stack span:nth-child(n) {
+
+  .dynamo-story-stack span:nth-child(n) {
     margin-inline: 0;
   }
 }
 
 @media (max-width: 760px) {
-.dynamo-calendar {
+
+  .dynamo-calendar {
     margin-top: 5rem;
     border-radius: 20px;
   }
-.dynamo-calendar__chrome p {
+
+  .dynamo-calendar__chrome p {
     display: none;
   }
-.dynamo-calendar__chrome a {
+
+  .dynamo-calendar__chrome a {
     font-size: 0;
   }
-.dynamo-calendar__chrome a svg {
+
+  .dynamo-calendar__chrome a svg {
     width: 0.75rem;
     height: 0.75rem;
   }
-.dynamo-calendar__body {
+
+  .dynamo-calendar__body {
     display: block;
   }
-.dynamo-calendar__sidebar {
+
+  .dynamo-calendar__sidebar {
     border-right: 0;
     border-bottom: 1px solid rgba(127, 127, 127, 0.18);
   }
-.dynamo-calendar__agenda {
+
+  .dynamo-calendar__agenda {
     padding: 2rem 1.25rem;
   }
-.dynamo-calendar__intro h2 {
+
+  .dynamo-calendar__intro h2 {
     font-size: 3rem;
   }
-.dynamo-calendar__event {
+
+  .dynamo-calendar__event {
     grid-template-columns: 3.2rem minmax(0, 1fr);
   }
-.dynamo-calendar__event-action {
+
+  .dynamo-calendar__event-action {
     display: none;
   }
-.dynamo-calendar__past a {
+
+  .dynamo-calendar__past a {
     display: block;
   }
-.dynamo-calendar__past a span {
+
+  .dynamo-calendar__past a span {
     display: block;
     margin-bottom: 0.15rem;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-.dynamo-welcome__cursor {
+
+  .dynamo-welcome__cursor {
     animation: none;
     opacity: 1;
   }
-.dynamo-welcome__cta,
+
+  .dynamo-welcome__cta,
   .dynamo-welcome__notification,
   .dynamo-story__step,
   .dynamo-story__step-copy,
@@ -1585,7 +1664,16 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle {
   }
 }
 
-article:has(.dynamo-community-page) { max-width: 1040px !important; }
+article:has(.dynamo-community-page) {
+  width: 100% !important;
+  max-width: 1200px !important;
+  margin-inline: auto;
+}
+
+.dark .dynamo-community-page {
+  --dynamo-community-soft: #2b2c2b;
+  --dynamo-community-titlebar-text: #d4d5d4;
+}
 
 .dynamo-community-page { color: var(--dynamo-community-ink); }
 
@@ -1602,6 +1690,8 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 .dynamo-community-button { display: inline-flex; min-height: 2.55rem; flex: none; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.62rem 0.9rem; border: 1px solid var(--dynamo-community-rule); border-radius: 8px; background: var(--grayscale-a1); color: var(--dynamo-community-ink) !important; font-size: 0.82rem; font-weight: 680; text-decoration: none !important; transition: border-color 150ms ease, background 150ms ease; }
 
 .dynamo-community-button:hover { border-color: rgba(118, 185, 0, 0.55); background: rgba(118, 185, 0, 0.06); }
+
+.dynamo-community-button.is-outline { background: transparent; }
 
 .dynamo-community-button.is-primary { border-color: var(--dynamo-community-green); background: var(--dynamo-community-green); color: #0b1400 !important; }
 
@@ -1657,6 +1747,7 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 }
 
 .dynamo-community-calendar__chrome {
+  position: relative;
   display: grid;
   min-height: 3.7rem;
   grid-template-columns: 0.76rem 0.76rem 0.76rem 1fr 2.28rem;
@@ -1664,21 +1755,32 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   gap: 0.5rem;
   padding: 0 1.15rem;
   border-bottom: 1px solid var(--dynamo-community-rule);
-  background: color-mix(in srgb, var(--grayscale-a2) 80%, transparent);
+  background: var(--dynamo-community-soft);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .dynamo-community-calendar__chrome > span {
   width: 0.76rem;
   height: 0.76rem;
+  border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 50%;
   background: #ff5f57;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.08);
 }
 
 .dynamo-community-calendar__chrome > span:nth-child(2) { background: #febc2e; }
 
 .dynamo-community-calendar__chrome > span:nth-child(3) { background: #28c840; }
 
-.dynamo-community-calendar__chrome strong { justify-self: center; font-size: 0.84rem; }
+.dynamo-community-calendar__chrome strong {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--dynamo-community-titlebar-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
 
 .dynamo-community-window-bar {
   display: grid;
@@ -1690,15 +1792,21 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   background: var(--dynamo-community-soft);
 }
 
+.dark .dynamo-community-calendar__chrome,
+.dark .dynamo-community-window-bar {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
 .dynamo-community-window-bar > strong {
-  color: var(--dynamo-community-muted);
+  color: var(--dynamo-community-titlebar-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   font-size: 0.78rem;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .dynamo-community-window-dots { display: flex; gap: 0.48rem; }
 
-.dynamo-community-window-dots i { width: 0.72rem; height: 0.72rem; border-radius: 50%; background: #ff5f57; }
+.dynamo-community-window-dots i { width: 0.72rem; height: 0.72rem; border: 1px solid rgba(0,0,0,.12); border-radius: 50%; background: #ff5f57; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.08); }
 
 .dynamo-community-window-dots i:nth-child(2) { background: #febc2e; }
 
@@ -1756,7 +1864,7 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 }
 
 .dynamo-community-calendar__day.is-today {
-  box-shadow: inset 0 0 0 2px rgba(118, 185, 0, 0.42);
+  background: color-mix(in srgb, var(--dynamo-community-green) 13%, var(--grayscale-a1));
 }
 
 .dynamo-community-calendar__day.is-today .dynamo-community-calendar__number {
@@ -1766,13 +1874,13 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   margin: -0.15rem -0.15rem 0.3rem auto;
   place-items: center;
   border-radius: 50%;
-  background: var(--dynamo-community-green);
-  color: #0b1400;
+  background: color-mix(in srgb, var(--dynamo-community-green) 22%, transparent);
+  color: color-mix(in srgb, var(--dynamo-community-green) 72%, var(--dynamo-community-ink));
 }
 
 .dynamo-community-calendar__event-slot {
   position: relative;
-  min-height: 2.45rem;
+  min-height: 3.5rem;
   margin: 0.32rem 0;
 }
 
@@ -1781,9 +1889,9 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
   inset: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 0.35rem;
+  gap: 0.08rem;
   overflow: hidden;
   padding: 0.42rem 0.48rem;
   border: 1px solid transparent;
@@ -1916,7 +2024,7 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 
 .dynamo-community-channels__grid > a:nth-child(2n) { border-right: 0; }
 
-.dynamo-community-channels__grid > a:nth-last-child(-n + 2) { border-bottom: 0; }
+.dynamo-community-channels__grid > a:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; border-bottom: 0; }
 
 .dynamo-community-channels__grid > a:hover { background: rgba(118,185,0,.045); }
 
@@ -1946,7 +2054,7 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 
 .dynamo-community-app--calendar { background: #4978d0; }
 
-.dynamo-community-contribute { display: grid; grid-template-columns: minmax(0,1fr) minmax(240px,.7fr); gap: 2rem; margin-top: 3.5rem; padding: 2rem 0; border-block: 1px solid var(--dynamo-community-rule); }
+.dynamo-community-contribute { display: grid; grid-template-columns: minmax(0,1fr) minmax(240px,.7fr); gap: 2rem; margin-top: 3.5rem; padding: 2rem 0; border-top: 1px solid var(--dynamo-community-rule); }
 
 .dynamo-community-contribute > div > p:last-child { max-width: 620px; margin-bottom: 0; color: var(--dynamo-community-muted); line-height: 1.65; }
 
@@ -1958,23 +2066,31 @@ article:has(.dynamo-community-page) { max-width: 1040px !important; }
 
 .dynamo-community-contribute a:hover { color: var(--dynamo-community-green) !important; }
 
+body:has(.dynamo-community-page) .fern-layout-footer,
+.fern-layout-guide:has(.dynamo-community-page) > .grow { display: none; }
+
+body:has(.dynamo-community-page) .fern-layout-guide,
+article:has(.dynamo-community-page) { margin-bottom: 0; }
+
 @media (max-width: 760px) {
-.dynamo-community-section-heading, .dynamo-community-meeting__actions { align-items: flex-start; }
-.dynamo-community-section-heading { flex-direction: column; }
-.dynamo-community-meeting, .dynamo-community-contribute { grid-template-columns: 1fr; }
-.dynamo-community-meeting__cadence { min-height: 180px; border-right: 0; border-bottom: 1px solid var(--dynamo-community-rule); }
-.dynamo-community-calendar__window { overflow-x: auto; border-radius: 22px; }
-.dynamo-community-calendar__chrome, .dynamo-community-calendar__weekdays, .dynamo-community-calendar__grid { min-width: 720px; }
-.dynamo-community-channels__grid { grid-template-columns: 1fr; }
-.dynamo-community-channels__grid > a, .dynamo-community-channels__grid > a:nth-child(2n), .dynamo-community-channels__grid > a:nth-last-child(-n + 2) { border-right: 0; border-bottom: 1px solid var(--dynamo-community-rule); }
-.dynamo-community-channels__grid > a:last-child { border-bottom: 0; }
-.dynamo-community-calendar__upcoming { grid-template-columns: 1fr; }
-.dynamo-community-calendar__upcoming > p { padding-top: 0; }
+
+  .dynamo-community-section-heading, .dynamo-community-meeting__actions { align-items: flex-start; }
+  .dynamo-community-section-heading { flex-direction: column; }
+  .dynamo-community-meeting, .dynamo-community-contribute { grid-template-columns: 1fr; }
+  .dynamo-community-meeting__cadence { min-height: 180px; border-right: 0; border-bottom: 1px solid var(--dynamo-community-rule); }
+  .dynamo-community-calendar__window { overflow-x: auto; border-radius: 22px; }
+  .dynamo-community-calendar__chrome, .dynamo-community-calendar__weekdays, .dynamo-community-calendar__grid { min-width: 720px; }
+  .dynamo-community-channels__grid { grid-template-columns: 1fr; }
+  .dynamo-community-channels__grid > a, .dynamo-community-channels__grid > a:nth-child(2n), .dynamo-community-channels__grid > a:nth-last-child(-n + 2) { border-right: 0; border-bottom: 1px solid var(--dynamo-community-rule); }
+  .dynamo-community-channels__grid > a:last-child { border-bottom: 0; }
+  .dynamo-community-calendar__upcoming { grid-template-columns: 1fr; }
+  .dynamo-community-calendar__upcoming > p { padding-top: 0; }
 }
 
 @media (max-width: 520px) {
-.dynamo-community-meeting__actions { flex-direction: column; }
-.dynamo-community-meeting__actions .dynamo-community-button, .dynamo-community-meeting__actions .dynamo-community-text-link { width: 100%; }
+
+  .dynamo-community-meeting__actions { flex-direction: column; }
+  .dynamo-community-meeting__actions .dynamo-community-button, .dynamo-community-meeting__actions .dynamo-community-text-link { width: 100%; }
 }
 `;
 

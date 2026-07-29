@@ -35,7 +35,7 @@ const SITE_CSS = `
 /* Color themes for light and dark modes */
 :root {
     /* Brand Colors */
-    --nv-color-green: #74B900;
+    --nv-color-green: #76B900;
     --nv-color-green-2: #004B31;
     --nv-color-black: #000000;
     --nv-color-white: #FFFFFF;
@@ -189,10 +189,17 @@ html.dark,
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
     height: 100vh !important;
 }
-.fern-sidebar-link:not(:hover){
+.fern-sidebar-link:not(:hover) {
     background-color: transparent !important;
 }
+.fern-sidebar-link:hover {
+    background-color: rgba(118, 185, 0, 0.10) !important;
+}
+.dark .fern-sidebar-link:hover {
+    background-color: rgba(118, 185, 0, 0.16) !important;
+}
 .fern-sidebar-link {
+    position: relative;
     padding-left: 1rem !important;
     padding-right: 1rem !important;
     padding-top: 0.5rem !important;
@@ -467,14 +474,31 @@ animation-range: 0 50px;
 .fern-footer-prev h4, .fern-footer-next h4{
     font-size: inherit !important;
 }
-.fern-sidebar-link.nested[data-state="active"]:before {
-    left: -0px !important;
-    bottom: -0px !important;
-    top: -0px !important;
-    width: 2px !important;
+/* The active page uses a persistent NVIDIA-green bar and the same subtle
+   green gradient treatment as active entries in the Blog navigation. */
+.fern-sidebar-link[data-state="active"]::before {
+    content: "";
+    position: absolute;
+    left: 0 !important;
+    bottom: 0 !important;
+    top: 0 !important;
+    width: 3px !important;
+    background-color: var(--nv-color-green) !important;
 }
 .fern-sidebar-link[data-state="active"] {
     color: unset !important;
+    background: linear-gradient(
+        90deg,
+        rgba(118, 185, 0, 0.15),
+        rgba(118, 185, 0, 0.04)
+    ) !important;
+}
+.dark .fern-sidebar-link[data-state="active"] {
+    background: linear-gradient(
+        90deg,
+        rgba(118, 185, 0, 0.20),
+        rgba(118, 185, 0, 0.06)
+    ) !important;
 }
 
 .fern-selection-item .fern-selection-item-icon{
@@ -1270,6 +1294,18 @@ a.fern-card:hover{
 .node--local {
   bottom: 19%;
   left: -2%;
+}
+
+/* ===================== Community page ===================== */
+
+:root {
+  --dynamo-community-green: #76b900;
+  --dynamo-community-green-bright: #8ed600;
+  --dynamo-community-ink: var(--grayscale-a12);
+  --dynamo-community-muted: var(--grayscale-a10);
+  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
+  --dynamo-community-soft: #f3f4f3;
+  --dynamo-community-titlebar-text: #555755;
 }
 `;
 // sync-site-css:end
