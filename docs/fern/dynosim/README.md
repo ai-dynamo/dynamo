@@ -67,6 +67,6 @@ AIC provides performance models and candidate-shape information. DynoSim uses th
 | Exercise a Kubernetes frontend/router setup without GPUs | [Simulate a Kubernetes Deployment](mocker.mdx) |
 | Exercise a local frontend/router setup without GPUs | [Simulate a Local Deployment](mocker-local.mdx) |
 | Study Planner scaling decisions against a trace | [Benchmark Planner Decisions](planner-benchmarking.mdx) |
-| Generate a deployable Kubernetes config from model/SLA intent | [Model Deployment Guide](../kubernetes/model-deployment-guide.md) |
+| Generate a deployable Kubernetes config from model/SLA intent | [Auto Deployment](../kubernetes/auto-deployment-overview.mdx) |
 
 DynoSim narrows the search space; it does not replace real-hardware validation. Use it to move quickly, find promising candidates, and understand failure modes before spending cluster time.
