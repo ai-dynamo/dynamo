@@ -739,17 +739,6 @@ runs:
           fi
         }
 
-        verify_grove_admission() {
-          run_webhook_smoke_test 'Grove PodCliqueSet' smoke_grove
-          if ! jq -e '.spec.template.headlessServiceConfig != null' \
-            <<<"${SMOKE_OUTPUT}" >/dev/null; then
-            echo "::error::Grove PodCliqueSet request succeeded without the defaulting webhook mutation"
-            printf '%s\n' "${SMOKE_OUTPUT}" >&2
-            return 1
-          fi
-          echo "Grove PodCliqueSet admission succeeded with the expected defaulting mutation"
-        }
-
         verify_dynamo_admission v1alpha1 smoke_v1alpha1
         verify_dynamo_admission v1beta1 smoke_v1beta1
         verify_grove_webhook_configuration \
@@ -760,7 +749,7 @@ runs:
           validatingwebhookconfiguration \
           podcliqueset-validating-webhook \
           pcs.validating.webhooks.grove.io
-        verify_grove_admission
+        run_webhook_smoke_test 'Grove PodCliqueSet' smoke_grove
         echo "Grove PodCliqueSet defaulting and validation webhooks are installed and healthy"
         echo "::endgroup::"
 
