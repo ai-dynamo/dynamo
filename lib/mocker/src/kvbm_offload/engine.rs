@@ -353,21 +353,24 @@ impl MockOffloadEngine {
         let messenger = create_local_messenger().await?;
         let g2_events_manager = Arc::new(EventsManager::builder().build());
         let g2_event_stream = match drive_mode {
-            KvbmDriveMode::Live => {
-                G2EventStream::BestEffort(Box::pin(g2_events_manager.subscribe()))
-            }
-            KvbmDriveMode::OfflineDeterministic => G2EventStream::LossAware(Box::pin(
-                g2_events_manager
-                    .subscribe_loss_aware()
-                    .map(|result| result.map_err(|error| error.to_string())),
-            )),
+            KvbmDriveMode::Live => Some(G2EventStream::BestEffort(Box::pin(
+                g2_events_manager.subscribe(),
+            ))),
+            KvbmDriveMode::OfflineDeterministic => None,
         };
-        let registry = Arc::new(build_registry(g2_events_manager));
+        let registry = Arc::new(build_registry(g2_events_manager.clone()));
         let g2_manager = Arc::new(build_g2_block_manager(
             config.num_g2_blocks,
             config.block_size_tokens,
             &registry,
         ));
+        let g2_event_stream = g2_event_stream.unwrap_or_else(|| {
+            G2EventStream::LossAware(Box::pin(
+                g2_events_manager
+                    .subscribe_loss_aware()
+                    .map(|result| result.map_err(|error| error.to_string())),
+            ))
+        });
         let shared_g3 = SharedG3Pool::get_or_create_with_mode(&config, drive_mode)?;
         let g3_manager = shared_g3.as_ref().map(|pool| pool.manager());
         let shared_g4 = SharedG4Store::get_or_create_with_mode(&config, drive_mode)?;
