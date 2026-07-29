@@ -62,6 +62,7 @@ class OmniParallelKwargs:
 
     ulysses_degree: int = 1
     ring_degree: int = 1
+    allgather_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
     vae_parallel_mode: str = "tile"
@@ -254,6 +255,14 @@ class OmniArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--allgather-degree",
+            env_var="DYN_OMNI_ALLGATHER_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for AllGather-KV sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
             flag_name="--cfg-parallel-size",
             env_var="DYN_OMNI_CFG_PARALLEL_SIZE",
             default=1,
@@ -402,6 +411,8 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ulysses-degree must be > 0")
         if self.parallel.ring_degree <= 0:
             raise ValueError("--ring-degree must be > 0")
+        if self.parallel.allgather_degree <= 0:
+            raise ValueError("--allgather-degree must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
         if self.stage_configs_path is None:

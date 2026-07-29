@@ -188,6 +188,15 @@ overrides:
     license: LicenseRef-Intel-ISSL
     source: "Intel Simplified Software License — https://www.intel.com/content/www/us/en/developer/articles/license/end-user-license-agreement.html"
 
+  # --- Intel XPU Manager dpkg ---
+  # The upstream xpu-smi deb does not install a Debian copyright file that the
+  # dpkg generator can parse, but the Intel xpumanager project and package
+  # sources are MIT licensed.
+  - ecosystem: dpkg
+    name: xpu-smi
+    license: MIT
+    source: "Intel XPU Manager upstream LICENSE — https://github.com/intel/xpumanager/blob/master/LICENSE"
+
   # --- NVIDIA CUDA Toolkit dpkgs ---
   # Apt-installed CUDA components from the NVIDIA repo. Their copyright files
   # reference /usr/share/common-licenses/GPL-3 because some bundled GDB-related
@@ -358,8 +367,10 @@ overrides:
   - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
   - { ecosystem: python, name: mscclpp,                   license: "MIT",       source: "MSCCL++ upstream — https://github.com/microsoft/mscclpp/blob/main/LICENSE" }
   - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
-  - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-core, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }

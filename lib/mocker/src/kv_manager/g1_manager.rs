@@ -491,6 +491,9 @@ impl G1Manager {
         }
     }
 
+    /// Returns whether the legacy KVBM backend has a lower-tier offload
+    /// engine. Native G1 always returns `false`, so native requests cannot
+    /// enter the KVBM swap-in lifecycle.
     #[cfg(feature = "kvbm-offload")]
     pub fn has_offload_engine(&self) -> bool {
         match &self.backend {
