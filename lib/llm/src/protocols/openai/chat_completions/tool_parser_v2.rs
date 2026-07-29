@@ -39,6 +39,12 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 /// the streaming path. Must stay a subset of the families
 /// `dynamo_parsers_v2::create_tool_parser_for_family` accepts; the strings match
 /// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
+// TODO: when glm47 is added to V2_FAMILIES, port the streaming <tool_call>
+// truncation recovery from apply_tool_calling_jail (preprocessor.rs) to
+// tool_parser_v2::apply_stream. The v2 path skips the jail entirely, so the
+// ChoiceRecovery buffer and finish_reason=length synthetic-chunk logic will not
+// run. The aggregator.rs (non-streaming) half is parser-agnostic and keeps
+// working on both paths — only the streaming side needs porting.
 pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
 
 /// Whether the experimental v2 tool-parser routing is enabled. Read once from
