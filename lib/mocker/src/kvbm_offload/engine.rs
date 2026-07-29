@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_tokens::{BlockHash, SequenceHash as RouterSequenceHash};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use futures::task::noop_waker_ref;
 
 use kvbm_engine::leader::{
@@ -48,7 +48,6 @@ use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::common::protocols::G1 as MockerG1;
 
@@ -63,7 +62,7 @@ use super::coordinator::{
 };
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
-use super::worker::{CompletedTransfer, MockWorker, TransferDirection};
+use super::worker::{MockWorker, TransferDirection};
 
 // Successful offline barriers wake via watch channels. The timeout is only a
 // hang guard for pipeline bugs.
@@ -81,9 +80,7 @@ enum G2EventStream {
     LossAware(
         Pin<
             Box<
-                dyn Stream<
-                        Item = std::result::Result<LogicalKvCacheEvent, BroadcastStreamRecvError>,
-                    > + Send,
+                dyn Stream<Item = std::result::Result<LogicalKvCacheEvent, String>> + Send,
             >,
         >,
     ),
@@ -366,7 +363,11 @@ impl MockOffloadEngine {
                 G2EventStream::BestEffort(Box::pin(g2_events_manager.subscribe()))
             }
             KvbmDriveMode::OfflineDeterministic => {
-                G2EventStream::LossAware(Box::pin(g2_events_manager.subscribe_loss_aware()))
+                G2EventStream::LossAware(Box::pin(
+                    g2_events_manager
+                        .subscribe_loss_aware()
+                        .map(|result| result.map_err(|error| error.to_string())),
+                ))
             }
         };
         let registry = Arc::new(build_registry(g2_events_manager));
