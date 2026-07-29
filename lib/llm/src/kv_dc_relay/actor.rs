@@ -869,9 +869,7 @@ enum ActorCommand {
         release: oneshot::Receiver<()>,
     },
     #[cfg(test)]
-    InjectFault {
-        fault: ActorFault,
-    },
+    InjectFault { fault: ActorFault },
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -1601,8 +1599,7 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
         let (handle, faults) =
             KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fault-backpressure")).unwrap();
-        let disposition =
-            event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
+        let disposition = event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
 
         for event_id in 1..=(DEFAULT_FAULT_CAPACITY as u64 + 1) {
             handle

@@ -374,10 +374,7 @@ impl PendingActorFaults {
         let key = (fault.worker_id, fault.dp_rank);
         if let Some(current) = self.source_faults.get_mut(&key) {
             if fault.publisher_id != current.publisher_id
-                || is_stronger_source_fault(
-                    fault.disposition.action,
-                    current.disposition.action,
-                )
+                || is_stronger_source_fault(fault.disposition.action, current.disposition.action)
             {
                 *current = fault;
             }
