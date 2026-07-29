@@ -81,7 +81,7 @@ const testCases = [
     desc: 'vllm component triggers only vllm'
   },
 
-  // Sidecar files should trigger only their classification and Rust checks
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
     file: 'lib/sidecar/common/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
@@ -101,6 +101,11 @@ const testCases = [
     file: 'lib/sidecar/trtllm/src/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+  },
+  {
+    file: 'lib/sidecar/vllm/deploy/agg.yaml',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar deployment config avoids Rust and E2E checks'
   },
   {
     file: 'lib/sidecar/README.md',

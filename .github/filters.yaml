@@ -275,9 +275,7 @@ rust:
   - 'deny.toml'
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
-  - 'lib/sidecar/**'
-  - '!lib/sidecar/**/*.md'
-  - '!lib/sidecar/**/*.rst'
+  - 'lib/sidecar/**/*.proto'
 
 benchmarks:
   - 'benchmarks/**'
