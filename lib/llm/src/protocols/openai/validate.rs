@@ -163,6 +163,10 @@ fn validate_no_unsupported_fields_with_ignore(
             |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
         )?;
     }
+    if let Some(value) = unsupported_fields.get("logprob_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+    }
     Ok(())
 }
 
@@ -877,6 +881,15 @@ mod tests {
     fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
         let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
         validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_malformed_logprob_token_ids() {
+        for bad in [json!(["notanint"]), json!(7), json!([[1, 2]]), json!([-1])] {
+            let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
+            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            assert!(err.to_string().contains("must be an array of token IDs"));
+        }
     }
 
     #[test]
