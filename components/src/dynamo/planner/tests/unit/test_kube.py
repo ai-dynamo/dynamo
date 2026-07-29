@@ -1294,6 +1294,39 @@ async def test_wait_failed_rollout_raises_immediately(k8s_api, mock_core_api):
 
 
 @pytest.mark.asyncio
+async def test_wait_failed_rollout_raises_immediately_while_replicas_unstable(
+    k8s_api, mock_core_api
+):
+    """Failed + unstable replicas must raise RolloutFailedError on attempt 1.
+
+    The stability gate (non_planner_components_stable) must not run before the
+    Failed check on the require_backing_settled path. If it does, the loop
+    continues indefinitely and the caller gets a generic TimeoutError instead.
+    """
+    dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts="300")
+    # Make replicas unstable (desired=2, ready=1) so the old ordering would
+    # skip the Failed check via the stability-gate continue.
+    dgd["status"]["components"]["VllmDecodeWorker"]["readyReplicas"] = 1
+    dgd["status"]["rollingUpdate"] = {
+        "phase": "Failed",
+        "message": "pod CrashLoopBackOff",
+    }
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(RolloutFailedError) as exc_info:
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=3,
+                delay_seconds=0.01,
+            )
+    assert "test-deployment" in str(exc_info.value)
+    assert "CrashLoopBackOff" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_wait_legacy_failed_rollout_does_not_raise(k8s_api, mock_core_api):
     """Power-disabled (require_backing_settled=False) must not raise on a Failed rollout.
 

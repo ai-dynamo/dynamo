@@ -98,7 +98,7 @@ class PowerAwareConnector(Protocol):
 
     async def wait_for_settled_graph_deployment(
         self,
-        include_planner: bool = True,
+        include_planner: bool = False,
         *,
         require_prefill: bool = True,
         require_decode: bool = True,

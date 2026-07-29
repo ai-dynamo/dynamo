@@ -470,12 +470,17 @@ class KubernetesAPI:
                 is one of the services in the DGD.
             max_attempts: Maximum polling iterations.
             delay_seconds: Seconds between polls.
-            require_backing_settled: Power-only gate. When True (and
-                ``include_planner`` is False), also requires
-                ``status.observedGeneration >= metadata.generation`` and every
-                non-terminal worker Pod carrying the expected per-GPU annotation
-                from the current DGD snapshot, and blocks while
-                ``status.rollingUpdate.phase`` is Pending/InProgress/Failed.
+            require_backing_settled: Power-only gate. When True, raises
+                immediately on ``status.rollingUpdate.phase == "Failed"``
+                regardless of ``include_planner`` (the check runs before the
+                ``include_planner`` branch so ``include_planner=True`` callers
+                are not exempt; after fix-4 no production caller combines
+                ``require_backing_settled=True`` with ``include_planner=True``).
+                When True and ``include_planner`` is False, additionally
+                requires ``status.observedGeneration >= metadata.generation``
+                and every non-terminal worker Pod carrying the expected per-GPU
+                annotation from the current DGD snapshot, and blocks while
+                ``status.rollingUpdate.phase`` is Pending or InProgress.
                 Must stay False for the legacy ``wait_for_deployment_ready``
                 path so power-disabled planners keep working with older
                 operators or custom SAs that lack pods/list permission.
@@ -493,6 +498,18 @@ class KubernetesAPI:
             await asyncio.sleep(delay_seconds)
 
             graph_deployment = self.get_graph_deployment(graph_deployment_name)
+
+            # Failed is a terminal rollout state; retrying until timeout (up to
+            # 30 min) serves no purpose. Raise immediately so the operator can
+            # investigate. Checked before include_planner so this fires on both
+            # code paths when require_backing_settled is True.
+            if require_backing_settled:
+                _rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
+                if _rolling.get("phase") == "Failed":
+                    raise RolloutFailedError(
+                        deployment_name=graph_deployment_name,
+                        reason=_rolling.get("message", ""),
+                    )
 
             if include_planner:
                 conditions = graph_deployment.get("status", {}).get("conditions", [])
@@ -522,19 +539,10 @@ class KubernetesAPI:
             if not require_backing_settled:
                 return graph_deployment
 
-            # Power settlement path only from here. Failed is a terminal rollout
-            # state; retrying until timeout (up to 30 min) serves no purpose.
-            # Raise immediately so the operator or user can investigate and
-            # recover. The legacy path above does not raise because it predates
-            # the rolling-update contract and may run without pods/list RBAC.
-            rolling = graph_deployment.get("status", {}).get("rollingUpdate") or {}
-            if rolling.get("phase") == "Failed":
-                raise RolloutFailedError(
-                    deployment_name=graph_deployment_name,
-                    reason=rolling.get("message", ""),
-                )
-
             # Power settlement: generation catch-up + resolved workers' backing.
+            # The legacy path above does not gate on rollingUpdate because it
+            # predates the rolling-update contract and may run without pods/list
+            # RBAC. Failed was caught before the include_planner branch above.
             if not self.is_spec_generation_observed(graph_deployment):
                 generation = graph_deployment.get("metadata", {}).get("generation")
                 observed = graph_deployment.get("status", {}).get("observedGeneration")

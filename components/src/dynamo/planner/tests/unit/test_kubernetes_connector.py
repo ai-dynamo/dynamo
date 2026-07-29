@@ -55,6 +55,8 @@ def mock_kube_api():
     # Default: no terminating pods; tests that want to simulate terminating pods
     # override this per-test.
     mock_api.has_terminating_pods = Mock(return_value=False)
+    # Default: no blocking rollout; tests that want InProgress/Pending override.
+    mock_api.is_rolling_update_blocking_settlement = Mock(return_value=(False, ""))
     return mock_api
 
 
@@ -1316,6 +1318,105 @@ async def test_get_actual_worker_counts_pod_list_when_power_enabled(
     assert is_stable is True
     assert prefill_count == 2
     assert decode_count == 4
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_inprogress_rollout_is_unstable_when_power_on(
+    kubernetes_connector, mock_kube_api
+):
+    """InProgress rollout with replica-stable counts must be unstable when power is on.
+
+    Startup settlement already blocks on Pending/InProgress via
+    is_rolling_update_blocking_settlement. Runtime get_actual_worker_counts
+    must apply the same gate when check_terminating_pods=True (power-on) so
+    a scale-up is not admitted while old and new pod generations overlap.
+    """
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    # Replica counts look stable to per-service checks.
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    mock_kube_api.has_terminating_pods.return_value = False
+    # Deployment-level rollingUpdate is InProgress.
+    mock_kube_api.is_rolling_update_blocking_settlement.return_value = (
+        True,
+        "rollingUpdate.phase=InProgress",
+    )
+
+    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+        check_terminating_pods=True,
+    )
+
+    assert is_stable is False
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_failed_rollout_is_unstable_when_power_on(
+    kubernetes_connector, mock_kube_api
+):
+    """Failed rollout must be treated as unstable when check_terminating_pods=True.
+
+    is_rolling_update_blocking_settlement only covers Pending/InProgress; Failed
+    was intentionally excluded there because startup raises immediately. At
+    runtime there is no raise, so get_actual_worker_counts must be fail-closed
+    and return is_stable=False so power-aware ticks do not admit scale-ups
+    during a terminal (Failed) rollout state.
+    """
+    mock_deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "components": [
+                _component("prefill-component"),
+                _component("decode-component"),
+            ]
+        },
+        "status": {
+            "rollingUpdate": {"phase": "Failed", "message": "pod CrashLoopBackOff"}
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    mock_kube_api.has_terminating_pods.return_value = False
+    # is_rolling_update_blocking_settlement does not cover Failed; simulate that.
+    mock_kube_api.is_rolling_update_blocking_settlement.return_value = (False, "")
+
+    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+        check_terminating_pods=True,
+    )
+
+    assert is_stable is False
+
+
+@pytest.mark.asyncio
+async def test_get_actual_worker_counts_inprogress_rollout_is_stable_when_power_off(
+    kubernetes_connector, mock_kube_api
+):
+    """InProgress rollout must not affect stability when check_terminating_pods=False.
+
+    Power-disabled planners do not have pods/list RBAC and must not call the
+    rolling-update helper. The legacy replica-count path stays unchanged.
+    """
+    mock_deployment = _deployment(
+        _component("prefill-component"),
+        _component("decode-component"),
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+    mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+
+    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+        prefill_component_name="prefill-component",
+        decode_component_name="decode-component",
+        check_terminating_pods=False,
+    )
+
+    assert is_stable is True
+    mock_kube_api.is_rolling_update_blocking_settlement.assert_not_called()
 
 
 # Tests for _resolve_dgd_service / get_worker_info component-filter.

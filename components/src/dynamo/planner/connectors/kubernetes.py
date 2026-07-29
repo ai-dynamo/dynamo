@@ -496,7 +496,7 @@ class KubernetesConnector(PlannerConnector):
 
     async def wait_for_settled_graph_deployment(
         self,
-        include_planner: bool = True,
+        include_planner: bool = False,
         *,
         require_prefill: bool = True,
         require_decode: bool = True,
@@ -787,6 +787,28 @@ class KubernetesConnector(PlannerConnector):
             if not is_stable:
                 all_stable = False
             decode_count = ready_replicas
+
+        if check_terminating_pods:
+            is_blocking, reason = self.kube_api.is_rolling_update_blocking_settlement(
+                deployment
+            )
+            if not is_blocking:
+                # Failed is not in ROLLING_UPDATE_BLOCKING_PHASES because at
+                # startup it raises immediately rather than blocking. At runtime
+                # there is no raise, so treat Failed as fail-closed (unstable)
+                # so power-aware ticks do not admit scale-ups during a terminal
+                # rollout state.
+                rolling = deployment.get("status", {}).get("rollingUpdate") or {}
+                if rolling.get("phase") == "Failed":
+                    is_blocking = True
+                    reason = "rollingUpdate.phase=Failed"
+            if is_blocking:
+                logger.info(
+                    "%s: treating runtime counts as unstable: %s",
+                    self.graph_deployment_name,
+                    reason,
+                )
+                all_stable = False
 
         return prefill_count, decode_count, all_stable
 
