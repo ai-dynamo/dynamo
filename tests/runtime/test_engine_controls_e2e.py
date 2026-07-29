@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import dataclasses
 from types import SimpleNamespace
 from typing import Any
 
@@ -57,38 +56,13 @@ async def test_engine_routes_http_contract(
         control_calls.append(body)
         return {"status": "ok", "control": "sleep", "body": body}
 
-    configured_calls: list[dict[str, Any]] = []
-
     async def configured_route(body: dict[str, Any]) -> dict[str, Any]:
-        configured_calls.append(body)
         return {"body": body}
-
-    @dataclasses.dataclass
-    class PhaseConfig:
-        backend: str
-        max_bs: int | None
-        bs: list[int] | None
-        tc_compiler: str
-        full_prefill_max_req: int | None = None
-
-    @dataclasses.dataclass
-    class CudaGraphConfig:
-        decode: PhaseConfig
-        prefill: PhaseConfig
 
     def get_server_info() -> dict[str, Any]:
         return {
-            "dp_rank": 0,
             "tp_size": 4,
-            "pp_size": 2,
-            "dp_size": 8,
-            "cuda_graph_config": CudaGraphConfig(
-                decode=PhaseConfig("full", 32, [1, 2, 4, 8], "eager"),
-                prefill=PhaseConfig(
-                    "breakable", None, [1], "eager", full_prefill_max_req=4
-                ),
-            ),
-            "tp_rank_ids": (0, 1, 2, 3),
+            "topology": {"tp_rank_ids": (0, 1, 2, 3)},
             "active_batch_ids": {7, 9},
         }
 
@@ -112,12 +86,13 @@ async def test_engine_routes_http_contract(
     try:
         base_url = f"http://127.0.0.1:{system_port}/engine"
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await _request_with_retry(
-                client,
-                "POST",
-                f"{base_url}/control/sleep",
-                {"level": 1},
-            )
+
+            async def request(method, path, body=_NO_BODY):
+                return await _request_with_retry(
+                    client, method, f"{base_url}/{path}", body
+                )
+
+            response = await request("POST", "control/sleep", {"level": 1})
             assert response.status_code == 200
             assert response.json() == {
                 "status": "ok",
@@ -136,69 +111,30 @@ async def test_engine_routes_http_contract(
                 "HEAD",
                 "TRACE",
             ):
-                response = await _request_with_retry(
-                    client, method, f"{base_url}/configured"
-                )
+                response = await request(method, "configured")
                 assert response.status_code == 200
-                assert configured_calls[-1] == {}
                 if method != "HEAD":
                     assert response.json() == {"body": {}}
 
-            response = await _request_with_retry(
-                client,
-                "PUT",
-                f"{base_url}/configured",
-                {"value": 3},
-            )
+            response = await request("PUT", "configured", {"value": 3})
             assert response.status_code == 200
             assert response.json() == {"body": {"value": 3}}
-            assert configured_calls[-1] == {"value": 3}
 
-            response = await _request_with_retry(
-                client,
-                "POST",
-                f"{base_url}/configured",
-                {"method": "dangerous"},
-            )
+            response = await request("POST", "configured", {"method": "dangerous"})
             assert response.status_code == 200
             assert response.json() == {"body": {"method": "dangerous"}}
 
             for unconfigured in ("call_tokenizer_manager", "dangerous"):
-                response = await _request_with_retry(
-                    client,
-                    "POST",
-                    f"{base_url}/{unconfigured}",
-                    {"method": unconfigured},
-                )
+                response = await request("POST", unconfigured, {"method": unconfigured})
                 assert response.status_code == 404
                 assert response.json()["error"] == "Route not found"
 
-            response = await _request_with_retry(
-                client, "POST", f"{base_url}/server_info"
-            )
+            response = await request("POST", "server_info")
             assert response.status_code == 200
             state = response.json()
             assert "result" not in state
             assert state["tp_size"] == 4
-            assert state["pp_size"] == 2
-            assert state["dp_size"] == 8
-            assert state["cuda_graph_config"] == {
-                "decode": {
-                    "backend": "full",
-                    "max_bs": 32,
-                    "bs": [1, 2, 4, 8],
-                    "tc_compiler": "eager",
-                    "full_prefill_max_req": None,
-                },
-                "prefill": {
-                    "backend": "breakable",
-                    "max_bs": None,
-                    "bs": [1],
-                    "tc_compiler": "eager",
-                    "full_prefill_max_req": 4,
-                },
-            }
-            assert state["tp_rank_ids"] == [0, 1, 2, 3]
+            assert state["topology"]["tp_rank_ids"] == [0, 1, 2, 3]
             assert set(state["active_batch_ids"]) == {7, 9}
     finally:
         runtime.shutdown()

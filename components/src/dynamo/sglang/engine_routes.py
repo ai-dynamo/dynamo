@@ -29,6 +29,12 @@ class EngineRouteDescriptor:
     target: Literal["engine", "tm"] = "engine"
 
 
+def _invalid_descriptor(descriptor: str, message: str) -> ValueError:
+    return ValueError(
+        f"Invalid SGLang engine route descriptor {descriptor!r}: {message}"
+    )
+
+
 def parse_engine_route_descriptors(
     values: str | Sequence[str] | None,
 ) -> list[EngineRouteDescriptor]:
@@ -59,73 +65,57 @@ def parse_engine_route_descriptors(
                 f"{position}: descriptor is empty"
             )
         if descriptor.count(":") > 1:
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                "expected at most one ':' target separator"
+            raise _invalid_descriptor(
+                descriptor, "expected at most one ':' target separator"
             )
 
         route_and_method, separator, target = descriptor.rpartition(":")
         if separator:
             if not route_and_method or not target:
-                raise ValueError(
-                    f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                    "both the route and target are required"
+                raise _invalid_descriptor(
+                    descriptor, "both the route and target are required"
                 )
             if target not in _TARGETS:
-                raise ValueError(
-                    f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                    f"unknown target {target!r}; expected 'engine' or 'tm'"
+                raise _invalid_descriptor(
+                    descriptor,
+                    f"unknown target {target!r}; expected 'engine' or 'tm'",
                 )
         else:
             route_and_method = descriptor
             target = "engine"
 
         if route_and_method.count("=") > 1:
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                "expected at most one '=' method separator"
+            raise _invalid_descriptor(
+                descriptor, "expected at most one '=' method separator"
             )
 
         path, method_separator, method = route_and_method.partition("=")
         if not method_separator:
             method = path
         if not path or not method:
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                "both the route path and method are required"
+            raise _invalid_descriptor(
+                descriptor, "both the route path and method are required"
             )
 
-        path_segments = path.split("/")
-        if any(not _ROUTE_SEGMENT_RE.fullmatch(segment) for segment in path_segments):
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
+        if any(not _ROUTE_SEGMENT_RE.fullmatch(segment) for segment in path.split("/")):
+            raise _invalid_descriptor(
+                descriptor,
                 "the route path must contain non-empty '/'-separated segments "
-                "using only letters, digits, '.', '_', and '-'"
+                "using only letters, digits, '.', '_', and '-'",
             )
         if not method.isidentifier():
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                f"method {method!r} is not a Python identifier"
+            raise _invalid_descriptor(
+                descriptor, f"method {method!r} is not a Python identifier"
             )
         if method.startswith("_"):
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                "private methods cannot be exposed"
-            )
+            raise _invalid_descriptor(descriptor, "private methods cannot be exposed")
         if path in paths:
-            raise ValueError(
-                f"Invalid SGLang engine route descriptor {descriptor!r}: "
-                f"route path {path!r} is configured more than once"
+            raise _invalid_descriptor(
+                descriptor, f"route path {path!r} is configured more than once"
             )
 
         paths.add(path)
-        descriptors.append(
-            EngineRouteDescriptor(
-                path=path,
-                method=method,
-                target=target,
-            )
-        )
+        descriptors.append(EngineRouteDescriptor(path, method, target))
 
     return descriptors
 
@@ -308,7 +298,6 @@ async def _run_in_thread(
         try:
             result.set_result(function(*args, **kwargs))
         except Exception as error:
-            # Transfer the original exception to the awaiting route callback.
             result.set_exception(error)
 
     thread = threading.Thread(
@@ -388,18 +377,11 @@ def normalize_engine_route_result(result: Any) -> dict[str, Any]:
 
     if result is None:
         return {"status": "ok"}
-    if isinstance(result, tuple):
-        if len(result) == 2:
-            return {
-                "success": normalize_engine_route_value(result[0]),
-                "message": normalize_engine_route_value(result[1]),
-            }
-        if len(result) == 3:
-            return {
-                "success": normalize_engine_route_value(result[0]),
-                "message": normalize_engine_route_value(result[1]),
-                "num_paused_requests": normalize_engine_route_value(result[2]),
-            }
+    if isinstance(result, tuple) and len(result) in {2, 3}:
+        keys = ("success", "message", "num_paused_requests")
+        return {
+            key: normalize_engine_route_value(value) for key, value in zip(keys, result)
+        }
     normalized = normalize_engine_route_value(result)
     if isinstance(normalized, dict):
         return normalized
@@ -466,32 +448,23 @@ class _ConfiguredEngineRoute:
 
     async def _call_sync_engine(self, args: list[Any], kwargs: dict[str, Any]) -> Any:
         owner_loop = asyncio.get_running_loop()
-        return await _run_in_thread(
-            self._call_sync_engine_in_thread,
-            args,
-            kwargs,
-            owner_loop,
-        )
 
-    def _call_sync_engine_in_thread(
-        self,
-        args: list[Any],
-        kwargs: dict[str, Any],
-        owner_loop: asyncio.AbstractEventLoop,
-    ) -> Any:
-        original_loop = getattr(self._engine, "loop", None)
-        bridge_required = original_loop is owner_loop or (
-            original_loop is not None
-            and callable(getattr(original_loop, "is_running", None))
-            and original_loop.is_running()
-        )
-        if bridge_required:
-            self._engine.loop = _RunningLoopBridge(original_loop)
-        try:
-            return self._method(*args, **kwargs)
-        finally:
+        def call() -> Any:
+            original_loop = getattr(self._engine, "loop", None)
+            bridge_required = original_loop is owner_loop or (
+                original_loop is not None
+                and callable(getattr(original_loop, "is_running", None))
+                and original_loop.is_running()
+            )
             if bridge_required:
-                self._engine.loop = original_loop
+                self._engine.loop = _RunningLoopBridge(original_loop)
+            try:
+                return self._method(*args, **kwargs)
+            finally:
+                if bridge_required:
+                    self._engine.loop = original_loop
+
+        return await _run_in_thread(call)
 
 
 def resolve_configured_engine_routes(
@@ -506,15 +479,16 @@ def resolve_configured_engine_routes(
         tuple[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]
     ] = []
     for descriptor in descriptors:
-        if descriptor.target == "engine":
-            target = engine
-        else:
-            target = getattr(engine, "tokenizer_manager", None)
-            if target is None:
-                raise ValueError(
-                    f"Invalid SGLang engine route descriptor for "
-                    f"/engine/{descriptor.path}: the Engine has no tokenizer_manager"
-                )
+        target = (
+            engine
+            if descriptor.target == "engine"
+            else getattr(engine, "tokenizer_manager", None)
+        )
+        if target is None:
+            raise ValueError(
+                f"Invalid SGLang engine route descriptor for "
+                f"/engine/{descriptor.path}: the Engine has no tokenizer_manager"
+            )
 
         try:
             method = getattr(target, descriptor.method)

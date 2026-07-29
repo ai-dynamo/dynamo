@@ -11,6 +11,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import msgspec
 import pytest
 
 from dynamo.sglang.engine_routes import (
@@ -40,39 +41,19 @@ class Request:
 Request.__module__ = "starlette.requests"
 
 
-class UpdateWeightsRequest:
-    """Msgspec-shaped request containing the vanilla SGLang fields."""
+class UpdateWeightsRequest(msgspec.Struct, kw_only=True):
+    """Typed request containing the vanilla SGLang fields."""
 
-    __struct_fields__ = (
-        "names",
-        "dtypes",
-        "shapes",
-        "group_name",
-        "weight_version",
-    )
-
-    def __init__(
-        self,
-        *,
-        names,
-        dtypes,
-        shapes,
-        group_name="weight_update_group",
-        weight_version=None,
-    ):
-        self.names = names
-        self.dtypes = dtypes
-        self.shapes = shapes
-        self.group_name = group_name
-        self.weight_version = weight_version
+    names: list[str]
+    dtypes: list[str]
+    shapes: list[list[int]]
+    group_name: str = "weight_update_group"
+    weight_version: str | None = None
 
 
-class TypedFailure:
-    __struct_fields__ = ("success", "message")
-
-    def __init__(self, *, success, message):
-        self.success = success
-        self.message = message
+class TypedFailure(msgspec.Struct):
+    success: bool
+    message: str
 
 
 @dataclasses.dataclass
@@ -114,10 +95,8 @@ class FakeEngine:
     def __init__(self, loop=None):
         self.loop = loop
         self.tokenizer_manager = FakeTokenizerManager()
-        self.custom_calls = []
 
     def my_custom_method(self, **kwargs):
-        self.custom_calls.append(kwargs)
         return {"custom": kwargs}
 
     async def async_custom_method(self, value):
@@ -140,8 +119,7 @@ class FakeEngine:
     def init_weights_update_group(self, **kwargs):
         return True, kwargs["group_name"]
 
-    def destroy_weights_update_group(self, **kwargs):
-        return True, kwargs["group_name"]
+    destroy_weights_update_group = init_weights_update_group
 
 
 def _resolved_handlers(engine, descriptors):
@@ -203,36 +181,28 @@ def test_repeated_cli_and_environment_configuration(monkeypatch):
     if DynamoSGLangArgGroup is None:
         pytest.skip("Dynamo runtime bindings are unavailable")
 
-    parser = argparse.ArgumentParser()
-    DynamoSGLangArgGroup().add_arguments(parser)
-    args = parser.parse_args(
-        [
-            "--engine-route",
-            "server_info=get_server_info",
-            "--engine-route",
-            "pause_generation:tm",
-        ]
-    )
-    assert args.engine_routes == [
+    def parse(*args):
+        parser = argparse.ArgumentParser()
+        DynamoSGLangArgGroup().add_arguments(parser)
+        return parser.parse_args(args).engine_routes
+
+    assert parse(
+        "--engine-route",
         "server_info=get_server_info",
+        "--engine-route",
         "pause_generation:tm",
-    ]
+    ) == ["server_info=get_server_info", "pause_generation:tm"]
 
     monkeypatch.setenv(
         "DYN_SGLANG_ENGINE_ROUTES",
         "flush_cache update_weights_from_distributed:tm",
     )
-    env_parser = argparse.ArgumentParser()
-    DynamoSGLangArgGroup().add_arguments(env_parser)
-    env_args = env_parser.parse_args([])
-    assert env_args.engine_routes == [
-        "flush_cache",
-        "update_weights_from_distributed:tm",
-    ]
+    assert parse() == ["flush_cache", "update_weights_from_distributed:tm"]
 
 
-def test_compatibility_descriptors_resolve_without_a_method_registry():
-    engine = FakeEngine()
+@pytest.mark.asyncio
+async def test_compatibility_routes_resolve_and_dispatch_without_a_registry():
+    engine = FakeEngine(asyncio.get_running_loop())
     routes = _resolved_handlers(
         engine,
         [
@@ -243,6 +213,7 @@ def test_compatibility_descriptors_resolve_without_a_method_registry():
             "init_weights_update_group",
             "update_weights_from_distributed:tm",
             "destroy_weights_update_group",
+            "async_custom=async_custom_method",
         ],
     )
 
@@ -254,72 +225,9 @@ def test_compatibility_descriptors_resolve_without_a_method_registry():
         "init_weights_update_group",
         "update_weights_from_distributed",
         "destroy_weights_update_group",
+        "async_custom",
     }
     assert "call_tokenizer_manager" not in routes
-
-
-@pytest.mark.asyncio
-async def test_compatibility_engine_methods_dispatch():
-    engine = FakeEngine(asyncio.get_running_loop())
-    routes = _resolved_handlers(
-        engine,
-        [
-            "server_info=get_server_info",
-            "flush_cache",
-            "init_weights_update_group",
-            "destroy_weights_update_group",
-        ],
-    )
-
-    server_info = await routes["server_info"]({})
-    assert server_info == {
-        "tp_size": 4,
-        "pp_size": 2,
-        "dp_size": 1,
-        "disaggregation_mode": "null",
-    }
-    assert "result" not in server_info
-    assert await routes["flush_cache"]({}) == {"timeout_s": None}
-    assert await routes["init_weights_update_group"]({"group_name": "trainer"}) == {
-        "success": True,
-        "message": "trainer",
-    }
-    assert await routes["destroy_weights_update_group"]({"group_name": "trainer"}) == {
-        "success": True,
-        "message": "trainer",
-    }
-
-
-@pytest.mark.asyncio
-async def test_arbitrary_custom_engine_method_requires_configuration_only():
-    engine = FakeEngine()
-    routes = _resolved_handlers(engine, ["custom=my_custom_method"])
-
-    result = await routes["custom"]({"value": 7, "nested": {"ok": True}})
-
-    assert result == {"custom": {"value": 7, "nested": {"ok": True}}}
-    assert engine.custom_calls == [{"value": 7, "nested": {"ok": True}}]
-    assert "my_custom_method" not in routes
-
-
-@pytest.mark.asyncio
-async def test_request_body_cannot_select_a_different_method():
-    engine = FakeEngine()
-    engine.dangerous = Mock()
-    routes = _resolved_handlers(engine, ["safe=my_custom_method"])
-
-    result = await routes["safe"]({"method": "dangerous"})
-
-    assert result == {"custom": {"method": "dangerous"}}
-    engine.dangerous.assert_not_called()
-    assert "dangerous" not in routes
-
-
-@pytest.mark.asyncio
-async def test_sync_engine_wrapper_bridges_to_the_running_owner_loop():
-    engine = FakeEngine(asyncio.get_running_loop())
-    routes = _resolved_handlers(engine, ["server_info=get_server_info"])
-
     assert await routes["server_info"]({}) == {
         "tp_size": 4,
         "pp_size": 2,
@@ -327,13 +235,30 @@ async def test_sync_engine_wrapper_bridges_to_the_running_owner_loop():
         "disaggregation_mode": "null",
     }
     assert engine.loop is asyncio.get_running_loop()
+    assert await routes["flush_cache"]({}) == {"timeout_s": None}
+    for route in ("init_weights_update_group", "destroy_weights_update_group"):
+        assert await routes[route]({"group_name": "trainer"}) == {
+            "success": True,
+            "message": "trainer",
+        }
+    assert await routes["async_custom"]({"value": 5}) == {"async": 5}
 
 
 @pytest.mark.asyncio
-async def test_async_engine_method_is_awaited():
-    routes = _resolved_handlers(FakeEngine(), ["custom=async_custom_method"])
+async def test_arbitrary_route_is_allowlisted_and_body_cannot_select_method():
+    engine = FakeEngine()
+    engine.dangerous = Mock()
+    routes = _resolved_handlers(engine, ["safe=my_custom_method"])
+    replacement = Mock(return_value={"replaced": True})
+    engine.my_custom_method = replacement
+    body = {"method": "dangerous", "nested": {"ok": True}}
 
-    assert await routes["custom"]({"value": 5}) == {"async": 5}
+    assert await routes["safe"](body) == {"custom": body}
+    replacement.assert_not_called()
+    engine.dangerous.assert_not_called()
+    assert set(routes) == {"safe"}
+    with pytest.raises(ValueError, match="requires a JSON object body"):
+        await routes["safe"](["not", "an", "object"])
 
 
 @pytest.mark.asyncio
@@ -403,11 +328,12 @@ async def test_typed_tm_request_preserves_weight_version_and_injects_none_reques
     result = await routes["update_weights_from_distributed"](body)
 
     request_obj, http_request = engine.tokenizer_manager.update_calls[0]
-    assert isinstance(request_obj, UpdateWeightsRequest)
-    assert request_obj.names == body["names"]
-    assert request_obj.dtypes == body["dtypes"]
-    assert request_obj.shapes == body["shapes"]
-    assert request_obj.weight_version == "step-42"
+    assert request_obj == UpdateWeightsRequest(
+        names=body["names"],
+        dtypes=body["dtypes"],
+        shapes=body["shapes"],
+        weight_version="step-42",
+    )
     assert http_request is None
     assert result == {"success": False, "message": "rejected step-42"}
     engine.tokenizer_manager.auto_create_handle_loop.assert_called_once_with()
@@ -417,7 +343,12 @@ async def test_typed_tm_request_preserves_weight_version_and_injects_none_reques
 async def test_typed_tm_empty_and_populated_requests():
     engine = FakeEngine()
     routes = _resolved_handlers(
-        engine, ["pause_generation:tm", "continue_generation:tm"]
+        engine,
+        [
+            "pause_generation:tm",
+            "continue_generation:tm",
+            "flush=flush_cache:tm",
+        ],
     )
 
     assert await routes["pause_generation"]({}) == {"status": "ok"}
@@ -430,22 +361,7 @@ async def test_typed_tm_empty_and_populated_requests():
     assert engine.tokenizer_manager.continue_calls == [
         ContinueGenerationRequest(torch_empty_cache=False)
     ]
-
-
-@pytest.mark.asyncio
-async def test_untyped_tm_method_receives_body_as_kwargs():
-    engine = FakeEngine()
-    routes = _resolved_handlers(engine, ["flush=flush_cache:tm"])
-
     assert await routes["flush"]({"timeout_s": 3.5}) == {"timeout_s": 3.5}
-
-
-@pytest.mark.asyncio
-async def test_non_object_body_is_rejected():
-    route = _resolved_handlers(FakeEngine(), ["custom=my_custom_method"])["custom"]
-
-    with pytest.raises(ValueError, match="requires a JSON object body"):
-        await route(["not", "an", "object"])
 
 
 @pytest.mark.parametrize(
@@ -467,15 +383,6 @@ def test_startup_rejects_missing_and_non_callable_methods(descriptor, message):
 def test_startup_rejects_missing_tokenizer_manager():
     with pytest.raises(ValueError, match="has no tokenizer_manager"):
         resolve_configured_engine_routes(SimpleNamespace(), ["pause_generation:tm"])
-
-
-def test_startup_resolves_methods_once():
-    engine = FakeEngine()
-    routes = _resolved_handlers(engine, ["custom=my_custom_method"])
-    engine.my_custom_method = Mock(return_value={"replaced": True})
-
-    assert routes["custom"]._method.__self__ is engine
-    assert routes["custom"]._method.__func__ is FakeEngine.my_custom_method
 
 
 def test_normalize_preserves_failures_and_nested_cuda_graph_config():
@@ -512,20 +419,17 @@ def test_normalize_preserves_failures_and_nested_cuda_graph_config():
     assert result["rank_ids"] == [0, 1]
     assert set(result["active_batches"]) == {7, 9}
     json.dumps(result)
+    assert normalize_engine_route_result((False, "failed")) == {
+        "success": False,
+        "message": "failed",
+    }
 
-
-def test_normalize_tuple_failure_and_recursive_value():
     @dataclasses.dataclass
     class Recursive:
         nested: object = None
 
     recursive = Recursive()
     recursive.nested = {"self": recursive}
-
-    assert normalize_engine_route_result((False, "failed")) == {
-        "success": False,
-        "message": "failed",
-    }
     result = normalize_engine_route_result(recursive)
     assert result == {"nested": {"self": "<recursive reference>"}}
     json.dumps(result)
