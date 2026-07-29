@@ -18,9 +18,10 @@ Dynamo SGLang uses SGLang's native argument parser -- all SGLang engine argument
 | **Decode** *(default)* | Standard LLM inference (aggregated or disaggregated decode) |
 | **Prefill** | Disaggregated prefill phase (`--disaggregation-mode prefill`) |
 | **Embedding** | Text embedding models (`--embedding-worker`) |
-| **Multimodal Encode** | Frontend-facing: vision encoding, embeddings generation (`--multimodal-encode-worker`) |
-| **Multimodal Worker** | LLM inference with multimodal data (`--multimodal-worker`) |
-| **Multimodal Prefill** | Prefill phase for multimodal disaggregation (`--multimodal-worker --disaggregation-mode prefill`) |
+| **Multimodal Encode** | Frontend-facing: vision encoding, embeddings generation (`--enable-multimodal --disaggregation-mode encode`) |
+| **Native Multimodal P/D** | Normal prefill/decode workers that pass raw media to SGLang (`--enable-multimodal --disaggregation-mode prefill/decode`) |
+| **Internal Multimodal Worker** | E/PD or E/P/D worker that consumes embeddings from a separate encode worker (`--enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/decode`) |
+| **Internal Multimodal Prefill** | Prefill phase for E/P/D multimodal disaggregation (`--enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill`) |
 | **Image Diffusion** | Image generation via DiffGenerator (`--image-diffusion-worker`) |
 | **Video Generation** | Text/image-to-video via DiffGenerator (`--video-generation-worker`) |
 | **LLM Diffusion** | Diffusion language models like LLaDA (`--dllm-algorithm <algo>`) |
@@ -39,8 +40,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../reasoning/README.md#supported-reasoning-parsers) parser for chain-of-thought models |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
-| `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) encode worker (frontend-facing) |
-| `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | Run as multimodal LLM worker |
+| `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](../../features/multimodal/multimodal-sglang.md) inputs on this worker |
+| `--dedicated-mm-encoder` | `DYN_SGL_DEDICATED_MM_ENCODER` | `false` | Select the internal encode-worker topology for multimodal PD/P/D workers |
 | `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../features/diffusion/text-to-image/README.md#sglang) worker |
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../features/diffusion/text-to-video/README.md#sglang) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
