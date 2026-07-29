@@ -86,3 +86,84 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
 
     fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
     assert load_video.await_args.args[0] != url
+
+
+def test_nvdec_video_data_builds_pt_videodata(monkeypatch) -> None:
+    """_nvdec_video_data turns NVDEC's (T,H,W,3) uint8 RGB frames into TRT-LLM's
+    VideoData "pt" form: a list of (C,H,W) float32 [0,1] tensors + metadata that
+    matches the vendor async_load_video output. Decode is mocked."""
+    import numpy as np
+
+    from dynamo.common.multimodal import nvdec_decoder
+
+    n, h, w = 3, 4, 5
+    frames_np = (np.arange(n * h * w * 3, dtype=np.uint8) % 256).reshape(n, h, w, 3)
+    meta = {"total_num_frames": 24, "fps": 12.0, "frames_indices": [0, 8, 16]}
+    # _nvdec_video_data imports decode_video_nvdec lazily from this module, so
+    # patching the source attribute is picked up on the fresh import.
+    monkeypatch.setattr(
+        nvdec_decoder,
+        "decode_video_nvdec",
+        lambda content, num_frames: (frames_np, meta),
+    )
+
+    vd = mmp._nvdec_video_data(b"h264-bytes", 3)
+
+    assert isinstance(vd.frames, list) and len(vd.frames) == n
+    f0 = vd.frames[0]
+    assert isinstance(f0, torch.Tensor)
+    assert tuple(f0.shape) == (3, h, w)  # (C, H, W)
+    assert f0.dtype == torch.float32
+    assert 0.0 <= float(f0.min()) and float(f0.max()) <= 1.0
+    expected = torch.from_numpy(frames_np[0].astype("float32") * (1.0 / 255.0)).permute(
+        2, 0, 1
+    )
+    assert torch.allclose(f0, expected, atol=1e-6)
+    assert set(vd.metadata) == {
+        "total_num_frames",
+        "fps",
+        "duration",
+        "frames_indices",
+    }
+    assert vd.metadata["total_num_frames"] == 24
+    assert vd.metadata["fps"] == 12.0
+    assert vd.metadata["duration"] == 24 / 12.0
+    assert vd.metadata["frames_indices"] == [0, 8, 16]
+    assert vd.audio is None
+
+
+@pytest.mark.asyncio
+async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
+    """H.264 video input is hardware-decoded via NVDEC; the vendor
+    async_load_video is bypassed. Other codecs fall back to it (covered by
+    test_internal_video_uses_dynamo_fetcher_when_allowed)."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    sentinel = object()
+    monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"h264 bytes"))
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: codec == "h264")
+    nvdec = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    load_video = AsyncMock(return_value=object())
+    monkeypatch.setattr(mmp, "async_load_video", load_video)
+
+    await processor.process_openai_request(
+        {
+            "multi_modal_data": {
+                "video_url": [{"Url": "http://169.254.169.254/v.mp4"}]
+            },
+            "token_ids": [1],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    nvdec.assert_called_once()  # the NVDEC transform ran ...
+    assert nvdec.call_args.args[0] == b"h264 bytes"
+    load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
