@@ -61,6 +61,7 @@ fn exact_queue(
                 request_index as f64,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
                 BenchRequest {
                     dispatchable: is_dispatchable(lane),
@@ -81,6 +82,7 @@ fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
                 QueueSnapshot::new(1, 0),
                 request_index as f64,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 BenchRequest { dispatchable: true },

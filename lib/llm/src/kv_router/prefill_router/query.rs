@@ -24,6 +24,7 @@ impl PrefillRouter {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        priority_load_shed_percent: u8,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
@@ -50,6 +51,7 @@ impl PrefillRouter {
                         cache_namespace,
                         priority_jump,
                         strict_priority,
+                        priority_load_shed_percent,
                         None,
                         None,
                         allowed_worker_ids,

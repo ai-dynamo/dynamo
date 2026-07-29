@@ -697,6 +697,7 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
+        load_shed_percent: u8,
         placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
@@ -707,6 +708,7 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
+            load_shed_percent,
             QueueEntryState::Ready(placement),
             payload,
         )
@@ -721,6 +723,7 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
+        load_shed_percent: u8,
         admission_id: AdmissionId,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
@@ -731,6 +734,7 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
+            load_shed_percent,
             QueueEntryState::Deferred(admission_id),
             payload,
         )
@@ -745,11 +749,18 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
+        load_shed_percent: u8,
         state: QueueEntryState,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
-        if let Some(rejection) = queue_rejection(class, worker_count) {
+        // Only requests that already jump the queue may stretch its caps.
+        let limit_boost_percent = if priority_jump > 0.0 {
+            load_shed_percent
+        } else {
+            0
+        };
+        if let Some(rejection) = queue_rejection(class, worker_count, limit_boost_percent) {
             return Err((rejection, payload));
         }
 
@@ -1092,7 +1103,11 @@ fn queue_policy_score(
     }
 }
 
-fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Option<QueueRejection> {
+fn queue_rejection<T>(
+    class: &PolicyClassQueue<T>,
+    worker_count: usize,
+    limit_boost_percent: u8,
+) -> Option<QueueRejection> {
     // Limits scale from the current discovered endpoint count and intentionally
     // compare only existing usage; the request that crosses a cap is accepted.
     for (limit_kind, current, limit_per_worker) in [
@@ -1112,7 +1127,8 @@ fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Optio
             class.config.cached_token_queue_limit_per_worker,
         ),
     ] {
-        let limit = limit_per_worker.map(|limit| limit.saturating_mul(worker_count));
+        let limit = limit_per_worker
+            .map(|limit| boosted_limit(limit.saturating_mul(worker_count), limit_boost_percent));
         if limit.is_some_and(|limit| current >= limit) {
             return Some(QueueRejection {
                 policy_class: class.config.name.clone(),
@@ -1124,6 +1140,16 @@ fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Optio
     }
 
     None
+}
+
+/// Stretches a queue cap by a bounded percentage so priority traffic can absorb
+/// short overload spikes without raising the cap for everyone else.
+fn boosted_limit(limit: usize, boost_percent: u8) -> usize {
+    if boost_percent == 0 {
+        return limit;
+    }
+    let bonus = limit.saturating_mul(boost_percent as usize) / 100;
+    limit.saturating_add(bonus)
 }
 
 fn add_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
@@ -1369,6 +1395,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 deferred_id,
                 "deferred",
             )
@@ -1381,6 +1408,7 @@ policy_classes:
                 QueueSnapshot::new(10, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "ready",
@@ -1434,6 +1462,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 deferred_id,
                 "rekeyed",
             )
@@ -1445,6 +1474,7 @@ policy_classes:
                 QueueSnapshot::new(10, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "ready",
@@ -1499,6 +1529,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 deferred_id,
                 "migrated",
             )
@@ -1510,6 +1541,7 @@ policy_classes:
                 QueueSnapshot::new(10, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "ready",
@@ -1570,6 +1602,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "first",
             )
@@ -1581,6 +1614,7 @@ policy_classes:
                 QueueSnapshot::new(100, 100),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "overshoot",
@@ -1594,6 +1628,7 @@ policy_classes:
                 2.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "rejected",
             )
@@ -1604,6 +1639,284 @@ policy_classes:
         assert_eq!(rejection.limit, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    fn request_capped_queue() -> PolicyQueue<&'static str> {
+        PolicyQueue::new(profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 10
+    request_queue_limit_per_worker: 2
+"#,
+        ))
+    }
+
+    fn enqueue_at_cap(queue: &mut PolicyQueue<&'static str>) {
+        for payload in ["first", "second"] {
+            queue
+                .enqueue(
+                    0,
+                    1,
+                    QueueSnapshot::new(10, 0),
+                    0.0,
+                    0.0,
+                    0,
+                    0,
+                    WorkerPlacement::Any,
+                    payload,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn load_shed_percent_needs_a_priority_jump_to_take_effect() {
+        let mut queue = request_capped_queue();
+        enqueue_at_cap(&mut queue);
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                0.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "normal",
+            )
+            .unwrap_err();
+
+        assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
+        assert_eq!(rejection.limit, 2);
+    }
+
+    #[test]
+    fn zero_load_shed_percent_keeps_the_base_cap_for_priority_requests() {
+        let mut queue = request_capped_queue();
+        enqueue_at_cap(&mut queue);
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                1.0,
+                0,
+                0,
+                WorkerPlacement::Any,
+                "priority",
+            )
+            .unwrap_err();
+
+        assert_eq!(rejection.limit, 2);
+    }
+
+    #[test]
+    fn priority_requests_queue_past_the_base_cap_but_not_past_the_boosted_one() {
+        let mut queue = request_capped_queue();
+        enqueue_at_cap(&mut queue);
+
+        // 2 + 50% rounds down to 3, so exactly one extra priority request fits.
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "priority",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).requests, 3);
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "overflow",
+            )
+            .unwrap_err();
+
+        assert_eq!(rejection.current, 3);
+        assert_eq!(rejection.limit, 3);
+    }
+
+    #[test]
+    fn boosted_limit_rounds_down_and_saturates() {
+        assert_eq!(boosted_limit(10, 0), 10);
+        assert_eq!(boosted_limit(3, 50), 4);
+        assert_eq!(boosted_limit(1000, 20), 1200);
+        assert_eq!(boosted_limit(usize::MAX, 100), usize::MAX);
+    }
+
+    fn token_capped_queue(limit_key: &str, limit: usize) -> PolicyQueue<&'static str> {
+        PolicyQueue::new(profile(&format!(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 10
+    {limit_key}: {limit}
+"#
+        )))
+    }
+
+    #[test]
+    fn load_shed_percent_stretches_the_raw_isl_token_cap() {
+        let mut queue = token_capped_queue("raw_isl_token_queue_limit_per_worker", 10);
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                0.0,
+                0,
+                0,
+                WorkerPlacement::Any,
+                "first",
+            )
+            .unwrap();
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "normal",
+            )
+            .unwrap_err();
+        assert_eq!(rejection.limit_kind, QueueLimitKind::RawIslTokens);
+        assert_eq!(rejection.limit, 10);
+
+        // 10 + 50% is 15, so the priority request still fits at 10 queued tokens.
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(5, 0),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "priority",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 15);
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "overflow",
+            )
+            .unwrap_err();
+        assert_eq!(rejection.limit_kind, QueueLimitKind::RawIslTokens);
+        assert_eq!(rejection.current, 15);
+        assert_eq!(rejection.limit, 15);
+    }
+
+    #[test]
+    fn load_shed_percent_stretches_the_cached_token_cap() {
+        let mut queue = token_capped_queue("cached_token_queue_limit_per_worker", 4);
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(4, 4),
+                0.0,
+                0.0,
+                0,
+                0,
+                WorkerPlacement::Any,
+                "first",
+            )
+            .unwrap();
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 1),
+                0.0,
+                0.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "normal",
+            )
+            .unwrap_err();
+        assert_eq!(rejection.limit_kind, QueueLimitKind::CachedTokens);
+        assert_eq!(rejection.limit, 4);
+
+        // 4 + 50% is 6, so the priority request still fits at 4 queued tokens.
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(2, 2),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "priority",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).cached_tokens, 6);
+
+        let (rejection, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 1),
+                0.0,
+                1.0,
+                0,
+                50,
+                WorkerPlacement::Any,
+                "overflow",
+            )
+            .unwrap_err();
+        assert_eq!(rejection.limit_kind, QueueLimitKind::CachedTokens);
+        assert_eq!(rejection.current, 6);
+        assert_eq!(rejection.limit, 6);
     }
 
     #[test]
@@ -1629,6 +1942,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "keep",
             )
@@ -1640,6 +1954,7 @@ policy_classes:
                 QueueSnapshot::new(16, 6),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "remove",
@@ -1670,6 +1985,7 @@ policy_classes:
                     worker as f64,
                     0.0,
                     0,
+                    0,
                     WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
                     payload,
                 )
@@ -1696,6 +2012,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     worker.worker_id as f64,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Exact(worker),
                     payload,
@@ -1729,6 +2046,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Exact(worker),
                 "old",
             )
@@ -1740,6 +2058,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 1.0,
                 10.0,
+                0,
                 0,
                 WorkerPlacement::Exact(worker),
                 "boosted",
@@ -1768,6 +2087,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     lane as f64,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
                     lane,
@@ -1803,6 +2123,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     lane as f64,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Exact(WorkerWithDpRank::new(lane, 0)),
                     lane,
@@ -1845,6 +2166,7 @@ policy_classes:
                     0.0,
                     0.0,
                     strict_priority,
+                    0,
                     WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
                     payload,
                 )
@@ -1875,6 +2197,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     0.0,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
                     payload,
@@ -1933,6 +2256,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "raw-queued",
             )
@@ -1944,6 +2268,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "raw-rejected",
@@ -1962,6 +2287,7 @@ policy_classes:
                 2.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "raw-after-growth",
             )
@@ -1973,6 +2299,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 3.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "raw-at-grown-cap",
@@ -1989,6 +2316,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "cached-queued",
             )
@@ -2000,6 +2328,7 @@ policy_classes:
                 QueueSnapshot::new(1, 1),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "cached-rejected",
@@ -2017,6 +2346,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "zero",
             )
@@ -2031,6 +2361,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 0.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "no-workers",
@@ -2064,6 +2395,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 0.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "queued",
@@ -2100,6 +2432,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "fcfs-long",
             )
@@ -2111,6 +2444,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "fcfs-short",
@@ -2124,6 +2458,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "wspt-long",
             )
@@ -2135,6 +2470,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "wspt-short",
@@ -2175,6 +2511,7 @@ policy_classes:
                     index as f64,
                     0.0,
                     0,
+                    0,
                     WorkerPlacement::Any,
                     "slow",
                 )
@@ -2186,6 +2523,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     index as f64,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Any,
                     "fast",
@@ -2232,6 +2570,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "agents-first",
             )
@@ -2243,6 +2582,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 1.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
                 "agents-blocked",
@@ -2256,6 +2596,7 @@ policy_classes:
                 2.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
                 "agents-ready",
             )
@@ -2267,6 +2608,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 0.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "batch",
@@ -2315,6 +2657,7 @@ policy_classes:
                     index as f64,
                     0.0,
                     0,
+                    0,
                     WorkerPlacement::Any,
                     "one",
                 )
@@ -2328,6 +2671,7 @@ policy_classes:
                     QueueSnapshot::new(1, 0),
                     index as f64,
                     0.0,
+                    0,
                     0,
                     WorkerPlacement::Any,
                     "three",
@@ -2370,6 +2714,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "first",
             )
@@ -2381,6 +2726,7 @@ policy_classes:
                 QueueSnapshot::new(100, 0),
                 0.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "second",
@@ -2421,6 +2767,7 @@ policy_classes:
                 0.0,
                 0.0,
                 0,
+                0,
                 WorkerPlacement::Any,
                 "large",
             )
@@ -2432,6 +2779,7 @@ policy_classes:
                 QueueSnapshot::new(1, 0),
                 0.0,
                 0.0,
+                0,
                 0,
                 WorkerPlacement::Any,
                 "blocked",

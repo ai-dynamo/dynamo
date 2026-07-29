@@ -898,6 +898,7 @@ impl<
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
+        let load_shed_percent = request.priority_load_shed_percent;
         let placement = request
             .pinned_worker
             .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
@@ -929,6 +930,7 @@ impl<
                 arrival_offset,
                 priority_jump,
                 strict_priority,
+                load_shed_percent,
                 admission_id,
                 queued,
             ),
@@ -939,6 +941,7 @@ impl<
                 arrival_offset,
                 priority_jump,
                 strict_priority,
+                load_shed_percent,
                 placement,
                 queued,
             ),
@@ -2252,6 +2255,7 @@ mod tests {
             lora_name: None,
             priority_jump: 0.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             policy_class: None,
             session_id: None,
             expected_output_tokens: None,
