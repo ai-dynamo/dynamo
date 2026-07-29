@@ -156,11 +156,11 @@ For any new model, validate on representative prompts before rolling out broadly
   </Accordion>
 
   <Accordion title="Why do the logs show an unrecognized DYN_TOKENIZER value?">
-    Use only `fastokens` or `default` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
+    Use `default`, `fastokens`, or `basetenkenizer` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
   </Accordion>
 
   <Accordion title="What happens when the model uses .model or .tiktoken files?">
-    The `fastokens` setting has no effect for TikToken-format tokenizers. Dynamo uses the existing TikToken backend, so you should not expect the `Using fastokens tokenizer backend` log or a `fastokens` speedup.
+    The `fastokens` and `basetenkenizer` settings have no effect for TikToken-format tokenizers. Dynamo uses the existing TikToken backend, so you should not expect either alternate-backend activation log or speedup.
   </Accordion>
 
   <Accordion title="Why doesn't TTFT improve?">

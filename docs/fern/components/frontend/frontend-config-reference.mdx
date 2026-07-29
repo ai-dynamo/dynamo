@@ -492,9 +492,9 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats, gRPC tun
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
-  Tokenizer implementation. `default` uses HuggingFace; `fastokens` uses the high-performance Rust tokenizer. See [Tokenizer](Tokenizer.md).
+  Tokenizer implementation. `default` uses HuggingFace, `fastokens` uses the high-performance hybrid encoder, and `basetenkenizer` uses Baseten Tokenizer for native encoding and decoding. See [Tokenizer](Tokenizer.md).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>default</Badge> <Badge intent="note" minimal>fastokens</Badge> <Badge intent="note" minimal>basetenkenizer</Badge></span>
 
   Environment variable: `DYN_TOKENIZER`
 </ParamField>
