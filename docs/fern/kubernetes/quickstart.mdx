@@ -5,8 +5,8 @@ title: Kubernetes Quickstart
 subtitle: Get a model running on Kubernetes and send your first request.
 ---
 
-Select **NVIDIA GPU** or **Intel GPU** based on the accelerator hardware in your cluster, and
-follow that tab throughout the guide. The Intel GPU path uses the XPU runtime and tooling.
+Select **NVIDIA GPU**, **Intel GPU**, or **CPU** based on the hardware in your cluster, and follow
+that tab throughout the guide. The Intel GPU path uses the XPU runtime and tooling.
 
 <Steps>
   <Step title="Check the prerequisites">
@@ -25,6 +25,15 @@ follow that tab throughout the guide. The Intel GPU path uses the XPU runtime an
         - `kubectl` matching the cluster's Kubernetes minor version
         - Helm v3 or later
         - Docker and access to a container registry
+        - A local clone of the Dynamo repository
+      </Tab>
+      <Tab title="CPU">
+        You need:
+
+        - A Kubernetes v1.30 or later cluster
+        - `kubectl` v1.30 or later configured for the cluster
+        - Helm v3 or later
+        - Docker and access to load images into or push images to the cluster
         - A local clone of the Dynamo repository
       </Tab>
     </Tabs>
@@ -57,6 +66,14 @@ Add `--set toolkit.enabled=false` only when the provider also configures the GPU
 ```bash
 kubectl get deviceclass gpu.intel.com
 kubectl get resourceslices
+```
+      </Tab>
+      <Tab title="CPU">
+        CPU deployments do not require an accelerator operator or device plugin. Verify that the
+        cluster is ready from the root of your Dynamo clone:
+
+```bash
+./deploy/pre-deployment/pre-deployment-check.sh --device cpu
 ```
       </Tab>
     </Tabs>
@@ -140,6 +157,82 @@ sed \
   | kubectl apply --namespace "$NAMESPACE" -f -
 ```
       </Tab>
+      <Tab title="CPU">
+        From the root of your Dynamo clone, build the vLLM CPU runtime image:
+
+```bash
+export CPU_IMAGE="dynamo:latest-vllm-cpu-runtime"
+
+python3 container/render.py \
+  --framework=vllm \
+  --device=cpu \
+  --target=runtime \
+  --output-short-filename
+docker build --tag "$CPU_IMAGE" --file container/rendered.Dockerfile .
+```
+
+        Load the image into a local cluster or push it to a registry accessible to your cluster.
+        For example, with kind:
+
+```bash
+kind load docker-image "$CPU_IMAGE"
+```
+
+        Apply a CPU DGD:
+
+```bash
+cat <<EOF | kubectl apply --namespace "$NAMESPACE" -f -
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-cpu
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${CPU_IMAGE}
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${CPU_IMAGE}
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --gpu-memory-utilization
+                - "0.5"
+                - --max-model-len
+                - "4096"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  ephemeral-storage: 2Gi
+              workingDir: /workspace/examples/backends/vllm
+EOF
+```
+      </Tab>
     </Tabs>
   </Step>
 
@@ -172,6 +265,18 @@ kubectl wait \
   --timeout=30m
 
 export FRONTEND_SERVICE=vllm-agg-xpu-dra-frontend
+```
+      </Tab>
+      <Tab title="CPU">
+
+```bash
+kubectl wait \
+  --for=condition=Ready \
+  dgd/qwen3-cpu \
+  --namespace "$NAMESPACE" \
+  --timeout=30m
+
+export FRONTEND_SERVICE=qwen3-cpu-frontend
 ```
       </Tab>
     </Tabs>
@@ -234,6 +339,12 @@ kubectl delete \
   --filename examples/backends/vllm/deploy/v1beta1/xpu/agg_xpu_dra.yaml \
   --namespace "$NAMESPACE" \
   --ignore-not-found
+```
+  </Tab>
+  <Tab title="CPU">
+
+```bash
+kubectl delete dgd/qwen3-cpu --namespace "$NAMESPACE" --ignore-not-found
 ```
   </Tab>
 </Tabs>
