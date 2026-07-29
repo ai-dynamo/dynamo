@@ -125,6 +125,17 @@ setup_env() {
     # PATH (e.g. /usr/local/bin during image builds).
     echo "export PATH=\"${bin_dir}:\${PATH}\";"
 
+    # sccache picks its storage backend by which of these variables is *set*,
+    # not by whether they hold anything. The Dockerfiles declare them from build
+    # args that default to "", so an unconfigured backend still selects itself
+    # and the server dies at startup with e.g.
+    #   create s3 cache failed: ConfigInvalid ... The bucket is misconfigured
+    # ignoring any backend that is actually configured. Drop the empty ones.
+    echo '[ -n "${SCCACHE_BUCKET:-}" ] || unset SCCACHE_BUCKET;'
+    echo '[ -n "${SCCACHE_REGION:-}" ] || unset SCCACHE_REGION;'
+    echo '[ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" ] || unset SCCACHE_WEBDAV_ENDPOINT;'
+    echo '[ -n "${SCCACHE_WEBDAV_TOKEN:-}" ] || unset SCCACHE_WEBDAV_TOKEN;'
+
     # Output a conditional block: only configure sccache if the server starts
     # successfully. The server needs working S3 credentials (mounted via
     # --mount=type=secret); if they're missing or invalid, we skip sccache

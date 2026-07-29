@@ -63,6 +63,9 @@ ARG USE_SCCACHE
 ARG SCCACHE_VERSION={{ context.dynamo.sccache_version }}
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
+# WebDAV-backed sccache (e.g. Depot Cache). Mutually exclusive with the S3
+# settings above; the token arrives as a build secret, never as a build arg.
+ARG SCCACHE_WEBDAV_ENDPOINT=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}

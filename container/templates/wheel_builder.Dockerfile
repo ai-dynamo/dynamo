@@ -248,6 +248,7 @@ COPY --from=dynamo_base /usr/local/bin/sccache /opt/sccache/sccache
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
+ARG SCCACHE_WEBDAV_ENDPOINT
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
@@ -284,7 +285,8 @@ RUN mkdir -p /tmp/native-sources
 # Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
 # setup-env only when the sccache server starts successfully)
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_WEBDAV_ENDPOINT=${USE_SCCACHE:+${SCCACHE_WEBDAV_ENDPOINT}}
 
 # Always build FFmpeg so libs are available for Rust checks in CI.
 # We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
@@ -298,6 +300,7 @@ ARG NV_CODEC_HEADERS_REF
 ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -358,6 +361,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -426,6 +430,7 @@ ARG NIXL_LIBFABRIC_REPO
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -461,6 +466,7 @@ ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
 ARG AWS_SDK_CPP_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -493,17 +499,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 FROM wheel_builder_base AS runtime_wheel_builder
 
 {% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
+# Copy Rust build inputs only (order matters for layer caching). components/ is
+# Python and feeds only the pure-Python ai-dynamo wheel, so it is copied after
+# the cargo build below -- listing it here makes every edit under
+# components/src/dynamo/ invalidate a multi-minute compile for nothing.
 COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+# Build the ai-dynamo-runtime (maturin) wheel
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     --mount=type=cache,target=/root/.cache/uv,sharing=shared \
@@ -515,8 +524,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
@@ -524,6 +531,18 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+
+# Python-only inputs for the pure-Python ai-dynamo wheel, kept after the cargo
+# build so component edits rebuild in seconds instead of recompiling Rust.
+COPY pyproject.toml README.md LICENSE hatch_build.py /opt/dynamo/
+COPY components/ /opt/dynamo/components/
+
+# Build ai-dynamo (pure Python) wheel
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo && \
+    uv build --wheel --out-dir /opt/dynamo/dist
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
@@ -632,6 +651,7 @@ ARG CUDA_MAJOR
 
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -692,6 +712,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
@@ -704,16 +725,19 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
+# Copy Rust build inputs only (order matters for layer caching). components/ is
+# Python and feeds only the pure-Python ai-dynamo wheel, so it is copied after
+# the cargo build below -- listing it here makes every edit under
+# components/src/dynamo/ invalidate a multi-minute compile for nothing.
 COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=secret,id=sccache-webdav-token,env=SCCACHE_WEBDAV_TOKEN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     --mount=type=cache,target=/root/.cache/uv,sharing=shared \
