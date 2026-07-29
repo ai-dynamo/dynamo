@@ -115,6 +115,7 @@ rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
 jsonschema = {version = "0.17"}
+serde_yaml = "0.9.34"
 tempfile = { workspace = true }
 
 [[bench]]

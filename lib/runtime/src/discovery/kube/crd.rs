@@ -127,6 +127,88 @@ mod tests {
     };
     use crate::protocols::EndpointId;
     use kube::Resource;
+    use serde_json::Value;
+
+    const CRD_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml"
+    );
+
+    #[test]
+    fn operator_crd_matches_rust_resource_contract() {
+        let yaml = std::fs::read_to_string(CRD_PATH)
+            .unwrap_or_else(|error| panic!("failed to read {CRD_PATH}: {error}"));
+        let crd: Value = serde_yaml::from_str(&yaml)
+            .unwrap_or_else(|error| panic!("failed to parse {CRD_PATH}: {error}"));
+
+        let group = DynamoWorkerMetadata::group(&());
+        let api_version = DynamoWorkerMetadata::version(&());
+        let kind = DynamoWorkerMetadata::kind(&());
+        let plural = DynamoWorkerMetadata::plural(&());
+
+        assert_eq!(
+            crd.pointer("/spec/group").and_then(Value::as_str),
+            Some(group.as_ref())
+        );
+        assert_eq!(
+            crd.pointer("/spec/names/kind").and_then(Value::as_str),
+            Some(kind.as_ref())
+        );
+        assert_eq!(
+            crd.pointer("/spec/names/plural").and_then(Value::as_str),
+            Some(plural.as_ref())
+        );
+        assert_eq!(
+            crd.pointer("/spec/scope").and_then(Value::as_str),
+            Some("Namespaced")
+        );
+
+        let versions = crd
+            .pointer("/spec/versions")
+            .and_then(Value::as_array)
+            .expect("CRD must define spec.versions");
+        let version = versions
+            .iter()
+            .find(|version| {
+                version.get("name").and_then(Value::as_str) == Some(api_version.as_ref())
+            })
+            .unwrap_or_else(|| panic!("CRD must serve Rust API version {api_version}"));
+        assert_eq!(version.get("served").and_then(Value::as_bool), Some(true));
+
+        let rust_spec =
+            serde_json::to_value(DynamoWorkerMetadataSpec::new(serde_json::json!({})))
+                .expect("Rust CRD spec must serialize");
+        assert!(
+            rust_spec.pointer("/data").is_some_and(Value::is_object),
+            "Rust CRD spec must serialize spec.data as an object"
+        );
+
+        let spec_schema = version
+            .pointer("/schema/openAPIV3Schema/properties/spec")
+            .expect("CRD must define an OpenAPI schema for spec");
+        let required = spec_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("CRD spec schema must define required fields");
+        assert!(
+            required.iter().any(|field| field.as_str() == Some("data")),
+            "CRD spec.data must be required"
+        );
+
+        let data_schema = spec_schema
+            .pointer("/properties/data")
+            .expect("CRD must define an OpenAPI schema for spec.data");
+        assert_eq!(
+            data_schema.get("type").and_then(Value::as_str),
+            Some("object")
+        );
+        assert_eq!(
+            data_schema
+                .get("x-kubernetes-preserve-unknown-fields")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
 
     #[test]
     fn test_crd_metadata() {
