@@ -67,6 +67,7 @@ const (
 	maxDisaggregatedSetRoleNameLength = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2
 	disaggregatedSetNameHashLength    = 8
 	dynamoGraphDeploymentKind         = "DynamoGraphDeployment"
+	dynamoComponentDeploymentKind     = "DynamoComponentDeployment"
 )
 
 type disaggregatedSetSelection struct {
@@ -694,7 +695,7 @@ func (r *DynamoGraphDeploymentReconciler) canAdoptModelServiceForDisaggregatedSe
 	if owner == nil || isControlledByBetaDGD(service, dgd) {
 		return true, nil
 	}
-	if owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != "DynamoComponentDeployment" {
+	if owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != dynamoComponentDeploymentKind {
 		return false, nil
 	}
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
@@ -863,7 +864,7 @@ func (r *DynamoGraphDeploymentReconciler) ensureControlledByDGD(ctx context.Cont
 	}
 	controllerOwner := metav1.GetControllerOf(obj)
 	if controllerOwner != nil {
-		if controllerOwner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || controllerOwner.Kind != "DynamoComponentDeployment" {
+		if controllerOwner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || controllerOwner.Kind != dynamoComponentDeploymentKind {
 			return fmt.Errorf("resource is controlled by %s/%s %q", controllerOwner.APIVersion, controllerOwner.Kind, controllerOwner.Name)
 		}
 		dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
@@ -990,7 +991,7 @@ func (r *DynamoGraphDeploymentReconciler) ensureControlledByDCD(
 		return nil
 	}
 	if controllerOwner := metav1.GetControllerOf(obj); controllerOwner != nil && !ownerReferenceMatchesDGD(controllerOwner, dgd) {
-		if controllerOwner.APIVersion == nvidiacomv1beta1.GroupVersion.String() && controllerOwner.Kind == "DynamoComponentDeployment" {
+		if controllerOwner.APIVersion == nvidiacomv1beta1.GroupVersion.String() && controllerOwner.Kind == dynamoComponentDeploymentKind {
 			currentOwner := &nvidiacomv1beta1.DynamoComponentDeployment{}
 			if err := r.Get(ctx, types.NamespacedName{Name: controllerOwner.Name, Namespace: obj.GetNamespace()}, currentOwner); err != nil {
 				return fmt.Errorf("failed to verify current DynamoComponentDeployment owner %s/%s: %w", obj.GetNamespace(), controllerOwner.Name, err)
@@ -1027,7 +1028,7 @@ func dcdControllerOwnerReference(dcd *nvidiacomv1beta1.DynamoComponentDeployment
 	}
 	return &metav1.OwnerReference{
 		APIVersion:         nvidiacomv1beta1.GroupVersion.String(),
-		Kind:               "DynamoComponentDeployment",
+		Kind:               dynamoComponentDeploymentKind,
 		Name:               dcd.Name,
 		UID:                dcd.UID,
 		Controller:         ptr.To(true),

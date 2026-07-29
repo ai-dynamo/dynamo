@@ -468,7 +468,7 @@ func TestAdoptSelectedModelServicesLeavesSharedForeignServiceOwner(t *testing.T)
 		Namespace: "default",
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(
 			foreignDCD,
-			nvidiacomv1beta1.GroupVersion.WithKind("DynamoComponentDeployment"),
+			nvidiacomv1beta1.GroupVersion.WithKind(dynamoComponentDeploymentKind),
 		)},
 	}}
 	reconciler := &DynamoGraphDeploymentReconciler{
