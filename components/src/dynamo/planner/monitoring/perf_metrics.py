@@ -181,8 +181,8 @@ async def _wait_for_endpoint_instances(
 
     try:
         instance_ids = await asyncio.wait_for(
-            client.wait_for_instances(),
-            timeout=timeout_s,  # type: ignore[attr-defined]
+            client.wait_for_instances(),  # type: ignore[attr-defined]
+            timeout=timeout_s,
         )
     except asyncio.TimeoutError:
         logger.info(
