@@ -413,6 +413,7 @@ class OmniHandler(BaseOmniHandler):
                 async for chunk in self._generate_with_lora_admission_lock(
                     inputs.lora_request,
                     create_generator,
+                    sampling_params_list=inputs.sampling_params_list,
                 ):
                     if chunk and chunk.get("formatted_chunk"):
                         yield chunk["formatted_chunk"]
@@ -428,12 +429,25 @@ class OmniHandler(BaseOmniHandler):
         self,
         lora_request: LoRARequest | None,
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+        sampling_params_list: list | None = None,
     ) -> AsyncIterator[Any]:
         """Yield engine outputs after atomically admitting a LoRA request.
 
-        Holds the per-adapter lock through retrieval of the first output to ensure
-        that concurrent unload_lora cannot call remove_lora while the adapter is
-        in use. This is critical because:
+        Lock behavior depends on the pipeline structure:
+
+        **Single-stage pipelines (pure LLM or pure diffusion)**:
+        - Hold lock through first output only
+        - Release lock, then stream remaining results (tokens) outside lock
+        - This optimization reduces lock contention for high-throughput text generation
+
+        **Multi-stage pipelines (e.g., image-via-chat with LLM + diffusion stages)**:
+        - Hold lock through entire generation
+        - All stages run inside the lock, ensuring the adapter is protected
+        - This is necessary because later stages (diffusion) still depend on the adapter
+          after the first stage (LLM) completes
+
+        This ensures that concurrent unload_lora cannot call remove_lora while the
+        adapter is in use. This is critical because:
 
         - For lazy-activated adapters (PREFILL mode): Lock protects vLLM's lazy
           activation bookkeeping from being deleted during admission.
@@ -441,24 +455,24 @@ class OmniHandler(BaseOmniHandler):
           from removing an adapter while this request is actively using it, which
           could cause generation to fail or produce incorrect results.
 
-        **Performance Note**: For diffusion stages (image/video generation), the first
-        output is the complete result, so the lock is held for the entire generation
-        duration. This means concurrent image/video requests for the same adapter are
-        fully serialized, and unload_lora operations block until generation completes.
-        For LLM/text stages, the first output is one token, so the lock is released
-        much earlier and throughput is less impacted. This serialization is a
-        necessary trade-off to prevent undefined behavior when adapters are removed
-        during active generation.
-
-        Pattern:
-        - Hold lock through first result to ensure safe admission and generation
-        - Re-resolve adapter under lock in case it was unloaded while waiting
-        - Yield remaining results after lock is released (LLM only; diffusion completes first)
+        **Performance Note**: For single-stage diffusion (image/video generation),
+        the first output is the complete result, so the lock is held for the entire
+        generation duration. This means concurrent image/video requests for the same
+        adapter are fully serialized, and unload_lora operations block until
+        generation completes. For LLM/text stages, the first output is one token,
+        so (in single-stage LLM pipelines) the lock is released much earlier and
+        throughput is less impacted. For multi-stage pipelines with diffusion,
+        the lock must be held through all stages regardless of throughput impact,
+        to prevent undefined behavior.
 
         Args:
             lora_request: Original LoRA request, or None for base model.
             create_generator: Factory that creates an async result iterator for
                 the admitted adapter.
+            sampling_params_list: The sampling params list from the request. Used to
+                detect multi-stage pipelines. If this list has multiple entries, the
+                entire generation is kept inside the lock. If None or single-entry,
+                the lock is released after the first output (optimization for LLM).
         """
         if lora_request is None:
             # Base model: no lock needed
@@ -491,9 +505,24 @@ class OmniHandler(BaseOmniHandler):
 
             yield first_output
 
-        # Release lock; stream remaining results
-        async for result in generator:
-            yield result
+            # For multi-stage pipelines (e.g., LLM + diffusion), keep lock held
+            # for the entire generation. For single-stage, release lock for throughput.
+            is_multi_stage = (
+                sampling_params_list is not None and len(sampling_params_list) > 1
+            )
+            if is_multi_stage:
+                # Multi-stage: continue streaming inside the lock
+                async for result in generator:
+                    yield result
+                # Lock is released here when exiting the async with block
+            else:
+                # Single-stage: release lock early and stream remaining results outside
+                pass
+
+        # For single-stage pipelines, stream remaining results outside lock
+        if sampling_params_list is None or len(sampling_params_list) <= 1:
+            async for result in generator:
+                yield result
 
     async def build_engine_inputs(
         self,
