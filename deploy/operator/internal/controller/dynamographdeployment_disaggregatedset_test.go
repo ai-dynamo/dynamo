@@ -343,6 +343,30 @@ func TestEnsureControlledByDCDTransfersOnlyDGDOwnedResources(t *testing.T) {
 		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(service), persisted))
 		require.Equal(t, []metav1.OwnerReference{foreignOwner}, persisted.OwnerReferences)
 	})
+
+	t.Run("accepts a sibling DCD controlled by the same DGD", func(t *testing.T) {
+		sibling := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "demo-decode",
+				Namespace:       "default",
+				UID:             "sibling-uid",
+				OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)},
+			},
+		}
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name:            "shared-model",
+			Namespace:       "default",
+			OwnerReferences: []metav1.OwnerReference{*dcdControllerOwnerReference(sibling)},
+		}}
+		reconciler := &DynamoGraphDeploymentReconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sibling, service).Build(),
+		}
+
+		require.NoError(t, reconciler.ensureControlledByDCD(t.Context(), dgd, dcd, service))
+		persisted := &corev1.Service{}
+		require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(service), persisted))
+		require.True(t, metav1.IsControlledBy(persisted, sibling))
+	})
 }
 
 func TestApplyDisaggregatedSetCheckpointStartupPoliciesCoordinatesSelectedRoles(t *testing.T) {

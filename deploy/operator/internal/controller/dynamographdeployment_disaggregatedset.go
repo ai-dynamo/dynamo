@@ -990,6 +990,15 @@ func (r *DynamoGraphDeploymentReconciler) ensureControlledByDCD(
 		return nil
 	}
 	if controllerOwner := metav1.GetControllerOf(obj); controllerOwner != nil && !ownerReferenceMatchesDGD(controllerOwner, dgd) {
+		if controllerOwner.APIVersion == nvidiacomv1beta1.GroupVersion.String() && controllerOwner.Kind == "DynamoComponentDeployment" {
+			currentOwner := &nvidiacomv1beta1.DynamoComponentDeployment{}
+			if err := r.Get(ctx, types.NamespacedName{Name: controllerOwner.Name, Namespace: obj.GetNamespace()}, currentOwner); err != nil {
+				return fmt.Errorf("failed to verify current DynamoComponentDeployment owner %s/%s: %w", obj.GetNamespace(), controllerOwner.Name, err)
+			}
+			if isControlledByBetaDGD(currentOwner, dgd) {
+				return nil
+			}
+		}
 		return fmt.Errorf("resource is controlled by %s/%s %q", controllerOwner.APIVersion, controllerOwner.Kind, controllerOwner.Name)
 	}
 
