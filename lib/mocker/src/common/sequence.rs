@@ -100,7 +100,7 @@ pub(crate) struct NativeBlockIdentity {
 }
 
 impl NativeBlockIdentity {
-    fn partial() -> Self {
+    pub(crate) fn partial() -> Self {
         Self {
             sequence_hash: None,
             local_hash: None,
@@ -276,6 +276,11 @@ impl RequestSequence {
         }
     }
 
+    /// Materialize one complete block's token IDs when event emission requires it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if token-ID event mode did not retain the full request history.
     pub(crate) fn block_token_ids(&self, position: usize) -> Option<Vec<u32>> {
         if !self.emit_token_ids {
             return None;
@@ -593,12 +598,6 @@ impl ActiveSequence {
     }
 
     /// Materialize every complete block's token IDs.
-    ///
-    /// # Panics
-    ///
-    /// Panics for native flat sequences that were created without token-ID
-    /// event emission, because those sequences intentionally discard completed
-    /// prompt and decode blocks.
     pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
         self.block_token_ids_in(0, self.len() / self.block_size)
     }
@@ -765,8 +764,7 @@ impl ActiveSequence {
     /// boundary. Using this to unwind arbitrary prompt history would be incorrect.
     ///
     /// If this contract is violated in release builds, legacy token storage
-    /// preserves its historical no-op on an empty buffer, while flat storage
-    /// panics to surface the invalid rollback.
+    /// preserves its historical no-op on an empty buffer.
     pub fn pop(&mut self) {
         debug_assert!(
             self.generated_tokens > 0,

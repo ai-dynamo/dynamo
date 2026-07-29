@@ -120,6 +120,16 @@ mod vllm {
 
     #[test]
     fn preempted_non_aligned_prompt_uses_complete_known_context() {
+        let assert_cost = |raw: PrefillCost| {
+            assert_eq!(raw.cached_tokens, 8);
+            assert_eq!(raw.new_tokens, 1);
+            assert_eq!(raw.active_cached_tokens, 0);
+
+            let adjusted = apply_prefix_recompute(SchedulingPolicy::Vllm, 9, 4, false, true, raw);
+            assert_eq!(adjusted.cached_tokens, 8);
+            assert_eq!(adjusted.new_tokens, 1);
+        };
+
         let owner = Uuid::from_u128(700);
         let mut manager =
             G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, G1Backend::Native);
@@ -151,14 +161,48 @@ mod vllm {
         manager.preempt_native(owner, lease);
 
         let raw = manager.get_native_prefill_cost(sequence, lease);
-        assert_eq!(raw.cached_tokens, 8);
-        assert_eq!(raw.new_tokens, 1);
-        assert_eq!(raw.active_cached_tokens, 0);
+        assert_cost(raw);
 
-        let adjusted =
-            apply_prefix_recompute(SchedulingPolicy::Vllm, sequence.len(), 4, false, true, raw);
-        assert_eq!(adjusted.cached_tokens, 8);
-        assert_eq!(adjusted.new_tokens, 1);
+        let owner = Uuid::from_u128(701);
+        let mut manager =
+            G1Manager::new_with_backend(8, 4, KvEventPublishers::default(), 0, G1Backend::Kvbm);
+        let mut request = RequestKvState::kvbm(ActiveSequence::new(
+            (0..6).collect(),
+            8,
+            Some(4),
+            true,
+            false,
+        ));
+        let RequestKvState::Kvbm(sequence) = &mut request else {
+            unreachable!()
+        };
+        let creation = sequence.take_creation_signal().unwrap();
+        assert!(matches!(
+            manager.process_for_request(owner, &creation, 0),
+            G1Acquire::Ready(_)
+        ));
+        for _ in 0..3 {
+            let (_, signals) = request.generate_token();
+            for signal in signals {
+                assert!(matches!(
+                    manager.process_for_request(owner, &signal, 0),
+                    G1Acquire::Ready(_)
+                ));
+            }
+        }
+        let RequestKvState::Kvbm(sequence) = &mut request else {
+            unreachable!()
+        };
+        let sequence_len = sequence.len();
+        sequence.commit_allocation(sequence_len);
+        manager.finalize_computed_prefix(owner, 0, sequence_len, sequence);
+        for signal in sequence.reset_with_signal() {
+            assert!(matches!(
+                manager.process_for_request(owner, &signal, 0),
+                G1Acquire::Ready(_)
+            ));
+        }
+        assert_cost(manager.get_prefill_cost(sequence));
     }
 
     #[test]

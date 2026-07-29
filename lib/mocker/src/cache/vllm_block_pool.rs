@@ -146,6 +146,28 @@ impl VllmBlockPool {
         self.reserve_hits(hits, fresh)
     }
 
+    /// Pin an already-authorized prefix and reserve the remaining entries.
+    ///
+    /// Unlike [`Self::reserve_resident_prefix`], every candidate must still be
+    /// resident. A missing hash means the caller's synchronous prefix
+    /// authorization changed before allocation committed.
+    pub(crate) fn reserve_exact_prefix(
+        &mut self,
+        candidates: impl IntoIterator<Item = SequenceHash>,
+        total: usize,
+    ) -> Option<ReserveOutcome> {
+        let mut hits = Vec::with_capacity(total);
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                panic!("authorized prefix hash {hash} is no longer resident")
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
     fn reserve_hits(
         &mut self,
         hits: Vec<(SequenceHash, BlockCopyId)>,
@@ -627,6 +649,13 @@ mod tests {
     fn reserve(pool: &mut VllmBlockPool, prefix: &[u64], fresh: usize) -> ReserveOutcome {
         pool.reserve(prefix, fresh)
             .unwrap_or_else(|| panic!("unexpected capacity exhaustion"))
+    }
+
+    #[test]
+    #[should_panic(expected = "authorized prefix hash 9 is no longer resident")]
+    fn exact_prefix_reports_missing_hash() {
+        let mut pool = VllmBlockPool::new(1);
+        let _ = pool.reserve_exact_prefix([9], 1);
     }
 
     #[test]

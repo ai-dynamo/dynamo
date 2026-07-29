@@ -85,10 +85,7 @@ impl BlockRequestLease {
             "native lease already has a partial tail"
         );
         self.entries.push(BlockLeaseEntry {
-            identity: NativeBlockIdentity {
-                sequence_hash: None,
-                local_hash: None,
-            },
+            identity: NativeBlockIdentity::partial(),
             copy: None,
             pending_cache: false,
         });
@@ -257,14 +254,14 @@ impl VllmKvManager {
         let Some(ReserveOutcome {
             mut reservation,
             removed,
-        }) = self.pool.reserve_resident_prefix(prefix, count)
+        }) = self.pool.reserve_exact_prefix(prefix, count)
         else {
             return VllmAcquire::CapacityExhausted;
         };
         assert_eq!(
             reservation.len() - reservation.fresh_len(),
             reusable_prefix_blocks,
-            "authorized native prefix changed during atomic allocation"
+            "exact native prefix reservation returned the wrong hit count"
         );
         self.publish_removed(removed);
         self.commit_lease_range(
@@ -424,6 +421,11 @@ impl VllmKvManager {
         mut reservation: NativeDestinationReservation,
     ) {
         lease.debug_assert_owner(owner);
+        debug_assert_eq!(
+            lease.resident_block_count(),
+            0,
+            "destination request already owns physical blocks"
+        );
         assert_eq!(reservation.request_id, owner, "destination owner mismatch");
         let prompt_blocks = sequence
             .num_input_tokens()
@@ -434,7 +436,7 @@ impl VllmKvManager {
             0,
             prompt_blocks,
             &mut reservation.pool,
-            true,
+            self.enable_prefix_caching,
             Some(sequence),
         );
         lease.allocated_tokens = sequence.num_input_tokens();

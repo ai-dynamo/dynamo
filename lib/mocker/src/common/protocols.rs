@@ -1007,6 +1007,19 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
+    if matches!(args.engine_type, EngineType::Vllm | EngineType::Trtllm)
+        && args.resolved_g1_backend() == G1Backend::Native
+        && args.block_size < 2
+    {
+        return Err(mock_engine_args_validation_error(
+            "native_g1_block_size_too_small",
+            format!(
+                "native G1 requires block_size to be at least 2 for engine_type={:?}, got block_size={}",
+                args.engine_type, args.block_size
+            ),
+        ));
+    }
+
     if args.g1_backend == Some(G1Backend::Native) && args.requires_kvbm_g1() {
         return Err(mock_engine_args_validation_error(
             "native_g1_legacy_offload_conflict",
@@ -2163,6 +2176,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn test_normalized_native_g1_rejects_block_size_one() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let error = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(G1Backend::Native)
+                .block_size(1)
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("native G1 requires block_size to be at least 2"),
+                "engine_type={engine_type:?}, error={error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalized_kvbm_accepts_block_size_one() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let args = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(G1Backend::Kvbm)
+                .block_size(1)
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap();
+
+            assert_eq!(args.block_size, 1, "engine_type={engine_type:?}");
+            assert_eq!(args.resolved_g1_backend(), G1Backend::Kvbm);
+        }
     }
 
     #[test]

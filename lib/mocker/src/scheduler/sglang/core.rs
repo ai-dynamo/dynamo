@@ -243,8 +243,7 @@ impl SglangCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let mut request = SglangRequest::from(request);
-                request.prepare(self.config.block_size);
+                let request = SglangRequest::new(request, self.config.block_size);
                 let prompt_footprint = request
                     .prompt_len()
                     .div_ceil(self.config.block_size)
@@ -367,8 +366,7 @@ impl SglangCore {
     }
 
     fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
-        let mut request = SglangRequest::from(request);
-        request.prepare(self.config.block_size);
+        let request = SglangRequest::new(request, self.config.block_size);
         if self.request_is_active(request.uuid) {
             anyhow::bail!("request {} is already active", request.uuid);
         }
