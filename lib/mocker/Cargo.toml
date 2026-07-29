@@ -15,9 +15,11 @@ readme = "README.md"
 [features]
 default = []
 profile = []
-# Test/benchmark-only deterministic replay plumbing. Production replay never
-# enables this feature and keeps the existing random selector behavior.
-replay-bench = ["dynamo-kv-router/bench"]
+# Opt-in deterministic replay plumbing. Production replay never enables this
+# feature and keeps the existing random selector behavior.
+canonical-replay = ["dynamo-kv-router/deterministic-selection"]
+# Compatibility alias for existing benchmark invocations.
+replay-bench = ["canonical-replay"]
 test-support = []
 aic-forward-pass = ["dep:aiconfigurator-core"]
 zmq-events = ["dep:tmq"]
@@ -41,6 +43,7 @@ velo = { workspace = true, optional = true }
 # workspace
 aiconfigurator-core = { workspace = true, optional = true }
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }

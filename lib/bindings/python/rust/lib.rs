@@ -179,6 +179,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
+        llm::replay::canonical_replay_available,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         llm::replay::run_mocker_synthetic_trace_replay,
         m
     )?)?;
@@ -189,6 +193,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     m.add_class::<DistributedRuntime>()?;
+    m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;

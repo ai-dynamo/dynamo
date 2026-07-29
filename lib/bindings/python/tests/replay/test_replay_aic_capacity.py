@@ -192,7 +192,7 @@ def test_direct_replay_falls_back_when_memory_estimator_is_unavailable(monkeypat
 
     report = _run_direct_aic_replay()
 
-    assert report["completed_requests"] == 1
+    assert report.summary["completed_requests"] == 1
 
 
 def test_direct_replay_preserves_other_capacity_errors(monkeypatch):

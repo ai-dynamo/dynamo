@@ -2362,6 +2362,7 @@ name = "dynamo-bench"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "chrono",
  "clap",
  "crossbeam-channel",
@@ -2642,6 +2643,7 @@ version = "1.4.0"
 dependencies = [
  "aiconfigurator-core",
  "anyhow",
+ "blake3",
  "bytes",
  "dashmap",
  "ddsketchy",

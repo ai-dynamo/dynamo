@@ -7,6 +7,9 @@ use crate::common::protocols::OutputSignal;
 use crate::common::speculative::SpeculativeDecodeSampler;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
+use crate::replay::offline::evidence::{
+    EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
+};
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
@@ -109,10 +112,41 @@ fn check_decode_mem_for_burst(
             break;
         };
 
+        let pressure_before = canonical_evidence_capture_active().then(|| {
+            let request = &running[idx];
+            (
+                request.uuid,
+                EnginePressureState {
+                    running_requests: running.len(),
+                    waiting_requests: None,
+                    active_blocks: active_kv_blocks(kv_manager, config.block_size),
+                },
+                request.allocated_tokens.div_ceil(config.block_size),
+                logical_available.div_ceil(config.block_size),
+                page_growth_needed.div_ceil(config.block_size),
+            )
+        });
         let mut req = running.remove(idx);
         kv_manager.retract(std::mem::take(&mut req.kv_lease));
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
+        if let Some((uuid, state_before, request_blocks, logical_available, required_blocks)) =
+            pressure_before
+        {
+            record_pressure(
+                PressureKind::SglangRetraction,
+                uuid,
+                state_before,
+                EnginePressureState {
+                    running_requests: running.len(),
+                    waiting_requests: None,
+                    active_blocks: active_kv_blocks(kv_manager, config.block_size),
+                },
+                request_blocks,
+                Some(logical_available),
+                Some(required_blocks),
+            );
+        }
         retracted.push(req);
     }
 
@@ -131,6 +165,11 @@ fn check_decode_mem_for_burst(
     }
 
     retracted
+}
+
+fn active_kv_blocks(kv_manager: &SglangKvManager, block_size: usize) -> usize {
+    let used = kv_manager.cache().total_tokens() - kv_manager.cache().available_tokens();
+    used.div_ceil(block_size)
 }
 
 #[cfg(test)]

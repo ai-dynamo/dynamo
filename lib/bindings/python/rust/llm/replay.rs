@@ -20,9 +20,10 @@ use dynamo_mocker::replay::{
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
+    types::PyBytes,
 };
-use pythonize::pythonize;
-use serde_json::json;
+use pythonize::{depythonize, pythonize};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::aic_callback::{
@@ -32,6 +33,259 @@ use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
 
 const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
 const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
+
+#[pyclass(name = "_OfflineReplayResult")]
+#[derive(Debug)]
+pub struct OfflineReplayResult {
+    report: dynamo_mocker::replay::TraceSimulationReport,
+    runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+    capture_per_request: bool,
+    coverage: dynamo_mocker::replay::CanonicalReplayCoverage,
+    canonical_metadata: Option<dynamo_mocker::replay::CanonicalReplayMetadata>,
+    canonical_capture: bool,
+}
+
+impl OfflineReplayResult {
+    fn new(
+        report: dynamo_mocker::replay::TraceSimulationReport,
+        capture_per_request: bool,
+        capture_planner_details: bool,
+        canonical_capture: bool,
+        canonical_metadata: Option<dynamo_mocker::replay::CanonicalReplayMetadata>,
+        runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+    ) -> Self {
+        let coverage = dynamo_mocker::replay::CanonicalReplayCoverage {
+            capture_per_request,
+            capture_planner_details,
+            capture_canonical_evidence: canonical_capture,
+            per_request_records: report.per_request.len(),
+            pressure: canonical_capture
+                .then(|| runtime_evidence.pressure.clone())
+                .flatten(),
+            kv_ingest: canonical_capture
+                .then(|| runtime_evidence.kv_ingest.clone())
+                .flatten(),
+        };
+        Self {
+            report,
+            runtime_evidence,
+            capture_per_request,
+            coverage,
+            canonical_metadata,
+            canonical_capture,
+        }
+    }
+}
+
+#[pymethods]
+impl OfflineReplayResult {
+    #[getter]
+    fn summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.report)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn per_request(&self, py: Python<'_>) -> PyResult<PyObject> {
+        if !self.capture_per_request {
+            return Ok(py.None());
+        }
+        pythonize(py, &self.report.per_request)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn coverage(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.coverage)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn lifecycle_operations(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.runtime_evidence.lifecycle_operations)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (planner=None))]
+    fn canonical_dict(
+        &self,
+        py: Python<'_>,
+        planner: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        let record = self.build_canonical_record(planner)?;
+        pythonize(py, &record.into_value().map_err(to_pyerr)?)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (planner=None))]
+    fn canonical_json_line<'py>(
+        &self,
+        py: Python<'py>,
+        planner: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let line = self
+            .build_canonical_record(planner)?
+            .into_json_line()
+            .map_err(to_pyerr)?;
+        Ok(PyBytes::new(py, &line))
+    }
+}
+
+impl OfflineReplayResult {
+    fn build_canonical_record(
+        &self,
+        planner: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<dynamo_mocker::replay::CanonicalReplayRecord> {
+        if !self.canonical_capture {
+            return Err(PyValueError::new_err(
+                "canonical serialization requires canonical_capture=True",
+            ));
+        }
+        if !self.capture_per_request {
+            return Err(PyValueError::new_err(
+                "canonical serialization requires per-request capture",
+            ));
+        }
+        let planner = planner
+            .map(|value| depythonize::<Value>(value).map_err(to_pyerr))
+            .transpose()?
+            .unwrap_or(Value::Null);
+        dynamo_mocker::replay::CanonicalReplayRecord::build(
+            &self.report,
+            self.canonical_metadata
+                .clone()
+                .expect("canonical replay result must retain execution metadata"),
+            self.coverage.clone(),
+            planner,
+        )
+        .map_err(to_pyerr)
+    }
+}
+
+#[pyfunction]
+pub fn canonical_replay_available() -> bool {
+    cfg!(feature = "canonical-replay")
+}
+
+fn trace_workload_digest(trace_files: &[PathBuf]) -> anyhow::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dynamo.offline-replay.trace.v1");
+    for path in trace_files {
+        let bytes = std::fs::read(path)?;
+        hasher.update(&(bytes.len() as u64).to_be_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn validate_canonical_scaling_policy(
+    py: Python<'_>,
+    canonical_capture: bool,
+    scaling_policy: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    if !canonical_capture {
+        return Ok(());
+    }
+    let Some(policy) = scaling_policy else {
+        return Ok(());
+    };
+    let policy = policy.bind(py);
+    let contract = policy
+        .getattr("_canonical_replay_contract")
+        .ok()
+        .and_then(|value| value.extract::<String>().ok());
+    let expected_policy_type = py
+        .import("dynamo.planner.offline.replay_adapter")?
+        .getattr("ReplayPlannerAdapter")?;
+    let expected_engine_type = py
+        .import("dynamo.planner.plugins.orchestrator.engine_adapter")?
+        .getattr("OrchestratorEngineAdapter")?;
+    let engine = policy.getattr("_engine").ok();
+    let is_builtin = contract.as_deref() == Some("builtin-planner-v1")
+        && policy.get_type().as_ptr() == expected_policy_type.as_ptr()
+        && engine
+            .as_ref()
+            .is_some_and(|value| value.get_type().as_ptr() == expected_engine_type.as_ptr());
+    if !is_builtin {
+        return Err(PyValueError::new_err(
+            "canonical_capture rejects unverified scaling_policy callbacks",
+        ));
+    }
+    Ok(())
+}
+
+struct ResolvedAicPerfConfig<'a> {
+    config: &'a AicPerfConfig,
+    backend_version: String,
+}
+
+fn resolve_aic_perf_config<'a>(
+    py: Python<'_>,
+    config: Option<&'a AicPerfConfig>,
+) -> PyResult<Option<ResolvedAicPerfConfig<'a>>> {
+    config
+        .map(|config| {
+            Ok(ResolvedAicPerfConfig {
+                config,
+                backend_version: resolve_aic_backend_version(
+                    py,
+                    config.backend_name(),
+                    config.backend_version(),
+                )?,
+            })
+        })
+        .transpose()
+}
+
+fn aic_perf_config_metadata(
+    config: Option<&ResolvedAicPerfConfig<'_>>,
+) -> Option<dynamo_mocker::replay::CanonicalAicIdentity> {
+    config.map(|resolved| {
+        let config = resolved.config;
+        dynamo_mocker::replay::CanonicalAicIdentity {
+            backend: Some(config.backend_name().to_string()),
+            system: Some(config.system().to_string()),
+            backend_version: Some(resolved.backend_version.clone()),
+            tp_size: Some(config.tp_size()),
+            model: Some(config.model_path().to_string()),
+            moe_tp_size: config.moe_tp_size(),
+            moe_ep_size: config.moe_ep_size(),
+            attention_dp_size: config.attention_dp_size(),
+            gemm_dtype: config.gemm_dtype().map(str::to_string),
+            moe_dtype: config.moe_dtype().map(str::to_string),
+            fmha_dtype: config.fmha_dtype().map(str::to_string),
+            kv_cache_dtype: config.kv_cache_dtype().map(str::to_string),
+            comm_dtype: config.comm_dtype().map(str::to_string),
+            nextn: config.nextn(),
+            nextn_accept_rates: config.nextn_accept_rates().map(str::to_string),
+        }
+    })
+}
+
+#[cfg(feature = "aic-forward-pass")]
+fn canonical_aic_implementation(
+    py: Python<'_>,
+) -> PyResult<dynamo_mocker::replay::CanonicalAicImplementation> {
+    if super::aic_callback::compiled_engine_sdk_available(py)? {
+        Ok(dynamo_mocker::replay::CanonicalAicImplementation::CompiledRust)
+    } else {
+        Ok(dynamo_mocker::replay::CanonicalAicImplementation::PythonCompatibility)
+    }
+}
+
+#[cfg(not(feature = "aic-forward-pass"))]
+fn canonical_aic_implementation(
+    _py: Python<'_>,
+) -> PyResult<dynamo_mocker::replay::CanonicalAicImplementation> {
+    Err(PyValueError::new_err(
+        "canonical AIC replay requires the aic-forward-pass feature",
+    ))
+}
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -885,7 +1139,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, canonical_capture=false, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -912,8 +1166,29 @@ pub fn run_mocker_trace_replay(
     sla_ttft_ms: Option<f64>,
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
+    capture_per_request: bool,
+    canonical_capture: bool,
     scaling_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
+    if canonical_capture {
+        if !cfg!(feature = "canonical-replay") {
+            return Err(PyValueError::new_err(
+                "canonical_capture requires a binding built with --features canonical-replay",
+            ));
+        }
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "canonical_capture only supports replay_mode='offline'",
+            ));
+        }
+    }
+    if capture_per_request && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    validate_canonical_scaling_policy(py, canonical_capture, scaling_policy.as_ref())?;
+    let trace_format_name = trace_format.to_owned();
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -926,7 +1201,7 @@ pub fn run_mocker_trace_replay(
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
-    let prefill_load_estimator = load_replay_prefill_load_estimator(
+    let (prefill_load_estimator, aic_perf_config) = load_replay_prefill_load_estimator(
         py,
         router_mode,
         router_config.as_ref(),
@@ -934,13 +1209,25 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
+    let is_offline = replay_mode == "offline";
     if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "scaling_policy only supports replay_mode='offline'",
         ));
     }
     let jsonl_path_for_emit = report_jsonl_path.clone();
-    let record_per_request = report_jsonl_path.is_some();
+    let capture_planner_details = scaling_policy.is_some();
+    let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
+        capture_per_request: capture_per_request || report_jsonl_path.is_some(),
+        capture_planner_details,
+        capture_canonical_evidence: canonical_capture,
+        determinism: if canonical_capture {
+            dynamo_mocker::replay::ReplayDeterminism::CanonicalV1
+        } else {
+            dynamo_mocker::replay::ReplayDeterminism::Random
+        },
+    };
+    let record_per_request = capture_options.effective_per_request();
     if let Some(ms) = max_sim_time_ms {
         if !ms.is_finite() || ms < 0.0 {
             return Err(PyValueError::new_err(
@@ -960,6 +1247,66 @@ pub fn run_mocker_trace_replay(
         ttft_ms: sla_ttft_ms,
         itl_ms: sla_itl_ms,
         e2e_ms: sla_e2e_ms,
+    };
+    let canonical_trace_block_size = if trace_format_name == "dynamo" {
+        trace_block_size
+    } else {
+        Some(trace_block_size.unwrap_or(512))
+    };
+    let canonical_workload_digest = canonical_capture
+        .then(|| trace_workload_digest(&trace_files))
+        .transpose()
+        .map_err(to_pyerr)?;
+    let trace_identity_check = canonical_workload_digest
+        .as_ref()
+        .map(|digest| (trace_files.clone(), digest.clone()));
+    let canonical_metadata = if canonical_capture {
+        let (aic_performance_model_implementation, aic_prefill_load_estimator_implementation) =
+            canonical_aic_implementation_metadata(py, &args_selection, aic_perf_config.as_ref())?;
+        Some(dynamo_mocker::replay::CanonicalReplayMetadata {
+            replay_bench: true,
+            byte_identity_scope: "same_target_toolchain_semantic_features".to_string(),
+            workload: dynamo_mocker::replay::CanonicalWorkloadMetadata::Trace {
+                format: trace_format_name,
+                block_size: canonical_trace_block_size,
+                digest: canonical_workload_digest
+                    .clone()
+                    .expect("canonical trace digest must be populated"),
+            },
+            execution: dynamo_mocker::replay::CanonicalExecutionMetadata {
+                topology: dynamo_mocker::replay::canonical_topology(replay_args_mode(
+                    &args_selection,
+                )),
+                num_workers,
+                num_prefill_workers,
+                num_decode_workers,
+                replay_concurrency,
+                arrival_speedup_ratio,
+                max_sim_time_ms,
+                aic_prefill_load_estimator: aic_perf_config_metadata(aic_perf_config.as_ref()),
+                aic_performance_model_implementation,
+                aic_prefill_load_estimator_implementation,
+            },
+            engine_config: replay_engine_metadata(&args_selection).map_err(to_pyerr)?,
+            router: dynamo_mocker::replay::canonical_router_metadata(
+                router_mode,
+                router_config.as_ref(),
+            )
+            .map_err(to_pyerr)?,
+            sla: dynamo_mocker::replay::CanonicalSlaMetadata {
+                ttft_ms: sla_ttft_ms,
+                itl_ms: sla_itl_ms,
+                e2e_ms: sla_e2e_ms,
+            },
+            determinism: dynamo_mocker::replay::CanonicalDeterminismMetadata::canonical_v1(),
+            semantic_features: dynamo_mocker::replay::CanonicalSemanticFeatures {
+                canonical_replay: true,
+                mocker_kvbm_offload: cfg!(feature = "mocker-kvbm-offload"),
+                aic_forward_pass: cfg!(feature = "aic-forward-pass"),
+            },
+        })
+    } else {
+        None
     };
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>| {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
@@ -1104,11 +1451,32 @@ pub fn run_mocker_trace_replay(
             }
         }
     };
-    let report = if let Some(callback) = scaling_policy {
-        run(Some(Box::new(PyReplayScalingPolicy { callback }))).map_err(scaling_run_err_to_pyerr)?
+    let (report, runtime_evidence) = if let Some(callback) = scaling_policy {
+        let (report, evidence) =
+            dynamo_mocker::replay::with_runtime_evidence(capture_options, || {
+                dynamo_mocker::replay::with_replay_determinism(capture_options.determinism, || {
+                    run(Some(Box::new(PyReplayScalingPolicy { callback })))
+                })
+            });
+        (report.map_err(scaling_run_err_to_pyerr)?, evidence)
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        let (report, evidence) = py.allow_threads(move || {
+            dynamo_mocker::replay::with_runtime_evidence(capture_options, || {
+                dynamo_mocker::replay::with_replay_determinism(capture_options.determinism, || {
+                    run(None)
+                })
+            })
+        });
+        (report.map_err(to_pyerr)?, evidence)
     };
+    if let Some((trace_files, expected_digest)) = trace_identity_check {
+        let actual_digest = trace_workload_digest(&trace_files).map_err(to_pyerr)?;
+        if actual_digest != expected_digest {
+            return Err(PyValueError::new_err(
+                "canonical trace input changed while replay was running",
+            ));
+        }
+    }
     // Write per-request JSONL from Rust directly if requested, avoiding a
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
@@ -1116,9 +1484,21 @@ pub fn run_mocker_trace_replay(
         py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
             .map_err(to_pyerr)?;
     }
-    pythonize(py, &report)
-        .map_err(to_pyerr)
-        .map(|obj| obj.unbind())
+    if is_offline {
+        return Py::new(
+            py,
+            OfflineReplayResult::new(
+                report,
+                record_per_request,
+                capture_planner_details,
+                canonical_capture,
+                canonical_metadata,
+                runtime_evidence,
+            ),
+        )
+        .map(Py::into_any);
+    }
+    pythonize(py, &report).map(Bound::unbind).map_err(to_pyerr)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1299,7 +1679,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, canonical_capture=false, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1329,8 +1709,28 @@ pub fn run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Option<f64>,
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
+    capture_per_request: bool,
+    canonical_capture: bool,
     scaling_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
+    if canonical_capture {
+        if !cfg!(feature = "canonical-replay") {
+            return Err(PyValueError::new_err(
+                "canonical_capture requires a binding built with --features canonical-replay",
+            ));
+        }
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "canonical_capture only supports replay_mode='offline'",
+            ));
+        }
+    }
+    if capture_per_request && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    validate_canonical_scaling_policy(py, canonical_capture, scaling_policy.as_ref())?;
     if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "scaling_policy only supports replay_mode='offline'",
@@ -1354,7 +1754,7 @@ pub fn run_mocker_synthetic_trace_replay(
         num_decode_workers,
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
-    let prefill_load_estimator = load_replay_prefill_load_estimator(
+    let (prefill_load_estimator, aic_perf_config) = load_replay_prefill_load_estimator(
         py,
         router_mode,
         router_config.as_ref(),
@@ -1362,9 +1762,87 @@ pub fn run_mocker_synthetic_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
+    let is_offline = replay_mode == "offline";
+    let capture_planner_details = scaling_policy.is_some();
+    let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
+        capture_per_request,
+        capture_planner_details,
+        capture_canonical_evidence: canonical_capture,
+        determinism: if canonical_capture {
+            dynamo_mocker::replay::ReplayDeterminism::CanonicalV1
+        } else {
+            dynamo_mocker::replay::ReplayDeterminism::Random
+        },
+    };
+    let record_per_request = capture_options.effective_per_request();
     let block_size = match &args_selection {
         ReplayArgsSelection::Aggregated(args) => args.block_size.max(1),
         ReplayArgsSelection::Disagg(config) => config.prefill_args.block_size.max(1),
+    };
+    let synthetic_spec = dynamo_mocker::replay::CanonicalSyntheticSpec {
+        input_tokens,
+        output_tokens,
+        request_count,
+        replay_concurrency,
+        request_rate,
+        arrival_interval_ms,
+        arrival_seed,
+        turns_per_session,
+        shared_prefix_ratio,
+        num_prefix_groups,
+        inter_turn_delay_ms,
+        output_seed: 0xd37a_0a7e_5eed_u64,
+    };
+    let canonical_metadata = if canonical_capture {
+        let (aic_performance_model_implementation, aic_prefill_load_estimator_implementation) =
+            canonical_aic_implementation_metadata(py, &args_selection, aic_perf_config.as_ref())?;
+        let spec_bytes = serde_json::to_vec(&synthetic_spec).map_err(to_pyerr)?;
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"dynamo.offline-replay.synthetic.v1");
+        digest.update(&(spec_bytes.len() as u64).to_be_bytes());
+        digest.update(&spec_bytes);
+        Some(dynamo_mocker::replay::CanonicalReplayMetadata {
+            replay_bench: true,
+            byte_identity_scope: "same_target_toolchain_semantic_features".to_string(),
+            workload: dynamo_mocker::replay::CanonicalWorkloadMetadata::Synthetic {
+                block_size,
+                digest: digest.finalize().to_hex().to_string(),
+                spec: synthetic_spec,
+            },
+            execution: dynamo_mocker::replay::CanonicalExecutionMetadata {
+                topology: dynamo_mocker::replay::canonical_topology(replay_args_mode(
+                    &args_selection,
+                )),
+                num_workers,
+                num_prefill_workers,
+                num_decode_workers,
+                replay_concurrency,
+                arrival_speedup_ratio,
+                max_sim_time_ms: None,
+                aic_prefill_load_estimator: aic_perf_config_metadata(aic_perf_config.as_ref()),
+                aic_performance_model_implementation,
+                aic_prefill_load_estimator_implementation,
+            },
+            engine_config: replay_engine_metadata(&args_selection).map_err(to_pyerr)?,
+            router: dynamo_mocker::replay::canonical_router_metadata(
+                router_mode,
+                router_config.as_ref(),
+            )
+            .map_err(to_pyerr)?,
+            sla: dynamo_mocker::replay::CanonicalSlaMetadata {
+                ttft_ms: sla_ttft_ms,
+                itl_ms: sla_itl_ms,
+                e2e_ms: sla_e2e_ms,
+            },
+            determinism: dynamo_mocker::replay::CanonicalDeterminismMetadata::canonical_v1(),
+            semantic_features: dynamo_mocker::replay::CanonicalSemanticFeatures {
+                canonical_replay: true,
+                mocker_kvbm_offload: cfg!(feature = "mocker-kvbm-offload"),
+                aic_forward_pass: cfg!(feature = "aic-forward-pass"),
+            },
+        })
+    } else {
+        None
     };
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>| {
         let load_controller =
@@ -1407,7 +1885,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
-                            false,
+                            record_per_request,
                             None,
                             sla,
                             scaling_policy.take(),
@@ -1421,7 +1899,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             num_workers,
                             router_mode,
-                            false,
+                            record_per_request,
                             None,
                             sla,
                             scaling_policy.take(),
@@ -1436,7 +1914,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
-                            false,
+                            record_per_request,
                             sla,
                         )
                     }
@@ -1448,7 +1926,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             num_workers,
                             router_mode,
-                            false,
+                            record_per_request,
                             sla,
                         )
                     }
@@ -1467,7 +1945,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             max_in_flight,
                             router_mode,
-                            false,
+                            record_per_request,
                             None,
                             sla,
                             scaling_policy.take(),
@@ -1478,7 +1956,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             prefill_load_estimator.clone(),
                             trace,
                             router_mode,
-                            false,
+                            record_per_request,
                             None,
                             sla,
                             scaling_policy.take(),
@@ -1515,6 +1993,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        record_per_request,
                         sla,
                         scaling_policy.take(),
                     )
@@ -1527,6 +2006,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     num_workers,
                     arrival_speedup_ratio,
                     router_mode,
+                    record_per_request,
                     sla,
                     scaling_policy.take(),
                 ),
@@ -1539,7 +2019,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
-                        false,
+                        record_per_request,
                         sla,
                     )
                 }
@@ -1552,7 +2032,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         num_workers,
                         arrival_speedup_ratio,
                         router_mode,
-                        false,
+                        record_per_request,
                         sla,
                     )
                 }
@@ -1572,6 +2052,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         requests,
                         max_in_flight,
                         router_mode,
+                        record_per_request,
                         sla,
                         scaling_policy.take(),
                     )
@@ -1584,6 +2065,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         requests,
                         arrival_speedup_ratio,
                         router_mode,
+                        record_per_request,
                         sla,
                         scaling_policy.take(),
                     )
@@ -1596,19 +2078,105 @@ pub fn run_mocker_synthetic_trace_replay(
             }
         }
     };
-    let report = if let Some(callback) = scaling_policy {
-        run(Some(Box::new(PyReplayScalingPolicy { callback }))).map_err(scaling_run_err_to_pyerr)?
+    let (report, runtime_evidence) = if let Some(callback) = scaling_policy {
+        let (report, evidence) =
+            dynamo_mocker::replay::with_runtime_evidence(capture_options, || {
+                dynamo_mocker::replay::with_replay_determinism(capture_options.determinism, || {
+                    run(Some(Box::new(PyReplayScalingPolicy { callback })))
+                })
+            });
+        (report.map_err(scaling_run_err_to_pyerr)?, evidence)
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        let (report, evidence) = py.allow_threads(move || {
+            dynamo_mocker::replay::with_runtime_evidence(capture_options, || {
+                dynamo_mocker::replay::with_replay_determinism(capture_options.determinism, || {
+                    run(None)
+                })
+            })
+        });
+        (report.map_err(to_pyerr)?, evidence)
     };
-    pythonize(py, &report)
-        .map_err(to_pyerr)
-        .map(|obj| obj.unbind())
+    if is_offline {
+        return Py::new(
+            py,
+            OfflineReplayResult::new(
+                report,
+                record_per_request,
+                capture_planner_details,
+                canonical_capture,
+                canonical_metadata,
+                runtime_evidence,
+            ),
+        )
+        .map(Py::into_any);
+    }
+    pythonize(py, &report).map(Bound::unbind).map_err(to_pyerr)
 }
 
 enum ReplayArgsSelection {
     Aggregated(Box<RsMockEngineArgs>),
     Disagg(Box<dynamo_mocker::replay::OfflineDisaggReplayConfig>),
+}
+
+fn replay_args_mode(args: &ReplayArgsSelection) -> ReplayArgsMode {
+    match args {
+        ReplayArgsSelection::Aggregated(_) => ReplayArgsMode::Aggregated,
+        ReplayArgsSelection::Disagg(_) => ReplayArgsMode::Disagg,
+    }
+}
+
+fn replay_uses_aic(args: &ReplayArgsSelection) -> bool {
+    match args {
+        ReplayArgsSelection::Aggregated(args) => args.aic_backend.is_some(),
+        ReplayArgsSelection::Disagg(config) => {
+            config.prefill_args.aic_backend.is_some() || config.decode_args.aic_backend.is_some()
+        }
+    }
+}
+
+fn canonical_aic_implementation_metadata(
+    py: Python<'_>,
+    args: &ReplayArgsSelection,
+    aic_perf_config: Option<&ResolvedAicPerfConfig<'_>>,
+) -> PyResult<(
+    Option<dynamo_mocker::replay::CanonicalAicImplementation>,
+    Option<dynamo_mocker::replay::CanonicalAicImplementation>,
+)> {
+    let uses_performance_model = replay_uses_aic(args);
+    let uses_prefill_load_estimator = aic_perf_config.is_some();
+    let implementation = if uses_performance_model || uses_prefill_load_estimator {
+        Some(canonical_aic_implementation(py)?)
+    } else {
+        None
+    };
+    Ok((
+        if uses_performance_model {
+            implementation
+        } else {
+            None
+        },
+        if uses_prefill_load_estimator {
+            implementation
+        } else {
+            None
+        },
+    ))
+}
+
+fn replay_engine_metadata(
+    args: &ReplayArgsSelection,
+) -> anyhow::Result<dynamo_mocker::replay::CanonicalEngineConfig> {
+    match args {
+        ReplayArgsSelection::Aggregated(args) => {
+            dynamo_mocker::replay::CanonicalEngineConfig::aggregated(args)
+        }
+        ReplayArgsSelection::Disagg(config) => {
+            dynamo_mocker::replay::CanonicalEngineConfig::disaggregated(
+                &config.prefill_args,
+                &config.decode_args,
+            )
+        }
+    }
 }
 
 enum ReplayDispatch {
@@ -1822,6 +2390,16 @@ fn is_aic_memory_estimator_unavailable(py: Python<'_>, error: &PyErr) -> bool {
         .is_ok_and(|exception_type| error.is_instance(py, &exception_type))
 }
 
+fn resolve_aic_backend_version(
+    py: Python<'_>,
+    backend: &str,
+    configured_version: Option<&str>,
+) -> PyResult<String> {
+    py.import("dynamo._internal.aic")?
+        .call_method1("resolve_backend_version", (backend, configured_version))?
+        .extract()
+}
+
 fn materialize_replay_mocker_args(
     py: Python<'_>,
     extra_args: MockEngineArgs,
@@ -1838,7 +2416,13 @@ fn materialize_replay_mocker_args(
             .aic_model_path
             .clone()
             .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
-        let backend_version = args.aic_backend_version.clone();
+        let backend_version = resolve_aic_backend_version(
+            py,
+            &backend,
+            args.aic_backend_version.as_deref(),
+        )?;
+        args.aic_backend_version = Some(backend_version.clone());
+        let backend_version = Some(backend_version);
         let tp_size = args.aic_tp_size.unwrap_or(1);
         let moe_tp_size = args.aic_moe_tp_size;
         let moe_ep_size = args.aic_moe_ep_size;
@@ -2018,19 +2602,22 @@ fn load_replay_router_config(
     Ok(router_config.map(|config| config.inner().with_policy_model_name(model_name)))
 }
 
-fn load_replay_prefill_load_estimator(
+fn load_replay_prefill_load_estimator<'a>(
     py: Python<'_>,
     router_mode: dynamo_mocker::replay::ReplayRouterMode,
     router_config: Option<&KvRouterConfig>,
-    aic_perf_config: Option<&AicPerfConfig>,
-) -> PyResult<Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>> {
+    aic_perf_config: Option<&'a AicPerfConfig>,
+) -> PyResult<(
+    Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
+    Option<ResolvedAicPerfConfig<'a>>,
+)> {
     if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
         if aic_perf_config.is_some() {
             return Err(PyException::new_err(
                 "aic_perf_config requires router_mode='kv_router'",
             ));
         }
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let Some(router_config) = router_config else {
@@ -2039,7 +2626,7 @@ fn load_replay_prefill_load_estimator(
                 "aic_perf_config requires router_config with router_prefill_load_model='aic'",
             ));
         }
-        return Ok(None);
+        return Ok((None, None));
     };
 
     let router_config = router_config.inner();
@@ -2049,7 +2636,7 @@ fn load_replay_prefill_load_estimator(
                 "aic_perf_config requires router_prefill_load_model='aic'",
             ));
         }
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let Some(aic_perf_config) = aic_perf_config else {
@@ -2057,14 +2644,17 @@ fn load_replay_prefill_load_estimator(
             "router_prefill_load_model='aic' requires aic_perf_config",
         ));
     };
+    let resolved_aic_perf_config = resolve_aic_perf_config(py, Some(aic_perf_config))?
+        .expect("AIC perf config resolution must preserve a present config");
+    let aic_perf_config = resolved_aic_perf_config.config;
 
-    create_aic_prefill_load_estimator(
+    let estimator = create_aic_prefill_load_estimator(
         py,
         aic_perf_config.backend_name(),
         aic_perf_config.system(),
         aic_perf_config.model_path(),
         aic_perf_config.tp_size(),
-        aic_perf_config.backend_version(),
+        Some(&resolved_aic_perf_config.backend_version),
         aic_perf_config.moe_tp_size(),
         aic_perf_config.moe_ep_size(),
         aic_perf_config.attention_dp_size(),
@@ -2075,8 +2665,8 @@ fn load_replay_prefill_load_estimator(
         aic_perf_config.comm_dtype(),
         aic_perf_config.nextn(),
         aic_perf_config.nextn_accept_rates(),
-    )
-    .map(Some)
+    )?;
+    Ok((Some(estimator), Some(resolved_aic_perf_config)))
 }
 
 fn parse_replay_router_mode(
@@ -2373,6 +2963,7 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
         snapshot: ReplayScalingSnapshot,
     ) -> anyhow::Result<ReplayScalingDecision> {
         let ReplayScalingSnapshot {
+            tick_ordinal,
             now_ms,
             prefill_fpm,
             decode_fpm,
@@ -2390,6 +2981,7 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             let total_prefill_count = non_draining_prefill_count + draining_prefill_ids.len();
             let total_decode_count = non_draining_decode_count + draining_decode_ids.len();
             let metrics_json = json!({
+                "tick_ordinal": tick_ordinal,
                 "now_ms": now_ms,
                 "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
                 "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),

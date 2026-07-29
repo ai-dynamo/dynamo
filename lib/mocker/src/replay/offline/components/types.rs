@@ -4,6 +4,7 @@
 use uuid::Uuid;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
+use super::super::evidence::{KvIngestBoundary, WorkerPool};
 use super::super::runtime_utils::WorkerCompletionPayload;
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
@@ -67,6 +68,15 @@ pub(in crate::replay) trait ReplayEngineObservation {
 
     fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
         Vec::new()
+    }
+
+    fn record_ingestion(
+        _events: &Self::Batch,
+        _pool: WorkerPool,
+        _boundary: KvIngestBoundary,
+        _at_ms: f64,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

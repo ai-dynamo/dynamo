@@ -25,6 +25,9 @@ use crate::kv_manager::{DestinationReservation, G1Acquire, OffloadDependency};
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
+use crate::replay::offline::evidence::{
+    EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
+};
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
     ActiveHandoffRequests, AdmissionEvent, AdmissionInvariant, AdmissionStage,
@@ -102,6 +105,12 @@ pub(crate) struct SchedulerState {
 pub(super) struct PreemptedRequest {
     uuid: Uuid,
     signals: Vec<MoveBlock>,
+    pressure_before: Option<VllmPressureBefore>,
+}
+
+struct VllmPressureBefore {
+    state: EnginePressureState,
+    request_active_blocks: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -279,7 +288,11 @@ impl SchedulerState {
             );
         }
         self.prepend_waiting(uuid);
-        Some(PreemptedRequest { uuid, signals })
+        Some(PreemptedRequest {
+            uuid,
+            signals,
+            pressure_before: None,
+        })
     }
 
     #[cfg(test)]
@@ -1711,7 +1724,30 @@ impl VllmCore {
             selected = Some(uuid);
             break;
         }
-        let preempted = selected.and_then(|uuid| self.state.preempt_uuid(uuid));
+        let pressure_before = selected.and_then(|uuid| {
+            canonical_evidence_capture_active().then(|| VllmPressureBefore {
+                state: EnginePressureState {
+                    running_requests: self.state.running_members.len(),
+                    waiting_requests: Some(self.state.waiting_members.len()),
+                    active_blocks: self.kv_manager.num_active_blocks(),
+                },
+                request_active_blocks: self
+                    .state
+                    .requests
+                    .get(&uuid)
+                    .map(|request| {
+                        request
+                            .sequence
+                            .num_allocated_tokens()
+                            .div_ceil(self.args.block_size)
+                    })
+                    .unwrap_or_default(),
+            })
+        });
+        let mut preempted = selected.and_then(|uuid| self.state.preempt_uuid(uuid));
+        if let Some(preempted) = preempted.as_mut() {
+            preempted.pressure_before = pressure_before;
+        }
         if let Some(preempted) = preempted.as_ref() {
             self.bump_capacity_generation();
             tracing::debug!(
@@ -1722,6 +1758,39 @@ impl VllmCore {
             );
         }
         preempted
+    }
+
+    fn finish_preemption(&mut self, preempted: PreemptedRequest) -> Uuid {
+        let PreemptedRequest {
+            uuid,
+            signals,
+            pressure_before,
+        } = preempted;
+        for signal in signals {
+            assert!(
+                matches!(
+                    self.kv_manager.process_for_request(uuid, &signal, 0),
+                    G1Acquire::Ready(_)
+                ),
+                "preemption cleanup must be infallible"
+            );
+        }
+        if let Some(before) = pressure_before {
+            record_pressure(
+                PressureKind::VllmPreemption,
+                uuid,
+                before.state,
+                EnginePressureState {
+                    running_requests: self.state.running_members.len(),
+                    waiting_requests: Some(self.state.waiting_members.len()),
+                    active_blocks: self.kv_manager.num_active_blocks(),
+                },
+                before.request_active_blocks,
+                None,
+                None,
+            );
+        }
+        uuid
     }
 
     fn refresh_request_offload_dependency(&mut self, uuid: Uuid) -> Option<OffloadDependency> {
@@ -1932,18 +2001,9 @@ impl VllmCore {
                 actual_computed_after = effective_computed_before;
                 break;
             };
-            for signal in preempted.signals {
-                assert!(
-                    matches!(
-                        self.kv_manager
-                            .process_for_request(preempted.uuid, &signal, 0),
-                        G1Acquire::Ready(_)
-                    ),
-                    "preemption cleanup must be infallible"
-                );
-            }
+            let preempted_uuid = self.finish_preemption(preempted);
             *preempted_any = true;
-            if let Some(undone) = scheduled.remove(&preempted.uuid) {
+            if let Some(undone) = scheduled.remove(&preempted_uuid) {
                 *token_budget += undone.total_tokens;
                 if undone.prompt_tokens > 0 && self.args.worker_type != WorkerType::Decode {
                     *batch_count = batch_count.saturating_sub(1);
@@ -1952,7 +2012,7 @@ impl VllmCore {
                     *batch_total_prefix = batch_total_prefix.saturating_sub(undone.prefix_tokens);
                 }
             }
-            if preempted.uuid == uuid {
+            if preempted_uuid == uuid {
                 return ScheduleOutcome::CurrentPreempted;
             }
         }
@@ -2189,17 +2249,8 @@ impl VllmCore {
                     break;
                 };
                 running_changed = true;
-                for signal in preempted.signals {
-                    assert!(
-                        matches!(
-                            self.kv_manager
-                                .process_for_request(preempted.uuid, &signal, 0),
-                            G1Acquire::Ready(_)
-                        ),
-                        "decode preemption cleanup must be infallible"
-                    );
-                }
-                if preempted.uuid == uuid {
+                let preempted_uuid = self.finish_preemption(preempted);
+                if preempted_uuid == uuid {
                     break;
                 }
             }
@@ -2317,16 +2368,7 @@ impl VllmCore {
                 return (Duration::ZERO, Vec::new());
             };
             running_changed = true;
-            for signal in preempted.signals {
-                assert!(
-                    matches!(
-                        self.kv_manager
-                            .process_for_request(preempted.uuid, &signal, 0),
-                        G1Acquire::Ready(_)
-                    ),
-                    "speculative preemption cleanup must be infallible"
-                );
-            }
+            self.finish_preemption(preempted);
 
             ready.clear();
             for uuid in self.state.running.iter().copied() {

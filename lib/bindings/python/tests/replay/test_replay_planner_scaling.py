@@ -5,8 +5,11 @@ import json
 
 import pytest
 
+from dynamo._core import canonical_replay_available
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
+
+from .replay_utils import _run_replay_cli
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -88,6 +91,34 @@ def _planner_config(mode, report_output_dir, scale_component=None):
     return config
 
 
+def _assert_lifecycle_operations_are_consistent(operations):
+    assert [operation["operation_ordinal"] for operation in operations] == list(
+        range(len(operations))
+    )
+    for operation in operations:
+        state = operation["state_after_batch"]
+        assert state["active"] == sorted(state["active"])
+        assert state["starting"] == sorted(state["starting"])
+        assert state["draining"] == sorted(state["draining"])
+        assert not (set(state["active"]) & set(state["starting"]))
+        assert not (set(state["active"]) & set(state["draining"]))
+        assert not (set(state["starting"]) & set(state["draining"]))
+        releases = operation["topology_released_request_uuids"]
+        assert len(releases) == len(set(releases))
+        for transition in operation["transitions"]:
+            assert (
+                transition["origin_operation_ordinal"] <= operation["operation_ordinal"]
+            )
+        if operation["cause"] == "planner_scale":
+            assert operation["planner_tick_ordinal"] is not None
+        else:
+            assert operation["planner_tick_ordinal"] is None
+            assert operation["origin_operation_ordinal"] is not None
+            assert (
+                operation["origin_operation_ordinal"] < operation["operation_ordinal"]
+            )
+
+
 def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
     trace_path = _write_burst_idle_trace(
         tmp_path,
@@ -106,20 +137,147 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
         planner_config=_planner_config("agg", tmp_path),
     )
 
+    assert report.per_request is None
+    assert report.coverage["capture_per_request"] is False
+    assert report.planner.total_ticks == len(report.planner.ticks)
+    assert report.planner.total_ticks > 0
     events = [
         (event.component, event.from_count, event.to_count)
-        for event in report.scaling_events
+        for event in report.planner.scaling_events
     ]
-    assert report.trace_report["completed_requests"] == 33
+    assert report.summary["completed_requests"] == 33
     assert events == [
         ("agg", 1, 2),
         ("agg", 2, 3),
         ("agg", 3, 2),
         ("agg", 2, 1),
     ]
-    assert report.trace_report["decode_worker_seconds"] > (
-        report.trace_report["duration_ms"] / 1000.0
+    lifecycle = report.planner.lifecycle_operations
+    assert lifecycle
+    _assert_lifecycle_operations_are_consistent(lifecycle)
+    transitions = {
+        transition["transition"]
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    }
+    assert transitions == {
+        "worker_ready",
+        "worker_draining",
+        "worker_removed",
+    }
+    assert report.summary["decode_worker_seconds"] > (
+        report.summary["duration_ms"] / 1000.0
     )
+
+
+def test_canonical_planner_report_is_stable_across_output_directories(tmp_path):
+    if not canonical_replay_available():
+        pytest.skip("binding was not built with canonical-replay")
+
+    trace_path = _write_burst_idle_trace(
+        tmp_path,
+        input_tokens=128,
+        output_tokens=64,
+        request_count=8,
+    )
+    replay_kwargs = {
+        "extra_engine_args": MockEngineArgs(
+            block_size=64,
+            num_gpu_blocks=16,
+            max_num_seqs=8,
+            speedup_ratio=50.0,
+        ),
+        "num_workers": 1,
+        "capture_per_request": False,
+        "canonical_capture": True,
+    }
+    first = run_trace_replay(
+        trace_path,
+        planner_config=_planner_config("agg", tmp_path / "first"),
+        **replay_kwargs,
+    )
+    second = run_trace_replay(
+        trace_path,
+        planner_config=_planner_config("agg", tmp_path / "second"),
+        **replay_kwargs,
+    )
+
+    assert first.planner is not None
+    assert first.planner.total_ticks == len(first.planner.ticks)
+    assert first.planner.total_ticks > 0
+    assert first.planner.scaling_events
+    assert any(
+        tick["runtime_decision"]["target_decode"] is None
+        for tick in first.planner.ticks
+    )
+    for tick in first.planner.ticks:
+        for pool in tick["topology"].values():
+            assert pool["active_count"] == len(pool["active"])
+            assert pool["starting_count"] == len(pool["starting"])
+            assert pool["draining_count"] == len(pool["draining"])
+    first.planner.metadata["nonfinite"] = float("nan")
+    with pytest.raises(ValueError, match="non-finite number"):
+        first.to_canonical_dict()
+    del first.planner.metadata["nonfinite"]
+    planner_metadata = first.to_canonical_dict()["metadata"]["planner"]
+    assert planner_metadata["benchmark_granularity"] == 8
+    assert planner_metadata["bootstrap"] == {"status": "not_required"}
+    assert first._canonical_json_line() == second._canonical_json_line()
+
+
+def test_canonical_planner_jsonl_is_stable_across_process_hash_seeds(
+    tmp_path, monkeypatch
+):
+    if not canonical_replay_available():
+        pytest.skip("binding was not built with canonical-replay")
+
+    trace_path = _write_burst_idle_trace(
+        tmp_path,
+        input_tokens=128,
+        output_tokens=64,
+        request_count=8,
+    )
+    outputs = []
+    for run_name, hash_seed in (("first", "1"), ("second", "999")):
+        run_dir = tmp_path / run_name
+        run_dir.mkdir()
+        canonical_path = run_dir / "canonical.jsonl"
+        report_path = run_dir / "report.json"
+        planner_config = _planner_config("agg", run_dir / "planner")
+        monkeypatch.setenv("PYTHONHASHSEED", hash_seed)
+        _run_replay_cli(
+            run_dir,
+            str(trace_path),
+            "--extra-engine-args",
+            json.dumps(
+                {
+                    "block_size": 64,
+                    "num_gpu_blocks": 16,
+                    "max_num_seqs": 8,
+                    "speedup_ratio": 50.0,
+                }
+            ),
+            "--num-workers",
+            "2",
+            "--router-mode",
+            "kv_router",
+            "--planner-config",
+            json.dumps(planner_config),
+            "--canonical-reports-jsonl",
+            str(canonical_path),
+            "--report-json",
+            str(report_path),
+        )
+        outputs.append(canonical_path.read_bytes())
+
+    assert outputs[0] == outputs[1]
+    canonical = json.loads(outputs[0])
+    routes = [
+        (record["uuid"], record["routing_history"][0]["logical_worker_id"])
+        for record in canonical["per_request"]
+    ]
+    assert len(routes) == 9
+    assert {worker_id for _, worker_id in routes} >= {0, 1}
 
 
 @pytest.mark.parametrize(
@@ -169,16 +327,43 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
 
     events = [
         (event.from_count, event.to_count)
-        for event in report.scaling_events
+        for event in report.planner.scaling_events
         if event.component == component
     ]
-    assert report.trace_report["completed_requests"] == (
-        3 if component == "prefill" else 33
-    )
+    assert report.summary["completed_requests"] == (3 if component == "prefill" else 33)
     assert events[0] == (1, 2)
     assert events[-1] == (2, 1)
     assert max(to_count for _, to_count in events) > 1
-    worker_seconds_key = f"{component}_worker_seconds"
-    assert report.trace_report[worker_seconds_key] > (
-        report.trace_report["duration_ms"] / 1000.0
+    lifecycle = [
+        operation
+        for operation in report.planner.lifecycle_operations
+        if operation["pool"] == component
+    ]
+    _assert_lifecycle_operations_are_consistent(lifecycle)
+    starting = next(
+        operation
+        for operation in lifecycle
+        if any(
+            transition["transition"] == "worker_starting"
+            for transition in operation["transitions"]
+        )
     )
+    ready = next(
+        operation
+        for operation in lifecycle
+        if operation["cause"] == "worker_ready_event"
+    )
+    assert ready["origin_operation_ordinal"] == starting["operation_ordinal"]
+    assert ready["at_ms"] > starting["at_ms"]
+    assert any(
+        transition["transition"] == "worker_removed"
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    )
+    assert any(
+        transition["transition"] == "worker_draining"
+        for operation in lifecycle
+        for transition in operation["transitions"]
+    )
+    worker_seconds_key = f"{component}_worker_seconds"
+    assert report.summary[worker_seconds_key] > (report.summary["duration_ms"] / 1000.0)

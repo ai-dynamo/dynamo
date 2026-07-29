@@ -128,7 +128,7 @@ struct TurnRuntime {
     priority: i32,
     strict_priority: u32,
     policy_class: Option<String>,
-    #[cfg(any(test, feature = "replay-bench"))]
+    #[cfg(any(test, feature = "canonical-replay"))]
     deterministic_request_id: Option<Uuid>,
 }
 
@@ -467,9 +467,10 @@ impl WorkloadDriver {
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
-                    #[cfg(feature = "replay-bench")]
-                    deterministic_request_id: Some(Uuid::from_u128(session_index as u128 + 1)),
-                    #[cfg(all(test, not(feature = "replay-bench")))]
+                    #[cfg(feature = "canonical-replay")]
+                    deterministic_request_id: crate::replay::canonical_replay_active()
+                        .then(|| Uuid::from_u128(session_index as u128 + 1)),
+                    #[cfg(all(test, not(feature = "canonical-replay")))]
                     deterministic_request_id: None,
                 }],
                 cumulative_tokens: Vec::new(),
@@ -523,8 +524,9 @@ impl WorkloadDriver {
         let trace_block_size = trace.block_size;
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
-        #[cfg(feature = "replay-bench")]
-        let mut next_deterministic_request_id = 1_u128;
+        #[cfg(feature = "canonical-replay")]
+        let mut next_deterministic_request_id =
+            crate::replay::canonical_replay_active().then_some(1_u128);
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -553,13 +555,17 @@ impl WorkloadDriver {
                             turn.max_output_tokens,
                             &mut output_rng,
                         ));
-                        #[cfg(feature = "replay-bench")]
+                        #[cfg(feature = "canonical-replay")]
                         let deterministic_request_id = {
-                            let request_id = Uuid::from_u128(next_deterministic_request_id);
-                            next_deterministic_request_id = next_deterministic_request_id
-                                .checked_add(1)
-                                .expect("deterministic replay request UUID overflow");
-                            Some(request_id)
+                            next_deterministic_request_id.map(|next_id| {
+                                let request_id = Uuid::from_u128(next_id);
+                                next_deterministic_request_id = Some(
+                                    next_id
+                                        .checked_add(1)
+                                        .expect("deterministic replay request UUID overflow"),
+                                );
+                                request_id
+                            })
                         };
                         Ok(TurnRuntime {
                             request_id: None,
@@ -571,9 +577,9 @@ impl WorkloadDriver {
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
-                            #[cfg(feature = "replay-bench")]
+                            #[cfg(feature = "canonical-replay")]
                             deterministic_request_id,
-                            #[cfg(all(test, not(feature = "replay-bench")))]
+                            #[cfg(all(test, not(feature = "canonical-replay")))]
                             deterministic_request_id: None,
                         })
                     })
@@ -635,7 +641,7 @@ impl WorkloadDriver {
     /// Use stable monotonically increasing UUIDs for replay parity fixtures.
     /// This is unavailable in production builds so normal request identity and
     /// randomness remain unchanged.
-    #[cfg(any(test, feature = "replay-bench"))]
+    #[cfg(any(test, feature = "canonical-replay"))]
     pub fn with_deterministic_request_ids(mut self, first_id: u128) -> Self {
         let mut next_id = first_id;
         for session in &mut self.sessions {
@@ -650,7 +656,7 @@ impl WorkloadDriver {
     }
 
     fn request_uuid(&self, _session_index: usize, _turn_index: usize) -> Uuid {
-        #[cfg(any(test, feature = "replay-bench"))]
+        #[cfg(any(test, feature = "canonical-replay"))]
         if let Some(request_id) =
             self.sessions[_session_index].turns[_turn_index].deterministic_request_id
         {

@@ -88,7 +88,7 @@ impl PrefillLoadEstimator for PyAicCallback {
 }
 
 #[cfg(feature = "aic-forward-pass")]
-fn compiled_engine_sdk_available(py: Python<'_>) -> PyResult<bool> {
+pub(super) fn compiled_engine_sdk_available(py: Python<'_>) -> PyResult<bool> {
     match py.import("aiconfigurator.sdk.engine") {
         Ok(_) => Ok(true),
         Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {

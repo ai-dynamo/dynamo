@@ -26,6 +26,9 @@ use crate::common::protocols::{
 };
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::ActiveKvLease;
+use crate::replay::offline::evidence::with_engine_evidence_context;
+use crate::replay::offline::{PressureKind, WorkerPool, with_runtime_evidence};
+use crate::replay::{ReplayCaptureOptions, ReplayDeterminism};
 use crate::scheduler::test_utils::{
     CapturingFpmSink, RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
@@ -217,9 +220,36 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
     buffer.drain();
 
     let mut running = vec![req, blocker];
-    let retracted = decode::check_decode_mem(&mut running, &mut kv_manager, &config);
+    let (retracted, evidence) = with_runtime_evidence(
+        ReplayCaptureOptions {
+            capture_canonical_evidence: true,
+            determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
+        },
+        || {
+            with_engine_evidence_context(7.5, WorkerPool::Decode, 11, 2, || {
+                decode::check_decode_mem(&mut running, &mut kv_manager, &config)
+            })
+        },
+    );
     assert_eq!(retracted.len(), 1);
     assert_eq!(retracted[0].uuid, Uuid::from_u128(90_002));
+    let pressure = evidence.pressure.unwrap();
+    assert_eq!(pressure.vllm_preemptions_total, 0);
+    assert_eq!(pressure.sglang_retractions_total, 1);
+    let record = &pressure.records[0];
+    assert_eq!(record.pressure_ordinal, 0);
+    assert_eq!(record.at_ms, 7.5);
+    assert_eq!(record.pool, WorkerPool::Decode);
+    assert_eq!(record.worker_id, 11);
+    assert_eq!(record.dp_rank, 2);
+    assert_eq!(record.kind, PressureKind::SglangRetraction);
+    assert_eq!(record.request_uuid, Uuid::from_u128(90_002).to_string());
+    assert_eq!(record.state_before.running_requests, 2);
+    assert_eq!(record.state_after.running_requests, 1);
+    assert!(record.state_after.active_blocks <= record.state_before.active_blocks);
+    assert!(record.logical_available_blocks_before.is_some());
+    assert!(record.required_blocks_before.is_some());
     assert_eq!(removed_event_count(&buffer.drain()), 0);
     assert_eq!(kv_manager.cache().page_pool.available(), 0);
     assert_eq!(kv_manager.cache_mut().match_prefix(&prompt).0, prompt.len());

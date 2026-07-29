@@ -29,13 +29,13 @@ use dynamo_kv_router::{
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
+use serde::Serialize;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
 use crate::replay::offline::core::{
     Placement, PlacementDecision, PlacementEffects, PlacementPolicy, PlannerCacheSample,
@@ -46,6 +46,7 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector, replay_slots,
     replay_worker_config, replay_workers_with_configs,
 };
+use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode};
 
 mod composition_agg;
 pub(in crate::replay) use composition_agg::AggRuntime;
@@ -55,6 +56,43 @@ pub(in crate::replay) use composition_disagg::DisaggRuntime;
 pub(in crate::replay::offline) use composition_disagg::{
     derive_decode_router_config, derive_prefill_router_config,
 };
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalReplayRouterMode {
+    RoundRobin,
+    KvRouter,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CanonicalRouterMetadata {
+    pub mode: CanonicalReplayRouterMode,
+    pub config: Option<KvRouterConfig>,
+}
+
+pub fn canonical_router_metadata(
+    mode: ReplayRouterMode,
+    config: Option<&KvRouterConfig>,
+) -> Result<CanonicalRouterMetadata> {
+    if let Some(config) = config {
+        anyhow::ensure!(
+            config.router_tracking_key_file.is_none(),
+            "canonical replay does not support router_tracking_key_file"
+        );
+        anyhow::ensure!(
+            config.router_policy_config.is_none(),
+            "canonical replay does not support router_policy_config"
+        );
+    }
+    let (mode, config) = match mode {
+        ReplayRouterMode::RoundRobin => (CanonicalReplayRouterMode::RoundRobin, None),
+        ReplayRouterMode::KvRouter => (
+            CanonicalReplayRouterMode::KvRouter,
+            Some(config.cloned().unwrap_or_default()),
+        ),
+    };
+    Ok(CanonicalRouterMetadata { mode, config })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WorkerAdmission {
