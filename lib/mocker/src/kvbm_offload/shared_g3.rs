@@ -46,6 +46,7 @@ static SHARED_G3_POOL: OnceLock<Mutex<Option<Weak<SharedG3Pool>>>> = OnceLock::n
 static SHARED_G3_TEST_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
 impl SharedG3Pool {
+    #[cfg(test)]
     pub(crate) fn get_or_create(config: &KvbmOffloadConfig) -> Result<Option<Arc<Self>>> {
         Self::get_or_create_with_mode(config, KvbmDriveMode::Live)
     }

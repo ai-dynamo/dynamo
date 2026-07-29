@@ -54,6 +54,7 @@ static SHARED_G4_STORE: OnceLock<Mutex<Option<Weak<SharedG4Store>>>> = OnceLock:
 static SHARED_G4_TEST_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
 impl SharedG4Store {
+    #[cfg(test)]
     pub(crate) fn get_or_create(config: &KvbmOffloadConfig) -> Result<Option<Arc<Self>>> {
         Self::get_or_create_with_mode(config, KvbmDriveMode::Live)
     }

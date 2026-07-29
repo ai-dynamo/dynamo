@@ -458,6 +458,7 @@ pub struct MockWorker {
 }
 
 impl MockWorker {
+    #[cfg(test)]
     /// Build a new `MockWorker`.
     ///
     /// `offload_gbps` and `onboard_gbps` are throughput caps for the G1→G2
