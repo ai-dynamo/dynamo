@@ -64,11 +64,6 @@ on:
         required: false
         default: false
         type: boolean
-      themed_preview:
-        description: 'Apply the private NVIDIA global theme to this preview. Reproduces production, where the theme overrides the project css/js/footer. Needs an nvidia-org FERN_TOKEN.'
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -384,14 +379,17 @@ jobs:
           # stylesheet in hosted builds, so previews of any fern/main.css change
           # render unstyled. The repo main.css already carries the NVIDIA
           # branding rules, so unthemed previews stay visually faithful.
-          # A manual dispatch can opt in (themed_preview) to reproduce production
-          # locally-ish: this is the only way to see theme-dropped styling before
-          # merge, since the failure is invisible in an unthemed preview.
-          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ] || [ "${{ inputs.themed_preview }}" = "true" ]; then
-            yq -i '.global-theme = "nvidia"' docs.yml
-          else
-            yq -i 'del(.global-theme)' docs.yml
-          fi
+          # Every hosted build gets the theme, previews included. The theme
+          # overrides the project css/js and the custom footer, so an unthemed
+          # preview renders under conditions that never ship -- it was faithful
+          # to `fern docs dev`, not to the live site, which is how unstyled Home,
+          # Community and blog pages reached production unnoticed.
+          #
+          # This does not change the source repo's docs.yml, which still omits
+          # global-theme so contributors can run `fern docs dev` without an
+          # nvidia-org FERN_TOKEN (#10073). The theme is injected only into the
+          # docs-checkout copy CI builds from.
+          yq -i '.global-theme = "nvidia"' docs.yml
 
           echo "Updated docs.yml:"
           cat docs.yml
