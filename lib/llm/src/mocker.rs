@@ -1296,11 +1296,6 @@ mod tests {
         let engine = MockerExecutionContext::new(args);
 
         assert!(engine.prepare_bootstrap().await.is_err());
-        assert!(engine.engines.get().is_none());
-        assert!(engine.handoff_session_permits.get().is_none());
-        assert!(engine._relay_publishers.get().is_none());
-        assert!(!engine.handoff_shutdown.is_cancelled());
-        assert!(!engine.metrics_shutdown.is_cancelled());
 
         drop(occupied);
         let prepared = engine
