@@ -1168,6 +1168,44 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tools_rejects_non_object_parameters() {
+        for parameters in [json!("not-an-object"), json!([]), json!(42), json!(true)] {
+            let tools = vec![ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: "broken_tool".to_string(),
+                    description: None,
+                    parameters: Some(parameters),
+                    strict: None,
+                },
+            }];
+
+            let error = validate::validate_tools(&Some(&tools))
+                .expect_err("non-object function parameters must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "Function parameters at index 0 for \"broken_tool\" must be a JSON Schema object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tools_accepts_omitted_parameters() {
+        let tools = vec![ChatCompletionTool {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: "parameterless_tool".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        }];
+
+        validate::validate_tools(&Some(&tools))
+            .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
     fn test_openai_thinking_payload_normalizes_to_template_args() {
         let json_str = json!({
             "model": "deepseek-ai/DeepSeek-V4-Pro",

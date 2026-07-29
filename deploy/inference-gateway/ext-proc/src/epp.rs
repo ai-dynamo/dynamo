@@ -225,12 +225,10 @@ impl Router {
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
             cache_namespace,
