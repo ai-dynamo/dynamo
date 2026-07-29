@@ -105,7 +105,7 @@ When topology-aware KV transfer is enabled, the prefill router also derives deco
 > [!WARNING]
 > **Experimental.** Validate/tune conditional disaggregation against your workload before using it in production.
 
-Conditional disaggregation is a feature that enables a hybrid of aggregated and disaggregated request routing. The router may serve a request `prefill worker -> decode worker`, or it may send the request directly to a decode worker and the backend runs local prefill plus decode there.
+Conditional disaggregation enables a hybrid of aggregated and disaggregated request routing. The router may serve a request `prefill worker -> decode worker`, or it may send the request directly to a decode worker and the backend runs local prefill plus decode there.
 
 For workloads with a high degree of KV reusage on long-ISL requests, e.g. multi-turn / agentic conversation scenarios, conditional disaggregation can help your deployment maintain predictable SLA. Compared to unconditional disaggregation, it reduces memory pressure / TTFT on prefill workers by optimizing reuse of *decode-worker* KV cache; compared to unconditionally aggregated deployments, it avoids the heavy ITL penalty incurred by co-scheduling heavy prefill workload onto decode workers.
 
@@ -115,7 +115,7 @@ Enable conditional disaggregation with `--router-conditional-disagg` on the fron
 python -m dynamo.frontend \
     --router-mode kv \
     --router-conditional-disagg \
-    --router-conditional-disagg-policy isl_bounding
+    --router-conditional-disagg-config '{"policy":"isl_bounding"}'
 ```
 
 ### Backend Requirements
@@ -126,9 +126,9 @@ Configure workers as follows:
 
 | Backend | Requirement |
 | --- | --- |
-| vLLM | On decode workers, pass `--enable-conditional-disagg`. This opts decode workers into KV event publication and bypass handling. |
+| vLLM | Pass `--kv-events-config` on prefill and decode workers. |
 | TensorRT-LLM | Pass `--publish-kv-events` on prefill AND decode workers to opt them into KV-aware routing. |
-| SGLang | Not supported yet. Dynamo rejects SGLang conditional-disagg setups until the backend can run bypassed decode requests as local prefill+decode. |
+| SGLang | Not supported yet. |
 
 If decode workers do not publish KV events, the router cannot accurately assess bypass conditions.
 
@@ -141,19 +141,25 @@ For ISL-based policies, `effective ISL` is the request prompt length after subtr
 
 As a tuning starting point, we recommend choosing thresholds based on your workload's expected effective-ISL and the `effective ISL : raw ISL` ratio distribution. For example, with `isl_bounding`, setting the absolute threshold to p25 of the workload's effective ISL would make the absolute-threshold check pass for roughly 25% of requests.
 
-| Flag                                                  | Default        | Use                                                                                                                                               |
-| ----------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--router-conditional-disagg`                         | Disabled       | Enables conditional disaggregation. Requires `--router-mode kv` and separate prefill/decode worker pools.                                         |
-| `--router-conditional-disagg-policy`                  | `isl_bounding` | Selects the bypass policy: `isl_bounding`, `prefill_load`, or `isl_or_load`.                                                                      |
-| `--router-conditional-disagg-eff-isl-threshold`       | `2048`         | For `isl_bounding` and the ISL condition within `isl_or_load`, require effective ISL to be below this many tokens.                                |
-| `--router-conditional-disagg-eff-isl-ratio-threshold` | `0.7`          | For `isl_bounding` and the ISL condition within `isl_or_load`, require the `effective ISL : raw ISL` ratio to be below this value. Must be in `[0.0, 1.0]`. |
-| `--router-conditional-disagg-prefill-busy-threshold`  | Unset          | Sets the prefill busy threshold for `prefill_load` and `isl_or_load`. When unset, those policies inherit `--router-queue-threshold` if it is set. |
-| `--router-conditional-disagg-decode-busy-threshold`   | Unset          | Decode-busy guard. When unset, the guard is disabled. When set, conditional-disagg bypass is disabled if the selected decode worker's projected active decode KV blocks exceed this fraction of KV capacity. This uses router-side active decode block accounting. |
+| Flag | Default | Use |
+| --- | --- | --- |
+| `--router-conditional-disagg` | Disabled | Enables conditional disaggregation. Requires `--router-mode kv`, `--router-kv-events`, and separate prefill/decode worker pools. |
+| `--router-conditional-disagg-config` | Unset | JSON object for policy settings. Supported fields: `policy`, `eff_isl_threshold`, `eff_isl_ratio_threshold`, `prefill_busy_threshold`, and `decode_busy_threshold`. |
+
+The config fields map to these policy settings:
+
+| Config Field | Default | Use |
+| --- | --- | --- |
+| `policy` | `isl_bounding` | Selects the policy: `isl_bounding`, `prefill_load`, or `isl_or_load`. |
+| `eff_isl_threshold` | `2048` | For `isl_bounding` and the ISL condition within `isl_or_load`, require effective ISL to be below this many tokens. |
+| `eff_isl_ratio_threshold` | `0.7` | For `isl_bounding` and the ISL condition within `isl_or_load`, require the `effective ISL : raw ISL` ratio to be below this value. Must be in `[0.0, 1.0]`. |
+| `prefill_busy_threshold` | Unset | Sets the prefill busy threshold for `prefill_load` and `isl_or_load`. When unset, those policies inherit `--router-queue-threshold` if it is set. |
+| `decode_busy_threshold` | Unset | Decode-busy guard. When unset, the guard is disabled. When set, conditional disaggregation uses the normal remote-prefill path if the selected decode worker's projected active decode KV blocks exceed this fraction of KV capacity. If the selected decode worker does not report KV capacity, the router falls back to the normal prefill-decode disaggregation path instead. This uses router-side active decode block accounting. |
 
 The available policies are:
 
-| Policy         | Bypass Condition                                                                                                                                                       |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isl_bounding` | Effective ISL is below `--router-conditional-disagg-eff-isl-threshold` AND the effective/raw ISL ratio is below `--router-conditional-disagg-eff-isl-ratio-threshold`. |
-| `prefill_load` | The selected prefill worker is above the configured prefill busy threshold.                                                                                            |
-| `isl_or_load`  | Either the `isl_bounding` condition OR the `prefill_load` condition is true.                                                                                           |
+| Policy | Local Prefill+Decode Condition |
+| --- | --- |
+| `isl_bounding` | Effective ISL is below `eff_isl_threshold` AND the effective/raw ISL ratio is below `eff_isl_ratio_threshold`. |
+| `prefill_load` | The selected prefill worker is above the configured prefill busy threshold. |
+| `isl_or_load` | Either the `isl_bounding` condition OR the `prefill_load` condition is true. |

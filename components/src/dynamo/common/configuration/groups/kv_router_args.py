@@ -11,10 +11,11 @@ unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 """
 
 import argparse
+import json
 import logging
 import os
 import warnings
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -73,6 +74,14 @@ LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES: frozenset[str] = frozenset(
     {"prefill_load", "isl_or_load"}
 )
 
+_CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
+    "policy": "conditional_disagg_policy",
+    "eff_isl_threshold": "conditional_disagg_eff_isl_threshold",
+    "eff_isl_ratio_threshold": "conditional_disagg_eff_isl_ratio_threshold",
+    "prefill_busy_threshold": "conditional_disagg_prefill_busy_threshold",
+    "decode_busy_threshold": "conditional_disagg_decode_busy_threshold",
+}
+
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
     "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
@@ -123,36 +132,45 @@ def _default_prefill_load_scale() -> float:
     return 1.0
 
 
-def warn_conditional_disagg_prefill_busy_threshold_resolution(
-    *,
-    policy: str,
-    busy_threshold: Optional[float],
-    queue_threshold: Optional[float],
-) -> None:
-    if policy not in LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES:
-        return
-    if busy_threshold is not None:
-        logger.info(
-            "conditional_disagg prefill-load condition using "
-            "--router-conditional-disagg-prefill-busy-threshold=%s",
-            busy_threshold,
+def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "--router-conditional-disagg-config must be a JSON object"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--router-conditional-disagg-config must be a JSON object")
+
+    unknown = sorted(set(parsed) - set(_CONDITIONAL_DISAGG_CONFIG_FIELDS))
+    if unknown:
+        raise ValueError(
+            "--router-conditional-disagg-config has unknown field(s): "
+            + ", ".join(unknown)
         )
-    elif queue_threshold is not None:
-        logger.info(
-            "conditional_disagg prefill-load condition using "
-            "--router-queue-threshold=%s because "
-            "--router-conditional-disagg-prefill-busy-threshold is unset",
-            queue_threshold,
+    if "policy" in parsed and not isinstance(parsed["policy"], str):
+        raise ValueError("--router-conditional-disagg-config policy must be a string")
+    if "eff_isl_threshold" in parsed and (
+        not isinstance(parsed["eff_isl_threshold"], int)
+        or isinstance(parsed["eff_isl_threshold"], bool)
+    ):
+        raise ValueError(
+            "--router-conditional-disagg-config eff_isl_threshold must be an integer"
         )
-    else:
-        logger.warning(
-            "--router-conditional-disagg-policy=%r consumes the "
-            "prefill-worker busy signal, but neither "
-            "--router-conditional-disagg-prefill-busy-threshold nor "
-            "--router-queue-threshold is set; the prefill-load condition "
-            "will be disabled.",
-            policy,
-        )
+    for field in (
+        "eff_isl_ratio_threshold",
+        "prefill_busy_threshold",
+        "decode_busy_threshold",
+    ):
+        if parsed.get(field) is None:
+            continue
+        if not isinstance(parsed[field], (int, float)) or isinstance(
+            parsed[field], bool
+        ):
+            raise ValueError(
+                f"--router-conditional-disagg-config {field} must be a number"
+            )
+    return parsed
 
 
 class KvRouterConfigBase(ConfigBase):
@@ -186,6 +204,7 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
+    conditional_disagg_config: Optional[str] = None
     conditional_disagg_policy: str = "isl_bounding"
     conditional_disagg_eff_isl_threshold: int = 2048
     conditional_disagg_eff_isl_ratio_threshold: float = 0.7
@@ -201,9 +220,39 @@ class KvRouterConfigBase(ConfigBase):
         for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
             setattr(self, field, value)
 
+    def apply_conditional_disagg_config(self) -> None:
+        if self.conditional_disagg_config is not None:
+            parsed = _parse_conditional_disagg_config(self.conditional_disagg_config)
+            for key, value in parsed.items():
+                setattr(self, _CONDITIONAL_DISAGG_CONFIG_FIELDS[key], value)
+
+        if not self.conditional_disagg_enabled:
+            return
+        if self.conditional_disagg_policy not in LOAD_AWARE_CONDITIONAL_DISAGG_POLICIES:
+            return
+        # Load-aware conditional-disagg policies need a prefill busy threshold.
+        # If threshold is not user-provided via --router-conditional-disagg-config,
+        # default to --router-queue-threshold when that flag is set.
+        if self.conditional_disagg_prefill_busy_threshold is not None:
+            return
+        if self.router_queue_threshold is not None:
+            self.conditional_disagg_prefill_busy_threshold = self.router_queue_threshold
+            logger.info(
+                "conditional_disagg prefill_busy_threshold defaults to "
+                "--router-queue-threshold=%s",
+                self.router_queue_threshold,
+            )
+        else:
+            raise ValueError(
+                f"conditional_disagg policy={self.conditional_disagg_policy!r} "
+                "needs prefill_busy_threshold, but neither "
+                "prefill_busy_threshold nor --router-queue-threshold is set"
+            )
+
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
+        self.apply_conditional_disagg_config()
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
@@ -496,73 +545,17 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--router-conditional-disagg-policy",
-            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_POLICY",
-            default="isl_bounding",
+            flag_name="--router-conditional-disagg-config",
+            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG",
+            default=None,
             help=(
-                "[EXPERIMENTAL] KV Router: Conditional-disagg bypass policy. "
-                "'isl_bounding': bypass when effective ISL is below both the "
-                "absolute and ratio thresholds. 'prefill_load': bypass when "
-                "the chosen prefill worker is busy. 'isl_or_load': bypass "
-                "when either the ISL condition or the prefill-load condition is met."
+                "[EXPERIMENTAL] KV Router: JSON object for conditional "
+                "disaggregation policy settings. Supported fields: policy, "
+                "eff_isl_threshold, eff_isl_ratio_threshold, "
+                "prefill_busy_threshold, decode_busy_threshold."
             ),
             arg_type=str,
-            choices=list(CONDITIONAL_DISAGG_POLICY_CHOICES),
-            dest="conditional_disagg_policy",
-        )
-        add_argument(
-            g,
-            flag_name="--router-conditional-disagg-eff-isl-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
-            default=2048,
-            help=(
-                "[EXPERIMENTAL] KV Router: For 'isl_bounding' and the ISL "
-                "condition within 'isl_or_load', require effective ISL to be "
-                "below this many tokens."
-            ),
-            arg_type=int,
-            dest="conditional_disagg_eff_isl_threshold",
-        )
-        add_argument(
-            g,
-            flag_name="--router-conditional-disagg-eff-isl-ratio-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
-            default=0.7,
-            help=(
-                "[EXPERIMENTAL] KV Router: For 'isl_bounding' and the ISL "
-                "condition within 'isl_or_load', require the `effective ISL : raw ISL` "
-                "ratio to be below this value. Must be in [0.0, 1.0]."
-            ),
-            arg_type=float,
-            dest="conditional_disagg_eff_isl_ratio_threshold",
-        )
-        add_argument(
-            g,
-            flag_name="--router-conditional-disagg-prefill-busy-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
-            default=None,
-            help=(
-                "[EXPERIMENTAL] KV Router: Prefill-worker busy threshold for "
-                "'prefill_load' and 'isl_or_load'. A worker is busy when "
-                "active_tokens(W) > threshold * max_num_batched_tokens(W). "
-                "If unset, falls back to --router-queue-threshold."
-            ),
-            arg_type=float,
-            dest="conditional_disagg_prefill_busy_threshold",
-        )
-        add_argument(
-            g,
-            flag_name="--router-conditional-disagg-decode-busy-threshold",
-            env_var="DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
-            default=None,
-            help=(
-                "[EXPERIMENTAL] KV Router: Decode-busy guard for conditional disagg. "
-                "When set, conditional-disagg bypass is disabled if the selected "
-                "decode worker's projected active decode KV blocks exceed "
-                "threshold * total_kv_blocks(W). If unset, the guard is disabled."
-            ),
-            arg_type=float,
-            dest="conditional_disagg_decode_busy_threshold",
+            dest="conditional_disagg_config",
         )
         add_argument(
             g,

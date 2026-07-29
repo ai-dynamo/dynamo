@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from dynamo.router.args import parse_args
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
@@ -75,6 +77,23 @@ def handler_with_router():
     router = AsyncMock()
     handler.kv_router = router
     return handler, router
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--endpoint", "dynamo.worker.generate", "--router-conditional-disagg"],
+        [
+            "--endpoint",
+            "dynamo.worker.generate",
+            "--router-conditional-disagg-config",
+            '{"policy":"isl_bounding"}',
+        ],
+    ],
+)
+def test_standalone_router_rejects_conditional_disagg(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="standalone dynamo.router"):
+        parse_args(argv)
 
 
 @pytest.mark.asyncio
