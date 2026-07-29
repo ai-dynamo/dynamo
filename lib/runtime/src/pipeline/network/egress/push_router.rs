@@ -1407,8 +1407,9 @@ where
 
     /// Resolve `(instance_id, address, transport_kind_label, Instance)` for
     /// the selected worker. If that worker has disappeared, apply the caller's
-    /// fallback policy. Return `CannotConnect` when fallback is forbidden or no
-    /// eligible fallback worker can be resolved.
+    /// fallback policy. `CannotConnect` is returned when fallback is forbidden
+    /// or when a selected fallback disappears before its transport can be
+    /// resolved.
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1473,15 +1474,14 @@ where
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            None => Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "Instance {} not found and no other instances available for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into()),
+            // TODO(https://github.com/ai-dynamo/dynamo/issues/12383): Distinguish
+            // no discoverable fallback from pool-wide overload and return the
+            // appropriate typed error for each case.
+            None => Err(anyhow::anyhow!(
+                "Instance {} not found and no other instances available for endpoint {}",
+                instance_id,
+                self.client.endpoint.id()
+            )),
         }
     }
 
@@ -1783,6 +1783,13 @@ mod tests {
         assert!(
             !match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]),
             "CannotConnect failure must not be masked as ResourceExhausted: {error}"
+        );
+    }
+
+    fn assert_not_cannot_connect(error: &anyhow::Error) {
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "fallback-enabled failure must preserve its existing error semantics: {error}"
         );
     }
 
@@ -2207,7 +2214,15 @@ mod tests {
             .bidirectional_dispatch(stale_id, input)
             .await
             .unwrap_err();
-        assert_cannot_connect(&bidirectional_error);
+        assert_not_cannot_connect(&bidirectional_error);
+        assert!(
+            !match_error_chain(
+                bidirectional_error.as_ref(),
+                &[ErrorType::ResourceExhausted],
+                &[]
+            ),
+            "transport resolution must precede the stale overload check: {bidirectional_error}"
+        );
 
         rt.shutdown();
     }
@@ -2732,7 +2747,7 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert_cannot_connect(&error);
+        assert_not_cannot_connect(&error);
         let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
@@ -2782,7 +2797,7 @@ mod tests {
         let disallowed_error = router
             .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
             .unwrap_err();
-        assert_cannot_connect(&disallowed_error);
+        assert_not_cannot_connect(&disallowed_error);
 
         let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
