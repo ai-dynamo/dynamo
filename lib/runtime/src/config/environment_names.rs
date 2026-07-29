@@ -378,10 +378,11 @@ pub mod llm {
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
     ///
-    /// The default (10 ms) is chosen to sit above observed request-parse /
-    /// admission latency at p99 and below typical engine TTFT. Tune upward if
-    /// admission latency is bimodal; tune to `0` to disable the peek entirely
-    /// (all errors surface as SSE frames post-HTTP-200).
+    /// Default: unset → peek disabled (matches pre-fix behavior; all errors
+    /// surface as SSE frames post-HTTP-200). Set to a value ≥ observed
+    /// request-parse / admission p99 latency to opt in — request-validation
+    /// errors within the window surface as HTTP 4xx; anything past the window
+    /// stays as an SSE error frame. Setting to `0` also disables the peek.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
