@@ -82,8 +82,21 @@ The mounted PlannerConfig enables it:
 ```
 
 `enable_power_awareness` requires `environment: "kubernetes"` and
-`mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported). See the
-`power-aware-budget/` directory in
+`mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported).
+
+You must also enable `pods/list` RBAC for the Planner's ServiceAccount at
+install time. The Planner reads Pod annotations during startup to verify that
+power caps have propagated before caching them. Without the permission the
+startup settlement check fails. Pass this flag when installing or upgrading the
+platform chart:
+
+```bash
+helm dependency build deploy/helm/charts/platform
+helm upgrade --install dynamo deploy/helm/charts/platform \
+  --set dynamo-operator.planner.powerAwareness.enabled=true
+```
+
+See the `power-aware-budget/` directory in
 [Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
 the full annotation + config contract and its limitations (the budget is a
 projected ceiling over requested caps, not a proven hardware limit).

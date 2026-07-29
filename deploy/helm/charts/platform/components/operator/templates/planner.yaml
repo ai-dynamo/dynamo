@@ -48,13 +48,16 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if .Values.planner.powerAwareness.enabled }}
 # Pods (list only): startup settlement reads non-terminal pod annotations to
 # verify the DGD-owned power cap has propagated before caching it. No write
 # surface: caps are authored on the DGD podTemplate and enforced by the Power
 # Agent; the Planner never patches Pods.
+# Requires planner.powerAwareness.enabled=true in Helm values.
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -96,11 +99,14 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if .Values.planner.powerAwareness.enabled }}
 # Pods (list only): startup settlement reads non-terminal pod annotations to
 # verify the DGD-owned power cap has propagated before caching it. No write
 # surface: caps are authored on the DGD podTemplate and enforced by the Power
 # Agent; the Planner never patches Pods.
+# Requires planner.powerAwareness.enabled=true in Helm values.
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
+{{- end }}
 {{- end }}

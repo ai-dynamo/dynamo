@@ -10,7 +10,8 @@ capability discovery, and replica-state introspection for one deployment mode.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+import inspect
+from typing import TYPE_CHECKING, Optional, Protocol, TypeGuard, runtime_checkable
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.monitoring.worker_info import WorkerInfo
@@ -77,10 +78,10 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 class PowerAwareConnector(Protocol):
     """Narrow read-only power capability — Kubernetes-specific, not part of PlannerConnector.
 
-    The environment checks ``isinstance(controller, PowerAwareConnector)`` at
-    each power-aware boundary when ``enable_power_awareness=True``. All three
-    methods must be present; a typo or absent method is caught at the isinstance
-    check rather than silently falling back to a no-op.
+    The environment calls ``is_power_aware_connector(controller)`` at each
+    power-aware boundary when ``enable_power_awareness=True``. All three methods
+    must be present and callable; a typo or absent method is caught at that check
+    rather than silently falling back to a no-op.
     """
 
     def get_graph_deployment(self) -> dict:
@@ -108,4 +109,31 @@ class PowerAwareConnector(Protocol):
         ...
 
 
-__all__ = ["PlannerConnector", "PowerAwareConnector", "WorkerInfoProvider"]
+_POWER_AWARE_REQUIRED: tuple[str, ...] = (
+    "get_graph_deployment",
+    "get_component_power_configs",
+    "wait_for_settled_graph_deployment",
+)
+
+
+def is_power_aware_connector(obj: object) -> TypeGuard[PowerAwareConnector]:
+    """Return True if ``obj`` is a ``PowerAwareConnector``.
+
+    Uses ``inspect.getattr_static`` (so the check is correct on Python < 3.12,
+    where ``isinstance(..., Protocol)`` may return True for objects such as an
+    unrestricted ``MagicMock`` that satisfy the protocol only via
+    ``__getattr__``). Each attribute must also be callable to exclude
+    non-callable class-level sentinels.
+    """
+    return all(
+        callable(inspect.getattr_static(obj, name, None))
+        for name in _POWER_AWARE_REQUIRED
+    )
+
+
+__all__ = [
+    "PlannerConnector",
+    "PowerAwareConnector",
+    "WorkerInfoProvider",
+    "is_power_aware_connector",
+]

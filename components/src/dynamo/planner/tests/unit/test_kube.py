@@ -1352,19 +1352,20 @@ async def test_wait_legacy_failed_rollout_does_not_raise(k8s_api, mock_core_api)
 
 
 @pytest.mark.asyncio
-async def test_wait_settlement_dgd_whitespace_annotation_matches_canonical_pod(
-    k8s_api, mock_core_api
-):
-    """DGD annotation ' 350 ' (whitespace-padded) matches a pod carrying '350'.
+async def test_wait_settlement_verbatim_annotation_propagation(k8s_api, mock_core_api):
+    """DGD annotation ' 350 ' propagates verbatim to Pods; settlement uses raw string.
 
-    get_gpu_power_limit_watts() strips whitespace and returns the integer 350,
-    so expected_power stores str(350) = '350'. A pod carrying the canonical
-    form '350' settles successfully. Exact string comparison still rejects a
-    pod whose annotation differs from '350' (e.g. ' 350 '), so the canonical
-    form is what operators must write on pods.
+    The operator copies the raw DGD podTemplate annotation onto each Pod without
+    normalization, so expected_power stores the raw string ' 350 ' and the
+    settlement comparison succeeds only when the Pod carries that same raw value.
+
+    ' 350 ' (DGD) + ' 350 ' (Pod) → settles (operator verbatim copy).
+    ' 350 ' (DGD) + '350'   (Pod) → does NOT settle (canonical form differs).
     """
     dgd = _stable_worker_dgd(generation=2, observed_generation=2, decode_watts=" 350 ")
-    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="350")])
+
+    # Verbatim match: pod carries the raw DGD annotation string.
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation=" 350 ")])
     with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
         got = await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment",
@@ -1376,3 +1377,17 @@ async def test_wait_settlement_dgd_whitespace_annotation_matches_canonical_pod(
             delay_seconds=0.01,
         )
     assert got is dgd
+
+    # Canonical form "350" does not match the raw DGD annotation " 350 ".
+    _mock_pod_list(mock_core_api, [_make_pod("pod-0", annotation="350")])
+    with patch.object(k8s_api, "get_graph_deployment", return_value=dgd):
+        with pytest.raises(TimeoutError):
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment",
+                include_planner=False,
+                require_backing_settled=True,
+                require_prefill=False,
+                require_decode=True,
+                max_attempts=3,
+                delay_seconds=0.01,
+            )

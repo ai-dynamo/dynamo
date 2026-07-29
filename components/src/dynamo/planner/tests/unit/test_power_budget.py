@@ -166,6 +166,19 @@ def test_shrink_pair_infeasible_raises_runtime_error():
         _shrink_pair(5, 5, 2000, 2000, 1000, 1)
 
 
+def test_shrink_pair_asymmetric_wattage_never_raises_decode_above_proposed():
+    """p_watts >> d_watts must not push new_d above num_d.
+
+    num_p=3, num_d=10, p_watts=100, d_watts=1, budget=200:
+    projected=310>200. Proportional shrink lands new_p=1 (p_watts is expensive).
+    remaining=200-100=100; floor(100/1)=100 >> num_d=10 without the cap.
+    """
+    new_p, new_d = _shrink_pair(3, 10, 100, 1, 200, 1)
+    assert new_d <= 10, f"new_d={new_d} raised above proposed num_d=10"
+    assert new_p * 100 + new_d * 1 <= 200, "result exceeds budget"
+    assert new_p >= 1 and new_d >= 1, "must keep at least min_endpoint of each"
+
+
 def test_already_over_budget_baseline_with_no_proposal_is_left_alone():
     # Nothing proposed (both None); baseline over budget but no lever this tick.
     assert apply_power_budget(None, None, 10, 10, 700, 1200, 100, 1) == (

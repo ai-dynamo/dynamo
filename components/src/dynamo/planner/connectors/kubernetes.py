@@ -349,8 +349,9 @@ class KubernetesConnector(PlannerConnector):
         """Fetch the DGD once for callers that share it across GPU/power reads.
 
         Not on the base ``PlannerConnector`` protocol — power awareness is
-        Kubernetes-local and must not expand that ABC (duck-typed via
-        ``getattr`` from the environment).
+        Kubernetes-local and must not expand that ABC. The environment checks
+        ``is_power_aware_connector(controller)`` (all three methods present)
+        rather than duck-typing via ``getattr``.
         """
         return self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
@@ -737,8 +738,8 @@ class KubernetesConnector(PlannerConnector):
                 already reads desired==available but still have lingering pods with
                 a deletionTimestamp are reported as not-yet-stable.  Must only be
                 True when enable_power_awareness is on: the pod list requires the
-                pods/list RBAC permission that power-disabled ServiceAccounts do
-                not carry.
+                pods/list RBAC permission granted at install time by
+                ``planner.powerAwareness.enabled`` in the Helm chart.
 
         Returns:
             tuple[int, int, bool]: (prefill_count, decode_count, is_stable)

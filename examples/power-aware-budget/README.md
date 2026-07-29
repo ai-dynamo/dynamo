@@ -60,6 +60,19 @@ renders it into the Deployment / LeaderWorkerSet template.
    `decode` (`agg` is not currently supported). Per-GPU caps are **not** set
    here — they live on the worker `podTemplate` annotations only.
 
+3. Enable the Planner's `pods/list` RBAC permission in the Helm installation.
+   Power-annotation settlement reads Pod annotations at startup, which requires
+   this permission. Set it when installing or upgrading the platform chart:
+
+   ```bash
+   helm dependency build deploy/helm/charts/platform
+   helm upgrade --install dynamo deploy/helm/charts/platform \
+     --set dynamo-operator.planner.powerAwareness.enabled=true
+   ```
+
+   Without this flag the Planner's ServiceAccount lacks `pods/list` and the
+   startup settlement check will fail with a Kubernetes RBAC error.
+
 ## Projection
 
 ```text

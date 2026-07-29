@@ -446,7 +446,12 @@ def _shrink_pair(
     max_p = math.floor((budget - min_endpoint * d_watts) / p_watts)
     new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
     remaining = budget - new_p * p_watts
-    new_d = max(min_endpoint, math.floor(remaining / d_watts))
+    # Cap new_d at num_d: when p_watts >> d_watts the proportional shrink lands
+    # new_p near min_endpoint, leaving a large remaining budget that would push
+    # floor(remaining / d_watts) above num_d. Callers guarantee num_d >=
+    # min_endpoint, so min(num_d, max(min_endpoint, ...)) returns <= num_d
+    # while still respecting the floor for valid inputs.
+    new_d = min(num_d, max(min_endpoint, math.floor(remaining / d_watts)))
     return new_p, new_d
 
 

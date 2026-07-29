@@ -10,7 +10,7 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector, PowerAwareConnector
+from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
@@ -191,7 +191,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         """
         if not self.config.enable_power_awareness:
             return None
-        if not isinstance(self.controller, PowerAwareConnector):
+        if not is_power_aware_connector(self.controller):
             return None
         return self.controller.get_graph_deployment()
 
@@ -203,7 +203,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         planners keep the standard ``wait_for_deployment_ready`` path.
         """
         if self.config.enable_power_awareness:
-            if not isinstance(self.controller, PowerAwareConnector):
+            if not is_power_aware_connector(self.controller):
                 raise DeploymentValidationError(
                     [
                         "Power awareness requires a connector that implements "
@@ -385,7 +385,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         generic ``type: worker`` fallback). Called at startup only to adopt
         static caps. Never called at runtime — caps are startup-static.
         """
-        if not isinstance(self.controller, PowerAwareConnector):
+        if not is_power_aware_connector(self.controller):
             raise DeploymentValidationError(
                 [
                     "Power awareness requires a connector that implements "

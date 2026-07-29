@@ -245,13 +245,15 @@ class Service(BaseModel):
         """
         return self.get_gpu_count() * self.get_node_count()
 
-    def get_gpu_power_limit_watts(self) -> int:
-        """Return ``dynamo.nvidia.com/gpu-power-limit`` from podTemplate annotations.
+    def get_gpu_power_limit_annotation(self) -> str:
+        """Return the raw ``dynamo.nvidia.com/gpu-power-limit`` annotation string.
 
-        The per-GPU cap is read from the worker component's
-        ``podTemplate.metadata.annotations``. This is the *desired* static cap
-        the operator stamps onto Pods and the Power Agent enforces; the Planner
-        only reads it for power projection.
+        Validates the annotation (same rules as ``get_gpu_power_limit_watts``)
+        but returns the original string rather than the parsed integer.  The
+        operator propagates the raw DGD podTemplate annotation verbatim onto
+        each Pod, so callers that build settlement expected-values must use
+        this raw string — not the canonical ``str(int)`` — to get an exact
+        match against what the Pod actually carries.
 
         Raises:
             PowerAnnotationMissingError: annotation key is absent.
@@ -264,13 +266,31 @@ class Service(BaseModel):
         raw = annotations.get(POWER_ANNOTATION_KEY)
         if raw is None:
             raise PowerAnnotationMissingError(self.name)
+        raw_str = str(raw)
         try:
-            watts = int(str(raw).strip())
+            watts = int(raw_str.strip())
         except (ValueError, TypeError) as err:
-            raise PowerAnnotationInvalidError(self.name, str(raw)) from err
+            raise PowerAnnotationInvalidError(self.name, raw_str) from err
         if watts <= 0:
-            raise PowerAnnotationInvalidError(self.name, str(raw))
-        return watts
+            raise PowerAnnotationInvalidError(self.name, raw_str)
+        return raw_str
+
+    def get_gpu_power_limit_watts(self) -> int:
+        """Return ``dynamo.nvidia.com/gpu-power-limit`` as a validated integer.
+
+        The per-GPU cap is read from the worker component's
+        ``podTemplate.metadata.annotations``. This is the *desired* static cap
+        the operator stamps onto Pods and the Power Agent enforces; the Planner
+        only reads it for power projection.
+
+        For verbatim annotation comparison (settlement), use
+        ``get_gpu_power_limit_annotation()`` instead.
+
+        Raises:
+            PowerAnnotationMissingError: annotation key is absent.
+            PowerAnnotationInvalidError: value is empty, non-integer, or <= 0.
+        """
+        return int(self.get_gpu_power_limit_annotation().strip())
 
 
 def get_component_from_type_or_name(

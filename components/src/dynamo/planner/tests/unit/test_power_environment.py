@@ -10,12 +10,13 @@ re-reads or re-adopts them. Annotation or topology changes take effect through
 a worker rollout plus Planner restart.
 """
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from kubernetes.client import ApiException
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.base import is_power_aware_connector
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.errors import DeploymentValidationError, PowerAnnotationInvalidError
 from dynamo.planner.monitoring.dgd_services import (
@@ -66,11 +67,10 @@ def _env(
 
 
 def _power_controller(**kwargs):
-    """Minimal mock that satisfies isinstance(..., PowerAwareConnector).
+    """Minimal mock accepted by is_power_aware_connector().
 
-    All three protocol methods must be present in __dict__ so
-    inspect.getattr_static can find them (runtime_checkable uses static
-    lookup in Python 3.12+, bypassing Mock's __getattr__).
+    All three protocol methods must be set explicitly on the instance so
+    inspect.getattr_static can find them and callable() returns True.
     """
     controller = Mock(**kwargs)
     controller.get_graph_deployment = Mock()
@@ -123,6 +123,34 @@ def _worker(name, *, comp_type, watts="300", gpus="1", node_count=None):
 
 def _dgd(*components):
     return {"spec": {"components": list(components)}}
+
+
+def test_is_power_aware_connector_rejects_bare_magic_mock():
+    assert is_power_aware_connector(MagicMock()) is False
+
+
+def test_is_power_aware_connector_accepts_valid_connector():
+    connector = Mock()
+    connector.get_graph_deployment = Mock()
+    connector.get_component_power_configs = Mock()
+    connector.wait_for_settled_graph_deployment = AsyncMock()
+    assert is_power_aware_connector(connector) is True
+
+
+def test_is_power_aware_connector_rejects_missing_method():
+    connector = Mock()
+    connector.get_graph_deployment = Mock()
+    connector.get_component_power_configs = Mock()
+    # wait_for_settled_graph_deployment absent from __dict__
+    assert is_power_aware_connector(connector) is False
+
+
+def test_is_power_aware_connector_rejects_non_callable_attribute():
+    connector = Mock()
+    connector.get_graph_deployment = Mock()
+    connector.get_component_power_configs = Mock()
+    connector.wait_for_settled_graph_deployment = "not_a_function"
+    assert is_power_aware_connector(connector) is False
 
 
 def test_init_populates_power_watts():
@@ -200,12 +228,12 @@ def test_init_required_decode_config_none_raises():
 async def test_initialize_power_on_requires_power_aware_connector():
     """Power on + connector missing a PowerAwareConnector method must raise immediately.
 
-    runtime_checkable uses inspect.getattr_static (Python 3.12+), which
-    bypasses Mock's __getattr__. A method not explicitly set on the mock
-    instance is invisible to the isinstance check, so omitting
-    wait_for_settled_graph_deployment triggers DeploymentValidationError
-    rather than silently falling through to replica-count readiness and
-    skipping observedGeneration / pod-annotation convergence.
+    is_power_aware_connector() uses inspect.getattr_static, which bypasses
+    Mock's __getattr__. A method not explicitly set on the mock instance is
+    invisible to the check, so omitting wait_for_settled_graph_deployment
+    triggers DeploymentValidationError rather than silently falling through
+    to replica-count readiness and skipping observedGeneration / pod-annotation
+    convergence.
     """
     controller = Mock()
     controller.async_init = AsyncMock()
@@ -215,7 +243,7 @@ async def test_initialize_power_on_requires_power_aware_connector():
         return_value=(_cfg("prefill", 700), _cfg("decode", 300))
     )
     # wait_for_settled_graph_deployment intentionally absent from __dict__:
-    # isinstance(controller, PowerAwareConnector) → False.
+    # is_power_aware_connector(controller) → False.
 
     env = _env(controller)
     fpm = Mock()
