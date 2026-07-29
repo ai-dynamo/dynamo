@@ -9,6 +9,7 @@ import gc
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import torch
@@ -81,11 +82,12 @@ class GMSV1SleepModeBackend(SleepModeBackend):
         with self._use_pool(_WEIGHTS, self._weights_pool):
             yield
 
-        parameter_span_bytes, copied_out_bytes = (
-            copy_non_parameter_tensors_to_default_allocator(
-                model(),
-                self._weights.mappings,
-            )
+        (
+            parameter_span_bytes,
+            copied_out_bytes,
+        ) = copy_non_parameter_tensors_to_default_allocator(
+            model(),
+            self._weights.mappings,
         )
         torch.cuda.synchronize(self._device)
         self._destroy_weights_pool()
@@ -145,12 +147,44 @@ class GMSV1SleepModeBackend(SleepModeBackend):
 
         try:
             self._state = "RESUMING"
+            wake_t0 = monotonic()
+
+            kv_t0 = monotonic()
             self._kv_cache.connect(RequestedLockType.RW)
+            kv_connected_at = monotonic()
             self._kv_cache.reallocate_all_handles()
+            kv_reallocated_at = monotonic()
             self._kv_cache.remap_all_vas()
+            kv_done_at = monotonic()
+            logger.info(
+                "GMS V1 KV wake device=%d connect_elapsed=%.3fs "
+                "reallocate_elapsed=%.3fs remap_elapsed=%.3fs total_elapsed=%.3fs",
+                self._device,
+                kv_connected_at - kv_t0,
+                kv_reallocated_at - kv_connected_at,
+                kv_done_at - kv_reallocated_at,
+                kv_done_at - kv_t0,
+            )
+
+            weights_t0 = monotonic()
             self._weights.connect(RequestedLockType.RO)
+            weights_connected_at = monotonic()
             self._weights.remap_all_vas()
+            weights_done_at = monotonic()
+            logger.info(
+                "GMS V1 weights wake device=%d connect_elapsed=%.3fs "
+                "remap_elapsed=%.3fs total_elapsed=%.3fs",
+                self._device,
+                weights_connected_at - weights_t0,
+                weights_done_at - weights_connected_at,
+                weights_done_at - weights_t0,
+            )
             self._state = "RUNNING"
+            logger.info(
+                "GMS V1 wake complete device=%d total_elapsed=%.3fs",
+                self._device,
+                monotonic() - wake_t0,
+            )
         except Exception as cause:
             logger.exception("GMS V1 resume failed; terminating the worker process")
             raise SystemExit(1) from cause
