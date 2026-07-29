@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import os
 import threading
 
@@ -65,6 +66,9 @@ def _interval_seconds() -> float:
     except ValueError:
         logger.warning("invalid DYN_FPM_GC_FREEZE_INTERVAL_S=%r, using 60", raw)
         return 60.0
+    if not math.isfinite(value):
+        logger.warning("invalid DYN_FPM_GC_FREEZE_INTERVAL_S=%r, using 60", raw)
+        return 60.0
     return max(1.0, value)
 
 
@@ -76,9 +80,13 @@ def gc_maintain() -> int:
     scans. The full-heap walk this costs is why callers must be outside
     any measured window.
     """
-    gc.unfreeze()
-    gc.collect()
-    gc.freeze()
+    # Serialize with the periodic tick: a freeze fired between unfreeze()
+    # and collect() would re-freeze the garbage this call is meant to
+    # reclaim, silently turning the maintenance pass into a no-op.
+    with _lock:
+        gc.unfreeze()
+        gc.collect()
+        gc.freeze()
     return gc.get_freeze_count()
 
 
@@ -89,10 +97,13 @@ def _freeze_loop(interval: float, stop: threading.Event) -> None:
             # no pause. Never collect on the timer (a periodic collect walks
             # the unfrozen heap) and never call gc.get_freeze_count() here
             # (it walks the whole permanent generation: measured 0.4-4s
-            # pauses once millions of objects are frozen).
-            gc.freeze()
+            # pauses once millions of objects are frozen). Serialized with
+            # gc_maintain() through _lock.
+            with _lock:
+                gc.freeze()
         except Exception:  # pragma: no cover - defensive
-            logger.exception("fpm gc tick failed")
+            logger.exception("fpm gc tick failed; freeze loop exiting")
+            raise
 
 
 def start_gc_policy() -> bool:

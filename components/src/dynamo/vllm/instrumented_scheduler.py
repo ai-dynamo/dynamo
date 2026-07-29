@@ -1907,10 +1907,6 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_active = False
             return
 
-        from dynamo.vllm import gc_policy as _fpm_gc_policy
-
-        _fpm_gc_policy.start_gc_policy()
-
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
         raw_mode = cfg.get("mode", "agg")
         if not isinstance(raw_mode, str) or raw_mode not in BENCHMARK_MODES:
@@ -2131,6 +2127,12 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_cudagraph_mode,
             self._bench_cudagraph_capture_sizes,
         )
+
+        # Started last so a config validation error above never leaves the
+        # engine-core process with automatic gen2 collection disabled.
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
+        _fpm_gc_policy.start_gc_policy()
 
     # -- Grid generation ------------------------------------------------
 

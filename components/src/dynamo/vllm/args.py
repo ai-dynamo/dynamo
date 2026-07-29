@@ -355,7 +355,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        if os.environ.get("DYN_FPM_GC_POLICY"):
+        if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
             # Class path as a literal, not an import: importing
             # dynamo.vllm.gc_policy auto-starts the policy in the importing
             # process, and this launcher process must stay untouched.
