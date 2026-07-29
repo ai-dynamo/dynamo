@@ -292,6 +292,13 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  config:
+    server:
+      healthProbes:
+        # -- Enable Grove's health and readiness probes on port 9444. Grove's /readyz
+        # gates on certificate readiness and its webhook listener, so PodCliqueSet
+        # admission is not attempted before Grove can serve it.
+        enable: true
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.
