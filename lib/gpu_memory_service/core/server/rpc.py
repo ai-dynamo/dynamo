@@ -10,7 +10,7 @@ import socket
 import socketserver
 from pathlib import Path
 
-from ..protocol import (
+from gpu_memory_service.core.protocol import (
     REQUEST_TYPES,
     ErrorResponse,
     HandshakeRequest,
@@ -19,9 +19,9 @@ from ..protocol import (
     receive_message,
     send_message,
 )
-from .gms import GMSServerMemoryManager
-from .lease import socket_is_alive
-from .sessions import ServerSession
+from gpu_memory_service.core.server.gms import GMSServerMemoryManager
+from gpu_memory_service.core.server.lease import socket_is_alive
+from gpu_memory_service.core.server.sessions import ServerSession
 
 
 class _GMSRequestHandler(socketserver.BaseRequestHandler):
