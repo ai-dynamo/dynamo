@@ -151,7 +151,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     echo "deb [arch=${TARGETARCH} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
     apt-get update && \
-    curl --retry 3 --retry-delay 5 -fsSL -o /tmp/nsys.deb \
+    curl --retry 5 --retry-delay 5 --retry-all-errors -fsSL -o /tmp/nsys.deb \
         "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${TARGETARCH}/nsight-systems-2025.5.1_2025.5.1.121-1_${TARGETARCH}.deb" && \
     apt-get install -y --no-install-recommends /tmp/nsys.deb gh && \
     rm -f /tmp/nsys.deb && \
