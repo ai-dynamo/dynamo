@@ -39,7 +39,7 @@ def make_args(**overrides):
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
-        "g1_backend": "kvbm",
+        "g1_backend": None,
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
@@ -142,6 +142,57 @@ def test_build_mocker_engine_args_trtllm_accepts_native_g1():
 
     assert engine_args.g1_backend == "native"
     assert engine_args.block_size == 32
+
+
+def test_mocker_defaults_to_native_g1_across_python_entrypoints():
+    cli_args = parse_args([])
+    assert cli_args.g1_backend is None
+    assert CONFIG.build_mocker_engine_args(cli_args).g1_backend == "native"
+    assert MockEngineArgs().g1_backend == "native"
+    assert MockEngineArgs.from_json("{}").g1_backend == "native"
+
+
+@pytest.mark.parametrize(
+    "offload",
+    [
+        {"num_g2_blocks": 8},
+        {"num_g2_blocks": 8, "num_g3_blocks": 16},
+        {"num_g2_blocks": 8, "enable_g4_storage": True},
+    ],
+)
+def test_mocker_offload_automatically_selects_kvbm_g1(offload):
+    engine_args = MockEngineArgs(**offload)
+
+    assert engine_args.g1_backend == "kvbm"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_explicit_native_with_offload_is_rejected(engine_type):
+    with pytest.raises(Exception, match="omit g1_backend"):
+        MockEngineArgs(
+            engine_type=engine_type,
+            g1_backend="native",
+            num_g2_blocks=8,
+        )
+
+
+def test_mocker_explicit_native_accepts_disabled_offload():
+    engine_args = MockEngineArgs(
+        g1_backend="native",
+        num_g2_blocks=0,
+        num_g3_blocks=0,
+    )
+
+    assert engine_args.g1_backend == "native"
+
+
+@pytest.mark.parametrize("engine_type", ["VLLM", "TRTLLM"])
+def test_mocker_uppercase_json_offload_selects_kvbm_g1(engine_type):
+    engine_args = MockEngineArgs.from_json(
+        json.dumps({"engine_type": engine_type, "num_g2_blocks": 8})
+    )
+
+    assert engine_args.g1_backend == "kvbm"
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
@@ -422,6 +473,36 @@ def test_mocker_cli_accepts_native_g1_for_trtllm():
     args = parse_args(["--engine-type", "trtllm", "--g1-backend", "native"])
 
     assert args.engine_type == "trtllm"
+    assert args.g1_backend == "native"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_cli_rejects_explicit_native_g1_with_offload(engine_type, capsys):
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--engine-type",
+                engine_type,
+                "--g1-backend",
+                "native",
+                "--num-g2-blocks",
+                "8",
+            ]
+        )
+
+    assert "omit --g1-backend" in capsys.readouterr().err
+
+
+def test_mocker_cli_ignores_explicit_g1_backend_for_sglang():
+    args = parse_args(
+        [
+            "--engine-type",
+            "sglang",
+            "--g1-backend",
+            "native",
+        ]
+    )
+
     assert args.g1_backend == "native"
 
 
