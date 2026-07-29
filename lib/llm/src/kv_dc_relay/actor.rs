@@ -12,13 +12,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "ckf-diagnostics")]
 use std::time::Instant;
 
+#[cfg(test)]
+use dynamo_kv_router::indexer::cuckoo::CkfConfig;
 #[cfg(any(test, feature = "ckf-diagnostics"))]
 use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 #[cfg(feature = "ckf-diagnostics")]
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
-    CkfConfig, CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta,
-    DcCkfDeltaSink, DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
+    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
@@ -32,12 +34,11 @@ use tokio_util::sync::CancellationToken;
 use crate::kv_router::indexer::{RecoveryResetReason, RecoveryTarget, SourceEpoch};
 
 use super::host::KvDcRelayError;
-use super::resolution::PoolBinding;
 
 const DEFAULT_MAILBOX_CAPACITY: usize = 256;
 const DEFAULT_PENDING_BLOCK_PERMITS: usize = 65_536;
 const DEFAULT_PUBLICATION_CAPACITY: usize = 64;
-const DEFAULT_FAULT_CAPACITY: usize = 16;
+pub(super) const DEFAULT_FAULT_CAPACITY: usize = 16;
 #[cfg(test)]
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
 const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
@@ -253,11 +254,23 @@ fn actor_fault_category(disposition: CkfFailureDisposition) -> ActorFaultCategor
     }
 }
 
+async fn send_actor_fault(
+    sender: &mpsc::Sender<ActorFault>,
+    fence: &CancellationToken,
+    fault: ActorFault,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = fence.cancelled() => false,
+        result = sender.send(fault) => result.is_ok(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct StreamScope {
-    pub(super) process_incarnation: u64,
+    pub(super) relay_incarnation: u64,
     pub(super) layout_generation: u64,
-    pub(super) pool_binding: PoolBinding,
+    pub(super) pool_id: dynamo_kv_router::identity::PoolId,
 }
 
 #[derive(Debug, Clone)]
@@ -276,12 +289,12 @@ impl DcCkfDeltaSink for BroadcastDeltaSink {
 #[derive(Debug, Clone)]
 pub(crate) struct KvDcRelayHandle {
     sender: mpsc::Sender<ActorCommand>,
+    identity: ProducerIdentity,
     payload_permits: Arc<Semaphore>,
     fence: CancellationToken,
     stopped: CancellationToken,
     #[cfg(feature = "ckf-diagnostics")]
     pub(super) diagnostics: ActorDiagnosticsHandle,
-    pub(super) scope: StreamScope,
 }
 
 impl KvDcRelayHandle {
@@ -298,6 +311,7 @@ impl KvDcRelayHandle {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn spawn_with_publication_delay(
         config: CkfConfig,
         scope: StreamScope,
@@ -305,6 +319,19 @@ impl KvDcRelayHandle {
     ) -> Result<(Self, mpsc::Receiver<ActorFault>), KvDcRelayError> {
         Self::spawn_with_capacity_and_delay(
             config,
+            scope,
+            DEFAULT_MAILBOX_CAPACITY,
+            publication_delay,
+        )
+    }
+
+    pub(super) fn spawn_with_state_and_publication_delay(
+        state: DcCkfState,
+        scope: StreamScope,
+        publication_delay: Duration,
+    ) -> (Self, mpsc::Receiver<ActorFault>) {
+        Self::spawn_with_state_capacity_and_delay(
+            state,
             scope,
             DEFAULT_MAILBOX_CAPACITY,
             publication_delay,
@@ -320,6 +347,7 @@ impl KvDcRelayHandle {
         Self::spawn_with_capacity_and_delay(config, scope, capacity, DEFAULT_PUBLICATION_DELAY)
     }
 
+    #[cfg(test)]
     fn spawn_with_capacity_and_delay(
         config: CkfConfig,
         scope: StreamScope,
@@ -327,11 +355,25 @@ impl KvDcRelayHandle {
         publication_delay: Duration,
     ) -> Result<(Self, mpsc::Receiver<ActorFault>), KvDcRelayError> {
         let state = DcCkfState::new(config)?;
+        Ok(Self::spawn_with_state_capacity_and_delay(
+            state,
+            scope,
+            capacity,
+            publication_delay,
+        ))
+    }
+
+    fn spawn_with_state_capacity_and_delay(
+        state: DcCkfState,
+        scope: StreamScope,
+        capacity: usize,
+        publication_delay: Duration,
+    ) -> (Self, mpsc::Receiver<ActorFault>) {
         let (sender, receiver) = mpsc::channel(capacity);
         let (publication_tx, _) = broadcast::channel(DEFAULT_PUBLICATION_CAPACITY);
         let identity = ProducerIdentity::new(
-            scope.pool_binding.pool_id(),
-            scope.process_incarnation,
+            scope.pool_id,
+            scope.relay_incarnation,
             scope.layout_generation,
             state.format(),
         );
@@ -356,18 +398,22 @@ impl KvDcRelayHandle {
             fence.clone(),
             stopped.clone(),
         ));
-        Ok((
+        (
             Self {
                 sender,
+                identity,
                 payload_permits: Arc::new(Semaphore::new(DEFAULT_PENDING_BLOCK_PERMITS)),
                 fence,
                 stopped,
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics,
-                scope,
             },
             fault_rx,
-        ))
+        )
+    }
+
+    pub(super) const fn identity(&self) -> ProducerIdentity {
+        self.identity
     }
 
     async fn submit<T>(
@@ -930,8 +976,10 @@ async fn run_actor(
                         source_epoch.get()
                     );
                     diagnostics.record_error(&message);
-                    if fault_tx
-                        .send(ActorFault {
+                    if !send_actor_fault(
+                        &fault_tx,
+                        &fence,
+                        ActorFault {
                             worker_id,
                             dp_rank,
                             source_epoch,
@@ -939,10 +987,11 @@ async fn run_actor(
                             category: actor_fault_category(disposition),
                             disposition,
                             message,
-                        })
-                        .await
-                        .is_err()
+                        },
+                    )
+                    .await
                     {
+                        discard_tail = fence.is_cancelled();
                         break;
                     }
                     diagnostics.finish_command();
@@ -1023,8 +1072,10 @@ async fn run_actor(
                     let message = error.to_string();
                     let category = actor_fault_category(disposition);
                     diagnostics.record_error(&message);
-                    if fault_tx
-                        .send(ActorFault {
+                    if !send_actor_fault(
+                        &fault_tx,
+                        &fence,
+                        ActorFault {
                             worker_id,
                             dp_rank,
                             source_epoch,
@@ -1032,10 +1083,11 @@ async fn run_actor(
                             category,
                             disposition,
                             message,
-                        })
-                        .await
-                        .is_err()
+                        },
+                    )
+                    .await
                     {
+                        discard_tail = fence.is_cancelled();
                         break;
                     }
                 }
@@ -1314,27 +1366,19 @@ mod tests {
     use dynamo_kv_router::protocols::{
         KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
     };
-    use dynamo_runtime::protocols::EndpointId;
 
     use super::*;
-    use crate::kv_dc_relay::resolution::EndpointLocator;
 
-    fn scope(name: &str) -> StreamScope {
-        let endpoint = format!("ns.worker.{name}");
-        let endpoint_id = EndpointId::from(endpoint.as_str());
+    fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
         let domain = IndexerDomainId::new(
             CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
             RoutingScopeId::new([3; 16], IdentitySource::Explicit),
         );
         StreamScope {
-            process_incarnation: 1,
+            relay_incarnation: 1,
             layout_generation: 1,
-            pool_binding: PoolBinding::new(
-                PoolId::new(domain, dc_id),
-                EndpointLocator::new(dc_id, endpoint_id),
-                None,
-            ),
+            pool_id: PoolId::new(domain, dc_id),
         }
     }
 
@@ -1399,10 +1443,7 @@ mod tests {
             snapshot.buckets.len(),
             snapshot.identity.format().bucket_count()
         );
-        assert_eq!(
-            actor_health(&handle).mailbox_capacity,
-            DEFAULT_MAILBOX_CAPACITY
-        );
+        assert_eq!(handle.mailbox_capacity(), DEFAULT_MAILBOX_CAPACITY);
         assert!(
             handle
                 .diagnostics
@@ -1595,6 +1636,37 @@ mod tests {
                 .await,
             Err(KvDcRelayError::ShuttingDown)
         ));
+    }
+
+    #[tokio::test]
+    async fn producer_fence_interrupts_a_full_fault_channel() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (handle, faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fault-backpressure")).unwrap();
+        handle
+            .admit_event(SourceEpoch::new(0), stored(worker, 1, &[1]))
+            .await
+            .unwrap();
+        handle.flush().await.unwrap();
+
+        for event_id in 2..=(DEFAULT_FAULT_CAPACITY as u64 + 2) {
+            handle
+                .admit_event(SourceEpoch::new(1), stored(worker, event_id, &[event_id]))
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while faults.len() != DEFAULT_FAULT_CAPACITY || handle.mailbox_depth() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must block after filling the fault channel");
+
+        tokio::time::timeout(Duration::from_secs(1), handle.fence())
+            .await
+            .expect("fence must interrupt a blocked fault send")
+            .unwrap();
     }
 
     #[tokio::test]
