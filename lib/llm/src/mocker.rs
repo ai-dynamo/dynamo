@@ -22,16 +22,13 @@ use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerM
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
-    RawKvEventSink,
+    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, RawKvEventSink,
 };
-use dynamo_mocker::engine::create_engine;
+use dynamo_mocker::live::{LiveEngine, LiveEngineConfig};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
-use dynamo_mocker::scheduler::{SchedulerCommandEnvelope, SchedulerHandle};
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
     ParticipantRegistration, connect_to_prefill,
@@ -56,8 +53,8 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use self::handoff::{
-    HandoffEventRegistry, SourceHandoffManager, SourceRegistration, cancel_destination,
-    order_for_engine, run_destination_session,
+    HandoffControl, SourceHandoffManager, SourceRegistration, cancel_destination,
+    live_handoff_boundary, order_for_engine, run_destination_session,
 };
 use self::metrics::NativeMockerMetrics;
 
@@ -221,30 +218,23 @@ fn no_bootstrap_handoff_delay(
     Some(Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0))
 }
 
-/// AsyncEngine wrapper around the Scheduler that generates random character tokens
-pub struct MockEngine {
-    active_requests: Arc<DashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>,
-    request_senders: OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>,
-    command_senders: OnceCell<Vec<mpsc::Sender<SchedulerCommandEnvelope>>>,
-    // TODO(DIS-2478): Store the scheduler cancellation senders and connect the AsyncEngine
-    // context stop/response-stream drop path to targeted cancellation. Until then, lib/mocker
-    // cancellation is not wired end to end through MockEngine.
+struct MockerExecutionContext {
+    engines: OnceCell<Vec<LiveEngine>>,
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
-    senders_ready: Notify,
+    engines_ready: Notify,
     engine_args: MockEngineArgs,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     source_handoff_manager: OnceCell<SourceHandoffManager>,
-    handoff_events: HandoffEventRegistry,
     handoff_shutdown: CancellationToken,
-    scheduler_shutdown: CancellationToken,
+    metrics_shutdown: CancellationToken,
     handoff_tasks: TaskTracker,
-    scheduler_tasks: TaskTracker,
+    metrics_tasks: TaskTracker,
     native_metrics: Arc<NativeMockerMetrics>,
-    /// Keep schedulers alive so their CancelGuards don't fire prematurely.
-    _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
+    /// Keep ZMQ relay publishers alive until their engines finish shutting down.
+    _relay_publishers: OnceCell<Vec<Option<KvEventPublisher>>>,
     /// Forward pass metrics publisher (kept alive for the engine lifetime).
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
 }
@@ -254,9 +244,8 @@ struct PreparedBootstrap {
     max_sessions: usize,
 }
 
-impl MockEngine {
-    /// Create a new MockEngine with the given parameters
-    pub fn new(engine_args: MockEngineArgs) -> Self {
+impl MockerExecutionContext {
+    fn new(engine_args: MockEngineArgs) -> Self {
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
         let response_replay_table = engine_args
@@ -277,23 +266,20 @@ impl MockEngine {
             );
         }
         Self {
-            active_requests: Arc::new(DashMap::new()),
-            request_senders: OnceCell::new(),
-            command_senders: OnceCell::new(),
+            engines: OnceCell::new(),
             handoff_session_permits: OnceCell::new(),
-            senders_ready: Notify::new(),
+            engines_ready: Notify::new(),
             engine_args,
             response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
-            handoff_events: HandoffEventRegistry::default(),
             handoff_shutdown: CancellationToken::new(),
-            scheduler_shutdown: CancellationToken::new(),
+            metrics_shutdown: CancellationToken::new(),
             handoff_tasks: TaskTracker::new(),
-            scheduler_tasks: TaskTracker::new(),
+            metrics_tasks: TaskTracker::new(),
             native_metrics,
-            _schedulers: OnceCell::new(),
+            _relay_publishers: OnceCell::new(),
             _fpm_publisher: OnceCell::new(),
         }
     }
@@ -361,7 +347,7 @@ impl MockEngine {
         );
     }
 
-    pub async fn start(&self, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
+    async fn start(self: Arc<Self>, endpoint: dynamo_runtime::component::Endpoint) -> Result<()> {
         let component = endpoint.component().clone();
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -411,88 +397,77 @@ impl MockEngine {
             }
         };
 
-        let schedulers = self
-            .start_schedulers(kv_endpoint, self.scheduler_shutdown.clone(), fpm_sinks)
-            .await;
+        let (engines, relay_publishers, handoff_session_permits) =
+            self.start_engines(kv_endpoint, fpm_sinks).await?;
+
+        self.engines
+            .set(engines)
+            .map_err(|_| anyhow::anyhow!("live Mocker engines initialized more than once"))?;
+        self._relay_publishers
+            .set(relay_publishers)
+            .map_err(|_| anyhow::anyhow!("mocker relay publishers initialized more than once"))?;
+        self.handoff_session_permits
+            .set(handoff_session_permits)
+            .map_err(|_| anyhow::anyhow!("mocker handoff permits initialized more than once"))?;
+        self.engines_ready.notify_waiters();
 
         if let Some(prepared) = prepared_bootstrap {
             self.commit_bootstrap(prepared);
         }
 
         Self::start_metrics_publishing(
-            &schedulers,
+            self.engines
+                .get()
+                .expect("live Mocker engines were initialized above"),
             endpoint,
             self.native_metrics.clone(),
-            self.scheduler_shutdown.clone(),
-            self.scheduler_tasks.clone(),
+            self.metrics_shutdown.clone(),
+            self.metrics_tasks.clone(),
         )
         .await?;
 
-        let _ = self._schedulers.set(schedulers);
-
-        let handoff_shutdown = self.handoff_shutdown.clone();
-        let scheduler_shutdown = self.scheduler_shutdown.clone();
-        let handoff_tasks = self.handoff_tasks.clone();
-        let scheduler_tasks = self.scheduler_tasks.clone();
-        let source_manager = self.source_handoff_manager.get().cloned();
-        let bootstrap_server = self.bootstrap_server.get().cloned();
+        let shutdown = Arc::clone(&self);
         tokio::spawn(async move {
             primary_token.cancelled().await;
-            handoff_shutdown.cancel();
-            handoff_tasks.close();
-            if let Some(manager) = source_manager {
+            shutdown.handoff_shutdown.cancel();
+            shutdown.handoff_tasks.close();
+            if let Some(manager) = shutdown.source_handoff_manager.get().cloned() {
                 manager.wait_closed().await;
             }
-            if let Some(server) = bootstrap_server {
+            if let Some(server) = shutdown.bootstrap_server.get().cloned() {
                 server.wait_closed().await;
             }
-            handoff_tasks.wait().await;
-            scheduler_shutdown.cancel();
-            scheduler_tasks.close();
-            scheduler_tasks.wait().await;
+            shutdown.handoff_tasks.wait().await;
+            if let Some(engines) = shutdown.engines.get() {
+                for result in
+                    futures::future::join_all(engines.iter().map(LiveEngine::shutdown)).await
+                {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "failed to shut down live Mocker engine");
+                    }
+                }
+            }
+            shutdown.metrics_shutdown.cancel();
+            shutdown.metrics_tasks.close();
+            shutdown.metrics_tasks.wait().await;
         });
 
         Ok(())
     }
 
-    /// Send a request to the appropriate scheduler, waiting for initialization if needed.
-    pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
-        let sender = self.request_sender(dp_rank).await;
-        let _ = sender.send(request);
-    }
-
-    async fn request_sender(&self, dp_rank: usize) -> mpsc::UnboundedSender<DirectRequest> {
-        if let Some(senders) = self.request_senders.get() {
-            return senders[dp_rank].clone();
+    async fn engine(&self, dp_rank: usize) -> LiveEngine {
+        if let Some(engines) = self.engines.get() {
+            return engines[dp_rank].clone();
         }
 
-        // Register the waiter *before* re-checking to avoid a TOCTOU race
-        // where `start_schedulers` sets + notifies between our check and subscribe.
-        let notified = self.senders_ready.notified();
-        if let Some(senders) = self.request_senders.get() {
-            return senders[dp_rank].clone();
+        let notified = self.engines_ready.notified();
+        if let Some(engines) = self.engines.get() {
+            return engines[dp_rank].clone();
         }
         notified.await;
-
-        let senders = self
-            .request_senders
+        self.engines
             .get()
-            .expect("must be set after notify");
-        senders[dp_rank].clone()
-    }
-
-    async fn command_sender(&self, dp_rank: usize) -> mpsc::Sender<SchedulerCommandEnvelope> {
-        if let Some(senders) = self.command_senders.get() {
-            return senders[dp_rank].clone();
-        }
-        let notified = self.senders_ready.notified();
-        if let Some(senders) = self.command_senders.get() {
-            return senders[dp_rank].clone();
-        }
-        notified.await;
-        self.command_senders
-            .get()
-            .expect("scheduler command senders must be initialized before notification")[dp_rank]
+            .expect("live Mocker engines must be initialized before notification")[dp_rank]
             .clone()
     }
 
@@ -500,7 +475,7 @@ impl MockEngine {
         if let Some(permits) = self.handoff_session_permits.get() {
             return permits[dp_rank].clone();
         }
-        let notified = self.senders_ready.notified();
+        let notified = self.engines_ready.notified();
         if let Some(permits) = self.handoff_session_permits.get() {
             return permits[dp_rank].clone();
         }
@@ -511,22 +486,21 @@ impl MockEngine {
             .clone()
     }
 
-    /// Create schedulers and spawn their background tasks for distributing token notifications.
-    async fn start_schedulers(
+    async fn start_engines(
         &self,
         endpoint: Option<&dynamo_runtime::component::Endpoint>,
-        cancel_token: CancellationToken,
         fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
-    ) -> Vec<Box<dyn SchedulerHandle>> {
+    ) -> Result<(
+        Vec<LiveEngine>,
+        Vec<Option<KvEventPublisher>>,
+        Vec<Arc<Semaphore>>,
+    )> {
         let args = &self.engine_args;
-        let mut schedulers = Vec::<Box<dyn SchedulerHandle>>::new();
-        let mut senders = Vec::with_capacity(args.dp_size as usize);
-        let mut command_senders = Vec::with_capacity(args.dp_size as usize);
+        let mut engines = Vec::<LiveEngine>::with_capacity(args.dp_size as usize);
+        let mut relay_publishers = Vec::with_capacity(args.dp_size as usize);
         let mut handoff_session_permits = Vec::with_capacity(args.dp_size as usize);
 
         for (dp_rank, fpm_publisher) in (0..args.dp_size).zip(fpm_sinks) {
-            let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
-
             let (kv_event_publishers, relay_publisher): (
                 KvEventPublishers,
                 Option<KvEventPublisher>,
@@ -607,92 +581,39 @@ impl MockEngine {
                 None => (KvEventPublishers::default(), None),
             };
 
-            let mut scheduler = create_engine(
+            let engine = match LiveEngine::start_with_config(
                 args.clone(),
                 dp_rank,
-                Some(output_tx),
-                kv_event_publishers,
-                Some(cancel_token.clone()),
-                fpm_publisher,
-            );
+                LiveEngineConfig {
+                    kv_event_publishers,
+                    fpm_publisher,
+                },
+            ) {
+                Ok(engine) => engine,
+                Err(error) => {
+                    for engine in &engines {
+                        if let Err(shutdown_error) = engine.shutdown().await {
+                            tracing::error!(
+                                %shutdown_error,
+                                "failed to shut down live Mocker engine after startup error"
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+            };
 
-            senders.push(scheduler.request_sender());
-            command_senders.push(scheduler.command_sender());
+            engines.push(engine);
+            relay_publishers.push(relay_publisher);
             handoff_session_permits
                 .push(Arc::new(Semaphore::new(args.effective_handoff_capacity())));
-            let mut lifecycle_rx = scheduler
-                .take_lifecycle_receiver()
-                .expect("new scheduler must expose one lifecycle receiver");
-            schedulers.push(scheduler);
-
-            let active_requests_clone = self.active_requests.clone();
-            let cancel_token_cloned = cancel_token.clone();
-            let handoff_events = self.handoff_events.clone();
-
-            self.scheduler_tasks.spawn({
-                let cancel_token = cancel_token.clone();
-                async move {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = cancel_token.cancelled() => break,
-                            event = lifecycle_rx.recv() => {
-                                let Some(event) = event else {
-                                    break;
-                                };
-                                handoff_events.deliver(event).await;
-                            }
-                        }
-                    }
-                }
-            });
-
-            self.scheduler_tasks.spawn(async move {
-                // Keep the relay publisher alive for the lifetime of this task.
-                // Dropping it would cancel its background ZMQ→NATS relay tasks.
-                let _relay_publisher = relay_publisher;
-
-                loop {
-                    tokio::select! {
-                        signal_result = output_rx.recv() => {
-                            let Some(output_batch) = signal_result else {
-                                break; // Channel closed
-                            };
-
-                            for signal in output_batch {
-                                if let Some(request_tx) = active_requests_clone.get(&signal.uuid) {
-                                    let _ = request_tx.send(signal);
-                                }
-                            }
-                        }
-                        _ = cancel_token_cloned.cancelled() => {
-                            tracing::info!("Scheduler output task cancelled, clearing active requests");
-                            active_requests_clone.clear();
-                            break;
-                        }
-                    }
-                }
-            });
         }
-
-        // Set the senders once and notify waiters
-        self.request_senders
-            .set(senders)
-            .expect("Already initialized");
-        self.command_senders
-            .set(command_senders)
-            .expect("Already initialized");
-        self.handoff_session_permits
-            .set(handoff_session_permits)
-            .expect("Already initialized");
-        self.senders_ready.notify_waiters();
-
-        schedulers
+        Ok((engines, relay_publishers, handoff_session_permits))
     }
 
     /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
-        schedulers: &[Box<dyn SchedulerHandle>],
+        engines: &[LiveEngine],
         endpoint: Endpoint,
         native_metrics: Arc<NativeMockerMetrics>,
         cancel_token: CancellationToken,
@@ -703,8 +624,8 @@ impl MockEngine {
         if let Err(e) = metrics_publisher.create_endpoint(endpoint).await {
             tracing::error!("Metrics endpoint failed: {e}");
         }
-        for scheduler in schedulers.iter() {
-            let mut metrics_rx = scheduler.metrics_receiver();
+        for engine in engines {
+            let mut metrics_rx = engine.metrics_receiver();
             let publisher = metrics_publisher.clone();
             let native_metrics = native_metrics.clone();
             let cancel_token = cancel_token.clone();
@@ -749,11 +670,13 @@ impl MockEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error> for MockEngine {
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for MockerExecutionContext
+{
     async fn generate(
         &self,
         input: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<LLMEngineOutput>, Error> {
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
 
@@ -766,6 +689,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 dp_rank, self.engine_args.dp_size
             )));
         }
+        let engine = self.engine(dp_rank as usize).await;
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let is_prefill = self.engine_args.is_prefill();
@@ -826,9 +750,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             ..Default::default()
         };
 
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
-        self.active_requests.insert(request_uuid, request_tx);
-
         // Create a simple channel for the stream
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
@@ -841,14 +762,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             && (self.engine_args.is_prefill() || self.engine_args.is_decode())
             && handoff_id.is_none()
         {
-            self.active_requests.remove(&request_uuid);
             return Err(Error::msg("disaggregated mocker requires a handoff ID"));
         }
 
         let handoff_cancel = CancellationToken::new();
         let mut source_completion_rx = None;
         let mut destination_error_rx = None;
-        let mut destination_cleanup = None;
+        let mut destination_cleanup: Option<HandoffControl> = None;
+        let mut live_request;
 
         if let Some(handoff_id) = handoff_id {
             let bootstrap_info = request
@@ -864,7 +785,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             let order = match order_for_engine(self.engine_args.engine_type) {
                 Ok(order) => order,
                 Err(error) => {
-                    self.active_requests.remove(&request_uuid);
                     return Err(Error::msg(error.to_string()));
                 }
             };
@@ -875,24 +795,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             {
                 Ok(permit) => permit,
                 Err(_) => {
-                    self.active_requests.remove(&request_uuid);
                     return Err(Error::msg(format!(
                         "mocker handoff session limit reached for DP rank {dp_rank}"
                     )));
                 }
             };
-            let command_tx = self.command_sender(dp_rank as usize).await;
-            let lifecycle = match self.handoff_events.register(handoff_id) {
-                Ok(lifecycle) => lifecycle,
+            let (registration, prepared_request) = engine
+                .prepare_request(direct_request)
+                .map_err(|error| Error::msg(error.to_string()))?;
+            live_request = prepared_request;
+            let (control, lifecycle) = match engine.register_handoff(handoff_id) {
+                Ok(boundary) => boundary,
                 Err(error) => {
-                    self.active_requests.remove(&request_uuid);
                     return Err(Error::msg(error.to_string()));
                 }
             };
+            let (control, lifecycle) = live_handoff_boundary(control, lifecycle, registration);
 
             if self.engine_args.is_prefill() {
                 let Some(manager) = self.source_handoff_manager.get() else {
-                    self.active_requests.remove(&request_uuid);
                     return Err(Error::msg("source handoff manager is not initialized"));
                 };
                 let (completion_tx, completion_rx) = oneshot::channel();
@@ -900,15 +821,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     identity,
                     order,
                     engine_type: self.engine_args.engine_type,
-                    request: direct_request,
-                    command_tx,
+                    control,
                     lifecycle,
                     completion_tx,
                     cancel: handoff_cancel.clone(),
                     observer: None,
                     _permit: session_permit,
                 }) {
-                    self.active_requests.remove(&request_uuid);
                     return Err(Error::msg(error.to_string()));
                 }
                 source_completion_rx = Some(completion_rx);
@@ -929,12 +848,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 {
                     Ok(connection) => connection,
                     Err(error) => {
-                        self.active_requests.remove(&request_uuid);
                         return Err(Error::msg(format!("bootstrap connection failed: {error}")));
                     }
                 };
                 let (error_tx, error_rx) = mpsc::unbounded_channel();
-                let session_command_tx = command_tx.clone();
+                let session_control = control.clone();
                 let session_cancel = handoff_cancel.clone();
                 let session_timeout =
                     Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
@@ -943,8 +861,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     let _session_permit = session_permit;
                     if let Err(error) = run_destination_session(
                         connection,
-                        direct_request,
-                        session_command_tx,
+                        session_control,
                         lifecycle,
                         session_cancel,
                         session_timeout,
@@ -956,18 +873,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                     }
                 });
                 destination_error_rx = Some(error_rx);
-                destination_cleanup = Some((command_tx, handoff_id));
+                destination_cleanup = Some(control);
             } else {
-                self.active_requests.remove(&request_uuid);
                 return Err(Error::msg(
                     "aggregated mocker request cannot carry handoff metadata",
                 ));
             }
         } else {
-            self.direct(direct_request, dp_rank as usize).await;
+            live_request = engine
+                .submit(direct_request)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
         }
 
-        let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
         let reasoning = self.engine_args.reasoning.clone();
         let handoff_session_timeout =
@@ -1026,7 +944,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             None => destination_error_rx = None,
                         }
                     }
-                    maybe_signal = request_rx.recv() => {
+                    maybe_signal = live_request.recv() => {
                         let Some(signal) = maybe_signal else {
                             let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
@@ -1133,12 +1051,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
             if !request_completed_normally {
                 handoff_cancel.cancel();
-                if let Some((command_tx, handoff_id)) = destination_cleanup.as_ref() {
-                    cancel_destination(command_tx, *handoff_id, handoff_session_timeout).await;
+                if let Some(control) = destination_cleanup.as_ref() {
+                    cancel_destination(control, handoff_session_timeout).await;
                 }
+                let _ = live_request.cancel().await;
             }
-
-            active_requests.remove(&request_uuid);
         };
         if let Some(tasks) = response_task_tracker {
             tasks.spawn(response_task);
@@ -1146,75 +1063,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx);
+        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-    }
-}
-
-pub struct AnnotatedMockEngine {
-    inner: Arc<MockEngine>,
-}
-
-impl AnnotatedMockEngine {
-    pub fn new(
-        inner: MockEngine,
-        distributed_runtime: DistributedRuntime,
-        endpoint_id: dynamo_runtime::protocols::EndpointId,
-    ) -> Self {
-        let inner = Arc::new(inner);
-        let inner_clone = inner.clone();
-
-        // Start background task to wait for component service and start the engine
-        let cancel_token = distributed_runtime.primary_token();
-        tokio::spawn(async move {
-            let component = loop {
-                if cancel_token.is_cancelled() {
-                    tracing::debug!("Mocker engine startup cancelled");
-                    return;
-                }
-
-                let ready = distributed_runtime
-                    .namespace(&endpoint_id.namespace)
-                    .and_then(|ns| ns.component(&endpoint_id.component))
-                    .ok();
-
-                if let Some(comp) = ready
-                    && let Ok(instances) = comp.list_instances().await
-                    && !instances.is_empty()
-                {
-                    break comp;
-                }
-
-                tracing::debug!("Component service not available yet, retrying...");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            };
-
-            tracing::debug!("Component service is now available, starting mocker engine");
-            let endpoint = component.endpoint(endpoint_id.name);
-            if let Err(e) = inner_clone.start(endpoint).await {
-                tracing::error!("Failed to start mocker engine: {e}");
-            }
-        });
-
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for AnnotatedMockEngine
-{
-    async fn generate(
-        &self,
-        input: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let stream = self.inner.generate(input).await?;
-        let context = stream.context();
-
-        // Convert stream of LLMEngineOutput to Annotated<LLMEngineOutput>
-        let annotated_stream = stream.map(Annotated::from_data);
-
-        Ok(ResponseStream::new(Box::pin(annotated_stream), context))
     }
 }
 
@@ -1224,12 +1074,40 @@ pub async fn make_mocker_engine(
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
 ) -> Result<ExecutionContext, Error> {
-    // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
-    let annotated_engine =
-        AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
+    let engine = Arc::new(MockerExecutionContext::new(args));
+    let startup_engine = Arc::clone(&engine);
+    let cancel_token = distributed_runtime.primary_token();
+    tokio::spawn(async move {
+        let component = loop {
+            if cancel_token.is_cancelled() {
+                tracing::debug!("Mocker engine startup cancelled");
+                return;
+            }
 
-    Ok(Arc::new(annotated_engine))
+            let ready = distributed_runtime
+                .namespace(&endpoint_id.namespace)
+                .and_then(|namespace| namespace.component(&endpoint_id.component))
+                .ok();
+            if let Some(component) = ready
+                && let Ok(instances) = component.list_instances().await
+                && !instances.is_empty()
+            {
+                break component;
+            }
+
+            tracing::debug!("Component service not available yet, retrying...");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        tracing::debug!("Component service is now available, starting mocker engine");
+        let endpoint = component.endpoint(endpoint_id.name);
+        if let Err(error) = startup_engine.start(endpoint).await {
+            tracing::error!("Failed to start mocker engine: {error}");
+        }
+    });
+
+    Ok(engine)
 }
 
 #[cfg(test)]
@@ -1237,9 +1115,10 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_mocker::common::protocols::{MockEngineArgs, OutputSignal, WorkerType};
+    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::time::Duration;
 
@@ -1279,32 +1158,22 @@ mod tests {
     async fn no_bootstrap_prefill_delays_terminal_finish_once() {
         let args = MockEngineArgs::builder()
             .worker_type(WorkerType::Prefill)
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(25_000_000))
             .build()
             .unwrap();
-        let engine = MockEngine::new(args);
-        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
-        engine.request_senders.set(vec![request_tx]).unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = prefill_request();
+        request.token_ids = vec![1, 2, 3, 4];
 
-        let mut stream = engine
-            .generate(SingleIn::new(prefill_request()))
-            .await
-            .unwrap();
-        let request = request_rx.recv().await.unwrap();
-        let request_id = request.uuid.unwrap();
-        engine
-            .active_requests
-            .get(&request_id)
-            .unwrap()
-            .send(OutputSignal {
-                uuid: request_id,
-                token_id: None,
-                completed: true,
-                rejected: false,
-                handoff_delay_ms: Some(100.0),
-            })
-            .unwrap();
-
-        let token = stream.next().await.unwrap();
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let token = stream.next().await.unwrap().data.unwrap();
         assert_eq!(token.token_ids.len(), 1);
         assert!(token.finish_reason.is_none());
         assert!(
@@ -1314,7 +1183,7 @@ mod tests {
         );
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        let finish = stream.next().await.unwrap();
+        let finish = stream.next().await.unwrap().data.unwrap();
         assert!(finish.token_ids.is_empty());
         assert!(finish.finish_reason.is_some());
         assert!(stream.next().await.is_none());
@@ -1324,37 +1193,74 @@ mod tests {
     async fn context_capped_completion_maps_to_length() {
         let args = MockEngineArgs::builder()
             .max_model_len(Some(4))
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
             .build()
             .unwrap();
-        let engine = MockEngine::new(args);
-        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
-        engine.request_senders.set(vec![request_tx]).unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
 
         let mut stream = engine
             .generate(SingleIn::new(decode_request(3, 4)))
             .await
             .unwrap();
-        let request = request_rx.recv().await.unwrap();
-        assert_eq!(request.max_output_tokens, 4);
-        let request_id = request.uuid.unwrap();
-        engine
-            .active_requests
-            .get(&request_id)
-            .unwrap()
-            .send(OutputSignal {
-                uuid: request_id,
-                token_id: Some(42),
-                completed: true,
-                rejected: false,
-                handoff_delay_ms: None,
-            })
-            .unwrap();
-
-        let token = stream.next().await.unwrap();
+        let token = stream.next().await.unwrap().data.unwrap();
         assert_eq!(token.token_ids.len(), 1);
         assert!(token.finish_reason.is_none());
-        assert_eq!(stream.next().await.unwrap(), LLMEngineOutput::length());
+        assert_eq!(
+            stream.next().await.unwrap().data.unwrap(),
+            LLMEngineOutput::length()
+        );
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_response_cancels_live_request_and_allows_id_reuse() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(0.1)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let request_id = Uuid::from_u128(99);
+        let input = SingleIn::with_id_and_metadata(
+            decode_request(1, 100),
+            request_id.to_string(),
+            BTreeMap::new(),
+        );
+        let stream = engine.generate(input).await.unwrap();
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metrics = live.metrics_receiver().borrow().clone();
+                if live.active_request_count() == 0
+                    && metrics.running_requests == 0
+                    && metrics.waiting_requests == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped response must cancel its live request");
+
+        let input = SingleIn::with_id_and_metadata(
+            decode_request(1, 1),
+            request_id.to_string(),
+            BTreeMap::new(),
+        );
+        let mut replacement = engine.generate(input).await.unwrap();
+        while replacement.next().await.is_some() {}
+        assert_eq!(live.active_request_count(), 0);
     }
 
     #[test]
@@ -1387,15 +1293,14 @@ mod tests {
             .unwrap()
             .normalized()
             .unwrap();
-        let engine = MockEngine::new(args);
+        let engine = MockerExecutionContext::new(args);
 
         assert!(engine.prepare_bootstrap().await.is_err());
-        assert!(engine.request_senders.get().is_none());
-        assert!(engine.command_senders.get().is_none());
+        assert!(engine.engines.get().is_none());
         assert!(engine.handoff_session_permits.get().is_none());
-        assert!(engine._schedulers.get().is_none());
+        assert!(engine._relay_publishers.get().is_none());
         assert!(!engine.handoff_shutdown.is_cancelled());
-        assert!(!engine.scheduler_shutdown.is_cancelled());
+        assert!(!engine.metrics_shutdown.is_cancelled());
 
         drop(occupied);
         let prepared = engine
