@@ -351,7 +351,14 @@ impl MockOffloadEngine {
         drive_mode: KvbmDriveMode,
     ) -> Result<Self> {
         let messenger = create_local_messenger().await?;
-        let g2_events_manager = Arc::new(EventsManager::builder().build());
+        let g2_events_manager = Arc::new(match drive_mode {
+            KvbmDriveMode::Live => EventsManager::builder().build(),
+            // A single completion can replace the whole tier, emitting one
+            // removal and one creation per slot before the boundary drains it.
+            KvbmDriveMode::OfflineDeterministic => EventsManager::builder()
+                .channel_capacity(config.num_g2_blocks.saturating_mul(2).max(1024))
+                .build(),
+        });
         let g2_event_stream = match drive_mode {
             KvbmDriveMode::Live => Some(G2EventStream::BestEffort(Box::pin(
                 g2_events_manager.subscribe(),
