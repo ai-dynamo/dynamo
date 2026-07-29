@@ -353,7 +353,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
-      build_timeout_minutes: 60
+      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-dev' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-dev-{0}', github.sha) || '' }}
@@ -394,7 +394,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
-      build_timeout_minutes: 45
+      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
       # OSRB CSV diff baseline: post-merge context. main -> previous commit;
       # release/* -> prior release tag (see resolve_diff_base.py).
       diff_event_context: push
@@ -417,7 +417,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
-      build_timeout_minutes: 45
+      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
       # OSRB CSV diff baseline: post-merge context. main -> previous commit;
       # release/* -> prior release tag (see resolve_diff_base.py).
       diff_event_context: push

@@ -88,7 +88,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
     secrets: inherit
 
   vllm-copy-to-acr:
