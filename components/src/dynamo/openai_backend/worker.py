@@ -21,6 +21,7 @@ from httpx_sse import aconnect_sse
 
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.llm import HttpError, ModelInput, ModelType, WorkerType, register_model
+from dynamo.openai_backend.engine_metrics import register_engine_metrics
 from dynamo.runtime import DistributedRuntime, Endpoint, dynamo_worker
 
 LOGGER = logging.getLogger("dynamo.openai_backend.worker")
@@ -733,6 +734,15 @@ def _enable_nats_from_env() -> bool:
     return os.environ.get("DYN_REQUEST_PLANE", "tcp") == "nats"
 
 
+def _split_endpoint_name(endpoint_name: str) -> tuple[str, str, str]:
+    """Split a ``namespace.component.endpoint`` path into its three parts."""
+    parts = endpoint_name.split(".")
+    if len(parts) != 3:
+        LOGGER.debug("Unexpected endpoint name '%s'", endpoint_name)
+        return endpoint_name, "backend", "generate"
+    return parts[0], parts[1], parts[2]
+
+
 @dynamo_worker(enable_nats=_enable_nats_from_env())
 async def worker(runtime: DistributedRuntime) -> None:
     _configure_logging()
@@ -775,6 +785,25 @@ async def init(
             "Registered OpenAI backend worker for model '%s' on endpoint '%s'",
             config.served_model_name or config.model,
             endpoint_name,
+        )
+
+        # The engine runs as a separate server here, so its metrics are only on its
+        # own HTTP endpoint. Federate them onto this worker's metrics so both are
+        # served from one scrape target. A no-op when the engine exposes none.
+        #
+        # Use the abort URL rather than the upstream one: in router mode the
+        # upstream is the sglang router, which does not emit the engine's series,
+        # while the abort URL always addresses the engine itself.
+        namespace_name, component_name, generate_name = _split_endpoint_name(
+            endpoint_name
+        )
+        register_engine_metrics(
+            endpoint,
+            config.abort_base_url or config.upstream_base_url,
+            namespace_name=namespace_name,
+            component_name=component_name,
+            endpoint_name=generate_name,
+            model_name=config.served_model_name or config.model,
         )
 
         await endpoint.serve_endpoint(RequestHandler(upstream).generate)
