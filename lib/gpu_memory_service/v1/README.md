@@ -166,10 +166,17 @@ integration.
 
 ## Running V1
 
-Start one two-domain sidecar per rank:
+Start one V1 child per visible device:
 
 ```text
-gms-v1-server --device 0
+python3 -m gpu_memory_service.cli.server --use-v1
+```
+
+The supervisor discovers the visible devices and monitors the children. To
+start one rank-local child directly:
+
+```text
+gpu-memory-service --use-v1 --device 0
 ```
 
 Save or hydrate that rank's weight artifact under

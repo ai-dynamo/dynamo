@@ -11,11 +11,11 @@ import socketserver
 from pathlib import Path
 
 from ..protocol import (
+    REQUEST_TYPES,
     ErrorResponse,
     HandshakeRequest,
     HandshakeResponse,
     Message,
-    REQUEST_TYPES,
     receive_message,
     send_message,
 )
