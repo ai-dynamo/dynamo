@@ -438,6 +438,7 @@ runs:
         helm upgrade --install dynamo-platform . --namespace default \
           "${IMAGE_ARGS[@]}" \
           --set dynamo-operator.gpuDiscovery.enabled=false \
+          --set dynamo-operator.webhook.service.publishNotReadyAddresses=true \
           "${CHECKPOINT_HELM_ARGS[@]}" \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
@@ -529,6 +530,29 @@ runs:
           echo "::error::Operator Pod disappeared after manager container readiness"
           exit 1
         fi
+
+        echo "::group::Dynamo webhook Service routing override"
+        VIRTUAL_PUBLISH_NOT_READY=$(kubectl --kubeconfig="${VKUBECONFIG}" \
+          get services -n default \
+          -l app.kubernetes.io/component=webhook \
+          -o jsonpath='{.items[0].spec.publishNotReadyAddresses}')
+        if [ "${VIRTUAL_PUBLISH_NOT_READY}" != "true" ]; then
+          echo "::error::vCluster webhook Service does not publish not-ready addresses"
+          exit 1
+        fi
+
+        HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
+          -l app.kubernetes.io/component=webhook \
+          -o jsonpath='{.items[0].metadata.name}')
+        HOST_PUBLISH_NOT_READY=$(kubectl get service "${HOST_WEBHOOK_SERVICE}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.publishNotReadyAddresses}')
+        if [ "${HOST_PUBLISH_NOT_READY}" != "true" ]; then
+          echo "::error::vCluster did not preserve publishNotReadyAddresses on the host webhook Service"
+          exit 1
+        fi
+        echo "Dynamo webhook Service publishes not-ready addresses in both virtual and host clusters"
+        echo "::endgroup::"
 
         echo "::group::Resolved operator image identity"
         kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
