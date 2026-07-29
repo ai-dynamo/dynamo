@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: grove-manifest
+spec:
+  backendFramework: vllm
+  components:
+    - name: frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/dynamo-frontend:test
+    - name: decode
+      type: decode
+      multinode:
+        nodeCount: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example/dynamo-worker:test

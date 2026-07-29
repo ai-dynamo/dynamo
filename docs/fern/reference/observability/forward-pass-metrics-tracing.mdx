@@ -34,11 +34,9 @@ precedence when set. It cannot add a missing Dynamo relay to an unsupported topo
 | --- | --- | --- |
 | vLLM (`python -m dynamo.vllm`) | Aggregated, prefill, or decode, including native multimodal workers | Supported |
 | vLLM (`python -m dynamo.vllm`) | Embedding, multimodal encode, or headless | Not supported; Dynamo warns and does not inject the FPM scheduler |
-| vLLM unified worker | All topologies | Not supported; the unified path does not construct an FPM relay |
 | SGLang (`python -m dynamo.sglang`) | Aggregated, prefill, decode, or LLM diffusion, including `--enable-multimodal` without a dedicated encoder | Supported |
 | SGLang (`python -m dynamo.sglang`) | Embedding or dedicated multimodal encoder | Not supported; Dynamo warns and does not auto-enable FPM |
 | SGLang (`python -m dynamo.sglang`) | Image diffusion, video generation, or snapshot mode | Not supported |
-| SGLang unified worker | All topologies | Not supported; the unified path does not construct an FPM relay |
 | TensorRT-LLM and mocker | Direct-publisher paths | Persistence supported; no Python relay activation is required |
 
 For vLLM, an explicit `DYN_FORWARDPASS_METRIC_PORT` wins; otherwise trace activation uses port

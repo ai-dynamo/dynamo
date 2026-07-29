@@ -35,11 +35,9 @@ pytestmark = [
 
 
 def _make_config(**overrides) -> Mock:
-    """Create a mock Config with all multimodal flags defaulting to False."""
+    """Create a mock Config with canonical worker settings."""
     defaults = {
-        "multimodal_encode_worker": False,
-        "multimodal_worker": False,
-        "multimodal_decode_worker": False,
+        "enable_multimodal": False,
         "omni": False,
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
@@ -471,7 +469,6 @@ class TestCreate:
             setup_metrics_collection_fn=Mock(),
         )
         factory._create_multimodal_encode_worker = AsyncMock()  # type: ignore[assignment]
-        factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
@@ -541,7 +538,7 @@ class TestCreate:
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
-        config = _make_config(multimodal_worker=True)
+        config = _make_config(enable_multimodal=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
