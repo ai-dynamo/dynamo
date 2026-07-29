@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_tokens::{BlockHash, SequenceHash as RouterSequenceHash};
-use futures::{Stream, StreamExt};
 use futures::task::noop_waker_ref;
+use futures::{Stream, StreamExt};
 
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, InstanceLeader, Leader, OnboardingStatus, StagingMode,
@@ -77,13 +77,7 @@ enum ReservationBlocker {
 
 enum G2EventStream {
     BestEffort(Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>),
-    LossAware(
-        Pin<
-            Box<
-                dyn Stream<Item = std::result::Result<LogicalKvCacheEvent, String>> + Send,
-            >,
-        >,
-    ),
+    LossAware(Pin<Box<dyn Stream<Item = std::result::Result<LogicalKvCacheEvent, String>> + Send>>),
 }
 
 /// Lower-tier lookup prepared while the caller reserves destination G1 slots.
@@ -362,13 +356,11 @@ impl MockOffloadEngine {
             KvbmDriveMode::Live => {
                 G2EventStream::BestEffort(Box::pin(g2_events_manager.subscribe()))
             }
-            KvbmDriveMode::OfflineDeterministic => {
-                G2EventStream::LossAware(Box::pin(
-                    g2_events_manager
-                        .subscribe_loss_aware()
-                        .map(|result| result.map_err(|error| error.to_string())),
-                ))
-            }
+            KvbmDriveMode::OfflineDeterministic => G2EventStream::LossAware(Box::pin(
+                g2_events_manager
+                    .subscribe_loss_aware()
+                    .map(|result| result.map_err(|error| error.to_string())),
+            )),
         };
         let registry = Arc::new(build_registry(g2_events_manager));
         let g2_manager = Arc::new(build_g2_block_manager(
