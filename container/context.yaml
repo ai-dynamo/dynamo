@@ -63,7 +63,7 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.26.0-ubuntu2404
+    runtime_image_tag: nightly-6f91edf96d3f3272945809c04702380053bff4de@sha256:24f2f8975d011ea7f7066a547886a08a1fd3c4bf0880463487fae4f01ce723c6
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM

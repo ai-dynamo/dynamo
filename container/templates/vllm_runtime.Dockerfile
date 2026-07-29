@@ -300,6 +300,44 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
 
+{% if device == "cuda" and target not in ("dev", "local-dev") %}
+RUN python3 - <<'PY'
+import importlib.metadata as metadata
+import os
+
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.worker.gpu_worker import Worker
+
+expected_commit = "6f91edf96d3f3272945809c04702380053bff4de"
+actual_commit = os.environ.get("VLLM_BUILD_COMMIT")
+if actual_commit != expected_commit:
+    raise RuntimeError(
+        f"Expected vLLM build commit {expected_commit}, found {actual_commit!r}"
+    )
+
+expected_flashinfer = "0.6.15.post1"
+actual_flashinfer = metadata.version("flashinfer-python")
+if actual_flashinfer != expected_flashinfer:
+    raise RuntimeError(
+        f"Expected flashinfer-python {expected_flashinfer}, found {actual_flashinfer}"
+    )
+
+expected_methods = {"checkpoint_prepare", "checkpoint_restore"}
+for cls in (Worker, AsyncLLM):
+    missing = expected_methods - set(dir(cls))
+    if missing:
+        raise RuntimeError(f"{cls.__name__} missing {sorted(missing)}")
+
+unexpected_methods = expected_methods & set(dir(EngineCore))
+if unexpected_methods:
+    raise RuntimeError(
+        "Unexpected vLLM scheduler-checkpoint overlay: "
+        f"EngineCore has {sorted(unexpected_methods)}"
+    )
+PY
+{% endif %}
+
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.
