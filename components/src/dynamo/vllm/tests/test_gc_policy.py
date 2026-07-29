@@ -16,13 +16,19 @@ pytestmark = [
 
 
 def _fresh_module(monkeypatch, policy: str | None):
-    if policy is None:
-        monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
-    else:
-        monkeypatch.setenv("DYN_FPM_GC_POLICY", policy)
+    # Reload with the policy disabled: the module-tail autostart firing
+    # during import/reload would rebuild the module globals and leak the
+    # previously started daemon thread plus the disabled gen2 threshold
+    # when a freeze test runs in isolation. Tests start the policy
+    # explicitly after the reload.
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
     import dynamo.vllm.gc_policy as gc_policy
 
-    return importlib.reload(gc_policy)
+    gc_policy.stop_gc_policy()
+    gc_policy = importlib.reload(gc_policy)
+    if policy is not None:
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", policy)
+    return gc_policy
 
 
 def test_policy_off_by_default(monkeypatch):
