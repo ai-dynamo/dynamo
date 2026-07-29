@@ -45,6 +45,8 @@ where
     worker_groups: Vec<Option<Vec<usize>>>,
     /// Number of non-tombstoned worker groups.
     live_group_count: usize,
+    /// Aggregate request ownership across all live DP-rank schedulers.
+    total_in_flight: usize,
     /// Logical workers that can start a pass, ordered by stable worker ID.
     ready_groups: BTreeSet<usize>,
     /// Ready groups that made no observable progress during the prior drive.
@@ -70,6 +72,7 @@ where
         workers: Vec<OfflineWorkerState>,
     ) -> Self {
         let count = workers.len();
+        let total_in_flight = workers.iter().map(OfflineWorkerState::in_flight).sum();
         debug_assert!(
             workers
                 .iter()
@@ -85,6 +88,7 @@ where
             workers,
             worker_groups,
             live_group_count: count,
+            total_in_flight,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
@@ -131,6 +135,7 @@ where
             workers,
             worker_groups,
             live_group_count: num_workers,
+            total_in_flight: 0,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
@@ -221,6 +226,36 @@ where
         }
     }
 
+    fn record_in_flight_change(&mut self, before: usize, after: usize) {
+        if after >= before {
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_add(after - before)
+                .expect("offline engine in-flight request count overflow");
+        } else {
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_sub(before - after)
+                .expect("offline engine in-flight request count underflow");
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_total_in_flight(&self) {
+        let expected: usize = self
+            .workers
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(OfflineWorkerState::in_flight)
+            .sum();
+        debug_assert_eq!(
+            self.total_in_flight, expected,
+            "aggregate offline engine in-flight count drifted from workers"
+        );
+    }
+
     #[cfg(debug_assertions)]
     fn debug_assert_ready_frontier(&self) {
         let expected = (0..self.worker_groups.len())
@@ -253,6 +288,8 @@ where
         debug_assert_eq!(worker_id, self.worker_groups.len());
         self.worker_groups.push(Some(rank_ids));
         self.live_group_count += 1;
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
         worker_id
     }
 
@@ -263,10 +300,15 @@ where
             return false;
         };
         for rank_id in rank_ids {
-            self.workers
+            let worker = self
+                .workers
                 .get_mut(rank_id)
                 .and_then(Option::take)
                 .expect("live worker group referenced a missing rank");
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_sub(worker.in_flight())
+                .expect("tombstoned worker exceeded aggregate in-flight count");
         }
         self.live_group_count = self
             .live_group_count
@@ -277,6 +319,8 @@ where
             self.worker_groups.iter().flatten().count(),
             "live worker group count drifted from storage"
         );
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
         true
     }
 
@@ -475,9 +519,15 @@ where
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        self.worker_mut(rank_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
-            .receive_request(request);
+        let (before, after) = {
+            let worker = self
+                .worker_mut(rank_id)
+                .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
+            let before = worker.in_flight();
+            worker.receive_request(request);
+            (before, worker.in_flight())
+        };
+        self.record_in_flight_change(before, after);
         self.refresh_rank(rank_id);
         Ok(())
     }
@@ -487,10 +537,15 @@ where
         rank_id: usize,
         command: SchedulerCommand,
     ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
-        let mut effects = self
-            .worker_mut(rank_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
-            .apply_command(command)?;
+        let (mut effects, before, after) = {
+            let worker = self
+                .worker_mut(rank_id)
+                .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
+            let before = worker.in_flight();
+            let effects = worker.apply_command(command)?;
+            (effects, before, worker.in_flight())
+        };
+        self.record_in_flight_change(before, after);
         let engine_events = Observation::take_command_events(&mut effects);
         let observed = ObservedCommandEffects {
             result: effects.result,
@@ -710,16 +765,21 @@ where
             );
         }
         let rank_id = payload.worker_idx;
-        let worker = self.worker_mut(rank_id).ok_or_else(|| {
-            anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
-        })?;
-        worker.mark_idle();
-        worker.mark_completed(payload.completed_requests);
         let mut payload = payload;
-        payload
-            .lifecycle_events
-            .extend(worker.retry_pending_destinations());
-        let observed = Observation::drain_worker_events(worker);
+        let (observed, before, after) = {
+            let worker = self.worker_mut(rank_id).ok_or_else(|| {
+                anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
+            })?;
+            let before = worker.in_flight();
+            worker.mark_idle();
+            worker.mark_completed(payload.completed_requests);
+            payload
+                .lifecycle_events
+                .extend(worker.retry_pending_destinations());
+            let observed = Observation::drain_worker_events(worker);
+            (observed, before, worker.in_flight())
+        };
+        self.record_in_flight_change(before, after);
         payload.progress.had_raw_observations |= observed.had_raw_observations;
         payload.progress.made_progress |= observed.had_raw_observations;
         payload.engine_events.append(observed.events);
@@ -728,11 +788,9 @@ where
     }
 
     pub(in crate::replay::offline) fn in_flight(&self) -> usize {
-        self.workers
-            .iter()
-            .filter_map(Option::as_ref)
-            .map(OfflineWorkerState::in_flight)
-            .sum()
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
+        self.total_in_flight
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {
@@ -1002,6 +1060,61 @@ mod tests {
         assert_eq!(effects.scheduled_completions.len(), 1);
         assert_eq!(effects.scheduled_completions[0].at_ms, 5.0);
         assert_eq!(collector.request_latencies(uuid).unwrap().0, 5.0);
+    }
+
+    #[test]
+    fn sglang_aggregate_in_flight_tracks_worker_ownership() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let worker = OfflineWorkerState::new(0, args.clone(), false);
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
+            SimulationWorkerStage::Aggregated,
+            EnginePassMode::Visible,
+            vec![worker],
+        );
+        engine.set_scaling_args(args, false);
+        assert_eq!(engine.in_flight(), 0);
+
+        let cancelled = Uuid::from_u128(501);
+        engine.dispatch(0, timed_request(cancelled, 4)).unwrap();
+        assert_eq!(engine.in_flight(), 1);
+        let effects = engine
+            .apply_command(
+                0,
+                SchedulerCommand::CancelRequest {
+                    request_id: cancelled,
+                },
+            )
+            .unwrap();
+        assert_eq!(effects.result, SchedulerCommandResult::Applied);
+        assert_eq!(engine.in_flight(), 0);
+
+        let completed = Uuid::from_u128(502);
+        engine.dispatch(0, timed_request(completed, 4)).unwrap();
+        assert_eq!(engine.in_flight(), 1);
+        let effects = engine
+            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .unwrap();
+        let completion = take_only_completion(effects);
+        assert_eq!(engine.in_flight(), 1);
+        engine.on_scheduled_completion(completion).unwrap();
+        assert_eq!(engine.in_flight(), 0);
+
+        engine.mark_for_removal(0);
+        assert_eq!(engine.try_remove_drained(), vec![0]);
+        assert_eq!(engine.in_flight(), 0);
     }
 
     #[test]
