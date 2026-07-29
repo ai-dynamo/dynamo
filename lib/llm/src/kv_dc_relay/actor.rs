@@ -1311,7 +1311,6 @@ mod tests {
     use crate::discovery::{
         KvEventSource, KvSourceMembershipView, KvSourceStatus, KvStateEndpointResolution,
     };
-    use crate::kv_dc_relay::resolution::EndpointLocator;
     use crate::kv_router::indexer::{WorkerQueryClient, WorkerQueryTransport};
 
     struct UnusedWorkerQueryTransport;
