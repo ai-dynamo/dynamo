@@ -297,7 +297,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
-			// NVBug 6176646: component pod metadata must survive structural pruning.
+			// Component pod metadata must survive structural pruning.
 			name: "v1beta1 discovery annotation survives the component pod template API server round trip",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{

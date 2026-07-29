@@ -873,7 +873,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
-			// NVBug 6176646: generated DCD pod metadata must survive structural pruning.
+			// Generated DCD pod metadata must survive structural pruning.
 			name: "v1beta1 discovery annotation survives the generated DCD API server round trip",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
