@@ -27,6 +27,18 @@ fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
 }
 
+#[derive(Clone, Copy)]
+struct PassBoundary {
+    start_ms: f64,
+    end_ms: f64,
+}
+
+impl PassBoundary {
+    fn wall_time_secs(self) -> f64 {
+        (self.end_ms - self.start_ms).max(0.0) / 1000.0
+    }
+}
+
 pub(in crate::replay::offline) struct EngineComponent<Observation = NoEngineEvents>
 where
     Observation: ReplayEngineObservation,
@@ -566,6 +578,87 @@ where
         Ok(worker.is_busy())
     }
 
+    #[inline(always)]
+    fn lower_executed_pass(
+        workers: &mut [Option<OfflineWorkerState>],
+        stage: SimulationWorkerStage,
+        rank_id: usize,
+        boundary: PassBoundary,
+        mut executed: EnginePassResult,
+        align_collector: Option<&mut TraceCollector>,
+        effects: &mut EngineEffects<Observation::Batch>,
+    ) {
+        if let Some(fpm) = executed.fpm.as_mut() {
+            fpm.wall_time_secs = boundary.wall_time_secs();
+        }
+        if let Some(collector) = align_collector {
+            collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
+        }
+
+        let admitted_requests = !executed.admissions.is_empty();
+        let had_raw_observations = !executed.kv_events.is_empty();
+        let published_pass_start_kv = executed.router_event_visibility
+            == RouterEventVisibility::PassStart
+            && had_raw_observations;
+        let made_progress = admitted_requests
+            || published_pass_start_kv
+            || executed.completed_requests > 0
+            || !executed.output_signals.is_empty()
+            || !executed.lifecycle_events.is_empty()
+            || had_raw_observations
+            || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
+        let observed_events = Observation::take_pass_events(&mut executed);
+        effects.admissions.extend(executed.admissions);
+        let completion_events =
+            if executed.router_event_visibility == RouterEventVisibility::PassStart {
+                effects.pass_start_events.append(observed_events);
+                Observation::Batch::default()
+            } else {
+                observed_events
+            };
+        let payload = WorkerCompletionPayload {
+            stage,
+            worker_idx: rank_id,
+            completed_requests: executed.completed_requests,
+            output_signals: executed.output_signals,
+            lifecycle_events: executed.lifecycle_events,
+            engine_events: completion_events,
+            progress: EngineProgress {
+                made_progress,
+                had_raw_observations,
+            },
+            fpm: executed.fpm,
+            accept_length_output_tokens: executed.accept_length_output_tokens,
+            accept_length_decode_forwards: executed.accept_length_decode_forwards,
+        };
+
+        if boundary.end_ms > boundary.start_ms {
+            Self::required_worker_mut(workers, rank_id).mark_busy();
+            effects
+                .scheduled_completions
+                .push(ScheduledWorkerCompletion {
+                    at_ms: boundary.end_ms,
+                    payload,
+                });
+            return;
+        }
+
+        // NOTE: Keep both lifecycle extremes in view when changing this gate.
+        // Tight-spin/livelock occurs when an effect-free, queued-only,
+        // zero-duration pass is repeatedly treated as progress at the same
+        // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
+        // quiescence while workers still own unfinished requests but have no
+        // concrete future event, deadline, or dependency notification. Stop
+        // same-time iteration when no observable state changed, but only after
+        // the owning subsystem can account for every unfinished request's
+        // future wakeup; an empty event queue alone is not quiescence.
+        if made_progress {
+            effects.progress.made_progress = true;
+            effects.progress.had_raw_observations |= had_raw_observations;
+            effects.immediate_completions.push(payload);
+        }
+    }
+
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
@@ -604,6 +697,48 @@ where
                 continue;
             }
 
+            let mut effects = EngineEffects::default();
+            if rank_ids.len() == 1 {
+                let rank_id = rank_ids[0];
+                let executed = match self.pass_mode {
+                    EnginePassMode::Visible => {
+                        let Some(collector) = collector.as_deref_mut() else {
+                            bail!("offline replay visible engine pass requires a collector");
+                        };
+                        Self::required_worker_mut(&mut self.workers, rank_id)
+                            .try_execute_pass(collector, now_ms)
+                    }
+                    EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
+                        .try_execute_hidden_pass(now_ms),
+                }?;
+                let group_end_ms = executed.end_ms;
+                Self::lower_executed_pass(
+                    &mut self.workers,
+                    self.stage,
+                    rank_id,
+                    PassBoundary {
+                        start_ms: now_ms,
+                        end_ms: group_end_ms,
+                    },
+                    executed,
+                    None,
+                    &mut effects,
+                );
+
+                if !effects.is_empty() {
+                    if group_end_ms <= now_ms {
+                        // A zero-duration pass can remain ready. Re-arm it here
+                        // without depending on caller completion processing.
+                        self.refresh_group(worker_id);
+                    }
+                    return Ok(effects);
+                }
+                if self.group_is_ready(worker_id) {
+                    self.deferred_ready_groups.insert(worker_id);
+                }
+                continue;
+            }
+
             let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
                 SmallVec::with_capacity(rank_ids.len());
             for &rank_id in rank_ids {
@@ -630,11 +765,13 @@ where
                 .filter_map(Option::as_ref)
                 .map(|executed| executed.end_ms)
                 .fold(now_ms, f64::max);
-            let group_wall_time_secs = (group_end_ms - now_ms).max(0.0) / 1000.0;
-            let mut effects = EngineEffects::default();
+            let boundary = PassBoundary {
+                start_ms: now_ms,
+                end_ms: group_end_ms,
+            };
 
             for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
-                let Some(mut executed) = executed else {
+                let Some(executed) = executed else {
                     if group_end_ms > now_ms {
                         // Empty ranks still participate in the barrier so work
                         // arriving mid-epoch cannot start ahead of a sibling.
@@ -652,7 +789,7 @@ where
                                     engine_events: Observation::Batch::default(),
                                     progress: EngineProgress::default(),
                                     fpm: Some(ForwardPassSnapshot {
-                                        wall_time_secs: group_wall_time_secs,
+                                        wall_time_secs: boundary.wall_time_secs(),
                                         ..Default::default()
                                     }),
                                     accept_length_output_tokens: 0,
@@ -663,78 +800,24 @@ where
                     continue;
                 };
 
-                if let Some(fpm) = executed.fpm.as_mut() {
-                    fpm.wall_time_secs = group_wall_time_secs;
-                }
-                if self.pass_mode == EnginePassMode::Visible {
-                    collector
-                        .as_deref_mut()
-                        .expect("visible pass collector checked before execution")
-                        .align_pass_token_times(&executed.output_signals, group_end_ms);
-                }
-
-                let admitted_requests = !executed.admissions.is_empty();
-                let had_raw_observations = !executed.kv_events.is_empty();
-                let published_pass_start_kv = executed.router_event_visibility
-                    == RouterEventVisibility::PassStart
-                    && had_raw_observations;
-                let made_progress = admitted_requests
-                    || published_pass_start_kv
-                    || executed.completed_requests > 0
-                    || !executed.output_signals.is_empty()
-                    || !executed.lifecycle_events.is_empty()
-                    || had_raw_observations
-                    || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
-                let observed_events = Observation::take_pass_events(&mut executed);
-                effects.admissions.extend(executed.admissions);
-                let completion_events =
-                    if executed.router_event_visibility == RouterEventVisibility::PassStart {
-                        effects.pass_start_events.append(observed_events);
-                        Observation::Batch::default()
-                    } else {
-                        observed_events
-                    };
-                let payload = WorkerCompletionPayload {
-                    stage: self.stage,
-                    worker_idx: rank_id,
-                    completed_requests: executed.completed_requests,
-                    output_signals: executed.output_signals,
-                    lifecycle_events: executed.lifecycle_events,
-                    engine_events: completion_events,
-                    progress: EngineProgress {
-                        made_progress,
-                        had_raw_observations,
-                    },
-                    fpm: executed.fpm,
-                    accept_length_output_tokens: executed.accept_length_output_tokens,
-                    accept_length_decode_forwards: executed.accept_length_decode_forwards,
+                let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                    Some(
+                        collector
+                            .as_deref_mut()
+                            .expect("visible pass collector checked before execution"),
+                    )
+                } else {
+                    None
                 };
-
-                if group_end_ms > now_ms {
-                    Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                    effects
-                        .scheduled_completions
-                        .push(ScheduledWorkerCompletion {
-                            at_ms: group_end_ms,
-                            payload,
-                        });
-                    continue;
-                }
-
-                // NOTE: Keep both lifecycle extremes in view when changing this gate.
-                // Tight-spin/livelock occurs when an effect-free, queued-only,
-                // zero-duration pass is repeatedly treated as progress at the same
-                // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
-                // quiescence while workers still own unfinished requests but have no
-                // concrete future event, deadline, or dependency notification. Stop
-                // same-time iteration when no observable state changed, but only after
-                // the owning subsystem can account for every unfinished request's
-                // future wakeup; an empty event queue alone is not quiescence.
-                if made_progress {
-                    effects.progress.made_progress = true;
-                    effects.progress.had_raw_observations |= had_raw_observations;
-                    effects.immediate_completions.push(payload);
-                }
+                Self::lower_executed_pass(
+                    &mut self.workers,
+                    self.stage,
+                    rank_id,
+                    boundary,
+                    executed,
+                    align_collector,
+                    &mut effects,
+                );
             }
 
             if !effects.is_empty() {
