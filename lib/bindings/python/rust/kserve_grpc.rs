@@ -9,9 +9,12 @@ use llm_rs::model_type::{ModelInput, ModelType};
 use pyo3::prelude::*;
 
 use crate::{
-    CancellationToken, DistributedRuntime, engine::*, llm::local_model::ModelRuntimeConfig,
+    CancellationToken, DistributedRuntime,
+    engine::*,
+    llm::local_model::{ModelRuntimeConfig, parse_tensor_model_config},
     to_pyerr,
 };
+use pyo3::types::PyDict;
 
 pub use dynamo_llm::grpc::service::kserve;
 
@@ -67,22 +70,25 @@ impl KserveGrpcService {
             .map_err(to_pyerr)
     }
 
-    #[pyo3(signature = (model, checksum, engine, runtime_config=None))]
+    #[pyo3(signature = (model, checksum, engine, *, runtime_config=None, tensor_model_config=None))]
     pub fn add_tensor_model(
         &self,
         model: String,
         checksum: String,
         engine: PythonAsyncEngine,
         runtime_config: Option<ModelRuntimeConfig>,
+        tensor_model_config: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        // If runtime_config is provided, create and save a ModelDeploymentCard
-        // so the ModelConfig endpoint can return model configuration
-        if let Some(runtime_config) = runtime_config {
-            runtime_config.validate_config()?;
+        let tensor_model_config = parse_tensor_model_config(tensor_model_config)?;
+        if runtime_config.is_some() || tensor_model_config.is_some() {
             let mut card = RsModelDeploymentCard::with_name_only(&model);
             card.model_type = ModelType::TensorBased;
             card.model_input = ModelInput::Tensor;
-            card.runtime_config = runtime_config.inner;
+            if let Some(runtime_config) = runtime_config {
+                runtime_config.validate_config()?;
+                card.runtime_config = runtime_config.inner;
+            }
+            card.tensor_model_config = tensor_model_config;
 
             self.inner
                 .model_manager()

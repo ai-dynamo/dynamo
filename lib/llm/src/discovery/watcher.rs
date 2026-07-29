@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, Notify, mpsc::Sender};
+use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
@@ -26,15 +29,20 @@ use dynamo_runtime::{
     protocols::{EndpointId, annotated::Annotated},
 };
 
+use dynamo_renderer::PromptFormatter;
+
 use crate::{
     backend::Backend,
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::PrefillRouter,
+    kv_router::{EncoderRouter, PrefillRouter},
+    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
+    preprocessor::{
+        OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
+    },
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -50,19 +58,154 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    worker_type::WorkerType,
 };
 
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
-/// Constructs the WorkerSet storage key. Prefill and decode workers in the same
-/// namespace get different keys so they don't block each other's registration.
-fn worker_set_key(namespace: &str, model_type: ModelType) -> String {
-    if model_type.supports_prefill() {
-        format!("{}:prefill", namespace)
-    } else {
-        namespace.to_string()
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Constructs a collision-free WorkerSet storage key from its exact endpoint,
+/// model type, and worker role.
+///
+/// Each `(EndpointId, model_type, worker_type)` combination gets its own
+/// WorkerSet bucket. This generalizes the old `{ns}` / `{ns}:prefill` split:
+/// prefill, decode, encode, and aggregated workers within the same namespace
+/// (and even the same model_type) cleanly separate by `worker_type`. Encode
+/// workers, which register with [`ModelType::empty`], end up under
+/// `{ns}::encode` — distinct from a decode `{ns}:chat|completions:decode`.
+///
+/// `worker_type` arrives as `Option<WorkerType>` because the
+/// serving-readiness fields on the MDC are still optional at the type
+/// level; the compat shim renders missing values via
+/// [`effective_worker_type`] so legacy cards bucket and route correctly.
+fn worker_set_key(
+    endpoint_id: &EndpointId,
+    model_type: ModelType,
+    worker_type: Option<WorkerType>,
+) -> String {
+    let mt = model_type.as_vec().join("|");
+    let wt = effective_worker_type(worker_type, model_type);
+    serde_json::to_string(&(
+        &endpoint_id.namespace,
+        &endpoint_id.component,
+        &endpoint_id.name,
+        mt,
+        wt.as_str(),
+    ))
+    .expect("serializing WorkerSet key strings cannot fail")
+}
+
+fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
+    EndpointId {
+        namespace: mcid.namespace.clone(),
+        component: mcid.component.clone(),
+        name: mcid.endpoint.clone(),
     }
+}
+
+fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
+    match instance {
+        DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            instance_id,
+            model_suffix,
+            ..
+        } => Ok(ModelCardInstanceId {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+            instance_id: *instance_id,
+            model_suffix: model_suffix.clone(),
+        }),
+        _ => anyhow::bail!("Unexpected discovery instance type (expected ModelCard)"),
+    }
+}
+
+/// A source card is fully represented locally only after both the per-instance
+/// card and the shared WorkerSet have been recorded. `handle_put` can save the
+/// card before later pipeline construction fails, so either check alone would
+/// allow a failed registration to escape reconciliation.
+fn is_registration_complete(
+    manager: &ModelManager,
+    mcid: &ModelCardInstanceId,
+    card: &ModelDeploymentCard,
+) -> bool {
+    let ws_key = worker_set_key(
+        &model_card_endpoint_id(mcid),
+        card.model_type,
+        card.worker_type,
+    );
+    manager
+        .get_model_card(&mcid.to_path())
+        .is_some_and(|saved| saved.name() == card.name() && saved.mdcsum() == card.mdcsum())
+        && manager.get_model(card.name()).is_some_and(|model| {
+            model.has_worker_set(&ws_key) && model.is_checksum_compatible(&ws_key, card.mdcsum())
+        })
+}
+
+fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
+    card.worker_type == Some(WorkerType::Encode)
+        || card.media_decoder.is_some()
+        || card.model_type.supports_images()
+        || card.model_type.supports_videos()
+        || card
+            .needs
+            .iter()
+            .flatten()
+            .any(|worker_type| *worker_type == WorkerType::Encode)
+}
+
+fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
+
+fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(ENCODER_RESULT_HANDOFF_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+// Generate's opaque request state is not yet verified for migration replay.
+const GENERATE_MIGRATION_LIMIT: u32 = 0;
+
+/// Resolve the effective [`WorkerType`] for a card during the
+/// cross-version rollout.
+///
+/// A card from a **new** worker carries an explicit `worker_type`, used
+/// verbatim. A card from an **old** (legacy) worker has no `worker_type`;
+/// we reconstruct its role from the signal an old frontend itself used — the
+/// legacy `ModelType::Prefill` marker bit:
+///
+/// - legacy prefill card (`ModelType::Prefill` set, no `worker_type`) → `Prefill`
+/// - any other legacy card → `Aggregated`
+///
+/// This lets a new frontend activate the prefill router for, and correctly
+/// bucket, an old prefill worker. (Old *decode* workers are indistinguishable
+/// from old *aggregated* workers on the wire, so they resolve to `Aggregated`;
+/// the readiness path handles that by not topology-gating namespaces that
+/// still contain legacy cards — see `Model::is_workers_ready`.)
+fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
+    worker_type.unwrap_or_else(|| {
+        if model_type.supports_prefill() {
+            WorkerType::Prefill
+        } else {
+            WorkerType::Aggregated
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -87,13 +230,27 @@ pub struct ModelWatcher {
     /// Wakes tasks blocked in `recover_concurrent_registration` when a
     /// `RegistrationGuard` drops (i.e. a registration completes or panics).
     registration_notify: Notify,
-    /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
-    /// can await a racing put before proceeding with cleanup.
-    pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Tracks in-flight `handle_put` tasks by instance path so a later operation
+    /// can cancel a superseded registration.
+    pending_puts: DashMap<String, PendingPut>,
+    /// Serializes state changes for one model-card instance. The generation
+    /// fence preserves discovery-event order even when spawned tasks acquire
+    /// the per-instance lock in a different order.
+    instance_operations: DashMap<String, Arc<InstanceOperation>>,
+    /// Maps an MDC instance path to the LoRA adapter name recorded in the pre-spawn state-tracker
+    /// addition, so a removal whose model card was never durably saved (handle_put failed before
+    /// save) can still remove exactly that adapter from the tracker instead of leaving phantom
+    /// state or wiping a live worker (R4-2 / RR3-3).
+    pending_lora_adds: DashMap<String, String>,
     /// Frontend's `--model-path`. Threaded into `download_config` so
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
     local_model_path: Option<PathBuf>,
+    /// Frontend-level tokenizer backend override for discovered model cards.
+    tokenizer_backend: Option<TokenizerBackend>,
+    /// Whether the frontend configured the vLLM-compatible Generate API.
+    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
+    generate_engine_enabled: bool,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -104,7 +261,6 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Audios,
     ModelType::Videos,
     ModelType::TensorBased,
-    ModelType::Prefill,
     ModelType::Realtime,
 ];
 
@@ -124,8 +280,6 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_videos_models().is_empty()
     } else if model_type == ModelType::TensorBased {
         manager.list_tensor_models().is_empty()
-    } else if model_type == ModelType::Prefill {
-        manager.list_prefill_models().is_empty()
     } else if model_type == ModelType::Realtime {
         manager.list_realtime_models().is_empty()
     } else {
@@ -141,6 +295,46 @@ struct RegistrationGuard<'a> {
     set: &'a DashSet<String>,
     key: String,
     notify: &'a Notify,
+}
+
+struct PendingPut {
+    generation: u64,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct InstanceOperation {
+    generation: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl InstanceOperation {
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn begin(&self) -> u64 {
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    fn reserve_after(&self, expected: u64) -> Option<u64> {
+        let next = expected.wrapping_add(1);
+        self.generation
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| next)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current_generation() == generation
+    }
+}
+
+enum DeleteOutcome {
+    Superseded,
+    Processed(Option<String>),
 }
 
 impl Drop for RegistrationGuard<'_> {
@@ -176,7 +370,11 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            instance_operations: DashMap::new(),
+            pending_lora_adds: DashMap::new(),
             local_model_path: None,
+            tokenizer_backend: None,
+            generate_engine_enabled: false,
         }
     }
 
@@ -186,6 +384,73 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
+        self.tokenizer_backend = tokenizer_backend;
+    }
+
+    pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
+        self.generate_engine_enabled = enabled;
+    }
+
+    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+        if let Some(tokenizer_backend) = self.tokenizer_backend {
+            card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
+    }
+
+    fn instance_operation(&self, key: &str) -> Arc<InstanceOperation> {
+        self.instance_operations
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(InstanceOperation::default()))
+            .clone()
+    }
+
+    fn begin_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.begin();
+        (operation, generation)
+    }
+
+    fn observe_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.current_generation();
+        (operation, generation)
+    }
+
+    fn prune_instance_operation(&self, key: &str, operation: &Arc<InstanceOperation>) {
+        self.instance_operations.remove_if(key, |_, current| {
+            Arc::ptr_eq(current, operation) && Arc::strong_count(current) == 2
+        });
+    }
+
+    fn seed_lora_state_for_put(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
+        use crate::kv_router::protocols::WorkerWithDpRank;
+
+        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+        let state_tracker = self
+            .manager
+            .lora_state_tracker_for(&model_card_endpoint_id(mcid));
+        if let Some(adapter_name) = seed_lora_state_from_card(&state_tracker, worker, card) {
+            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
+        }
+    }
+
+    async fn handle_put_if_current(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+        operation: &InstanceOperation,
+        generation: u64,
+    ) -> Option<anyhow::Result<()>> {
+        let _guard = operation.lock.lock().await;
+        if !operation.is_current(generation) {
+            return None;
+        }
+
+        self.seed_lora_state_for_put(mcid, card);
+        Some(self.handle_put(mcid, card).await)
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -209,7 +474,44 @@ impl ModelWatcher {
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
     ) {
-        while let Some(result) = discovery_stream.next().await {
+        let mut reconciliation = tokio::time::interval(RECONCILIATION_INTERVAL);
+        reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // list_and_watch supplies the initial snapshot. Consume the immediate
+        // first tick so reconciliation begins after one complete interval.
+        reconciliation.tick().await;
+        let mut reconciliation_tasks = JoinSet::new();
+
+        loop {
+            let result = tokio::select! {
+                result = discovery_stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    result
+                }
+                _ = reconciliation.tick(), if reconciliation_tasks.is_empty() => {
+                    let watcher = Arc::clone(&self);
+                    let namespace_filter = namespace_filter.clone();
+                    reconciliation_tasks.spawn(async move {
+                        if let Err(err) = watcher.reconcile(&namespace_filter).await {
+                            tracing::warn!(
+                                error = format!("{err:#}"),
+                                "Frontend model registration reconciliation failed"
+                            );
+                        }
+                    });
+                    continue;
+                }
+                result = reconciliation_tasks.join_next(), if !reconciliation_tasks.is_empty() => {
+                    if let Some(Err(err)) = result {
+                        tracing::warn!(
+                            error = %err,
+                            "Frontend model registration reconciliation task failed"
+                        );
+                    }
+                    continue;
+                }
+            };
             let event = match result {
                 Ok(event) => event,
                 Err(err) => {
@@ -264,10 +566,16 @@ impl ModelWatcher {
                         continue;
                     }
 
+                    self.apply_tokenizer_backend_override(&mut card);
+
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
-                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+                    let ws_key = worker_set_key(
+                        &model_card_endpoint_id(&mcid),
+                        card.model_type,
+                        card.worker_type,
+                    );
                     if let Some(model) = self.manager.get_model(card.name())
                         && !model.is_checksum_compatible(&ws_key, card.mdcsum())
                     {
@@ -292,14 +600,18 @@ impl ModelWatcher {
                     // HuggingFace config download for one model cannot block
                     // discovery events for all subsequent models.
                     //
-                    // The JoinHandle is stored in `pending_puts` so that a
-                    // subsequent `handle_delete` for the same instance can
-                    // await the in-flight put before attempting cleanup.
+                    // The per-instance operation generation preserves event
+                    // order if this task is scheduled after a later operation.
                     let instance_key = mcid.to_path();
+                    let task_key = instance_key.clone();
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     let watcher = Arc::clone(&self);
                     let handle = tokio::spawn(async move {
-                        match watcher.handle_put(&mcid, &mut card).await {
-                            Ok(()) => {
+                        match watcher
+                            .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                            .await
+                        {
+                            Some(Ok(())) => {
                                 tracing::info!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -307,7 +619,7 @@ impl ModelWatcher {
                                 );
                                 watcher.notify_on_model.notify_waiters();
                             }
-                            Err(err) => {
+                            Some(Err(err)) => {
                                 tracing::error!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -315,7 +627,15 @@ impl ModelWatcher {
                                     "Error adding model from discovery",
                                 );
                             }
+                            None => {
+                                tracing::debug!(
+                                    key = %task_key,
+                                    generation,
+                                    "Skipping superseded model registration"
+                                );
+                            }
                         }
+                        watcher.prune_instance_operation(&task_key, &operation);
                         // Note: we intentionally do NOT remove from pending_puts here.
                         // Only the watch loop (on duplicate events) and handle_delete
                         // manage pending_puts, avoiding a race where a completed task's
@@ -330,16 +650,19 @@ impl ModelWatcher {
                     // The only case that hits this branch is the etcd watch replaying the same
                     // worker's Added event (reconnect or re-sync) — where cancelling the earlier
                     // redundant task is exactly what we want.
-                    if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
-                        old_handle.abort();
+                    if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+                        old_put.handle.abort();
                     }
-                    self.pending_puts.insert(instance_key, handle);
+                    self.pending_puts
+                        .insert(instance_key, PendingPut { generation, handle });
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
                     let model_card_instance_id = match &id {
                         DiscoveryInstanceId::Model(mcid) => mcid,
-                        DiscoveryInstanceId::Endpoint(_) | DiscoveryInstanceId::EventChannel(_) => {
+                        DiscoveryInstanceId::Endpoint(_)
+                        | DiscoveryInstanceId::EventChannel(_)
+                        | DiscoveryInstanceId::EventSource(_) => {
                             tracing::error!(
                                 "Unexpected discovery instance type in removal (expected Model)"
                             );
@@ -347,16 +670,24 @@ impl ModelWatcher {
                         }
                     };
 
+                    let instance_key = model_card_instance_id.to_path();
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     match self
-                        .handle_delete(model_card_instance_id, &namespace_filter)
+                        .handle_delete(
+                            model_card_instance_id,
+                            &namespace_filter,
+                            operation,
+                            generation,
+                        )
                         .await
                     {
-                        Ok(Some(model_name)) => {
+                        Ok(DeleteOutcome::Processed(Some(model_name))) => {
                             tracing::info!(model_name, "removed model");
                         }
-                        Ok(None) => {
+                        Ok(DeleteOutcome::Processed(None)) => {
                             // There are other instances running this model, nothing to do
                         }
+                        Ok(DeleteOutcome::Superseded) => {}
                         Err(e) => {
                             tracing::error!(error = %e, "error removing model");
                         }
@@ -364,6 +695,220 @@ impl ModelWatcher {
                 }
             }
         }
+
+        reconciliation_tasks.abort_all();
+        while reconciliation_tasks.join_next().await.is_some() {}
+    }
+
+    /// Compare the local frontend registry with a fresh discovery snapshot.
+    /// Missing or incomplete source cards are retried through `handle_put`; a
+    /// locally recorded card absent from the snapshot is removed through
+    /// `handle_delete`. The snapshot is sorted so repeated failures are logged
+    /// and retried in a deterministic order.
+    async fn reconcile(self: &Arc<Self>, namespace_filter: &NamespaceFilter) -> anyhow::Result<()> {
+        // Snapshot local keys and their operation generations before awaiting
+        // discovery. A registration that starts after this point advances its
+        // generation and prevents this snapshot from deleting the fresh card.
+        let local_entries = self
+            .manager
+            .get_model_card_keys()
+            .into_iter()
+            .map(|key| {
+                let (operation, generation) = self.observe_instance_operation(&key);
+                (key, operation, generation)
+            })
+            .collect::<Vec<_>>();
+
+        let mut instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
+        instances.sort_by_key(|instance| {
+            model_card_instance_id(instance)
+                .map(|mcid| mcid.to_path())
+                .unwrap_or_default()
+        });
+
+        let mut desired_keys = HashSet::with_capacity(instances.len());
+        let mut retry_count = 0usize;
+
+        for instance in instances {
+            let mcid = match model_card_instance_id(&instance) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::error!(
+                        error = format!("{err:#}"),
+                        "Unexpected discovery entry during model reconciliation"
+                    );
+                    continue;
+                }
+            };
+            if !namespace_filter.matches(&mcid.namespace) {
+                continue;
+            }
+
+            // Record the source key before deserializing the card. A malformed
+            // source entry must not cause a valid local entry with the same key
+            // to be treated as stale and deleted.
+            desired_keys.insert(mcid.to_path());
+
+            let mut card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) => card,
+                Err(err) => {
+                    tracing::error!(
+                        %err,
+                        instance_id = mcid.instance_id,
+                        "Failed to deserialize model card during reconciliation"
+                    );
+                    continue;
+                }
+            };
+            self.apply_tokenizer_backend_override(&mut card);
+
+            if !is_registration_complete(&self.manager, &mcid, &card)
+                && self.retry_model_registration(mcid, card).await
+            {
+                retry_count += 1;
+            }
+        }
+
+        let mut stale_entries = Vec::new();
+        for (key, operation, generation) in local_entries {
+            let mcid = match ModelCardInstanceId::from_path(&key) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::warn!(%err, key, "Ignoring malformed local model-card key");
+                    continue;
+                }
+            };
+            if namespace_filter.matches(&mcid.namespace) && !desired_keys.contains(&key) {
+                stale_entries.push((key, mcid, operation, generation));
+            }
+        }
+        stale_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let stale_entry_count = stale_entries.len();
+
+        let mut removed_stale_count = 0usize;
+        let mut superseded_stale_count = 0usize;
+        for (key, mcid, operation, snapshot_generation) in stale_entries {
+            let Some(delete_generation) = operation.reserve_after(snapshot_generation) else {
+                superseded_stale_count += 1;
+                tracing::debug!(
+                    key = %key,
+                    snapshot_generation,
+                    current_generation = operation.current_generation(),
+                    "Skipping stale cleanup superseded after reconciliation snapshot"
+                );
+                continue;
+            };
+            match self
+                .handle_delete(&mcid, namespace_filter, operation, delete_generation)
+                .await
+            {
+                Ok(DeleteOutcome::Processed(_)) => removed_stale_count += 1,
+                Ok(DeleteOutcome::Superseded) => superseded_stale_count += 1,
+                Err(err) => {
+                    tracing::error!(
+                        key = %key,
+                        error = format!("{err:#}"),
+                        "Error removing stale model during reconciliation"
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            expected_model_cards = desired_keys.len(),
+            retried_model_cards = retry_count,
+            removed_stale_model_cards = removed_stale_count,
+            superseded_stale_model_cards = superseded_stale_count,
+            failed_stale_model_cards =
+                stale_entry_count.saturating_sub(removed_stale_count + superseded_stale_count),
+            "Completed frontend model registration reconciliation"
+        );
+        Ok(())
+    }
+
+    /// Start one reconciliation retry unless the original event-driven
+    /// registration for this instance is still running. Completed failed tasks
+    /// remain in `pending_puts`, so they are replaced here by the retry task.
+    async fn retry_model_registration(
+        self: &Arc<Self>,
+        mcid: ModelCardInstanceId,
+        mut card: ModelDeploymentCard,
+    ) -> bool {
+        let instance_key = mcid.to_path();
+        if self
+            .pending_puts
+            .get(&instance_key)
+            .is_some_and(|pending| !pending.handle.is_finished())
+        {
+            return false;
+        }
+
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(&mcid),
+            card.model_type,
+            card.worker_type,
+        );
+        if let Some(model) = self.manager.get_model(card.name())
+            && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+        {
+            tracing::error!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                new_checksum = card.mdcsum(),
+                "Reconciliation found a model-card checksum that does not match the existing WorkerSet. \
+                 Drain all old workers in this namespace before deploying a new version."
+            );
+            return false;
+        }
+
+        tracing::warn!(
+            model_name = card.name(),
+            namespace = mcid.namespace,
+            instance_key,
+            "Retrying incomplete frontend model registration from discovery snapshot"
+        );
+
+        let task_key = instance_key.clone();
+        let (operation, generation) = self.begin_instance_operation(&instance_key);
+        let watcher = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            match watcher
+                .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                .await
+            {
+                Some(Ok(())) => {
+                    tracing::info!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        "Reconciled model registration"
+                    );
+                    watcher.notify_on_model.notify_waiters();
+                }
+                Some(Err(err)) => {
+                    tracing::error!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        error = format!("{err:#}"),
+                        "Model registration reconciliation retry failed"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        key = %task_key,
+                        generation,
+                        "Skipping superseded model registration retry"
+                    );
+                }
+            }
+            watcher.prune_instance_operation(&task_key, &operation);
+        });
+
+        if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+            old_put.handle.abort();
+        }
+        self.pending_puts
+            .insert(instance_key, PendingPut { generation, handle });
+        true
     }
 
     /// Handle a worker removal. Cleans up per-namespace WorkerSets and the Model itself
@@ -372,58 +917,178 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         namespace_filter: &NamespaceFilter,
+        operation: Arc<InstanceOperation>,
+        generation: u64,
+    ) -> anyhow::Result<DeleteOutcome> {
+        let key = mcid.to_path();
+
+        let operation_guard = match tokio::time::timeout(
+            Duration::from_secs(60),
+            operation.lock.lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                if !operation.is_current(generation) {
+                    self.prune_instance_operation(&key, &operation);
+                    return Ok(DeleteOutcome::Superseded);
+                }
+
+                if let Some((_, pending)) = self
+                    .pending_puts
+                    .remove_if(&key, |_, pending| pending.generation < generation)
+                {
+                    pending.handle.abort();
+                    let _ = pending.handle.await;
+                }
+                tracing::warn!(
+                    key = %key,
+                    "Timed out waiting for an earlier model registration; aborted it before delete"
+                );
+                operation.lock.lock().await
+            }
+        };
+
+        if !operation.is_current(generation) {
+            drop(operation_guard);
+            self.prune_instance_operation(&key, &operation);
+            tracing::debug!(
+                key = %key,
+                generation,
+                current_generation = operation.current_generation(),
+                "Skipping superseded model removal"
+            );
+            return Ok(DeleteOutcome::Superseded);
+        }
+
+        // An earlier put either released the operation lock or is waiting on
+        // it with an obsolete generation. Cancel its task before mutating the
+        // local card and WorkerSet state.
+        if let Some((_, pending)) = self
+            .pending_puts
+            .remove_if(&key, |_, pending| pending.generation < generation)
+        {
+            pending.handle.abort();
+            let _ = pending.handle.await;
+        }
+
+        let result = self.handle_delete_serialized(mcid, namespace_filter).await;
+        drop(operation_guard);
+        self.prune_instance_operation(&key, &operation);
+        result.map(DeleteOutcome::Processed)
+    }
+
+    async fn handle_delete_serialized(
+        &self,
+        mcid: &ModelCardInstanceId,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
 
-        // If there is an in-flight handle_put for this instance, wait for it
-        // to complete before we attempt cleanup. Without this, a Removed event
-        // arriving while handle_put is still downloading HF config would fail
-        // to find the model card, leaving a stale registration.
-        if let Some((_, mut handle)) = self.pending_puts.remove(&key) {
-            tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
-            // Ignore join errors (panic in the spawned task) — we still proceed
-            // with cleanup since the put may have partially registered the model.
-            match tokio::time::timeout(Duration::from_secs(60), &mut handle).await {
-                Ok(_) => {}
-                Err(_) => {
-                    // Abort the timed-out task so it cannot register the model
-                    // after we proceed with deletion.
-                    handle.abort();
-                    let _ = handle.await;
-                    tracing::warn!(
-                        key = %key,
-                        "Timed out waiting for in-flight handle_put, aborted and proceeding with delete"
-                    );
-                }
-            }
-        }
-        let card = match self.manager.remove_model_card(&key) {
+        let card = match self.manager.get_model_card(&key) {
             Some(card) => card,
             None => {
+                // The card was never durably saved (e.g. an Added event whose handle_put failed
+                // before save, after the pre-spawn tracker addition). Reconcile tracker state at
+                // the right granularity:
+                //   - base worker card (`model_suffix == None`): the worker instance is gone, so
+                //     clear it entirely;
+                //   - LoRA-adapter card (`model_suffix == Some`): remove ONLY that adapter, using
+                //     the name recorded in `pending_lora_adds`, so a still-live worker's other
+                //     adapters/capacity are untouched (RR3-3 / R4-2).
+                use crate::kv_router::protocols::WorkerWithDpRank;
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                let state_tracker = self
+                    .manager
+                    .lora_state_tracker_for(&model_card_endpoint_id(mcid));
+                if mcid.model_suffix.is_none() {
+                    state_tracker.handle_worker_removal(worker);
+                    // Sweep any pending fallback entries for this worker's LoRA cards so they
+                    // can't linger if their own remove events never arrive (RF-2).
+                    let prefix = format!("{}/", mcid.to_path());
+                    self.pending_lora_adds
+                        .retain(|k, _| !k.starts_with(&prefix));
+                } else if let Some((_, lora_name)) = self.pending_lora_adds.remove(&key) {
+                    state_tracker.handle_mdc_removal(worker, &lora_name);
+                }
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                    "ModelDeploymentCard absent during removal; reconciled LoRA tracker state from pending add"
                 );
                 return Ok(None);
             }
         };
         let model_name = card.name().to_string();
-        let worker_namespace = &mcid.namespace;
-        let worker_component = &mcid.component;
-        let ws_key = worker_set_key(&mcid.namespace, card.model_type);
 
-        // Query discovery for all remaining instances of this model
+        // Complete the only fallible discovery query before removing local
+        // state. If discovery is temporarily unavailable, retaining the card
+        // lets the next reconciliation pass retry this stale entry instead of
+        // losing the key while leaving its WorkerSet behind.
         let active_instances = self
             .cards_for_model_with_endpoints(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        let card = match self.manager.remove_model_card(&key) {
+            Some(card) => card,
+            None => {
+                tracing::debug!(
+                    key = %key,
+                    "ModelDeploymentCard was removed by concurrent cleanup"
+                );
+                return Ok(None);
+            }
+        };
+
+        // Feed the LoRA state tracker now that any in-flight handle_put has completed and the
+        // card is available (N2 — avoids the race where a Removed event outran the add). A LoRA
+        // adapter card unregisters just that adapter; the base worker card means the worker
+        // instance is gone, so drop its capacity + all loaded-LoRA bookkeeping (F4/F5).
+        {
+            use crate::kv_router::protocols::WorkerWithDpRank;
+            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+            let state_tracker = self
+                .manager
+                .lora_state_tracker_for(&model_card_endpoint_id(mcid));
+            match card.lora {
+                Some(ref lora_info) => state_tracker.handle_mdc_removal(worker, &lora_info.name),
+                None => state_tracker.handle_worker_removal(worker),
+            }
+        }
+        // The card-based cleanup above is authoritative; drop the pending fallback entry for a
+        // LoRA card, or sweep all of this worker's suffixed entries for a base card (RF-2).
+        if card.lora.is_some() {
+            self.pending_lora_adds.remove(&key);
+        } else {
+            let prefix = format!("{}/", mcid.to_path());
+            self.pending_lora_adds
+                .retain(|k, _| !k.starts_with(&prefix));
+        }
+
+        let worker_namespace = &mcid.namespace;
+        let worker_component = &mcid.component;
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(mcid),
+            card.model_type,
+            card.worker_type,
+        );
+
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
 
         if !component_has_instances {
@@ -435,13 +1100,22 @@ impl ModelWatcher {
                     namespace = %worker_namespace,
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
+                // Remove alias mirrors, but only ones this deployment owns — a
+                // declared alias that lost its reservation belongs to another model.
+                for alias in &card.aliases {
+                    if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
+                        self.manager.remove_worker_set(alias, &ws_key);
+                        self.manager.remove_model_if_empty(alias);
+                        self.manager.unregister_alias_if_empty(alias, &model_name);
+                    }
+                }
             }
 
             // Activator-state cleanup depends on which component just went away.
             //
             // PREFILL teardown (cached endpoint is stale): drop everything for
             // this key and deactivate the decode-side router so requests fall
-            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            // back to aggregated mode.
             //
             // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
             // valid for future decode rebuilds — that's PR 8965's primary
@@ -452,25 +1126,37 @@ impl ModelWatcher {
             // return `None`, and produce a WorkerSet with no PrefillRouter at
             // all. The stale-DecodeWaiting cleanup tests cover this rebuild
             // path.
-            if card.model_type.supports_prefill() {
-                if removed.is_some() {
+            match card.worker_type {
+                Some(WorkerType::Prefill) => {
+                    if removed.is_some() {
+                        self.manager
+                            .remove_prefill_activator(&model_name, worker_namespace);
+                    }
                     self.manager
-                        .remove_prefill_activator(&model_name, worker_namespace);
+                        .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
                 }
-                self.manager
-                    .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
-            } else {
-                // Decode-component teardown: always run the waiter cleanup,
-                // regardless of whether `remove_worker_set` found an entry. If
-                // a decode worker registered (creating a `DecodeWaiting`
-                // activator entry) but `handle_add_helper` later failed before
-                // `add_worker_set`, the WorkerSet is absent here yet the stale
-                // `DecodeWaiting` still needs to be cleared. The helper is
-                // state-safe (`remove_if(|_, v| matches!(v, DecodeWaiting(_)))`)
-                // so calling it on a key that's vacant or holds `PrefillReady`
-                // is a no-op.
-                self.manager
-                    .remove_decode_prefill_waiter(&model_name, worker_namespace);
+                Some(WorkerType::Encode) if card.model_type.is_empty() => {
+                    if removed.is_some() {
+                        self.manager
+                            .remove_encoder_activator(&model_name, worker_namespace);
+                    }
+                    self.manager
+                        .deactivate_encoder_router_for_consumers(&model_name, worker_namespace);
+                }
+                Some(WorkerType::Decode) => {
+                    // A decode registration may create a `DecodeWaiting`
+                    // activator before `handle_add_helper` installs its
+                    // WorkerSet. Always remove that waiter on teardown, even
+                    // when no WorkerSet was installed.
+                    self.manager
+                        .remove_decode_prefill_waiter(&model_name, worker_namespace);
+                    self.manager
+                        .remove_consumer_encoder_waiter(&model_name, worker_namespace);
+                }
+                Some(WorkerType::Aggregated) | Some(WorkerType::Encode) | None => {
+                    self.manager
+                        .remove_consumer_encoder_waiter(&model_name, worker_namespace);
+                }
             }
         }
 
@@ -486,6 +1172,13 @@ impl ModelWatcher {
 
         // No instances remain anywhere — remove the entire Model
         let _ = self.manager.remove_model(&model_name);
+        // Same ownership rule: only remove alias models this deployment owns.
+        for alias in &card.aliases {
+            if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
+                let _ = self.manager.remove_model(alias);
+                self.manager.unregister_alias_if_empty(alias, &model_name);
+            }
+        }
 
         if let Some(tx) = &self.model_update_tx {
             for model_type in ALL_MODEL_TYPES {
@@ -511,7 +1204,11 @@ impl ModelWatcher {
         // If so, this is just another worker joining an existing set — no pipeline build needed.
         let model_name = card.name().to_string();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(mcid),
+            card.model_type,
+            card.worker_type,
+        );
 
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
@@ -691,6 +1388,20 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
+        // Fast-fail before any expensive setup when the name is already reserved
+        // as another deployment's alias (`resolve_canonical_name` returns a
+        // different, canonical name only for a reserved alias). `add_worker_set`
+        // re-checks this atomically under `reservation_lock` and is the
+        // authoritative gate; rejecting here just avoids the config download,
+        // card save, and pipeline build for a name that cannot be claimed.
+        if self.manager.resolve_canonical_name(card.name()) != card.name() {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register: name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
+
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
@@ -715,11 +1426,129 @@ impl ModelWatcher {
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(mcid),
+            card.model_type,
+            card.worker_type,
+        );
 
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        worker_set.set_endpoint_id(endpoint.id());
         worker_set.set_instance_watcher(instance_watcher);
+
+        // A surface-less Encode worker is reached only through EncoderRouter.
+        // Register it for serving readiness, publish its endpoint to any
+        // waiting token pipeline, and do not build a public OpenAI surface.
+        if effective_worker_type(card.worker_type, card.model_type) == WorkerType::Encode
+            && card.model_type.is_empty()
+        {
+            if card.model_input != ModelInput::Tokens {
+                anyhow::bail!(
+                    "Encode workers must use ModelInput::Tokens, got {}",
+                    card.model_input.as_str()
+                );
+            }
+            self.manager
+                .add_worker_set(card.name(), &ws_key, worker_set);
+
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
+            self.manager.activate_encoder_router(
+                card.name(),
+                &namespace,
+                component.endpoint(&mcid.endpoint),
+            );
+            tracing::info!(
+                model_name = card.name(),
+                namespace = %namespace,
+                "Encode worker registered and router activated"
+            );
+            return Ok(());
+        }
+
+        // worker_type-driven short circuit for Prefill.
+        //
+        // A prefill worker carries no OpenAI-style engine — it is reached only
+        // through the dedicated prefill router, never by the frontend — so we
+        // dispatch it off `worker_type` here, *before* the model_type-based
+        // branches below. Everything else is routed by its OpenAI surface: a
+        // card that declares a surface builds the matching pipeline (so an
+        // sglang multimodal encode worker, which fronts the model, serves like
+        // any other worker), while a surface-less (`ModelType::empty()`) card
+        // is registered for serving-readiness only (see the `is_empty()` arm at
+        // the end of the chain). The role is carried by `worker_type`; serving
+        // is driven by `model_type`.
+        //
+        // `effective_worker_type` also resolves a legacy prefill card (the
+        // `ModelType::Prefill` marker bit with no `worker_type`, from an old
+        // worker registering against a new frontend) to `Prefill` here, so it
+        // activates the prefill router just like a new prefill worker.
+        if effective_worker_type(card.worker_type, card.model_type) == WorkerType::Prefill {
+            // Guardrail: prefill workers still expect Tokens input downstream.
+            if card.model_input != ModelInput::Tokens {
+                anyhow::bail!(
+                    "Prefill workers must use ModelInput::Tokens, got {}",
+                    card.model_input.as_str()
+                );
+            }
+
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill worker detected, registering and activating prefill router"
+            );
+
+            // No engine on the worker set — just lifecycle tracking so the
+            // prefill router can be activated/deactivated as workers come
+            // and go.
+            if !self
+                .manager
+                .add_worker_set(card.name(), &ws_key, worker_set)
+            {
+                tracing::error!(
+                    model_name = card.name(),
+                    "Refusing to register prefill worker: its name is reserved as an alias of \
+                     another deployment"
+                );
+                return Ok(());
+            }
+            // Mirror the prefill WorkerSet under any aliases so a disaggregated
+            // alias reports readiness like its primary (decode attaches its own).
+            self.attach_aliases(card, &ws_key);
+
+            if supports_encoder_result_handoff(card) {
+                self.manager.enable_encoder_routing(card.name(), &namespace);
+            }
+
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
+
+            // activate_prefill_router is keyed by deployment namespace (not
+            // ws_key) because it coordinates between decode and prefill
+            // worker sets that share the same deployment namespace but have
+            // different ws_keys (decode `{ns}:chat|completions:decode` vs
+            // prefill `{ns}::prefill`).
+            let endpoint = component.endpoint(&mcid.endpoint);
+            let Ok(()) = self
+                .manager
+                .activate_prefill_router(card.name(), &namespace, endpoint)
+            else {
+                tracing::warn!(
+                    model_name = card.name(),
+                    "Failed to activate prefill router - prefill worker may already be activated"
+                );
+                return Ok(());
+            };
+
+            tracing::info!(
+                model_name = card.name(),
+                "Prefill worker registered and router activated successfully"
+            );
+
+            return Ok(());
+        }
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
@@ -750,7 +1579,10 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_preprocessed_routing = needs_factory_chat_pipeline || tokenizer.is_some();
+            let needs_generate_pipeline =
+                self.generate_engine_enabled && supports_vllm_generate(card);
+            let needs_preprocessed_routing =
+                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
@@ -759,11 +1591,12 @@ impl ModelWatcher {
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     Some(
                         self.manager
-                            .kv_chooser_for(
+                            .kv_chooser_for_with_worker_role(
                                 &endpoint,
                                 card.kv_cache_block_size,
                                 Some(router_config.kv_router_config.clone()),
                                 self.prefill_load_estimator.clone(),
+                                card.worker_type,
                                 WORKER_TYPE_DECODE, // This is the decode router
                                 Some(card.display_name.clone()),
                                 card.runtime_config.enable_eagle,
@@ -774,41 +1607,12 @@ impl ModelWatcher {
                     None
                 };
 
-            // Create prefill chooser once if we're building pipelines
-            // Both chat and completions will share the same prefill chooser instance
-            let model_name = card.name().to_string();
-            let prefill_chooser = if needs_preprocessed_routing {
-                self.manager
-                    .register_prefill_router(&model_name, &namespace)
-                    .map(|rx| {
-                        // Create prefill-specific config with track_active_blocks disabled
-                        let mut prefill_config = router_config.kv_router_config.clone();
-                        prefill_config.router_track_active_blocks = false;
-                        // Prefill KV events are emitted by prefill workers; do not inherit
-                        // decode-only speculative hash mode.
-                        let prefill_enable_eagle = false;
-
-                        PrefillRouter::new(
-                            rx,
-                            self.manager.clone(),
-                            router_config.router_mode,
-                            card.kv_cache_block_size,
-                            Some(prefill_config),
-                            self.prefill_load_estimator.clone(),
-                            router_config.enforce_disagg,
-                            model_name.clone(),
-                            namespace.clone(),
-                            prefill_enable_eagle,
-                        )
-                    })
-            } else {
-                None
-            };
-
-            // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
-            // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
-            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
+            // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
+            // monitor can be handed directly to PrefillRouter::new. Each WorkerSet gets its own
+            // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
+            // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
+            // cleanup); thresholds control overload detection. The monitor and prefill router are
+            // created together here, so the monitor is passed into the prefill router directly.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
             // so that overload-state updates (via set_overloaded_instances) are visible to the
@@ -828,12 +1632,75 @@ impl ModelWatcher {
                 None
             };
 
+            // Only a typed Decode endpoint participates in the namespace-level
+            // P/D rendezvous. Aggregated and Encode endpoints are independent
+            // serving leaves and must not claim or perturb that pairing.
+            let model_name = card.name().to_string();
+            let prefill_receiver = if needs_preprocessed_routing
+                && effective_worker_type(card.worker_type, card.model_type) == WorkerType::Decode
+            {
+                match self
+                    .manager
+                    .register_prefill_router(&model_name, &namespace, &endpoint.id())
+                {
+                    Ok(receiver) => receiver,
+                    Err(error) => {
+                        tracing::error!(
+                            model_name,
+                            namespace,
+                            %error,
+                            "Refusing ambiguous endpoint-scoped P/D topology; ordinary serving remains enabled"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            // Chat and completions on this decode endpoint share one prefill chooser.
+            let prefill_chooser = prefill_receiver.map(|rx| {
+                // Create prefill-specific config with track_active_blocks disabled
+                let mut prefill_config = router_config.kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
+                // Prefill KV events are emitted by prefill workers; do not inherit
+                // decode-only speculative hash mode.
+                let prefill_enable_eagle = false;
+
+                PrefillRouter::new(
+                    rx,
+                    self.manager.clone(),
+                    router_config.router_mode,
+                    card.kv_cache_block_size,
+                    Some(prefill_config),
+                    self.prefill_load_estimator.clone(),
+                    router_config.session_affinity_ttl_secs,
+                    model_name.clone(),
+                    namespace.clone(),
+                    prefill_enable_eagle,
+                    // Hand the monitor directly so the prefill Client can be attached
+                    // to it on activation (no namespace lookup).
+                    worker_monitor.clone(),
+                )
+            });
+
+            let encoder_chooser = if needs_preprocessed_routing {
+                if supports_encoder_result_handoff(card) {
+                    self.manager.enable_encoder_routing(&model_name, &namespace);
+                }
+                self.manager
+                    .register_encoder_router(&model_name, &namespace)
+                    .map(|rx| EncoderRouter::new(rx, model_name.clone(), namespace.clone()))
+            } else {
+                None
+            };
+
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
+            worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
@@ -844,7 +1711,9 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
-                        router_config.enforce_disagg,
+                        encoder_chooser.clone(),
+                        uses_multimodal_cache_routing(card),
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -867,38 +1736,48 @@ impl ModelWatcher {
                             self.metrics.clone(),
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
-                    factory(mcid.clone(), card.clone(), routed_engine)
-                        .await
-                        .context("python chat_engine_factory")?
-                } else {
-                    let tk = tokenizer.clone().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Model has no supported Rust tokenizer and no chat_engine_factory. \
-                             Use --dyn-chat-processor vllm/sglang or provide a supported \
-                             tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
-                        )
-                    })?;
+                    Some(
+                        factory(mcid.clone(), card.clone(), routed_engine)
+                            .await
+                            .context("python chat_engine_factory")?,
+                    )
+                } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
-                        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+                        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor.new_with_parts")?;
-                    routing
-                        .build_pipeline::<
-                            NvCreateChatCompletionRequest,
-                            NvCreateChatCompletionStreamResponse,
-                        >(
-                            card,
-                            preprocessor,
-                            tk,
-                            self.migration_limit,
-                            self.migration_max_seq_len,
-                            self.metrics.clone(),
+                    Some(
+                        routing
+                            .build_pipeline::<
+                                NvCreateChatCompletionRequest,
+                                NvCreateChatCompletionStreamResponse,
+                            >(
+                                card,
+                                preprocessor,
+                                tk,
+                                self.migration_limit,
+                                self.migration_max_seq_len,
+                                self.metrics.clone(),
+                            )
+                            .context("PreprocessedRouting::build_pipeline")?,
                         )
-                        .context("PreprocessedRouting::build_pipeline")?
+                } else if needs_generate_pipeline {
+                    tracing::warn!(
+                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
+                    );
+                    None
+                } else {
+                    anyhow::bail!(
+                        "Model has no supported Rust tokenizer and no chat_engine_factory. \
+                         Use --dyn-chat-processor vllm/sglang or provide a supported \
+                         tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
+                    );
                 };
-                worker_set.chat_engine = Some(chat_engine);
-                tracing::info!("Chat completions is ready");
+                if let Some(chat_engine) = chat_engine {
+                    worker_set.chat_engine = Some(chat_engine);
+                    tracing::info!("Chat completions is ready");
+                }
             }
 
             // Add completions engine only if the model supports completions
@@ -932,11 +1811,28 @@ impl ModelWatcher {
                 }
             }
 
-            // Verify we built at least one serving engine. A Tokens model that
-            // ends up with no chat AND no completions engine (e.g. completions-only
-            // model with no tokenizer) should fail fast rather than register an
-            // empty WorkerSet that can't serve any requests.
-            if !worker_set.has_decode_engine() {
+            // Generate is a frontend-native token-in/token-out surface. It
+            // reuses the raw routed pipeline so the complete request envelope
+            // reaches the worker without passing through the OpenAI decoder.
+            if needs_generate_pipeline {
+                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("generate pipeline requires preprocessed routing")
+                })?;
+                let generate_engine = routing
+                    .build_preprocessed_pipeline(
+                        card,
+                        GENERATE_MIGRATION_LIMIT,
+                        None,
+                        self.metrics.clone(),
+                    )
+                    .context("build generate (preprocessed) pipeline")?;
+                worker_set.generate_engine = Some(generate_engine);
+                tracing::info!("Generate (token-in/token-out) is ready");
+            }
+
+            // Verify we built at least one serving engine. Generate can be the
+            // sole engine because token-native requests need no frontend tokenizer.
+            if !worker_set.has_any_serving_engine() {
                 anyhow::bail!(
                     "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
                      but no serving engine could be built. Provide a working tokenizer config or \
@@ -980,9 +1876,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -991,9 +1885,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1081,69 +1973,105 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.realtime_engine = Some(Arc::new(realtime_router));
-        } else if card.model_type.supports_prefill() {
-            // Case 6: Prefill
-            // Guardrail: Verify model_input is Tokens
-            if card.model_input != ModelInput::Tokens {
-                anyhow::bail!(
-                    "Prefill models must use ModelInput::Tokens, got {}",
-                    card.model_input.as_str()
-                );
-            }
-
+        } else if card.model_type.is_empty() {
+            // No OpenAI surface declared: a topology-only worker that exists
+            // purely for serving-readiness accounting — e.g. a surface-less
+            // encode helper, or an internal disaggregated worker fronted by
+            // another worker (reached over RPC, never by the frontend). Build
+            // no pipeline; the shared tail below registers the engine-less
+            // WorkerSet so the readiness gate counts it. (Prefill is handled by
+            // its own branch above.)
             tracing::info!(
                 model_name = card.name(),
-                "Prefill model detected, registering and activating prefill router"
+                "Topology-only worker (empty model_type), registering for serving readiness only"
             );
-
-            // Prefill sets have no engines — we add the WorkerSet first for tracking,
-            // then activate the prefill router.
-            self.manager
-                .add_worker_set(card.name(), &ws_key, worker_set);
-
-            if let Some(tx) = &self.model_update_tx {
-                tx.send(ModelUpdate::Added(card.clone())).await.ok();
-            }
-
-            // Note: activate_prefill_router is keyed by deployment namespace (not ws_key)
-            // because it coordinates between decode and prefill WorkerSets that share
-            // the same deployment namespace but have different ws_keys ("ns" vs "ns:prefill").
-            let Ok(()) = self
-                .manager
-                .activate_prefill_router(card.name(), &namespace, endpoint)
-            else {
-                tracing::warn!(
-                    model_name = card.name(),
-                    "Failed to activate prefill router - prefill model may already be activated"
-                );
-                return Ok(());
-            };
-
-            tracing::info!(
-                model_name = card.name(),
-                "Prefill model registered and router activated successfully"
-            );
-
-            return Ok(());
         } else {
-            // Reject unsupported combinations
+            // A worker that declares an OpenAI surface but with an incompatible
+            // model_input. (Surface-less workers hit the `is_empty()` arm above;
+            // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions|Prefill), Text+(Chat|Completions|Images), Tokens+Embeddings, Tensor+TensorBased",
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Realtime), \
+                Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
             );
         }
 
-        // Add the completed WorkerSet to the Model
-        self.manager
-            .add_worker_set(card.name(), &ws_key, worker_set);
+        // Add the completed WorkerSet to the Model, then mirror it under any
+        // configured aliases so alias names resolve, list, and report readiness
+        // exactly like the primary.
+        if !self
+            .manager
+            .add_worker_set(card.name(), &ws_key, worker_set)
+        {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register model: its name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
+        self.attach_aliases(card, &ws_key);
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
 
         Ok(())
+    }
+
+    /// Register `card`'s aliases against its primary name and mirror the just-
+    /// added WorkerSet under each, so an alias resolves to the primary and lists
+    /// / reports readiness identically. Shared by the aggregated/decode and the
+    /// disaggregated prefill registration paths so a disaggregated alias gets
+    /// both the decode and prefill WorkerSets (the prefill worker registers on
+    /// its own early-return path and would otherwise skip alias attachment).
+    ///
+    /// `register_alias` atomically reserves the name (rejecting a collision with a
+    /// live primary or a different primary's alias); only a successful reservation
+    /// is followed by the WorkerSet attach. The reservation holds the name against
+    /// any concurrent primary claim, so the subsequent attach cannot be refused —
+    /// a refusal would indicate a broken invariant and is only logged.
+    fn attach_aliases(&self, card: &ModelDeploymentCard, ws_key: &str) {
+        if card.aliases.is_empty() {
+            return;
+        }
+        let Some(model) = self.manager.get_model(card.name()) else {
+            tracing::warn!(
+                model_name = card.name(),
+                "Model missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        let Some(ws_arc) = model.get_worker_set(ws_key) else {
+            tracing::warn!(
+                model_name = card.name(),
+                ws_key,
+                "WorkerSet missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        for alias in &card.aliases {
+            if alias == card.name() {
+                continue;
+            }
+            if !self.manager.register_alias(alias, card.name()) {
+                continue;
+            }
+            tracing::info!(model_name = card.name(), alias, "Registering model alias");
+            if !self
+                .manager
+                .add_worker_set_arc(alias, ws_key, ws_arc.clone())
+            {
+                // Unreachable: register_alias reserved this name, so no concurrent
+                // primary can occupy it and the attach cannot be refused.
+                tracing::error!(
+                    model_name = card.name(),
+                    alias,
+                    "Alias reserved but WorkerSet attach was refused — invariant violated"
+                );
+            }
+        }
     }
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
@@ -1154,7 +2082,8 @@ impl ModelWatcher {
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
@@ -1214,18 +2143,233 @@ impl ModelWatcher {
     }
 }
 
+/// Seed the LoRA state tracker from a worker's MDC.
+///
+/// - Adapter card (`card.lora` is `Some`): register the loaded adapter (which also records the
+///   worker's capacity) and return the adapter name so the caller can track it for failed-save
+///   removal reconciliation.
+/// - Base worker card advertising `runtime_config.max_gpu_lora_count`: seed capacity-only (no
+///   phantom adapter) so the controller sees idle-but-LoRA-capable workers before the first
+///   adapter load. Returns `None`.
+/// - Otherwise (non-LoRA worker): no-op, returns `None`.
+///
+/// Split out of the discovery loop so the base-card capacity data flow is unit-testable without
+/// constructing a full `ModelWatcher`.
+fn seed_lora_state_from_card(
+    state_tracker: &crate::lora::LoraStateTracker,
+    worker: crate::kv_router::protocols::WorkerWithDpRank,
+    card: &ModelDeploymentCard,
+) -> Option<String> {
+    if let Some(lora_info) = card.lora.as_ref() {
+        state_tracker.handle_mdc_addition(worker, lora_info);
+        Some(lora_info.name.clone())
+    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+        state_tracker.set_worker_capacity(worker, capacity);
+        None
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::WorkerSet;
     use crate::model_card::ModelDeploymentCard;
 
-    fn make_worker_set(namespace: &str) -> WorkerSet {
-        WorkerSet::new(
-            namespace.to_string(),
-            "test-checksum".to_string(),
-            ModelDeploymentCard::default(),
-        )
+    fn test_endpoint_id(name: &str) -> EndpointId {
+        EndpointId {
+            namespace: "ns1".to_string(),
+            component: "workers".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn vllm_generate_requires_explicit_worker_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        assert!(!supports_vllm_generate(&card));
+
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_vllm_generate(&card));
+
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
+            .unwrap();
+        assert!(!supports_vllm_generate(&card));
+    }
+
+    #[test]
+    fn encoder_result_handoff_requires_explicit_worker_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.needs = vec![vec![WorkerType::Encode]];
+        assert!(!supports_encoder_result_handoff(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_encoder_result_handoff(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, false)
+            .unwrap();
+        assert!(!supports_encoder_result_handoff(&card));
+    }
+
+    #[test]
+    fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
+        // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
+        // runtime_config.max_gpu_lora_count must seed capacity-only so the controller sees the
+        // idle LoRA-capable worker before any adapter loads. Pins the base-card -> capacity flow
+        // that the discovery loop relies on.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(7, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.runtime_config.max_gpu_lora_count = Some(4);
+        assert!(card.lora.is_none());
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter, None, "a base card registers no adapter name");
+        assert_eq!(
+            st.list_workers(),
+            vec![worker],
+            "idle LoRA-capable worker must be visible to the controller"
+        );
+        assert_eq!(st.total_lora_slots(), 4);
+    }
+
+    #[test]
+    fn base_card_without_capacity_seeds_nothing() {
+        // A non-LoRA base card must not seed any worker capacity.
+        let st = crate::lora::LoraStateTracker::new();
+        let card = ModelDeploymentCard::with_name_only("base-model");
+        assert!(card.runtime_config.max_gpu_lora_count.is_none());
+
+        let adapter = seed_lora_state_from_card(
+            &st,
+            crate::kv_router::protocols::WorkerWithDpRank::new(1, 0),
+            &card,
+        );
+        assert_eq!(adapter, None);
+        assert!(
+            st.list_workers().is_empty(),
+            "a non-LoRA base card must not seed capacity"
+        );
+    }
+
+    #[test]
+    fn adapter_card_registers_adapter_and_returns_name() {
+        // An adapter card registers the loaded adapter (+capacity) and returns its name so the
+        // caller can track it in pending_lora_adds.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(3, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-x".to_string(),
+            max_gpu_lora_count: Some(2),
+        });
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter.as_deref(), Some("adapter-x"));
+        assert!(st.is_loaded("adapter-x", &worker));
+        assert_eq!(st.total_lora_slots(), 2);
+    }
+
+    #[test]
+    fn registration_is_complete_only_after_card_and_worker_set_exist() {
+        let manager = ModelManager::new();
+        let mcid = ModelCardInstanceId {
+            namespace: "deployment-a".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("llama");
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Aggregated);
+
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        // `do_worker_set_registration` saves the card before all pipeline
+        // construction has completed. A failure after this point must remain a
+        // reconciliation candidate.
+        manager
+            .save_model_card(&mcid.to_path(), card.clone())
+            .unwrap();
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(&mcid),
+            card.model_type,
+            card.worker_type,
+        );
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                "stale-checksum".to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(
+            !is_registration_complete(&manager, &mcid, &card),
+            "a WorkerSet from a different model-card checksum must be retried"
+        );
+
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                card.mdcsum().to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(is_registration_complete(&manager, &mcid, &card));
+
+        manager.remove_model_card(&mcid.to_path());
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_reserve_after_a_new_registration() {
+        let operation = InstanceOperation::default();
+        let snapshot_generation = operation.current_generation();
+
+        let registration_generation = operation.begin();
+
+        assert!(operation.is_current(registration_generation));
+        assert_eq!(operation.reserve_after(snapshot_generation), None);
+    }
+
+    #[tokio::test]
+    async fn newer_registration_waits_for_cleanup_and_remains_current() {
+        let operation = Arc::new(InstanceOperation::default());
+        let cleanup_generation = operation
+            .reserve_after(operation.current_generation())
+            .expect("cleanup should reserve the unchanged snapshot generation");
+        let cleanup_guard = operation.lock.lock().await;
+
+        let registration_generation = operation.begin();
+        assert!(!operation.is_current(cleanup_generation));
+
+        let registration_operation = Arc::clone(&operation);
+        let registration = tokio::spawn(async move {
+            let _guard = registration_operation.lock.lock().await;
+            registration_operation.is_current(registration_generation)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !registration.is_finished(),
+            "the newer registration must wait until cleanup releases the instance lock"
+        );
+
+        drop(cleanup_guard);
+        assert!(registration.await.unwrap());
     }
 
     #[test]
@@ -1238,7 +2382,6 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Audios));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
-        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
     }
 
@@ -1256,44 +2399,148 @@ mod tests {
     }
 
     #[test]
-    fn test_is_model_type_list_empty_prefill_present() {
-        let mm = ModelManager::new();
-        // A WorkerSet with no engines is treated as a prefill set
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
+    fn ws_key_format_per_role() {
+        let endpoint_id = test_endpoint_id("generate");
+        // Decode worker with Chat | Completions
+        let dk = worker_set_key(
+            &endpoint_id,
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Decode),
+        );
+        assert_eq!(
+            dk,
+            r#"["ns1","workers","generate","chat|completions","decode"]"#
+        );
 
-        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
-        // Other types should still be empty since the WorkerSet has no engines
-        assert!(is_model_type_list_empty(&mm, ModelType::Chat));
-        assert!(is_model_type_list_empty(&mm, ModelType::Completions));
-        assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
-        assert!(is_model_type_list_empty(&mm, ModelType::Images));
-        assert!(is_model_type_list_empty(&mm, ModelType::Audios));
-        assert!(is_model_type_list_empty(&mm, ModelType::Videos));
-        assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
+        // Prefill worker registers with empty ModelType (no OpenAI surface)
+        let pk = worker_set_key(&endpoint_id, ModelType::empty(), Some(WorkerType::Prefill));
+        assert_eq!(pk, r#"["ns1","workers","generate","","prefill"]"#);
+
+        // Encode worker, same pattern as prefill
+        let ek = worker_set_key(&endpoint_id, ModelType::empty(), Some(WorkerType::Encode));
+        assert_eq!(ek, r#"["ns1","workers","generate","","encode"]"#);
+
+        // Aggregated worker
+        let ak = worker_set_key(
+            &endpoint_id,
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        assert_eq!(
+            ak,
+            r#"["ns1","workers","generate","chat|completions","aggregated"]"#
+        );
+
+        // Legacy card with no worker_type set falls under the compat shim,
+        // which renders it as `aggregated` in the key.
+        let legacy = worker_set_key(&endpoint_id, ModelType::Chat | ModelType::Completions, None);
+        assert_eq!(
+            legacy,
+            r#"["ns1","workers","generate","chat|completions","aggregated"]"#
+        );
     }
 
     #[test]
-    fn test_is_model_type_list_empty_after_removal() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
-        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
-
-        mm.remove_model("model-a");
-        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+    fn ws_key_separates_endpoints_in_same_component() {
+        let a = worker_set_key(
+            &test_endpoint_id("generate-a"),
+            ModelType::Chat,
+            Some(WorkerType::Decode),
+        );
+        let b = worker_set_key(
+            &test_endpoint_id("generate-b"),
+            ModelType::Chat,
+            Some(WorkerType::Decode),
+        );
+        assert_ne!(a, b);
     }
 
     #[test]
-    fn test_is_model_type_list_not_empty_when_other_model_remains() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("model-a", "ns1", make_worker_set("ns1"));
-        mm.add_worker_set("model-b", "ns1", make_worker_set("ns1"));
+    fn ws_key_new_and_legacy_prefill_share_a_bucket() {
+        let endpoint_id = test_endpoint_id("generate");
+        // A NEW prefill worker dual-emits ModelType::Prefill + worker_type=Prefill.
+        let new_prefill =
+            worker_set_key(&endpoint_id, ModelType::Prefill, Some(WorkerType::Prefill));
+        assert_eq!(
+            new_prefill,
+            r#"["ns1","workers","generate","prefill","prefill"]"#
+        );
 
-        // Remove one model — other still provides prefill
-        mm.remove_model("model-a");
-        assert!(!is_model_type_list_empty(&mm, ModelType::Prefill));
+        // A LEGACY prefill card (ModelType::Prefill marker bit, no worker_type)
+        // must resolve to the SAME bucket via effective_worker_type, so old and
+        // new prefill workers in one namespace don't split into two buckets.
+        let legacy_prefill = worker_set_key(&endpoint_id, ModelType::Prefill, None);
+        assert_eq!(
+            legacy_prefill,
+            r#"["ns1","workers","generate","prefill","prefill"]"#
+        );
+        assert_eq!(new_prefill, legacy_prefill);
+    }
 
-        // Remove the last model — now empty
-        mm.remove_model("model-b");
-        assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+    #[test]
+    fn effective_worker_type_resolution() {
+        // Explicit worker_type is used verbatim.
+        assert_eq!(
+            effective_worker_type(Some(WorkerType::Decode), ModelType::Chat),
+            WorkerType::Decode
+        );
+        assert_eq!(
+            effective_worker_type(Some(WorkerType::Prefill), ModelType::Prefill),
+            WorkerType::Prefill
+        );
+        // Legacy prefill card (Prefill marker bit, no worker_type) → Prefill.
+        assert_eq!(
+            effective_worker_type(None, ModelType::Prefill),
+            WorkerType::Prefill
+        );
+        // Any other legacy card → Aggregated.
+        assert_eq!(
+            effective_worker_type(None, ModelType::Chat | ModelType::Completions),
+            WorkerType::Aggregated
+        );
+        assert_eq!(
+            effective_worker_type(None, ModelType::empty()),
+            WorkerType::Aggregated
+        );
+    }
+
+    #[test]
+    fn ws_key_separates_prefill_from_decode_in_same_namespace() {
+        let endpoint_id = test_endpoint_id("generate");
+        // Prefill and decode in the same deployment namespace must hash to
+        // distinct keys so they live in separate WorkerSet buckets.
+        let decode = worker_set_key(
+            &endpoint_id,
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Decode),
+        );
+        let prefill = worker_set_key(&endpoint_id, ModelType::empty(), Some(WorkerType::Prefill));
+        assert_ne!(decode, prefill);
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        let endpoint_id = EndpointId {
+            namespace: "dynamo".to_string(),
+            ..test_endpoint_id("generate")
+        };
+        // Regression for the Encode/Aggregated key collision: Encode and
+        // Aggregated workers in the same namespace MUST map to different keys,
+        // so both can register without an MDC checksum mismatch. Under the
+        // role-in-key scheme, an Encode worker registers surface-less
+        // (ModelType::empty()) and lands in `{ns}::encode`, while Aggregated
+        // keeps its `{ns}:chat|completions:aggregated` bucket.
+        let agg_key = worker_set_key(
+            &endpoint_id,
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key(&endpoint_id, ModelType::empty(), Some(WorkerType::Encode));
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(
+            agg_key,
+            r#"["dynamo","workers","generate","chat|completions","aggregated"]"#
+        );
+        assert_eq!(enc_key, r#"["dynamo","workers","generate","","encode"]"#);
     }
 }

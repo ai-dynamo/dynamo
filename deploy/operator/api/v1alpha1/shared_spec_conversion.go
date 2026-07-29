@@ -152,6 +152,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -257,7 +258,7 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) {
+	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
 		cp := *preserved.ExtraPodSpec.DeepCopy()
 		dst.ExtraPodSpec = &cp
 	}
@@ -334,7 +335,8 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.ExtraPodMetadata = src.ExtraPodMetadata.DeepCopy()
 		hasSave = true
 	}
-	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) {
+	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) ||
+		alphaFrontendSidecarConflictNeedsPreservation(src.FrontendSidecar, src.ExtraPodSpec) {
 		save.ExtraPodSpec = src.ExtraPodSpec.DeepCopy()
 		hasSave = true
 	}
@@ -352,10 +354,6 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 	}
 	if src.Failover != nil && !src.Failover.Enabled {
 		save.Failover = src.Failover.DeepCopy()
-		hasSave = true
-	}
-	if src.Checkpoint != nil && !src.Checkpoint.Enabled {
-		save.Checkpoint = src.Checkpoint.DeepCopy()
 		hasSave = true
 	}
 	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
@@ -503,6 +501,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
@@ -547,8 +546,10 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		return err
 	}
 
-	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
+	// Restore lossy cache flags before field-origin reconstruction so every
+	// compilation-cache mount is excluded from main-container origin matching.
 	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
+	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
 	pruneEmptyExtraPodSpec(dst, restored)
 	if save != nil {
 		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
@@ -926,7 +927,8 @@ func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeplo
 	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
 		return
 	}
-	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
+	restorablePreserved := restorablePreservedCompilationCacheMounts(src, preserved)
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(restorablePreserved, dst.VolumeMounts)
 }
 
 func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
@@ -934,11 +936,42 @@ func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.Compilation
 		if !mount.UseAsCompilationCache {
 			continue
 		}
-		return compilationCache != nil &&
-			compilationCache.PVCName == mount.Name &&
-			compilationCache.MountPath == mount.MountPoint
+		return compilationCacheMatchesVolumeMount(compilationCache, mount)
 	}
 	return compilationCache == nil
+}
+
+func compilationCacheMatchesVolumeMount(compilationCache *v1beta1.CompilationCacheConfig, mount VolumeMount) bool {
+	return compilationCache != nil &&
+		compilationCache.PVCName == mount.Name &&
+		compilationCache.MountPath == mount.MountPoint
+}
+
+func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) []VolumeMount {
+	main, mainPresent := sharedMainContainer(src)
+	secondaryMountsProjected := mainPresent || hasPodTemplateContent(preserved, false)
+	firstCompilationCacheSeen := false
+	live := make([]VolumeMount, 0, len(preserved.VolumeMounts))
+	for _, mount := range preserved.VolumeMounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		if !firstCompilationCacheSeen {
+			firstCompilationCacheSeen = true
+			if compilationCacheMatchesVolumeMount(src.CompilationCache, mount) {
+				live = append(live, mount)
+			}
+			continue
+		}
+		// Secondary cache flags have no beta field. When alpha content creates a
+		// beta main container, its matching mount is their observable
+		// representation and absence means deletion. Cache-only alpha objects do
+		// not create a pod template, so those flags remain sparse-preserved state.
+		if !secondaryMountsProjected || nativeVolumeMountHasNamePath(main.VolumeMounts, mount.Name, mount.MountPoint) {
+			live = append(live, mount)
+		}
+	}
+	return live
 }
 
 func visiblePreservedVolumeMountProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, mounts []VolumeMount) []VolumeMount {
@@ -1054,6 +1087,50 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
+	switch policy {
+	case CheckpointStartupPolicyImmediate:
+		return v1beta1.CheckpointStartupPolicyImmediate
+	case CheckpointStartupPolicyWaitForCheckpoint:
+		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return v1beta1.CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
+	switch policy {
+	case v1beta1.CheckpointStartupPolicyImmediate:
+		return CheckpointStartupPolicyImmediate
+	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
+		return CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
+	switch policy {
+	case CheckpointDeletionPolicyDelete:
+		return v1beta1.CheckpointDeletionPolicyDelete
+	case CheckpointDeletionPolicyRetain:
+		return v1beta1.CheckpointDeletionPolicyRetain
+	default:
+		return v1beta1.CheckpointDeletionPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
+	switch policy {
+	case v1beta1.CheckpointDeletionPolicyDelete:
+		return CheckpointDeletionPolicyDelete
+	case v1beta1.CheckpointDeletionPolicyRetain:
+		return CheckpointDeletionPolicyRetain
+	default:
+		return CheckpointDeletionPolicy(policy)
+	}
+}
+
 // ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
 // v1beta1 experimental GMS config. Disabled configs are represented by absence
 // in v1beta1 and are skipped by the caller.
@@ -1114,12 +1191,14 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	}
 }
 
-// ConvertFromServiceCheckpointConfig converts an enabled checkpoint config into
-// the v1beta1 experimental checkpoint config. Disabled configs are represented
-// by absence in v1beta1 and are skipped by the caller.
+// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
+// v1beta1 experimental checkpoint config.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeToV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
 		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
@@ -1143,8 +1222,10 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled:             true,
+		Enabled:             src.Enabled,
 		Mode:                checkpointModeFromV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
 		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
@@ -1213,7 +1294,7 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromFailoverSpec(src.Failover, exp.Failover)
 	}
 
-	if src.Checkpoint != nil && src.Checkpoint.Enabled {
+	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
@@ -1246,7 +1327,7 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
-// over dedicated fields, except for env which is additive.
+// over dedicated fields, except for env and volumeMounts which are additive.
 func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
@@ -1300,12 +1381,17 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	}
 	main := src.ExtraPodSpec.MainContainer.DeepCopy()
 	baseEnvs := mainBase.Env
+	dedicatedVolumeMounts := slices.Clone(mainBase.VolumeMounts)
 	// Name must be "main" regardless of what MainContainer carried.
 	main.Name = mainContainerName
 	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
 		return fmt.Errorf("merge main container: %w", err)
 	}
 	mainBase.Env = mergeEnvs(baseEnvs, main.Env)
+	// The v1alpha1 renderer merged extraPodSpec.mainContainer first, then
+	// appended the dedicated service-level mounts. Preserve that ordering rather
+	// than allowing mergo to replace the VolumeMounts slice.
+	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
 		mainBase.StartupProbe = main.StartupProbe
@@ -1322,7 +1408,8 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 	// Main container: base from dedicated fields.
 	mainBase := buildMainContainerFromDedicated(src)
 
-	// Merge ExtraPodSpec.MainContainer on top, except for Env which is additive.
+	// Merge ExtraPodSpec.MainContainer on top, except for fields with legacy
+	// additive behavior handled by mergeExtraPodSpecMainContainer.
 	if err := mergeExtraPodSpecMainContainer(src, &mainBase); err != nil {
 		return nil, err
 	}
@@ -2037,6 +2124,33 @@ func extraPodSpecNeedsPreservation(eps *ExtraPodSpec) bool {
 	return eps != nil && (extraPodSpecIsZero(eps) || extraPodSpecOnlyPreservesMainContainerName(eps))
 }
 
+func shouldRestorePreservedExtraPodSpec(dst, preserved *DynamoComponentDeploymentSharedSpec) bool {
+	return dst != nil &&
+		preserved != nil &&
+		preserved.ExtraPodSpec != nil &&
+		(extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) ||
+			alphaFrontendSidecarConflictNeedsPreservation(preserved.FrontendSidecar, preserved.ExtraPodSpec))
+}
+
+func alphaFrontendSidecarConflictNeedsPreservation(frontendSidecar *FrontendSidecarSpec, eps *ExtraPodSpec) bool {
+	// Keep enough origin data for admission to preserve the v1alpha1 rule that
+	// rejects frontendSidecar when extraPodSpec already declares the generated
+	// sidecar container name.
+	return frontendSidecar != nil && extraPodSpecHasContainer(eps, defaultFrontendSidecarContainerName)
+}
+
+func extraPodSpecHasContainer(eps *ExtraPodSpec, name string) bool {
+	if eps == nil || eps.PodSpec == nil {
+		return false
+	}
+	for _, container := range eps.PodSpec.Containers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {
 	if eps == nil || eps.MainContainer == nil || eps.MainContainer.Name == "" || !podSpecIsZero(eps.PodSpec) {
 		return false
@@ -2122,7 +2236,8 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 		ensureExtraPodSpecMainContainer(dst).Resources = *preservedMain.Resources.DeepCopy()
 	}
 	currentVolumeMounts := withoutCompilationCacheMounts(currentMain.VolumeMounts, dst.VolumeMounts)
-	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedSemanticMain.VolumeMounts), currentVolumeMounts) &&
+	preservedVolumeMounts := withoutCompilationCacheMounts(preservedSemanticMain.VolumeMounts, preserved.VolumeMounts)
+	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedVolumeMounts), currentVolumeMounts) &&
 		(len(preserved.VolumeMounts) > 0 || len(preservedMain.VolumeMounts) > 0) {
 		dst.VolumeMounts = restorePreservedVolumeMountOrigins(preserved.VolumeMounts, dst.VolumeMounts, preservedMain.VolumeMounts)
 		ensureExtraPodSpecMainContainer(dst).VolumeMounts = cloneNativeVolumeMounts(preservedMain.VolumeMounts)

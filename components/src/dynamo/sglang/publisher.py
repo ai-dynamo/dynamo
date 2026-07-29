@@ -26,7 +26,11 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
-from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
+from dynamo.sglang.capacity import (
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    publishes_kv_events,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -171,6 +175,7 @@ class DynamoSglangPublisher:
 
         self._running = True
         self.kv_publishers: List[KvEventPublisher] = []
+        self.kv_publisher: Optional[KvEventPublisher] = None
         self.fpm_relays: list = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
@@ -292,10 +297,17 @@ class DynamoSglangPublisher:
         - NATS handles cross-node event distribution
 
         Returns:
-            List of KvEventPublisher instances if kv_events_config is set,
+            List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
-        if self.server_args.kv_events_config:
+        if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
+            logging.info(
+                "Non-leader node (node_rank=%s) shares the leader's single KV "
+                "rank slice; skipping KV event publishing so the router sees "
+                "exactly one source per (worker_id, dp_rank).",
+                getattr(self.server_args, "node_rank", 0) or 0,
+            )
+        elif self.dynamo_args.use_kv_events:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
             if not base_ep:
@@ -338,6 +350,7 @@ class DynamoSglangPublisher:
                     zmq_topic="",
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                     dp_rank=dp_rank,
+                    kv_state_endpoint=self.dynamo_args.kv_state_endpoint,
                 )
                 self.kv_publishers.append(publisher)
 
@@ -449,8 +462,24 @@ async def setup_sgl_metrics(
     config: Config,
     generate_endpoint: Endpoint,
     kv_worker_id: Optional[int] = None,
-) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
+) -> tuple[Optional[DynamoSglangPublisher], asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
+
+    For chat/decode workers (the default), this registers SGLang's
+    multiprocess ``sglang:*`` metrics, the Dynamo ``LLMBackendMetrics``
+    chat-shaped gauges (KV total_blocks, gpu_cache_usage, model_load_time),
+    and starts a ``DynamoSglangPublisher`` that pulls scheduler metrics
+    over ZMQ and (optionally) forwards KV events / FPM stats.
+
+    For **embedding workers** (``config.dynamo_args.embedding_worker``),
+    the chat-shaped pipeline is **skipped entirely**: pooling engines
+    have no KV cache, no prefill/decode phase, and no scheduler metrics
+    worth collecting, so every metric in that pipeline would emit zeros
+    forever. The function returns ``(None, <noop task>, metrics_labels)``
+    so callers can keep the same ``await setup_sgl_metrics(...)`` shape
+    and ``metrics_task.cancel()`` cleanup. Embedding-shaped metrics are
+    registered separately by ``init_embedding.py`` via
+    ``init_embedding_metrics``.
 
     Args:
         engine: The SGLang engine instance.
@@ -459,8 +488,25 @@ async def setup_sgl_metrics(
         kv_worker_id: Optional worker identity for KV event attribution.
 
     Returns:
-        Tuple of (publisher instance, running asyncio task, metrics labels).
+        Tuple of (publisher instance or None, asyncio task, metrics labels).
     """
+    metrics_labels = [("model", engine.server_args.served_model_name)]
+
+    if getattr(config.dynamo_args, "embedding_worker", False):
+        logging.info(
+            "Embedding worker: skipping chat-shaped Prometheus + KV-event "
+            "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
+            "Embedding-shaped metrics are registered separately."
+        )
+
+        # Hold a never-completing task so callers can ``cancel()`` + ``await``
+        # it uniformly in their finally blocks, matching the chat-worker shape.
+        async def _idle() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_idle())
+        return None, task, metrics_labels
+
     # Register SGLang multiprocess metrics only when --enable-metrics was passed.
     # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
     # so MultiProcessCollector will crash without it.
@@ -487,7 +533,6 @@ async def setup_sgl_metrics(
         component_name=config.dynamo_args.component,
     )
 
-    metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangPublisher(
         engine,
         config,
@@ -502,7 +547,7 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     node_rank = getattr(config.server_args, "node_rank", 0) or 0
-    if node_rank <= 0:
+    if node_rank <= 0 and config.dynamo_args.use_kv_events:
         publisher.init_kv_event_publish()
     publisher.init_fpm_relay()
 
@@ -531,7 +576,9 @@ async def handle_non_leader_node(
     )
 
     try:
-        if publisher.server_args.kv_events_config:
+        if publisher.dynamo_args.use_kv_events and publishes_kv_events(
+            publisher.server_args
+        ):
             kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,

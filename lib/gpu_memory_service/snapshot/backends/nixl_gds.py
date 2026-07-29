@@ -22,10 +22,10 @@ from gpu_memory_service.snapshot.backends.nixl_common import (
     run_bounded_nixl_transfers,
 )
 from gpu_memory_service.snapshot.transfer import (
-    NIXL_GDS_TRANSFER_BACKEND,
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
+    TransferBackendKind,
     TransferSession,
     group_sources_by_path,
     validate_transfer_targets,
@@ -36,8 +36,6 @@ logger = logging.getLogger(__name__)
 
 class NixlGDSTransferBackend:
     """NIXL GDS_MT backend for direct file-to-GMS GPU memory transfers."""
-
-    name = NIXL_GDS_TRANSFER_BACKEND
 
     def __init__(self, *, config: GMSSnapshotConfig) -> None:
         api = load_nixl_api()
@@ -83,7 +81,6 @@ class _NixlGDSTransferSession:
         self._device = device
         self._max_workers = max(1, int(max_workers))
         self._sources = list(sources)
-        self._active = True
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
@@ -96,17 +93,14 @@ class _NixlGDSTransferSession:
         ) -> NixlTransferResources:
             return self._prepare_file_transfer(file_group, targets)
 
-        try:
-            run_bounded_nixl_transfers(
-                agent=self._agent,
-                backend_name=NIXL_GDS_TRANSFER_BACKEND,
-                items=file_groups,
-                max_inflight=self._max_workers,
-                prepare_transfer=prepare_transfer,
-                logger=logger,
-            )
-        finally:
-            self._active = False
+        run_bounded_nixl_transfers(
+            agent=self._agent,
+            backend_name=TransferBackendKind.NIXL_GDS.value,
+            items=file_groups,
+            max_inflight=self._max_workers,
+            prepare_transfer=prepare_transfer,
+            logger=logger,
+        )
 
         elapsed = time.monotonic() - t0
         throughput = total_bytes / elapsed / (1024**3) if elapsed > 0 else 0
@@ -121,7 +115,7 @@ class _NixlGDSTransferSession:
         )
 
     def close(self) -> None:
-        self._active = False
+        pass
 
     def _prepare_file_transfer(
         self,

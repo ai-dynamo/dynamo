@@ -64,10 +64,12 @@ class EncodeWorkerHandler:
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
+            self.model, trust_remote_code=self.engine_args.trust_remote_code
         )
         self.vision_model = load_vision_model(
-            self.model, enforce_eager=self.engine_args.enforce_eager
+            self.model,
+            enforce_eager=self.engine_args.enforce_eager,
+            trust_remote_code=self.engine_args.trust_remote_code,
         )
         hidden_size = getattr(self.vision_model, "out_hidden_size", None)
         if hidden_size is None:
@@ -129,7 +131,6 @@ class EncodeWorkerHandler:
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
-        logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
@@ -327,7 +328,7 @@ class EncodeWorkerHandler:
                         (transfer_request[1], embedding_item.embeddings)
                     )
 
-            logger.debug(f"Request: {request.model_dump_json()}")
+            payload = request.model_dump_json()
 
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
@@ -341,7 +342,7 @@ class EncodeWorkerHandler:
             )
 
             # Yield transformed request back
-            yield request.model_dump_json()
+            yield payload
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")

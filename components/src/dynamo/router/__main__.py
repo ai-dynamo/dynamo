@@ -134,10 +134,16 @@ class StandaloneRouterHandler:
                 "disaggregated_params": worker_output.get("disaggregated_params"),  # type: ignore[attr-defined]
                 "extra_args": worker_output.get("extra_args"),  # type: ignore[attr-defined]
                 "completion_usage": worker_output.get("completion_usage"),  # type: ignore[attr-defined]
+                # engine_data carries routed_experts/prompt_logprobs; routing_data carries
+                # worker_id/token_ids/timing. Forward both so they survive this router.
+                "engine_data": worker_output.get("engine_data"),  # type: ignore[attr-defined]
+                "routing_data": worker_output.get("routing_data"),  # type: ignore[attr-defined]
             }
             yield llm_engine_output
 
-    async def best_worker_id(self, token_ids, router_config_override=None):
+    async def best_worker_id(
+        self, token_ids, router_config_override=None, cache_namespace=None
+    ):
         """
         Get the best worker ID for a given set of tokens without actually routing.
 
@@ -150,7 +156,9 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
-            token_ids, router_config_override
+            token_ids,
+            router_config_override,
+            cache_namespace=cache_namespace,
         )
 
         yield worker_id
@@ -173,6 +181,7 @@ class StandaloneRouterHandler:
             request.get("block_mm_infos"),
             request.get("lora_name"),
             request.get("include_shared", True),
+            request.get("cache_namespace"),
         )
 
         yield scores
@@ -191,19 +200,27 @@ async def worker(runtime: DistributedRuntime):
 
     logger.info("Starting Standalone Router Service")
     logger.debug(
-        f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
-        f"overlap_score_credit={config.overlap_score_credit}, "
-        f"prefill_load_scale={config.prefill_load_scale}, "
-        f"router_temperature={config.router_temperature}, "
-        f"use_kv_events={config.use_kv_events}, "
-        f"durable_kv_events={config.durable_kv_events}, "
-        f"router_replica_sync={config.router_replica_sync}, "
-        f"router_reset_states={config.router_reset_states}, "
-        f"router_track_active_blocks={config.router_track_active_blocks}, "
-        f"router_track_output_blocks={config.router_track_output_blocks}, "
-        f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
-        f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
-        f"router_ttl_secs={config.router_ttl_secs}"
+        "Configuration: endpoint=%s, router_block_size=%s, "
+        "overlap_score_credit=%s, overlap_score_credit_decay=%s, "
+        "prefill_load_scale=%s, decode_active_request_weight=%s, "
+        "router_temperature=%s, use_kv_events=%s, router_replica_sync=%s, "
+        "router_track_active_blocks=%s, router_track_output_blocks=%s, "
+        "router_assume_kv_reuse=%s, router_track_prefill_tokens=%s, "
+        "router_ttl_secs=%s",
+        config.endpoint,
+        config.router_block_size,
+        config.overlap_score_credit,
+        config.overlap_score_credit_decay,
+        config.prefill_load_scale,
+        config.decode_active_request_weight,
+        config.router_temperature,
+        config.use_kv_events,
+        config.router_replica_sync,
+        config.router_track_active_blocks,
+        config.router_track_output_blocks,
+        config.router_assume_kv_reuse,
+        config.router_track_prefill_tokens,
+        config.router_ttl_secs,
     )
 
     kv_router_config = build_kv_router_config(config)

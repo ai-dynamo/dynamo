@@ -300,9 +300,8 @@ class OmniHandler(BaseOmniHandler):
         defaults = list(self.engine_client.default_sampling_params_list or [])
         result = []
         for i, default in enumerate(defaults):
-            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
-                "stage_type", "llm"
-            )
+            metadata = self.engine_client.engine.get_stage_metadata(i)
+            stage_type = getattr(metadata, "stage_type", "llm")
             if stage_type == "diffusion":
                 result.append(diffusion_sp)
             else:

@@ -20,7 +20,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from typing import Optional, Self
+from typing import Optional
+
+# typing.Self is 3.11+; pyproject declares requires-python>=3.10 so use the
+# typing_extensions back-port (added as an explicit dep in pyproject.toml).
+from typing_extensions import Self
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase

@@ -16,8 +16,8 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
     parse_sharded_ssd_roots,
@@ -29,11 +29,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# How long the saver waits for the engine to commit weights before giving up
-# and failing the Job. Without a bound, an engine that crashes before commit
-# would leave the saver blocked indefinitely and the Job stuck Running.
-DEFAULT_SAVE_LOCK_TIMEOUT_MS = 30 * 60 * 1000  # 30 minutes
 
 
 def _save_device(
@@ -60,6 +55,11 @@ def _save_device(
         ",".join(shard_roots) or "-",
     )
     t0 = time.monotonic()
+    # This runs on a ThreadPoolExecutor thread; bind its device before
+    # any device work, mirroring the loader's _load_device.
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    vmm.runtime_set_device(device)
     GMSStorageClient(
         output_dir,
         socket_path=get_socket_path(device),
@@ -73,7 +73,10 @@ def _save_device(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Save a GMS checkpoint.")
+    parser = argparse.ArgumentParser(
+        description="Save a GMS checkpoint.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
@@ -88,22 +91,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-lock-timeout-ms",
         type=int,
-        default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
+        default=30 * 60 * 1000,
         help=(
-            "Timeout for acquiring the GMS RO lock before save. "
-            f"Default is {DEFAULT_SAVE_LOCK_TIMEOUT_MS}."
+            "Timeout for acquiring the GMS RO lock before save. Without a "
+            "bound, an engine that crashes before commit would leave the "
+            "saver blocked indefinitely and the Job stuck Running."
         ),
     )
     parser.add_argument(
         "--shard-size-bytes",
         type=int,
         default=4 * 1024**3,
-        help="Shard size in bytes. Default is 4 GiB.",
+        help="Shard size in bytes.",
     )
     parser.add_argument(
         "--sharded-ssd-roots",
         default="",
         help="Comma-separated SSD roots for sharded prototype saves.",
+    )
+    parser.add_argument(
+        "--device-type",
+        type=str,
+        default=VMMDeviceType.CUDA.value,
+        choices=[d.value for d in VMMDeviceType],
+        help="VMM device type (default: cuda).",
     )
     return parser
 
@@ -120,7 +131,11 @@ def main(argv: list[str] | None = None) -> None:
     shard_size_bytes = args.shard_size_bytes
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
-    devices = list_devices()
+    device_type = VMMDeviceType.from_str(args.device_type)
+    init_vmm(device_type)
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    devices = vmm.list_devices()
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),

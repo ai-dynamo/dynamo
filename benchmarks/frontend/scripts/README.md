@@ -116,7 +116,7 @@ When `--num-models` is 1, the served model name matches the HF model path (e.g.,
 |------|----------|---------|
 | etcd | Yes | `apt install etcd` or [releases](https://github.com/etcd-io/etcd/releases) |
 | nats-server | Yes | `apt install nats-server` or [nats.io](https://nats.io/download/) |
-| aiperf | Yes | `uv pip install "aiperf==0.8.0"` (in dynamo venv) |
+| aiperf | Yes | `uv pip install "aiperf==0.10.0"` (in dynamo venv) |
 | jq | Yes | `apt install jq` |
 | perf | Optional | `apt install linux-tools-$(uname -r)` |
 | bpftrace | Optional | `apt install bpftrace` (needs root or CAP_BPF + CAP_PERFMON) |

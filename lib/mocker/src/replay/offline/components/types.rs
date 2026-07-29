@@ -1,13 +1,45 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
+use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
 use super::super::runtime_utils::WorkerCompletionPayload;
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot};
-use crate::loadgen::ReplayRequestHashes;
-use crate::scheduler::AdmissionEvent;
+use super::super::state::OfflineWorkerState;
+use crate::common::protocols::DirectRequest;
+use crate::loadgen::ReplayRequestPayload;
+use crate::replay::offline::core::RequestIdentity;
+use crate::scheduler::{
+    AdmissionEvent, EnginePassResult, SchedulerCommandEffects, SchedulerCommandResult,
+    SchedulerLifecycleEvent,
+};
+
+pub(in crate::replay) struct ObservedWorkerEvents<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) events: Events,
+    pub(in crate::replay::offline) had_raw_observations: bool,
+}
+
+impl<Events: EngineEventBatch> ObservedWorkerEvents<Events> {
+    pub(in crate::replay) fn from_events(events: Events) -> Self {
+        let had_raw_observations = !events.is_empty();
+        Self {
+            events,
+            had_raw_observations,
+        }
+    }
+}
+
+impl RequestIdentity for DirectRequest {
+    fn request_id(&self) -> Option<Uuid> {
+        self.uuid
+    }
+}
+
+impl RequestIdentity for ReplayRequestPayload {
+    fn request_id(&self) -> Option<Uuid> {
+        self.metadata().uuid
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::replay) enum ReplayMode {
@@ -21,61 +53,86 @@ pub(in crate::replay::offline) enum EnginePassMode {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WorkerAdmission {
-    pub(crate) uuid: Uuid,
-    pub(crate) worker_idx: usize,
-    /// Number of blocks the router matched against the prefix cache at
-    /// admission time. Used by the traffic accumulator to derive an
-    /// average KV hit rate for the planner.
-    pub(crate) overlap_blocks: u32,
-    /// Total ISL expressed in blocks (ceil(isl_tokens / block_size)),
-    /// paired with ``overlap_blocks`` for the hit-rate ratio.
-    pub(crate) isl_blocks: u32,
-}
+pub(in crate::replay) trait ReplayEngineObservation {
+    type Batch: EngineEventBatch;
 
-#[derive(Debug)]
-pub(in crate::replay::offline) struct ScheduledWorkerCompletion {
-    pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) payload: WorkerCompletionPayload,
-}
+    const CAPTURE_RAW: bool;
 
-#[derive(Debug, Default)]
-pub(in crate::replay::offline) struct EngineEffects {
-    pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
-    pub(in crate::replay::offline) pass_start_kv_events: Vec<RouterEvent>,
-    pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload>,
-    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion>,
-    /// Forward pass metrics snapshots emitted by workers during this drive cycle,
-    /// keyed by worker index. Collected for planner integration.
-    pub(in crate::replay::offline) fpm_snapshots: Vec<(usize, ForwardPassSnapshot)>,
-}
+    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch;
+    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch;
+    fn drain_worker_events(worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch>;
 
-impl EngineEffects {
-    pub(in crate::replay::offline) fn is_empty(&self) -> bool {
-        self.admissions.is_empty()
-            && self.pass_start_kv_events.is_empty()
-            && self.immediate_completions.is_empty()
-            && self.scheduled_completions.is_empty()
+    #[cfg(feature = "kvbm-offload")]
+    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch;
+
+    fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
+        Vec::new()
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct RouterEffects {
-    pub(crate) admissions: Vec<WorkerAdmission>,
+impl ReplayEngineObservation for NoEngineEvents {
+    type Batch = ();
+
+    const CAPTURE_RAW: bool = false;
+
+    #[inline]
+    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch {
+        pass.kv_events.clear();
+    }
+
+    #[inline]
+    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch {
+        effects.kv_events.clear();
+    }
+
+    #[inline]
+    fn drain_worker_events(_worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch> {
+        ObservedWorkerEvents::from_events(())
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[inline]
+    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch {
+        effects.kv_events.clear();
+    }
+}
+
+pub(in crate::replay) struct ObservedCommandEffects<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) result: SchedulerCommandResult,
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+}
+
+#[cfg(feature = "kvbm-offload")]
+pub(in crate::replay) struct ObservedOffloadEffects<Events: EngineEventBatch> {
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) progress: EngineProgress,
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct ReadyArrival {
-    pub(in crate::replay::offline) request: DirectRequest,
-    pub(in crate::replay::offline) arrival_time_ms: f64,
-    pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
-    /// Session identifier and turn index, when the trace source carries them
-    /// (Mooncake workload, applied-compute-agentic). `None` for raw request
-    /// lists (`Requests` admission source) and for any path that doesn't
-    /// preserve session structure.
-    pub(in crate::replay::offline) session_id: Option<String>,
-    pub(in crate::replay::offline) turn_index: Option<usize>,
+pub(in crate::replay::offline) struct ScheduledWorkerCompletion<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) at_ms: f64,
+    pub(in crate::replay::offline) payload: WorkerCompletionPayload<Events>,
+}
+
+#[derive(Debug, Default)]
+pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
+    pub(in crate::replay::offline) pass_start_events: Events,
+    pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
+    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion<Events>>,
+    pub(in crate::replay::offline) progress: EngineProgress,
+}
+
+impl<Events: EngineEventBatch> EngineEffects<Events> {
+    pub(in crate::replay::offline) fn is_empty(&self) -> bool {
+        self.admissions.is_empty()
+            && self.pass_start_events.is_empty()
+            && self.immediate_completions.is_empty()
+            && self.scheduled_completions.is_empty()
+            && !self.progress.made_progress
+    }
 }
 
 /// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].
@@ -92,6 +149,9 @@ pub struct TrafficStats {
     pub avg_osl: f64,
     pub avg_ttft_ms: f64,
     pub avg_itl_ms: f64,
+    /// Mean visible tokens produced per decode request-forward, including the
+    /// base token. ``None`` means the window had no decode forwards.
+    pub avg_accept_length: Option<f64>,
     /// Mean prefix-cache hit rate (0.0-1.0) across router admissions in
     /// the window, computed as ``mean(overlap_blocks / isl_blocks)`` over
     /// admitted requests (i.e. the arithmetic mean of per-request
@@ -102,6 +162,14 @@ pub struct TrafficStats {
     /// returns the arithmetic mean of those samples, independent of
     /// per-request ISL size.
     pub avg_kv_hit_rate: f64,
+    /// Number of samples behind `avg_kv_hit_rate` (its denominator: router
+    /// admissions with `isl_blocks > 0`). Carried so a consumer that merges
+    /// several drained windows can reconstruct the exact sample-weighted mean
+    /// rather than approximating it with `num_req`.
+    pub hit_rate_count: usize,
+    /// Number of decode request-forwards behind `avg_accept_length` (its
+    /// denominator). Same purpose as `hit_rate_count` for cross-window merges.
+    pub accept_length_forward_count: usize,
 }
 
 /// Accumulates traffic statistics between planner ticks for deriving
@@ -135,6 +203,10 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
     total_hit_rate: f64,
     /// Number of admissions with non-zero ISL blocks in the current window.
     hit_rate_count: usize,
+    /// Visible output tokens emitted by decode forwards in the current window.
+    total_accept_length_tokens: usize,
+    /// Number of request decode-forwards in the current window.
+    accept_length_forward_count: usize,
 }
 
 impl TrafficAccumulator {
@@ -150,6 +222,8 @@ impl TrafficAccumulator {
             itl_count: 0,
             total_hit_rate: 0.0,
             hit_rate_count: 0,
+            total_accept_length_tokens: 0,
+            accept_length_forward_count: 0,
         }
     }
 
@@ -168,7 +242,7 @@ impl TrafficAccumulator {
                 self.total_ttft_ms += ttft_ms;
                 self.ttft_count += 1;
             }
-            if mean_itl_ms > 0.0 {
+            if output_tokens > 1 && mean_itl_ms.is_finite() && mean_itl_ms >= 0.0 {
                 self.total_itl_ms += mean_itl_ms;
                 self.itl_count += 1;
             }
@@ -193,6 +267,22 @@ impl TrafficAccumulator {
         }
         self.total_hit_rate += f64::from(overlap_blocks) / f64::from(isl_blocks);
         self.hit_rate_count += 1;
+    }
+
+    /// Record visible token bursts from decode forwards for accept-length
+    /// scaling. ``visible_output_tokens`` is the numerator and
+    /// ``decode_forwards`` is the number of requests that participated in the
+    /// decode forward.
+    pub(in crate::replay::offline) fn on_accept_length_sample(
+        &mut self,
+        visible_output_tokens: usize,
+        decode_forwards: usize,
+    ) {
+        if visible_output_tokens == 0 || decode_forwards == 0 {
+            return;
+        }
+        self.total_accept_length_tokens += visible_output_tokens;
+        self.accept_length_forward_count += decode_forwards;
     }
 
     /// Drain the accumulator at the given simulated time, resetting counters.
@@ -224,6 +314,15 @@ impl TrafficAccumulator {
         } else {
             0.0
         };
+        let avg_accept_length = if self.accept_length_forward_count > 0 {
+            Some(self.total_accept_length_tokens as f64 / self.accept_length_forward_count as f64)
+        } else {
+            None
+        };
+        // Capture the sample counts before the reset so a consumer that merges
+        // several drained windows can reconstruct exact count-weighted means.
+        let hit_rate_count = self.hit_rate_count;
+        let accept_length_forward_count = self.accept_length_forward_count;
         self.window_start_ms = now_ms;
         self.num_req = 0;
         self.total_isl = 0;
@@ -234,6 +333,8 @@ impl TrafficAccumulator {
         self.itl_count = 0;
         self.total_hit_rate = 0.0;
         self.hit_rate_count = 0;
+        self.total_accept_length_tokens = 0;
+        self.accept_length_forward_count = 0;
         TrafficStats {
             duration_s,
             num_req,
@@ -241,14 +342,27 @@ impl TrafficAccumulator {
             avg_osl,
             avg_ttft_ms,
             avg_itl_ms,
+            avg_accept_length,
             avg_kv_hit_rate,
+            hit_rate_count,
+            accept_length_forward_count,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
+
     use super::*;
+
+    #[test]
+    fn no_engine_events_and_batch_are_zero_sized() {
+        type Batch = <NoEngineEvents as ReplayEngineObservation>::Batch;
+
+        assert_eq!(size_of::<NoEngineEvents>(), 0);
+        assert_eq!(size_of::<Batch>(), 0);
+    }
 
     #[test]
     fn traffic_accumulator_drain_with_no_admissions_reports_zero_hit_rate() {
@@ -259,6 +373,7 @@ mod tests {
         assert!((stats.avg_isl - 100.0).abs() < 1e-9);
         assert!((stats.avg_osl - 50.0).abs() < 1e-9);
         assert_eq!(stats.avg_kv_hit_rate, 0.0);
+        assert_eq!(stats.avg_accept_length, None);
     }
 
     #[test]
@@ -275,6 +390,24 @@ mod tests {
         // (0.75 + 0.0) / 2 = 0.375. Every request contributes one sample
         // regardless of ISL size, so large requests don't dominate.
         assert!((stats.avg_kv_hit_rate - 0.375).abs() < 1e-9);
+    }
+
+    #[test]
+    fn traffic_accumulator_accept_length_is_weighted_by_decode_forwards() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_accept_length_sample(6, 2); // two requests accepted three tokens each
+        acc.on_accept_length_sample(2, 2); // two requests accepted one token each
+        let stats = acc.drain(1_000.0);
+        assert_eq!(stats.avg_accept_length, Some(2.0));
+    }
+
+    #[test]
+    fn traffic_accumulator_accept_length_missing_without_decode_forwards() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_accept_length_sample(4, 0);
+        acc.on_accept_length_sample(0, 4);
+        let stats = acc.drain(1_000.0);
+        assert_eq!(stats.avg_accept_length, None);
     }
 
     #[test]
@@ -300,5 +433,15 @@ mod tests {
         assert_eq!(stats.avg_isl, 0.0);
         assert_eq!(stats.avg_osl, 0.0);
         assert_eq!(stats.avg_kv_hit_rate, 0.0);
+        assert_eq!(stats.avg_accept_length, None);
+    }
+
+    #[test]
+    fn traffic_accumulator_retains_zero_millisecond_itl_samples() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_request(10, 3, Some((1.0, 0.0)));
+        acc.on_request(10, 3, Some((1.0, 10.0)));
+        let stats = acc.drain(1_000.0);
+        assert_eq!(stats.avg_itl_ms, 5.0);
     }
 }

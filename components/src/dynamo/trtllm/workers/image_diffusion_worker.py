@@ -35,15 +35,14 @@ async def init_image_diffusion_worker(
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
     """
     # Check tensorrt_llm visual_gen availability early with a clear error message.
-    # visual_gen is part of TensorRT-LLM (tensorrt_llm._torch.visual_gen).
     # Without this check, users would get a cryptic ImportError deep inside
     # DiffusionEngine.initialize().
     try:
-        import tensorrt_llm._torch.visual_gen  # noqa: F401
+        import tensorrt_llm.visual_gen  # noqa: F401
     except ImportError:
         raise ImportError(
             "Image diffusion requires TensorRT-LLM with visual_gen support.\n"
-            "The visual_gen module is at tensorrt_llm._torch.visual_gen.\n"
+            "The visual_gen module is at tensorrt_llm.visual_gen.\n"
             "Install TensorRT-LLM with AIGV support:\n"
             "  pip install tensorrt_llm\n"
             "See: https://github.com/NVIDIA/TensorRT-LLM"
@@ -55,18 +54,11 @@ async def init_image_diffusion_worker(
 
     logging.info(f"Initializing image diffusion worker with config: {config}")
 
-    # Parse skip_components from comma-separated string to list
-    skip_components = (
-        [c.strip() for c in config.skip_components.split(",") if c.strip()]
-        if config.skip_components
-        else []
-    )
-
     if not config.endpoint:
         raise ValueError("endpoint must be configured for image diffusion worker")
 
     # Build DiffusionConfig from the main Config
-    diffusion_config = DiffusionConfig.from_config(config, skip_components)
+    diffusion_config = DiffusionConfig.from_config(config)
 
     # Get the endpoint from the runtime
     endpoint = runtime.endpoint(

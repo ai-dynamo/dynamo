@@ -10,6 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
 use super::kserve;
@@ -31,7 +32,7 @@ use crate::protocols::tensor::{
 use crate::grpc::service::kserve::inference;
 use crate::grpc::service::kserve::inference::DataType;
 
-use tonic::Status;
+use tonic::{Status, metadata::MetadataMap};
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
@@ -57,6 +58,7 @@ pub async fn tensor_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateTensorRequest,
     streaming: bool,
+    metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
     // create the context for the request
     let request_id = get_or_create_request_id(request.id.as_deref());
@@ -66,7 +68,9 @@ pub async fn tensor_response_stream(
         endpoint: Endpoint::Tensor.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id.clone());
+    let metadata = extract_metadata_from_grpc(metadata)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
     let context = request.context();
 
     // [gluo TODO] revisit metrics to properly expose it

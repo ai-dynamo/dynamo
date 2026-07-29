@@ -16,6 +16,7 @@ try:
         _build_planner_config,
         _inject_mocker_aic_args,
         build_aic_interpolation_spec,
+        build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -283,6 +284,70 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
+    def test_aic_perf_model_threads_into_planner_config(self):
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner)
+        prefill_pick = PickedParallelConfig(tp=1, dp=1)
+        decode_pick = PickedParallelConfig(tp=2, dp=1)
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=prefill_pick,
+            best_decode_pick=decode_pick,
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        cfg = _build_planner_config(
+            dgdr,
+            prefill_pick,
+            decode_pick,
+            aic_perf_model=spec,
+        )
+
+        assert cfg.aic_perf_model is not None
+        assert cfg.aic_perf_model.hf_id == dgdr.model
+        assert cfg.aic_perf_model.system == "h200_sxm"
+        assert cfg.aic_perf_model.backend == "vllm"
+        assert cfg.aic_perf_model.prefill_pick == prefill_pick
+        assert cfg.aic_perf_model.decode_pick == decode_pick
+
+    @pytest.mark.parametrize(
+        ("mode", "prefill_pick", "decode_pick"),
+        [
+            ("prefill", None, PickedParallelConfig(tp=1)),
+            ("decode", PickedParallelConfig(tp=1), None),
+            ("agg", PickedParallelConfig(tp=1), None),
+            ("disagg", None, PickedParallelConfig(tp=1)),
+            ("disagg", PickedParallelConfig(tp=1), None),
+        ],
+    )
+    def test_aic_perf_model_skips_mode_missing_required_pick(
+        self, mode, prefill_pick, decode_pick
+    ):
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            mode=mode,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=prefill_pick,
+            best_decode_pick=decode_pick,
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        assert spec is None
+
     def test_no_spec_leaves_aic_interpolation_none(self):
         planner = PlannerConfig(
             enable_throughput_scaling=False,
@@ -320,6 +385,19 @@ class TestNeedsProfileDataRapid:
         )
         dgdr = _dgdr(planner=planner)
         assert needs_profile_data(dgdr) is True
+
+    def test_none_planner_only_returns_false(self):
+        """Planner-only none mode can warm from native AIC or live FPMs."""
+        from dynamo.profiler.utils.profile_common import needs_profile_data
+
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+            pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.None_,
+        )
+        dgdr = _dgdr(planner=planner)
+        assert needs_profile_data(dgdr) is False
 
     def test_mocker_rapid_returns_false(self):
         """Mocker + rapid: mocker pulls AIC perf data at runtime; no NPZ files."""

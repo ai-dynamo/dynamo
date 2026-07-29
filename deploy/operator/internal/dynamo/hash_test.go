@@ -274,6 +274,11 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
 
+	scaleToZero := betaDGD(t, base())
+	scaleToZero.Spec.Components[0].Replicas = ptr.To(int32(0))
+	scaleToZero.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scaleToZero))
+
 	scalingAdapter := betaDGD(t, base())
 	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))

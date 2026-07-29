@@ -44,6 +44,7 @@ class PreprocessedRequest(BaseModel):
     token_ids: List[TokenIdType]
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
+    require_reasoning: bool = False
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
@@ -59,6 +60,7 @@ class EmbeddingRequest(BaseModel):
     dimensions: Optional[
         int
     ] = None  # only supported in text-embedding-3 and later models from OpenAI
+    encoding_format: Literal["float", "base64"] = "float"
 
 
 class DisaggPreprocessedRequest(BaseModel):
@@ -117,11 +119,17 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
+# One MultiModalGroup carries timestamps for a single video.
+SingleVideoTimestamps = List[float]
+
+
 class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     video_grid_thw: Optional[List[Any]] = None
+    second_per_grid_ts: Optional[float] = None
+    video_timestamps: Optional[SingleVideoTimestamps] = None
     num_mm_tokens: Optional[int] = None
 
 

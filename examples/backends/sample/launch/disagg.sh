@@ -5,7 +5,7 @@
 # Disaggregated serving with the sample (echo) backend — GPU-free smoke test.
 #
 # Spawns dynamo.frontend plus one prefill worker and one decode worker, both
-# backed by the sample engine. Prefill workers register as ModelType::Prefill
+# backed by the sample engine. Prefill workers register as WorkerType::Prefill
 # (the unified Rust Worker overrides registration based on
 # WorkerConfig.disaggregation_mode); the frontend's PrefillRouter forwards
 # the synthetic disaggregated_params handle from prefill to decode.

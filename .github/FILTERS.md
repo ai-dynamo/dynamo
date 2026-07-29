@@ -15,6 +15,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
+| `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |

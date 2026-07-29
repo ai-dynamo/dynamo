@@ -112,7 +112,10 @@ Markers are required for all tests. They are used for test selection in CI and l
 
 ### Marker Requirements
 - Every test must have at least one **Lifecycle** marker, and **Test Type** and **Hardware** markers.
-- **Component/Framework** markers are required as applicable.
+- **Framework** and **Component** markers are required as applicable. When a test
+  has a framework marker (`vllm`/`trtllm`/`sglang`), it must also pick **exactly
+  one** component marker so tests are grouped consistently by feature area and
+  remain selectable via expressions like `pytest -m "vllm and multimodal"`.
 
 ### Marker Table
 | Category                | Marker(s)                                                        | Description                        |
@@ -126,9 +129,12 @@ Markers are required for all tests. They are used for test selection in CI and l
 | SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
 | TRT-LLM KV tokens      | requested_trtllm_kv_tokens(N)                                                          | (TRT-LLM only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` → `KvCacheConfig.max_tokens` via `--override-engine-args`. Deterministic, parallel-safe. |
 | TRT-LLM VRAM GiB       | requested_trtllm_vram_gib(N)                                                           | (TRT-LLM only) Max VRAM in GiB. Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args`. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router, multimodal, core | Backend or component specificity. |
-| Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
+| Framework               | vllm, trtllm, sglang                                             | Which backend the test runs against. Pair with a component marker. |
+| Component               | core, multimodal, router, kvbm, kvbm_concurrency, fault_tolerance, planner | Which part of the backend the test exercises. Pick exactly one of {core, multimodal, router, kvbm, fault_tolerance} per framework-tagged test (disjoint); use `kvbm_concurrency` additionally for KVBM stress tests. `planner` is its own component used by the planner test suite. |
+| Infrastructure          | k8s, deploy                                                      | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
+| Dependency add-ons      | lmcache                                                          | Optional dependency required by the test (paired with a framework marker, e.g. `vllm + lmcache`). |
+| Selector-only           | none                                                             | Defined in `pyproject.toml` for CI selector expressions (e.g. `pre_merge and none and gpu_1` to target tests with no framework marker). Not applied to individual tests. |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
 
 ### Example (vLLM)
@@ -139,7 +145,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 @pytest.mark.profiled_vram_gib(20.5)  # actual nvidia-smi peak
 @pytest.mark.requested_vllm_kv_cache_bytes(942_054_000)  # KV cache cap (2x safety over min=471_027_000)
 @pytest.mark.vllm
-@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_kv_cache_behavior():
     ...
 ```
@@ -153,6 +159,7 @@ def test_kv_cache_behavior():
 @pytest.mark.requested_sglang_kv_tokens(96)     # KV cache cap (2x safety over min=48)
 @pytest.mark.timeout(265)
 @pytest.mark.sglang
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_sglang_aggregated():
     ...
 ```
@@ -166,6 +173,7 @@ def test_sglang_aggregated():
 @pytest.mark.requested_trtllm_kv_tokens(2592)   # KV cache cap (2x safety over min=1296)
 @pytest.mark.timeout(300)
 @pytest.mark.trtllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 def test_trtllm_aggregated():
     ...
 ```
@@ -175,6 +183,7 @@ def test_trtllm_aggregated():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.multimodal  # video output → multimodal component
 # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens doesn't apply
 # and requested_trtllm_vram_gib (KvCacheConfig.max_gpu_total_bytes) has no effect —
 # the VRAM is model weights + activations. Only profiled_vram_gib is meaningful.
@@ -383,7 +392,7 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 ```
 
-**Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
+**Pre-merge CI equivalent** -- this is what [`pr.yaml`](../.github/workflows/pr.yaml) runs via [`dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml) on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
 pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short
@@ -445,14 +454,14 @@ It is highly recommended that you run tests thoroughly on your local machine bef
 
 Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the full set):
 - **Pre-merge (Rust):** [`.github/workflows/pre-merge.yml`](../.github/workflows/pre-merge.yml)
-- **Pre-merge (Python):** [`.github/workflows/container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml)
-- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) -> [`.github/workflows/build-test-distribute-flavor.yml`](../.github/workflows/build-test-distribute-flavor.yml)
+- **Pre-merge (Python):** [`.github/workflows/pr.yaml`](../.github/workflows/pr.yaml) -> [`.github/workflows/dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml)
+- **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml)
 - **Nightly:** [`.github/workflows/nightly-ci.yml`](../.github/workflows/nightly-ci.yml)
 - **Pytest action:** [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml)
 
 ### Pre-merge (every PR)
 
-Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml).
+Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
 **Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 

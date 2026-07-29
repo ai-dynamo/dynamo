@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import logging
+import struct
 from collections.abc import AsyncGenerator
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,19 @@ from dynamo.sglang.request_handlers.embedding.metrics import (
     observe_embedding_input_tokens,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+
+def _encode_floats_to_base64(floats: List[float]) -> str:
+    """Encode an embedding vector as a base64 string per the OpenAI
+    ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
+    are concatenated and base64-encoded with the standard alphabet.
+
+    Mirrors the Rust ``encode_floats_to_base64`` helper in
+    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
+    produce identical bytes for the same input.
+    """
+    packed = struct.pack(f"<{len(floats)}f", *floats)
+    return base64.b64encode(packed).decode("ascii")
 
 
 class EmbeddingWorkerHandler(BaseWorkerHandler):
@@ -45,7 +60,24 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             request: Embedding request dictionary.
             context: Context object for cancellation handling.
         """
-        logging.debug(f"Embedding request: {request}")
+        embedding_input = request.get("input")
+        if isinstance(embedding_input, str):
+            input_type = "str"
+            input_length = len(embedding_input)
+        elif isinstance(embedding_input, list):
+            input_type = "list"
+            input_length = len(embedding_input)
+        else:
+            input_type = "other"
+            input_length = None
+
+        logging.debug(
+            "Embedding request: input_type=%s input_length=%s has_dimensions=%s has_encoding_format=%s",
+            input_type,
+            input_length,
+            "dimensions" in request,
+            "encoding_format" in request,
+        )
 
         # Parse the embedding request - should only receive EmbeddingRequest format
         embedding_request = EmbeddingRequest(**request)
@@ -68,6 +100,8 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
+        encoding_format = embedding_request.encoding_format
+
         trace_header = context.trace_headers() if self.enable_trace else None
         trace_id = context.trace_id
 
@@ -82,6 +116,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             result,
             embedding_request.model,
             dimensions=dimensions,
+            encoding_format=encoding_format,
         )
         yield response
 
@@ -90,20 +125,21 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         ret: Any,
         model_name: str,
         dimensions: Optional[int] = None,
+        encoding_format: str = "float",
     ) -> Dict[str, Any]:
-        """Transform SGLang response to OpenAI embedding format.
+        """Transform SGLang response to the internal worker->frontend
+        embedding format.
 
-        Applies the optional ``dimensions`` field for Matryoshka-style
-        truncation (slice leading N).
-
-        Note: ``encoding_format=base64`` is part of the OpenAI spec but
-        cannot be honored at this layer alone -- the Rust frontend's
-        response aggregator deserializes ``data[].embedding`` as
-        ``Vec<f32>`` (inherited from the upstream ``async_openai``
-        embeddings types), so a base64 string here would be rejected
-        downstream. Supporting it end-to-end requires owning the
-        embedding response type in ``lib/protocols`` and updating the
-        aggregator. Tracked separately.
+        - ``dimensions``: Matryoshka-style truncation; keeps the first N
+          values of each embedding vector.
+        - ``encoding_format``: validated upstream in ``generate`` for
+          spec compliance, but no longer branches the worker's output.
+          The ``embedding`` field is always emitted as a base64-encoded
+          little-endian ``float32`` byte string; the Rust HTTP frontend
+          decodes back to a JSON array of floats at the HTTP boundary
+          when the client asked for float. Truncation runs before
+          encoding so the base64 byte count matches the requested
+          dimensionality.
         """
         if not isinstance(ret, list):
             ret = [ret]
@@ -123,10 +159,18 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                     )
                 embedding = embedding[:dimensions]
 
+            # Always emit base64 over the worker->frontend wire format,
+            # mirroring the vLLM embedding handler. The Rust HTTP frontend
+            # decodes back to a float array when the client's
+            # ``encoding_format`` is float (the OpenAI default); when the
+            # client asked for base64 the payload is passed through. JSON
+            # float arrays of 15 x 1024 floats cost ~115 ms per request in
+            # Python ``json.dumps`` + Rust ``serde_json`` parse across NATS;
+            # base64 bytes avoid both halves of that cost.
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding,
+                    "embedding": _encode_floats_to_base64(embedding),
                     "index": idx,
                 }
             )

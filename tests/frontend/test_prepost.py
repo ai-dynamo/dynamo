@@ -12,7 +12,13 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
+HAS_QWEN3_REASONING = check_module_available(
+    "vllm.reasoning.qwen3_engine_reasoning_parser"
+) or check_module_available("vllm.reasoning.qwen3_reasoning_parser")
+HAS_QWEN3_TOOL_PARSER = check_module_available(
+    "vllm.tool_parsers.qwen3_engine_tool_parser"
+) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
@@ -20,7 +26,6 @@ if HAS_VLLM:
     )
     from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -38,8 +43,39 @@ pytestmark = [
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
-    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
+    pytest.mark.skipif(
+        not (HAS_VLLM and HAS_QWEN3_REASONING and HAS_QWEN3_TOOL_PARSER),
+        reason="requires vllm qwen3 reasoning+tool parser",
+    ),
 ]
+
+
+def _resolve_qwen3_reasoning_parser_class():
+    try:
+        from vllm.reasoning.qwen3_engine_reasoning_parser import (
+            Qwen3ParserReasoningAdapter,
+        )
+
+        return Qwen3ParserReasoningAdapter
+    except ImportError:
+        from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
+
+        return Qwen3ReasoningParser
+
+
+def _resolve_qwen3_tool_parser_class():
+    try:
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+        return Qwen3EngineToolParser
+    except ImportError:
+        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+
+        return Qwen3CoderToolParser
+
+
+def _make_qwen3_tool_parser(tokenizer, tools):
+    return _resolve_qwen3_tool_parser_class()(tokenizer, tools)
 
 
 # ---------------------------------------------------------------------------
@@ -1305,6 +1341,45 @@ def request_for_sampling():
 
 
 @pytest.fixture
+def qwen3_coder_request_for_sampling():
+    return ChatCompletionRequest.model_construct(
+        messages=[{"content": "What is the weather in NYC?", "role": "user"}],
+        model="Qwen/Qwen3-Coder",
+        tools=[
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="get_weather",
+                    description="Get weather for a location",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "City name",
+                            }
+                        },
+                        "required": ["location"],
+                    },
+                ),
+            )
+        ],
+        tool_choice="auto",
+        include_reasoning=True,
+        stream=False,
+        n=1,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        temperature=None,
+        top_p=None,
+        skip_special_tokens=False,
+        chat_template_kwargs=None,
+        reasoning_effort=None,
+        parallel_tool_calls=True,
+    )
+
+
+@pytest.fixture
 def sampling_params():
     return SamplingParams(
         n=1,
@@ -1338,7 +1413,7 @@ def processor(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1406,6 +1481,235 @@ def _collect_tool_calls(results):
 # Test
 # ---------------------------------------------------------------------------
 @pytest.mark.vllm
+def test_qwen3_coder_non_streaming_uses_batch_tool_parse(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    """Dynamo internally streams, but non-streaming clients should match vLLM batch parsing."""
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="</function>\n</function>\n</function>",
+            token_ids=[1002],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="length",
+        ),
+    ]
+
+    streaming_proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=True,
+    )
+    streaming_results = _collect_results(streaming_proc, outputs)
+    streaming_content = "".join(
+        r.get("delta", {}).get("content", "") for r in streaming_results
+    )
+    assert "<function=get_weather>" not in streaming_content
+    streaming_tool_calls = _collect_tool_calls(streaming_results)
+    assert len(streaming_tool_calls) == 1
+    assert streaming_tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(streaming_tool_calls[0]["function"]["arguments"]) == {
+        "location": "NYC"
+    }
+
+    non_streaming_proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+    non_streaming_results = _collect_results(non_streaming_proc, outputs)
+    assert len(non_streaming_results) == 1
+
+    all_content = "".join(
+        r.get("delta", {}).get("content", "") for r in non_streaming_results
+    )
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(non_streaming_results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert non_streaming_results[0]["finish_reason"] == "length"
+
+
+@pytest.mark.vllm
+def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "I can check that.\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+                "</function>"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=None,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert len(results) == 1
+    assert results[0]["delta"]["content"] == "I can check that."
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert results[0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.vllm
+def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<think>Need the weather.</think>\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+                "</function>"
+            ),
+            token_ids=[1001],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=False,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert len(results) == 1
+    assert results[0]["delta"]["reasoning_content"] == "Need the weather."
+
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+    assert results[0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.vllm
+def test_qwen3_streaming_buffers_function_marker_after_reasoning_end(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<think>Need the weather.</think>\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+            ),
+            token_ids=[151667, 151668],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="</function>",
+            token_ids=[1002],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=_make_qwen3_tool_parser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=True,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert _collect_reasoning(results) == "Need the weather."
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+
+
+@pytest.mark.vllm
 def test_stream_interval_1(processor):
     """stream_interval=1: one token per chunk. Baseline that works."""
     results = _collect_results(processor, OUTPUTS_INTERVAL_1)
@@ -1465,7 +1769,7 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1518,7 +1822,7 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1571,7 +1875,7 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1636,7 +1940,7 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1738,7 +2042,7 @@ def test_streaming_parallel_tool_calls_no_think(
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
         chat_template_kwargs={"enable_thinking": False},
     )
 

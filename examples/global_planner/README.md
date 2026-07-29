@@ -15,6 +15,7 @@ enforces shared scaling policy across multiple DGDs.
 | `global-planner-gpu-budget.yaml` | Multi-model, GPU budget | vLLM | 2 independent model DGDs + 1 control DGD with `--max-total-gpus` |
 | `global-planner-vllm-test.yaml` | Single-endpoint, multi-pool | vLLM | 1 Frontend + GlobalRouter + GlobalPlanner, 2 prefill pools (TP1, TP2) + 1 decode pool |
 | `global-planner-mocker-test.yaml` | Single-endpoint, multi-pool | Mocker | Same as above with Mocker workers; GlobalPlanner in `--no-operation` mode |
+| `global-planner-vllm-test-xpu-dra.yaml` | Single-endpoint, multi-pool | vLLM (Intel XPU) | XPU/DRA variant with 2 TP1 prefill pools and 1 TP1 decode pool |
 
 ## Deployment Patterns
 
@@ -50,7 +51,7 @@ DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
 
 ## Prerequisites
 
-- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/kubernetes/README.md))
+- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/fern/kubernetes/quickstart.mdx))
 - Cluster Prometheus scraping router metrics via PodMonitor
 - HuggingFace token secret:
   ```bash
@@ -97,6 +98,34 @@ export DYNAMO_IMAGE=<dynamo-image>
 
 envsubst < global-planner-mocker-test.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
+
+### Intel XPU with DRA Example
+
+For Intel XPU clusters using [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/):
+
+```bash
+export K8S_NAMESPACE=my-ns
+export DYNAMO_IMAGE=<dynamo-image>
+export DYNAMO_VLLM_IMAGE=<vllm-xpu-image>  # Must be built for XPU
+export MODEL_NAME=Qwen/Qwen3-0.6B
+export STORAGE_CLASS_NAME=<rwx-storage-class>
+
+# Create HF token secret first
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<your-token> -n ${K8S_NAMESPACE}
+
+envsubst < global-planner-vllm-test-xpu-dra.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
+```
+
+**Prerequisites for XPU deployment:**
+- Intel XPU GPU driver and [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed
+- DRA enabled on the cluster
+- Container images built for Intel XPU (with `VLLM_TARGET_DEVICE=xpu`)
+
+**Key differences from GPU deployment:**
+- Uses DRA `ResourceClaimTemplate` instead of `resources.limits.gpu`
+- Sets `VLLM_TARGET_DEVICE=xpu` environment variable
+- Uses TP1 for both prefill pools because the DRA template requests one XPU per worker
 
 ## Verifying
 
@@ -160,7 +189,7 @@ This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-
 
 ## Further Reading
 
-- [Global Planner Deployment Guide](../../docs/components/planner/global-planner.md)
+- [Global Planner Deployment Guide](../../docs/fern/components/planner/global-planner.md)
 - [Global Planner README](../../components/src/dynamo/global_planner/README.md)
-- [Planner Configuration Guide](../../docs/components/planner/planner-guide.md)
+- [Planner Configuration Guide](../../docs/fern/components/planner/planner-guide.md)
 - [Global Router README](../../components/src/dynamo/global_router/README.md)

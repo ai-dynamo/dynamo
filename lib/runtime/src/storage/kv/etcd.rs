@@ -143,6 +143,21 @@ impl Bucket for EtcdBucket {
                         };
                         yield WatchEvent::Delete(key);
                     }
+                    etcd::WatchEvent::Resync(kvs) => {
+                        let mut snapshot = HashMap::with_capacity(kvs.len());
+                        for kv in kvs {
+                            let (k, v) = kv.into_key_value();
+                            let key = match String::from_utf8(k) {
+                                Ok(k) => Key::new(k),
+                                Err(err) => {
+                                    tracing::error!(%err, prefix, "Invalid UTF8 in etcd resync key");
+                                    continue;
+                                }
+                            };
+                            snapshot.insert(key, v.into());
+                        }
+                        yield WatchEvent::Resync(snapshot);
+                    }
                 }
             }
         };
@@ -260,7 +275,7 @@ mod concurrent_create_tests {
 
     #[test]
     fn test_concurrent_etcd_create_race_condition() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
 
         rt_clone.primary().block_on(async move {

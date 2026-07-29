@@ -14,6 +14,7 @@ use crate::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
     },
+    worker_type::WorkerType,
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
@@ -44,13 +45,15 @@ pub async fn run(
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
+            // In-process engines are always Aggregated: they own the full
+            // serving stack inline and don't depend on a peer worker.
             model
                 .attach(
                     &endpoint,
                     ModelType::Chat,
                     ModelInput::Text,
                     None,
-                    None,
+                    Some(WorkerType::Aggregated),
                     Vec::new(),
                 )
                 .await?;
@@ -62,6 +65,7 @@ pub async fn run(
             engine: inner_engine,
             mut model,
             is_prefill,
+            is_decode,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
@@ -77,10 +81,33 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            let model_type = if is_prefill {
-                ModelType::Prefill
+            // The disaggregation role is carried by `worker_type`, not
+            // `model_type`. Prefill workers register with an empty
+            // `model_type` (no OpenAI surface) and `WorkerType::Prefill`; a
+            // decode worker keeps its OpenAI surface and registers as
+            // `WorkerType::Decode` so the readiness gate can pair it with its
+            // prefill peer (mirrors the real vLLM/SGLang/TRT-LLM backends:
+            // decode `needs` Prefill and prefill `needs` Decode). A worker
+            // that is neither is a standalone `Aggregated` worker with no
+            // peer dependency.
+            let (model_type, worker_type, needs) = if is_prefill {
+                (
+                    ModelType::empty(),
+                    Some(WorkerType::Prefill),
+                    vec![vec![WorkerType::Decode]],
+                )
+            } else if is_decode {
+                (
+                    ModelType::Chat | ModelType::Completions,
+                    Some(WorkerType::Decode),
+                    vec![vec![WorkerType::Prefill]],
+                )
             } else {
-                ModelType::Chat | ModelType::Completions
+                (
+                    ModelType::Chat | ModelType::Completions,
+                    Some(WorkerType::Aggregated),
+                    Vec::new(),
+                )
             };
             model
                 .attach(
@@ -88,8 +115,8 @@ pub async fn run(
                     model_type,
                     ModelInput::Tokens,
                     None,
-                    None,
-                    Vec::new(),
+                    worker_type,
+                    needs,
                 )
                 .await?;
 

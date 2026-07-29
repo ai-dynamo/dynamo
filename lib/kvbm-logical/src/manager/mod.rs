@@ -91,19 +91,35 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
     /// Register a batch of completed blocks.
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
-        blocks
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let handles = self
+            .block_registry
+            .register_sequence_hashes(blocks.iter().map(CompleteBlock::sequence_hash));
+        let batch_size = blocks.len();
+        let registered =
+            self.store
+                .register_completed_blocks(blocks, handles, self.duplication_policy);
+        // The offline settlement bridge observes this counter as a
+        // publication watermark, so publish only after every store transition
+        // and presence marker in the batch is complete.
+        self.metrics
+            .inc_registrations_by(u64::try_from(batch_size).unwrap_or(u64::MAX));
+        registered
             .into_iter()
-            .map(|block| self.register_block(block))
+            .map(ImmutableBlock::from_inner)
             .collect()
     }
 
     /// Register a single completed block and return an immutable handle.
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
-        self.metrics.inc_registrations();
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
         let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        self.metrics.inc_registrations();
         ImmutableBlock::from_inner(inner)
     }
 
@@ -151,8 +167,60 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         matched
     }
 
+    /// Scattered batch match: resolves every input hash against the active or
+    /// inactive pool without stopping at a miss.
+    ///
+    /// The returned vector is aligned with `seq_hash`: each hit is `Some`,
+    /// each miss is `None`, and input order and duplicates are preserved. The
+    /// complete batch is resolved under one store-mutex acquisition. Frequency
+    /// tracking is applied after releasing that lock, exactly once per hit
+    /// (including repeated hashes and inactive resurrections).
+    ///
+    /// This operation contributes to the existing match metrics. Requested
+    /// and returned values are counted as occurrences, so repeated input
+    /// hashes and their repeated hits are counted repeatedly.
+    pub fn match_blocks_scattered(
+        &self,
+        seq_hash: &[SequenceHash],
+    ) -> Vec<Option<ImmutableBlock<T>>> {
+        self.metrics
+            .inc_match_hashes_requested(seq_hash.len() as u64);
+
+        if seq_hash.is_empty() {
+            self.metrics.inc_match_blocks_returned(0);
+            return Vec::new();
+        }
+
+        // ONE store-lock acquisition for all active+inactive probes, including
+        // misses and repeated hashes.
+        let inners = self.store.match_scattered_locked_batch(seq_hash);
+
+        // Keep TinyLFU work outside the store critical section. A duplicate
+        // input is a duplicate access, so each returned occurrence is touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in inners.iter().flatten() {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let hit_count = inners.iter().filter(|inner| inner.is_some()).count();
+        let matched = inners
+            .into_iter()
+            .map(|inner| inner.map(ImmutableBlock::from_inner))
+            .collect();
+
+        self.metrics.inc_match_blocks_returned(hit_count as u64);
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = hit_count,
+            "match_blocks_scattered result"
+        );
+        matched
+    }
+
     /// Scatter-gather scan: finds all blocks matching any hash, without
-    /// stopping on misses.
+    /// stopping on misses. Requested hashes are counted as input occurrences,
+    /// while returned blocks are counted as distinct hashes in the result map.
     pub fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],

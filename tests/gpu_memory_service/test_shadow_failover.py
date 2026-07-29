@@ -22,7 +22,7 @@ from tests.gpu_memory_service.flow_assertions import (
     assert_completion_ok,
     assert_kv_history,
     assert_weights_published_once,
-    quiesce_engine,
+    pause_engine,
     wait_for_active_layout,
     wait_for_resumed_layout,
     wait_for_weights_state,
@@ -30,11 +30,11 @@ from tests.gpu_memory_service.flow_assertions import (
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance, pytest.mark.core]
+pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 
 # Event flow under test:
-# 1. Shadow A starts as the initial weights publisher, then quiesces without serving traffic.
-# 2. Shadow B starts in read-only mode from the committed weights layout, then quiesces without serving traffic.
+# 1. Shadow A starts as the initial weights publisher, then pauses without serving traffic.
+# 2. Shadow B starts in read-only mode from the committed weights layout, then pauses without serving traffic.
 # 3. Primary starts in read-only mode and owns the next RW KV layout.
 # 4. Shadow A tries to resume while primary still owns the KV-cache RW layout.
 # 5. Primary is SIGKILLed; the old KV session clears before its GPU memory is reclaimed.
@@ -183,31 +183,31 @@ def _run_shadow_failover_test(
         shadow_a = manager.start_engine(
             "shadow-a",
         )
-        weights_state_after_shadow_a = quiesce_engine(
+        weights_state_after_shadow_a = pause_engine(
             weights_gms,
             kv_cache_gms,
             shadow_a,
-            quiesce_label="Shadow quiesce",
+            pause_label="Shadow pause",
         )
         weights_hash = weights_state_after_shadow_a.memory_layout_hash
         shadow_b = manager.start_engine(
             "shadow-b",
             read_only_weights=True,
         )
-        weights_state_after_shadow_b = quiesce_engine(
+        weights_state_after_shadow_b = pause_engine(
             weights_gms,
             kv_cache_gms,
             shadow_b,
-            quiesce_label="Shadow quiesce",
+            pause_label="Shadow pause",
             expected_weights_hash=weights_hash,
         )
         assert weights_state_after_shadow_b.memory_layout_hash == weights_hash
 
-        weights_events_after_shadow_quiesce = weights_gms.get_event_history().events
-        assert_weights_published_once(weights_events_after_shadow_quiesce)
+        weights_events_after_shadow_pause = weights_gms.get_event_history().events
+        assert_weights_published_once(weights_events_after_shadow_pause)
 
-        kv_events_after_shadow_quiesce = kv_cache_gms.get_event_history().events
-        assert_kv_history(kv_events_after_shadow_quiesce, cleared_layouts=2)
+        kv_events_after_shadow_pause = kv_cache_gms.get_event_history().events
+        assert_kv_history(kv_events_after_shadow_pause, cleared_layouts=2)
 
         primary, weights_with_primary = _start_primary(
             manager,
@@ -234,7 +234,7 @@ def _run_shadow_failover_test(
         )
 
         # The final KV history should show the full handoff:
-        # shadow A quiesced -> shadow B quiesced -> primary layout ->
+        # shadow A paused -> shadow B paused -> primary layout ->
         # primary abort/clear -> shadow A reconnects -> shadow A sees OOM.
         weights_events_after_resume = weights_gms.get_event_history().events
         assert_weights_published_once(weights_events_after_resume)
@@ -282,21 +282,21 @@ def test_gms_shadow_engine_failover_sglang(
 # ---------------------------------------------------------------------------
 
 
-def _trtllm_quiesce(
+def _trtllm_pause(
     weights_gms,
     engine,
     *,
     label: str,
     expected_hash: str | None = None,
 ):
-    """Quiesce a weights-only TRT-LLM engine and return the weights state."""
+    """Pause a weights-only TRT-LLM engine and return the weights state."""
     wait_for_weights_state(
         weights_gms,
         ServerState.RO,
         expected_hash=expected_hash,
         timeout=60.0,
     )
-    assert engine.quiesce()["status"] == "ok"
+    assert engine.pause()["status"] == "ok"
     logger.info("%s completed", label)
     ws = wait_for_weights_state(weights_gms, ServerState.COMMITTED)
     return ws
@@ -316,7 +316,7 @@ def test_gms_shadow_engine_failover_trtllm(
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
 
-        # Shadow A publishes weights, then quiesces.
+        # Shadow A publishes weights, then pauses.
         shadow_a = manager.start_engine("shadow-a")
         assert_completion_ok(
             frontend_port,
@@ -324,10 +324,10 @@ def test_gms_shadow_engine_failover_trtllm(
             failure_message="Shadow A inference failed",
             success_message="Shadow A inference OK",
         )
-        ws_a = _trtllm_quiesce(weights_gms, shadow_a, label="Shadow A quiesce")
+        ws_a = _trtllm_pause(weights_gms, shadow_a, label="Shadow A pause")
         weights_hash = ws_a.memory_layout_hash
 
-        # Shadow B starts RO, then quiesces.
+        # Shadow B starts RO, then pauses.
         shadow_b = manager.start_engine("shadow-b", read_only_weights=True)
         assert_completion_ok(
             frontend_port,
@@ -335,10 +335,10 @@ def test_gms_shadow_engine_failover_trtllm(
             failure_message="Shadow B inference failed",
             success_message="Shadow B inference OK",
         )
-        _trtllm_quiesce(
+        _trtllm_pause(
             weights_gms,
             shadow_b,
-            label="Shadow B quiesce",
+            label="Shadow B pause",
             expected_hash=weights_hash,
         )
         assert_weights_published_once(weights_gms.get_event_history().events)

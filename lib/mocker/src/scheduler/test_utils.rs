@@ -272,11 +272,13 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
 #[derive(Default)]
 pub(crate) struct CapturingFpmSink {
     snapshots: Mutex<Vec<ForwardPassSnapshot>>,
+    published: tokio::sync::Notify,
 }
 
 impl FpmSink for CapturingFpmSink {
     fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
         self.snapshots.lock().unwrap().push(snapshot);
+        self.published.notify_waiters();
         Ok(())
     }
 }
@@ -284,6 +286,14 @@ impl FpmSink for CapturingFpmSink {
 impl CapturingFpmSink {
     pub(crate) fn take(&self) -> Vec<ForwardPassSnapshot> {
         std::mem::take(&mut *self.snapshots.lock().unwrap())
+    }
+
+    pub(crate) async fn wait_for_snapshot(&self) {
+        let published = self.published.notified();
+        if !self.snapshots.lock().unwrap().is_empty() {
+            return;
+        }
+        published.await;
     }
 }
 
@@ -328,6 +338,7 @@ pub(crate) async fn assert_scheduler_completes_all(
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
     }
 

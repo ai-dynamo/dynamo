@@ -18,7 +18,7 @@ kind: DynamoCheckpoint
 metadata:
   name: qwen3-06b-bf16
 spec:
-  # Identity - determines the checkpoint hash
+  # Deprecated legacy identity. Required for standalone v1alpha1 checkpoints.
   identity:
     model: "Qwen/Qwen3-0.6B"
     backendFramework: "vllm"

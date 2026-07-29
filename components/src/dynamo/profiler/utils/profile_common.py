@@ -208,10 +208,10 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
       mode. In rapid mode the mocker pulls latency data directly from the
       AIConfigurator SDK via ``--aic-perf-model`` flags injected by the
       profiler, so no NPZ is emitted.
-    * **Planner** when throughput scaling is enabled — required for
-      thorough mode only. In rapid mode the planner runs AIC interpolation
-      in-process at bootstrap (see ``aic_interpolation.py``), so the
-      profiler no longer emits NPZ for planner rapid deployments either.
+    * **Planner** when thorough-mode bootstrap data is requested. In rapid
+      mode the planner receives ``aic_perf_model`` and can also run AIC
+      interpolation in-process at bootstrap; in none mode it starts from
+      native AIC or live FPM regression warmup.
     """
     sweep_mode = (
         dgdr.features.planner.pre_deployment_sweeping_mode
@@ -226,7 +226,7 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
         and dgdr.features.planner is not None
         and dgdr.features.planner.enable_throughput_scaling
     ):
-        return not is_rapid
+        return sweep_mode == PlannerPreDeploymentSweepMode.Thorough
     return False
 
 

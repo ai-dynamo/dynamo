@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import json
+from pathlib import Path
 
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -30,13 +32,6 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.timeout(120),
 ]
-
-
-@pytest.fixture(autouse=True)
-def _skip_online(request):
-    callspec = getattr(request.node, "callspec", None)
-    if callspec and callspec.params.get("replay_mode") == "online":
-        pytest.skip("intermittent hang in online replay mode (#9548)")
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -136,6 +131,94 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
     )
 
 
+def test_online_trace_replay_emits_per_request_goodput_and_capacity(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    jsonl_path = tmp_path / "online_requests.jsonl"
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        report_jsonl_path=jsonl_path,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    records = [
+        json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 4
+    assert {record["session_id"] for record in records} == {
+        "session-a",
+        "session-b",
+    }
+    assert all(record["decode_worker_idx"] is not None for record in records)
+    assert report["goodput_completed_requests"] == 4
+    assert report["decode_worker_seconds"] > 0.0
+    assert report["decode_gpus_per_worker"] == 1
+    assert report["gpu_hours"] > 0.0
+
+
+def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
+    trace_path = tmp_path / "agentic.jsonl"
+    records = [
+        {
+            "request_id": "root",
+            "session_id": "root",
+            "timestamp": 0.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [1],
+        },
+        {
+            "request_id": "dependent",
+            "session_id": "dependent",
+            "timestamp": 0.0,
+            "delay": 5.0,
+            "wait_for": ["root"],
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [2],
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        trace_format="agentic_mooncake",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+def test_online_synthetic_replay_supports_goodput_sla():
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        arrival_interval_ms=1.0,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    assert report["goodput_completed_requests"] == 2
+
+
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_supports_applied_compute_agentic_format_with_concurrency(
     tmp_path, replay_mode
@@ -172,6 +255,24 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
             num_workers=2,
             replay_mode="offline",
             trace_format="applied_compute_agentic",
+        )
+
+
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
         )
 
 
@@ -303,6 +404,7 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
         num_workers=2,
         replay_mode=replay_mode,
         router_mode="kv_router",
+        arrival_interval_ms=1.0,
         turns_per_session=2,
         inter_turn_delay_ms=5.0,
         shared_prefix_ratio=0.5,
@@ -336,6 +438,7 @@ def test_run_synthetic_trace_replay_workload_validates_zero_token_lengths(
             num_workers=2,
             replay_mode="offline",
             router_mode="kv_router",
+            arrival_interval_ms=1.0,
             turns_per_session=2,
         )
 
@@ -431,10 +534,12 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
 
 def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
     kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        return 1 if model_path == "test/model" else None
+
     monkeypatch.setattr(
-        kv_cache,
-        "compute_kv_bytes_per_token",
-        lambda model_path: 1 if model_path == "test/model" else None,
+        kv_cache, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
     )
     trace_path = _write_trace_and_args(tmp_path)
 
@@ -499,6 +604,7 @@ def test_run_synthetic_trace_replay_disagg_preserves_expected_output_tokens(
         num_decode_workers=2,
         replay_mode="offline",
         router_mode=router_mode,
+        arrival_interval_ms=1.0,
     )
 
     _assert_basic_report_counts(

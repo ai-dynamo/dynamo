@@ -21,8 +21,15 @@ import sys
 import time
 
 import numpy as np
-import pybase64
+import pytest
 import requests
+
+try:
+    import pybase64
+except ImportError:
+    pybase64 = None
+
+pytestmark = pytest.mark.skipif(pybase64 is None, reason="pybase64 is required")
 
 # Configuration
 MODEL = os.environ.get("MODEL_PATH", os.path.expanduser("~/proj/models/dsv2-lite-fp8"))

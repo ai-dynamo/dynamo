@@ -25,6 +25,8 @@ TORCH_DTYPE_BYTES = {
     "fp8_ds_mla": 1,
     "fp8_e4m3": 1,
     "fp8_inc": 1,
+    # AIC KVCacheQuantMode also allows int8 (1 byte per element)
+    "int8": 1,
 }
 
 # Default KV transfer bandwidth in GB/s.

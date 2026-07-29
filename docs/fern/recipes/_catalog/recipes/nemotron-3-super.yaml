@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: nemotron-3-super
+title: Nemotron-3-Super
+page: recipes/nemotron-3-super.mdx
+provider: nvidia
+model:
+  name: Nemotron-3-Super-120B-A12B
+  hf_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 (B200) / -FP8 (H200)
+  precision: NVFP4 (B200) / FP8 (H200), FP8 KV
+status: validated
+targets:
+- id: agg-b200-chat
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec-dl3
+  - kv-aware-routing
+  - deepep-high-throughput
+  workload:
+    type: chat
+    traffic: 8K/1K chat Mooncake trace replay (15% subset @ c128)
+  deploy:
+    asset: recipes/nemotron-3-super/vllm/agg-b200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-super/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 61.25 tok/s/user, 844.5 tok/s/GPU @ c128, 2 replicas
+- id: agg-b200-agentic
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec-dl3
+  - kv-aware-routing
+  - deepep-low-latency
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Mooncake trace replay (15% subset @ c192)
+  deploy:
+    asset: recipes/nemotron-3-super/vllm/agg-b200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-super/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 63.16 tok/s/user, 1388.4 tok/s/GPU @ c192, 2 replicas
+- id: agg-h200-chat
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec-dl3
+  - kv-aware-routing
+  - flashinfer-nvlink-one-sided
+  workload:
+    type: chat
+    traffic: 8K/1K chat Mooncake trace replay (15% subset @ c64)
+  deploy:
+    asset: recipes/nemotron-3-super/vllm/agg-h200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-super/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 56.07 tok/s/user, 404.6 tok/s/GPU @ c64, 2 replicas
+- id: agg-h200-agentic
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vLLM 0.21.0
+  topology: aggregated
+  techniques:
+  - tp4
+  - expert-parallel
+  - mtp-spec-dec-dl3
+  - kv-aware-routing
+  - deepep-high-throughput
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Mooncake trace replay (15% subset @ c128)
+  deploy:
+    asset: recipes/nemotron-3-super/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-super/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 62.94 tok/s/user, 851.0 tok/s/GPU @ c128, 2 replicas
+related_benchmarks: []
+maintainer: null
+gaps:
+- no related Feature Benchmark page exists for this model
+- no SLA/goodput target in source
+- source perf table concurrencies don't match perf.yaml default (c24)
+- single shared perf.yaml serves all four targets
+- maintainer unknown

@@ -72,6 +72,11 @@ func makeAdmissionCtx(op admissionv1.Operation) context.Context {
 	req := admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Group,
+				Version: nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Version,
+				Kind:    nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
+			},
 		},
 	}
 	return admission.NewContextWithRequest(context.Background(), req)
@@ -85,13 +90,6 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 		initialImage  string
 		expectedImage string
 	}{
-		{
-			name:          "CREATE with empty image defaults to operator version",
-			version:       "1.1.0",
-			operation:     admissionv1.Create,
-			initialImage:  "",
-			expectedImage: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0",
-		},
 		{
 			name:          "CREATE with preset image is not overwritten",
 			version:       "1.1.0",

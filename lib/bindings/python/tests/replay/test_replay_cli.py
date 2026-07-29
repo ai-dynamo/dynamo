@@ -46,6 +46,13 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
             aic_moe_tp_size=2,
             aic_moe_ep_size=1,
             aic_attention_dp_size=1,
+            aic_nextn=None,
+            aic_nextn_accept_rates=None,
+            aic_gemm_dtype=None,
+            aic_moe_dtype=None,
+            aic_fmha_dtype=None,
+            aic_kv_cache_dtype=None,
+            aic_comm_dtype=None,
         )
     )
 
@@ -59,6 +66,36 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         "aic_moe_tp_size": 2,
         "aic_moe_ep_size": 1,
         "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
+        "aic_gemm_dtype": None,
+        "aic_moe_dtype": None,
+        "aic_fmha_dtype": None,
+        "aic_kv_cache_dtype": None,
+        "aic_comm_dtype": None,
+    }
+
+
+def test_replay_policy_config_flag_overrides_router_json(monkeypatch):
+    captured = []
+
+    class FakeKvRouterConfig:
+        @staticmethod
+        def from_json(value):
+            captured.append(value)
+            return value
+
+    monkeypatch.setattr(replay_main, "KvRouterConfig", FakeKvRouterConfig)
+
+    config = replay_main._load_router_config(
+        '{"router_queue_policy":"wspt","router_policy_config":"embedded.yaml"}',
+        "explicit.yaml",
+    )
+
+    assert config == captured[0]
+    assert json.loads(captured[0]) == {
+        "router_queue_policy": "wspt",
+        "router_policy_config": "explicit.yaml",
     }
 
 
@@ -152,6 +189,10 @@ def test_replay_cli_subprocess_synthetic_multiturn_smoke(tmp_path):
         "4",
         "--request-count",
         "3",
+        "--request-rate",
+        "10",
+        "--arrival-seed",
+        "17",
         "--turns-per-session",
         "2",
         "--shared-prefix-ratio",
@@ -206,6 +247,36 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
         output_tokens=25,
     )
     _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_online_trace_jsonl_and_sla(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "online_trace_report.json"
+    jsonl_path = tmp_path / "online_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "online",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--report-jsonl",
+        str(jsonl_path),
+        "--sla-e2e-ms",
+        "1000000",
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["goodput_completed_requests"] == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
 @pytest.mark.timeout(30)

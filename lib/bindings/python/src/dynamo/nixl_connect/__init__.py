@@ -38,13 +38,51 @@ except ImportError as e:
         "PyTorch must be installed to use this module. Please install PyTorch, ex: 'pip install torch'."
     ) from e
 
+
+class _NixlImportProxy:
+    """Stand-in for a missing NIXL submodule that re-raises the deferred
+    import error on any attribute access or call.
+
+    Defer NIXL import error to only where NIXL is required. The `nixl`
+    pip wheel only ships CUDA builds (`nixl-cu12`); on platforms without
+    a NIXL wheel (e.g. AMD ROCm), letting `import dynamo.nixl_connect`
+    succeed lets transitive importers — router, planner, frontend — load.
+    Any code path that actually touches the bindings (today the only one
+    is `Connection.__init__` via `nixl_api.nixl_agent(...)`; tomorrow any
+    new one) fails loudly with a clear, deferred ImportError — no
+    explicit `_require_nixl()` guard call needed at each use site.
+    """
+
+    __slots__ = ("_module_name", "_orig_error")
+
+    def __init__(self, module_name: str, orig_error: ImportError) -> None:
+        # Bypass __setattr__ in case a subclass overrides it.
+        object.__setattr__(self, "_module_name", module_name)
+        object.__setattr__(self, "_orig_error", orig_error)
+
+    def _raise(self) -> None:
+        raise ImportError(
+            "NIXL Python bindings must be installed to use this module. "
+            "Please install NIXL, ex: 'pip install nixl'."
+        ) from self._orig_error
+
+    def __getattr__(self, name: str):
+        self._raise()
+
+    def __call__(self, *args, **kwargs):
+        self._raise()
+
+    def __repr__(self) -> str:
+        return f"<unavailable NIXL submodule {self._module_name!r}>"
+
+
 try:
     import nixl._api as nixl_api
     import nixl._bindings as nixl_bindings
 except ImportError as e:
-    raise ImportError(
-        "NIXL Python bindings must be installed to use this module. Please install NIXL, ex: 'pip install nixl'."
-    ) from e
+    nixl_api = _NixlImportProxy("nixl._api", e)  # type: ignore[assignment]
+    nixl_bindings = _NixlImportProxy("nixl._bindings", e)  # type: ignore[assignment]
+
 
 logger = logging.getLogger(__name__)
 
@@ -579,6 +617,9 @@ class Connection:
         self._connector: Connector = connector
         self._is_initialized = False
         self._name = f"{connector.name}-{number}"
+        # If NIXL bindings are absent, `nixl_api` is a `_NixlImportProxy`
+        # and the next line raises the deferred ImportError on attribute
+        # access — no explicit guard needed.
         self._nixl = nixl_api.nixl_agent(self._name)
 
         self._remote_refs: dict[str, int] = {}  # ref-count remote agents

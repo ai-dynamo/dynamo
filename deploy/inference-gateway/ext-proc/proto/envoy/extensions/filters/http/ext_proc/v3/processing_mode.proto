@@ -1,0 +1,37 @@
+// SPDX-FileCopyrightText: Copyright 2025 Envoy Project Authors
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored minimal subset of envoy/extensions/filters/http/ext_proc/v3/processing_mode.proto.
+// Wire-compatible with the upstream Envoy proto: same package name and field
+// numbers produce identical protobuf encoding on the wire. Annotation imports
+// are stripped to avoid the full Envoy proto dependency tree.
+
+syntax = "proto3";
+
+package envoy.extensions.filters.http.ext_proc.v3;
+
+message ProcessingMode
+{
+  enum HeaderSendMode {
+    DEFAULT = 0;
+    SEND = 1;
+    SKIP = 2;
+  }
+
+  enum BodySendMode {
+    NONE = 0;
+    STREAMED = 1;
+    BUFFERED = 2;
+    BUFFERED_PARTIAL = 3;
+    FULL_DUPLEX_STREAMED = 4;
+    GRPC = 5;
+  }
+
+  HeaderSendMode request_header_mode = 1;
+  HeaderSendMode response_header_mode = 2;
+  BodySendMode request_body_mode = 3;
+  BodySendMode response_body_mode = 4;
+  HeaderSendMode request_trailer_mode = 5;
+  HeaderSendMode response_trailer_mode = 6;
+}

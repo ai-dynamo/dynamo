@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# XPU Disaggregated Deployment with KV Router
+#
+# This example demonstrates disaggregated serving (Prefill/Decode separation)
+# with KV Router enabled for inteligent request routing based on KV cache availability.
+#
+# Requirements:
+# - Intel XPU with DRA (Dynamic Resource Allocation) driver installed
+# - Dynamo Operator with v1alpha1 support
+# - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag)
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: xpu-disagg-router
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+            # Enable KV Router for intelligent worker selection
+            - name: DYN_ROUTER_MODE
+              value: kv
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 2
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if your environment requires specific group access
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44   # render group
+        #     - 991  # video group
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          resources:
+            claims:
+              - name: gpu
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - decode
+            - --block-size
+            - "64"
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 2
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if your environment requires specific group access
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44   # render group
+        #     - 991  # video group
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          resources:
+            claims:
+              - name: gpu
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            # Enable KV events publishing for router cache tracking
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+            # NixlConnector config for XPU KV transfer
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+            - --block-size
+            - "64"
+            # Enable prefix caching for KV reuse
+            - --enable-prefix-caching

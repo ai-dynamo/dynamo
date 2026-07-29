@@ -1,12 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import logging
 from pathlib import Path
 from typing import Optional, Union
 
-from huggingface_hub import model_info
+from huggingface_hub import hf_hub_download, model_info
 from pydantic import BaseModel
 from transformers import AutoConfig
+
+try:
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+except ImportError:
+    get_model_config_from_model_path = None
+logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
     "F32": 4,  # FP32: 4 bytes per parameter
@@ -112,6 +120,85 @@ def get_model_weight_size(
         return get_model_weight_size_from_hub(str(model_name_or_path))
 
 
+def model_has_auto_map(
+    model_name_or_path: Union[str, Path],
+    token: Optional[str] = None,
+) -> bool:
+    """Return True iff the HF ``config.json`` declares an ``auto_map`` field.
+
+    ``auto_map`` signals that the model ships its own loader code in the HF
+    repo (``modeling_*.py`` / ``configuration_*.py``), which HF, vLLM, and
+    sglang refuse to execute unless the caller explicitly opts in via
+    ``trust_remote_code=True`` / ``--trust-remote-code``.
+
+    Works for both local directories and Hub model IDs. Reads ``config.json``
+    directly (no ``AutoConfig`` load) so it works even for architectures
+    that ``transformers`` doesn't know about. Returns False on any read
+    error so callers can treat detection as best-effort.
+    """
+    path = Path(model_name_or_path)
+    try:
+        if path.exists() and path.is_dir():
+            config_path = path / "config.json"
+            if not config_path.is_file():
+                return False
+        else:
+            try:
+                config_path = Path(
+                    hf_hub_download(
+                        repo_id=str(model_name_or_path),
+                        filename="config.json",
+                        token=token,
+                    )
+                )
+            except Exception as e:
+                # RepositoryNotFoundError / EntryNotFoundError mean the model or
+                # config.json doesn't exist — no custom code to worry about.
+                # Checked by name to avoid importing specific exception types at
+                # module level (huggingface_hub submodule portability).
+                if type(e).__name__ in (
+                    "RepositoryNotFoundError",
+                    "EntryNotFoundError",
+                ):
+                    return False
+                raise
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "model_has_auto_map: malformed config.json for %s: %s — assuming no auto_map.",
+            model_name_or_path,
+            e,
+        )
+        return False
+    except Exception as e:
+        # Unexpected failure (network, auth, I/O). We cannot determine whether
+        # the model needs trust_remote_code, so conservatively return True to
+        # avoid workers crashing at load time.
+        logger.warning(
+            "model_has_auto_map: unexpected error reading config.json for %s: %s "
+            "— defaulting to True (injecting --trust-remote-code).",
+            model_name_or_path,
+            e,
+        )
+        return True
+    return bool(cfg.get("auto_map"))
+
+
+def model_ref_allows_implicit_trust_remote_code(
+    model_name_or_path: Union[str, Path],
+) -> bool:
+    """Return True when implicit trust_remote_code is allowed for this ref.
+
+    Until DGDR carries an immutable remote revision through to the profiler,
+    remote HF model IDs are treated as mutable and must opt in explicitly.
+    Only local directories (including PVC-resolved snapshots) qualify for
+    implicit ``--trust-remote-code`` injection.
+    """
+    path = Path(model_name_or_path)
+    return path.exists() and path.is_dir()
+
+
 class ModelInfo(BaseModel):
     model_size: float
     architecture: str
@@ -121,6 +208,62 @@ class ModelInfo(BaseModel):
     intermediate_size: Optional[int] = None
     num_kv_heads: Optional[int] = None
     quantization_block_size: Optional[int] = None
+
+
+def _get_config_value(config: object, attr: str) -> object:
+    if isinstance(config, dict):
+        return config.get(attr)
+    return getattr(config, attr, None)
+
+
+def _positive_int_config_value(config: object, attr: str) -> Optional[int]:
+    value = _get_config_value(config, attr)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _load_model_config_for_mamba(
+    model_name_or_path: Union[str, Path],
+    trust_remote_code: bool = False,
+) -> object:
+    path = Path(model_name_or_path)
+    config_path = path / "config.json"
+    if path.is_dir() and config_path.is_file():
+        with open(config_path) as f:
+            return json.load(f)
+
+    if get_model_config_from_model_path is not None:
+        model_config = get_model_config_from_model_path(str(model_name_or_path))
+        raw_config = model_config.get("raw_config")
+        if raw_config is not None:
+            return raw_config
+
+    return AutoConfig.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+
+
+def get_mamba_cache_align_block_size(
+    model_name_or_path: Union[str, Path],
+    trust_remote_code: bool = False,
+) -> Optional[int]:
+    """Return vLLM's Mamba cache align token floor when derivable.
+
+    vLLM requires ``max_num_batched_tokens`` to be at least this block size
+    when Mamba cache mode is ``align``. Nemotron-H configs expose the fields
+    needed to compute it directly.
+    """
+    config = _load_model_config_for_mamba(model_name_or_path, trust_remote_code)
+    mamba_num_heads = _positive_int_config_value(config, "mamba_num_heads")
+    mamba_head_dim = _positive_int_config_value(config, "mamba_head_dim")
+    ssm_state_size = _positive_int_config_value(config, "ssm_state_size")
+    if not (mamba_num_heads and mamba_head_dim and ssm_state_size):
+        return None
+    return mamba_num_heads * mamba_head_dim + ssm_state_size
 
 
 def get_model_info(

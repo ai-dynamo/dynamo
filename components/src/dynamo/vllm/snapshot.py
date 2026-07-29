@@ -5,10 +5,14 @@ import gc
 import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.snapshot.lifecycle import (
+    EngineSnapshotController,
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 from .args import Config
-from .handlers import VllmEngineQuiesceController
+from .handlers import VllmEnginePauseController
 from .worker_factory import EngineSetupResult
 
 logger = logging.getLogger(__name__)
@@ -18,27 +22,28 @@ async def prepare_snapshot_engine(
     config: Config,
     setup_vllm_engine: Callable[[Config], EngineSetupResult],
 ) -> EngineSnapshotController[EngineSetupResult] | None:
-    checkpoint_config = CheckpointConfig.from_env()
-    if checkpoint_config is None:
+    snapshot_config = SnapshotConfig.from_env()
+    if snapshot_config is None:
         return None
 
     if config.headless:
         raise ValueError(
-            "--headless is incompatible with checkpoint mode "
-            "(DYN_CHECKPOINT_SIGNAL_FILE is set). "
-            "Remove --headless or unset DYN_CHECKPOINT_SIGNAL_FILE."
+            "--headless is incompatible with snapshot mode "
+            "(DYN_SNAPSHOT_CONTROL_DIR is set). "
+            "Remove --headless or unset DYN_SNAPSHOT_CONTROL_DIR."
         )
 
-    logger.info("Checkpoint mode enabled (watcher-driven signals)")
+    configure_snapshot_capture_env()
+    logger.info("Snapshot mode enabled (watcher-driven signals)")
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        quiesce_controller=VllmEngineQuiesceController(engine[0]),
-        checkpoint_config=checkpoint_config,
-        quiesce_args=(None,),
+        pause_controller=VllmEnginePauseController(engine[0]),
+        snapshot_config=snapshot_config,
+        pause_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
         raise SystemExit(0)

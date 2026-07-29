@@ -4,6 +4,13 @@
 # Core runtime dependencies shared by ALL Dynamo containers.
 # See README.md in this directory for version pinning strategy.
 
+# Force a source install of imageio-ffmpeg (pure-Python wrapper). The PyPI wheel
+# bundles a prebuilt, GPL-encumbered ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/
+# that has CVE exposure; we point imageio at the in-tree LGPL ffmpeg CLI via
+# IMAGEIO_FFMPEG_EXE instead. This directive is honored by pip and uv when this
+# file is passed via --requirement, and applies to the whole install.
+--no-binary imageio-ffmpeg
+
 aiohttp>=3.9.0,<4.0
 fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
@@ -11,7 +18,7 @@ httpx==0.28.1
 
 # Video generation: encode frames to MP4 (used by TRT-LLM, vLLM-Omni, SGLang diffusion)
 imageio>=2.37.0
-imageio-ffmpeg>=0.6.0
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Shared plotting utility used by runtime diagnostics and benchmark tooling.
 matplotlib==3.10.7
 msgspec==0.19.0
@@ -34,3 +41,4 @@ tensorboardX==2.6.2.2
 # Using >=4.56.0 to satisfy all frameworks
 transformers>=4.56.0
 uvicorn==0.38.0
+zstandard==0.23.0

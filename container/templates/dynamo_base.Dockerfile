@@ -22,7 +22,7 @@ RUN apt clean && apt-get update -y && \
 
 # Install sccache into the base image so downstream stages can COPY it
 # instead of downloading from GitHub (avoids 502 errors under parallel builds)
-ARG SCCACHE_VERSION=v0.14.0
+ARG SCCACHE_VERSION
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     wget --tries=3 --waitretry=5 \
         "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \
@@ -52,7 +52,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.93.1
+    RUST_VERSION=1.96.1
 
 # Install Rust — ARCH_ALT (x86_64/aarch64) is derived from TARGETARCH at build time
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \

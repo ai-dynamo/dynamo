@@ -5,8 +5,13 @@ import json
 
 import pytest
 
-from dynamo.llm import MockEngineArgs
+from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
+
+# run_synthetic_trace_replay constructs the Rust AIC callback, which imports
+# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
+# PyPI aiconfigurator releases predating PR #1200 don't ship it.
+pytest.importorskip("aiconfigurator.sdk.engine")
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
@@ -131,7 +136,6 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         num_workers=1,
         replay_mode="offline",
         replay_concurrency=8,
-        arrival_interval_ms=0.0,
     )
     aic = _run_aic_static_point(
         backend_name=backend_name,
@@ -244,7 +248,6 @@ def test_run_synthetic_disagg_replay_preserves_aic_local_optimum(
             replay_concurrency=replay_concurrency,
             replay_mode="offline",
             router_mode="round_robin",
-            arrival_interval_ms=0.0,
         )
         reports[variant_name] = report["output_throughput_tok_s"] / total_gpu_budget
 

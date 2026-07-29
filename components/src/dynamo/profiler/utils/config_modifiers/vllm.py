@@ -6,6 +6,7 @@ from typing import Tuple
 from uuid import uuid4
 
 import yaml
+from pydantic import ValidationError
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
@@ -16,6 +17,7 @@ from dynamo.profiler.utils.config import (
     get_worker_service_from_config,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_service_resources,
     update_image,
     validate_and_get_worker_args,
@@ -26,6 +28,7 @@ from dynamo.profiler.utils.defaults import (
     EngineType,
     resolve_deploy_path,
 )
+from dynamo.profiler.utils.model_info import get_mamba_cache_align_block_size
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -43,6 +46,52 @@ DEFAULT_VLLM_DISAGG_CONFIG_PATH = resolve_deploy_path(
 DEFAULT_VLLM_AGG_CONFIG_PATH = resolve_deploy_path(
     "examples/backends/vllm/deploy/agg.yaml"
 )
+DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+
+def _get_valued_arg(args: list[str], key: str) -> str | None:
+    for i, arg in enumerate(args):
+        if arg == key and i + 1 < len(args):
+            return args[i + 1]
+        if isinstance(arg, str) and arg.startswith(f"{key}="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
+    for i, arg in enumerate(args):
+        if arg == key and i + 1 < len(args):
+            args[i + 1] = value
+            return args
+        if isinstance(arg, str) and arg.startswith(f"{key}="):
+            args[i] = f"{key}={value}"
+            return args
+    return set_argument_value(args, key, value)
+
+
+def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
+    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
+    tokens = break_arguments(args)
+    # AIC may still emit the removed vLLM role flags. Normalize them at this
+    # ingestion boundary so they never reach the backend CLI.
+    cleaned_args = [
+        arg
+        for arg in tokens
+        if arg not in ("--is-prefill-worker", "--is-decode-worker")
+    ]
+    finalized = set_unique_argument_value(
+        cleaned_args, "--disaggregation-mode", role.value
+    )
+    if (
+        role == SubComponentType.PREFILL
+        and _get_valued_arg(finalized, "--kv-transfer-config") is None
+    ):
+        finalized = set_unique_argument_value(
+            finalized,
+            "--kv-transfer-config",
+            DEFAULT_VLLM_KV_TRANSFER_CONFIG,
+        )
+    return finalized
 
 
 class VllmV1ConfigModifier(BaseConfigModifier):
@@ -66,11 +115,39 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         return update_image(config, image)
 
     @classmethod
+    def _apply_disagg_workers(
+        cls,
+        cfg: Config,
+        prefill_cli_args: list[str],
+        prefill_replicas: int,
+        prefill_gpus: int,
+        decode_cli_args: list[str],
+        decode_replicas: int,
+        decode_gpus: int,
+        num_gpus_per_node: int | None = None,
+    ) -> None:
+        super()._apply_disagg_workers(
+            cfg,
+            prefill_cli_args=_finalize_disagg_cli_args(
+                prefill_cli_args, SubComponentType.PREFILL
+            ),
+            prefill_replicas=prefill_replicas,
+            prefill_gpus=prefill_gpus,
+            decode_cli_args=_finalize_disagg_cli_args(
+                decode_cli_args, SubComponentType.DECODE
+            ),
+            decode_replicas=decode_replicas,
+            decode_gpus=decode_gpus,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+
+    @classmethod
     def convert_config(
         cls,
         config: dict,
         target: EngineType,
         is_moe_model: bool = False,
+        model_name_or_path: str | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
 
@@ -109,8 +186,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
 
-            # remove --disaggregation-mode and its value (or legacy --is-prefill-worker)
+            # Remove role selection when converting the prefill worker to aggregated.
             args = remove_valued_arguments(args, "--disaggregation-mode")
+            # AIC may still emit this removed vLLM role flag.
             if "--is-prefill-worker" in args:
                 args.remove("--is-prefill-worker")
 
@@ -151,6 +229,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             if "--no-enable-prefix-caching" in args:
                 args.remove("--no-enable-prefix-caching")
 
+            args = cls._apply_mamba_cache_align_token_floor(args, model_name_or_path)
             worker_service.extraPodSpec.mainContainer.args = args
 
         # set num workers to 1
@@ -161,6 +240,75 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         decode_worker_config = cfg.spec.services[final_decode_service_name]
         decode_worker_config.replicas = 1
 
+        return cfg.model_dump()
+
+    @classmethod
+    def _apply_mamba_cache_align_token_floor(
+        cls, args: list[str], model_name_or_path: str | None
+    ) -> list[str]:
+        if not model_name_or_path:
+            return args
+
+        mamba_cache_mode = _get_valued_arg(args, "--mamba-cache-mode")
+        if mamba_cache_mode:
+            mamba_cache_mode = mamba_cache_mode.lower()
+        if mamba_cache_mode != "align":
+            return args
+
+        try:
+            mamba_align_floor = get_mamba_cache_align_block_size(model_name_or_path)
+        except (OSError, ValueError, TypeError):
+            logger.debug(
+                "Could not derive Mamba cache align token floor for %s",
+                model_name_or_path,
+                exc_info=True,
+            )
+            return args
+        if not mamba_align_floor:
+            return args
+
+        current = _get_valued_arg(args, "--max-num-batched-tokens")
+        try:
+            current_value = int(current) if current is not None else 0
+        except ValueError:
+            current_value = 0
+        if current_value >= mamba_align_floor:
+            return args
+
+        logger.info(
+            "Raising vLLM --max-num-batched-tokens from %s to Mamba align floor %d",
+            current if current is not None else "unset",
+            mamba_align_floor,
+        )
+        return _set_valued_arg(args, "--max-num-batched-tokens", str(mamba_align_floor))
+
+    @classmethod
+    def apply_model_runtime_constraints(
+        cls, config: dict, model_name_or_path: str | None
+    ) -> dict:
+        try:
+            cfg = Config.model_validate(config)
+        except ValidationError:
+            logger.debug(
+                "Skipping vLLM model runtime constraints for partial config",
+                exc_info=True,
+            )
+            return config
+        for component_type in (SubComponentType.DECODE,):
+            try:
+                worker_service = get_worker_service_from_config(
+                    cfg, backend="vllm", sub_component_type=component_type
+                )
+                args = validate_and_get_worker_args(worker_service, backend="vllm")
+                args = break_arguments(args)
+            except (KeyError, ValueError):
+                logger.debug(
+                    "Skipping vLLM model runtime constraints for partial worker config",
+                    exc_info=True,
+                )
+                continue
+            args = cls._apply_mamba_cache_align_token_floor(args, model_name_or_path)
+            worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
 
     @classmethod

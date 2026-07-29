@@ -202,9 +202,12 @@ def test_metric_failure_does_not_break_transform_response(monkeypatch):
     monkeypatch.setattr(eh, "observe_embedding_batch_size", _boom)
 
     handler = eh.EmbeddingWorkerHandler.__new__(eh.EmbeddingWorkerHandler)
-    ret = [{"embedding": [0.1, 0.2], "meta_info": {"prompt_tokens": 4}}]
+    floats = [0.1, 0.2]
+    ret = [{"embedding": floats, "meta_info": {"prompt_tokens": 4}}]
 
-    # Must not raise.
+    # Must not raise. The worker always emits base64 over the internal
+    # wire format -- the Rust frontend decodes back to float at the HTTP
+    # boundary if the client asked for float.
     out = handler._transform_response(ret, "model-A")
-    assert out["data"][0]["embedding"] == [0.1, 0.2]
+    assert out["data"][0]["embedding"] == eh._encode_floats_to_base64(floats)
     assert out["usage"]["prompt_tokens"] == 4

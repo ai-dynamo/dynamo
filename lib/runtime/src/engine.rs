@@ -180,14 +180,9 @@ pub trait AsyncEngineUnary<Resp: Data>:
 ///
 /// This trait combines `Stream` semantics with context provider capabilities,
 /// representing a continuous async operation that produces multiple messages over time.
-///
-/// - **Output side:** wrapped as [`EngineStream<T>`] = `crate::pipeline::ManyOut<T>`
-///   — the stream of response chunks an engine emits.
-/// - **Input side:** same `EngineStream<T>` shape, exposed as
-///   `crate::pipeline::ManyIn<T>` for documentary clarity at the call site.
-///
-/// [`ResponseStream`] is the canonical concrete implementor; [`RequestStream`]
-/// is a type alias of it for the input side.
+/// The canonical boxed form is [`EngineStream<T>`] (= `crate::pipeline::ManyOut<T>`),
+/// the stream of response chunks an engine emits; [`ResponseStream`] is the
+/// canonical concrete implementor.
 pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvider + Send {}
 
 /// Engine is a trait that defines the interface for a streaming engine.
@@ -266,16 +261,6 @@ impl<R: Data> Debug for ResponseStream<R> {
             .finish()
     }
 }
-
-/// Input-side type alias of [`ResponseStream`] — same struct, different name to
-/// signal role at the call site.
-///
-/// The shape is identical: a `(stream, ctx)` pair that implements [`Stream`],
-/// [`AsyncEngineContextProvider`], and [`AsyncEngineStream`]. Use `RequestStream`
-/// when you're constructing a value to feed into the `Req` slot of an engine,
-/// and [`ResponseStream`] when constructing a value to emit from the `Resp` slot.
-/// Functionally interchangeable.
-pub type RequestStream<R> = ResponseStream<R>;
 
 impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineUnary<T>>> {
     fn context(&self) -> Arc<dyn AsyncEngineContext> {

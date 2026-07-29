@@ -34,6 +34,8 @@ export MODALITY=${MODALITY:-"text"}
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+WORKER_MODULE="dynamo.trtllm"
+
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -101,7 +103,8 @@ python3 -m dynamo.frontend &
 OTEL_SERVICE_NAME=dynamo-worker-prefill \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.trtllm \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -121,7 +124,7 @@ wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 OTEL_SERVICE_NAME=dynamo-worker-decode \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-python3 -m dynamo.trtllm \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \

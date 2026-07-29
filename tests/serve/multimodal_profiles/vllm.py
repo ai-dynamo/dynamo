@@ -1,19 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
+    make_custom_encoder_payload,
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
+    make_image_payload_uuid_passthrough,
     make_video_payload,
 )
-from tests.utils.payload_builder import chat_payload, chat_payload_default
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    image_token_metrics_payload,
+)
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -41,7 +50,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
-    # `lightseek-mm` feature; the `_chat_processor` variant uses the vLLM
+    # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
     # DYNAMO_MM_TRANSFER shm/NIXL pre-rendered mm_kwargs delivery channel.
     "agg_router": "agg_multimodal_router.sh",
@@ -53,11 +62,15 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
+    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
+    # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
+    "agg_custom": "agg_custom.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
-        name="Qwen/Qwen3-VL-2B-Instruct",
+        name="Qwen/Qwen3-VL-2B-Instruct-FP8",
         short_name="qwen3-vl-2b",
         topologies={
             "agg": TopologyConfig(
@@ -100,40 +113,38 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
-            # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
-            # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
-            # Smoke-level on post_merge so regressions to the script's plumbing
-            # (worker boot order, ZMQ KV events, MM-routing build) surface in
-            # CI. The fine-grained routing-correctness assertions live in
-            # tests/mm_router/test_router_rust_mm_router_e2e.py.
-            #
-            # The payload sends two identical MM requests and asserts the
-            # second sees cached_tokens > 0 — proves the warm worker reused
-            # its KV cache, which only happens if the router routed both
-            # requests to the same worker. If routing silently regressed to
-            # text-prefix only, both requests would still succeed but the
-            # second's cached_tokens would be 0 and this case would fail.
+            # Post_merge MM-routing coverage for the Qwen3-VL family — the
+            # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
+                        )
+                    )
+                ],
             ),
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
-            # (Python preprocessor) instead of the Rust+lightseek path. Kept
-            # on post_merge alongside the default so both entry points stay
-            # covered by CI; the routing assertions are equivalent.
+            # (Python preprocessor) instead of the Rust MM-routing path. Kept
+            # on post_merge — the Rust-frontend variant of Qwen3.5-0.8B is
+            # the pre_merge gate; adding chat_processor doubles the GPU0
+            # queue time at 4-worker scale without catching distinct bugs
+            # (both paths share the kv_router downstream).
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
-            # single-GPU CI environment (the chat-processor script's own
-            # default is false for production multi-GPU usage).
+            # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
@@ -149,8 +160,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router_frontend_decode": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
-                profiled_vram_gib=18.7,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
+                profiled_vram_gib=13.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
                 env={
                     "SINGLE_GPU": "true",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
@@ -191,12 +202,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
     ),
-    # Lightseek-supported VLM coverage on `agg_router` (Rust-frontend
+    # Rust-frontend VLM coverage on `agg_router` (
     # MM-aware routing path). Each profile below adds the same smoke test
     # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
-    # corresponding family — Qwen2.5-VL, Qwen2-VL, Phi-3-vision — so the
-    # full lightseek model list (FAMILIES in lightseek_mm.rs) is exercised
-    # end-to-end. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # corresponding family (Qwen2.5-VL, Qwen2-VL). The LLaVA-1.5/NeXT profiles
+    # below are skip-marked, so this is Qwen-family coverage, not the full
+    # FAMILIES list. SINGLE_GPU=true packs both workers onto GPU 0 to match
     # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
     # first post_merge run will surface real peaks and we'll tighten.
     MultimodalModelProfile(
@@ -209,7 +220,22 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=19.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                # Qwen2-VL / Qwen2.5-VL: chat template emits `<|image_pad|>`
+                # (151655) and vLLM's HF processor expands the same id N
+                # times in the prompt sequence — routing-side fills with
+                # this id so block hashes align with what the worker
+                # stores. (the per-spec id is `<|vision_pad|>`
+                # 151654; the routing path now uses config.json's
+                # `image_token_id` instead, see preprocessor.rs splice.)
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
+                        )
+                    )
+                ],
             ),
         },
     ),
@@ -223,34 +249,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                # Dual-token routing path — see qwen2.5-vl-3b above.
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
+                        )
+                    )
+                ],
             ),
         },
-    ),
-    MultimodalModelProfile(
-        name="microsoft/Phi-3-vision-128k-instruct",
-        short_name="phi3-vision",
-        topologies={
-            # Phi-3-vision is the largest of the post_merge additions
-            # (~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak); profile
-            # leaves slim headroom on a 24 GiB box. If first post_merge
-            # run OOMs, drop to one worker (NUM_WORKERS=1) or move to
-            # gpu_2 with one worker per GPU.
-            "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=500,
-                profiled_vram_gib=22.0,
-                requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
-                # cached_tokens-asserting payload proves MM-aware routing
-                # engaged (2nd identical request hits the warm worker's KV
-                # cache); a silent regression to text-prefix-only routing
-                # would still return "green" but 0 cached tokens.
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
-            ),
-        },
-        # Phi-3-vision uses --trust-remote-code for its custom processor.
-        extra_vllm_args=["--trust-remote-code"],
     ),
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",
@@ -263,18 +273,41 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    # post_merge — qwen3-vl-2b carries the pre_merge baseline.
-                    MmCase(payload=make_image_payload(["green"])),
-                    # Inline-base64 + --frontend-decoding (NIXL RDMA path) on
-                    # the hybrid Mamba/full-attention VL. post_merge for the
-                    # same NIXL-stub reason as qwen3-vl-2b's frontend_decoding
-                    # cases — see that topology for the rationale.
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        followup_payloads=[image_token_metrics_payload()],
+                    ),
+                    # Inline-base64 + --frontend-decoding (NIXL RDMA path).
+                    # post_merge for the NIXL-stub reason — local pre-merge
+                    # builds outside Docker ship a NIXL stub that errors on
+                    # the runtime cudaMemcpy backend; CI post_merge runs in a
+                    # container with real NIXL.
                     MmCase(
                         suffix="b64_frontend_decoding",
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
                     ),
+                ],
+            ),
+            # qwen3_5 hybrid GDN: routing block_size ~544 (Mamba page-aligned),
+            # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
+            # threshold 0.7 fires on real degradation, tolerates variance.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=8.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
+                env={"SINGLE_GPU": "true"},
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.7,
+                            prompt_filler_repeats=120,
+                        )
+                    )
                 ],
             ),
         },
@@ -307,10 +340,37 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                timeout_s=300,
+                # 3x ~221s under the new scheduler (job-log 3d1554f); was 300
+                # (~1.6x) and under-ranked this 12 GiB test in the LPT scheduler,
+                # pushing it onto the tail of the run.
+                timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        suffix="uuid_passthrough",
+                        payload=make_image_payload_uuid_passthrough(
+                            ["green"], exercise_embedding_cache=True
+                        ),
+                        extra_script_args=[
+                            "--mm-processor-cache-gb",
+                            "4",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                            # Gemma 4 budgets 280 embeddings per image; the
+                            # 512x512 fixture emits 256. A 280-slot GPU cache can
+                            # retain only one, so the second fill evicts the first.
+                            "--max-num-batched-tokens",
+                            "280",
+                            "--limit-mm-per-prompt",
+                            '{"image": 1, "video": 0, "audio": 0}',
+                        ],
+                        # The connector runs in vLLM's spawned EngineCore, so
+                        # its debug hit diagnostic uses vLLM's logger level.
+                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
+                    ),
+                ],
             ),
         },
         extra_vllm_args=["--dtype", "bfloat16"],
@@ -350,13 +410,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # temperature=0 (see PR #9336 for the e_pd manifestation
             # and the comment block above on color-naming variance).
             # The agg_router routing path is already covered by the
-            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B / Phi-3-vision
+            # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B
             # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
-                        "agg_router routing path is covered by Qwen and Phi-3 profiles"
+                        "agg_router routing path is covered by Qwen profiles"
                     ),
                     pytest.mark.post_merge,
                 ],
@@ -366,7 +426,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
+                        )
+                    )
+                ],
             ),
             "agg": TopologyConfig(
                 # nightly-only: 7B 1-GPU footprint is tight (vram=19.2 GiB).
@@ -458,13 +526,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
     ),
-    # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
+    # LLaVA-NeXT covers a separate image processor (LlavaNextProcessor,
     # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
     # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
     #
     # Skipped: LLaVA-NeXT inherits the same LLaVA-on-vLLM-0.20 output
     # flake as LLaVA-1.5 (see PR #9336); the agg_router routing path is
-    # covered by the Qwen and Phi-3 profiles above.
+    # covered by the Qwen profiles above.
     MultimodalModelProfile(
         name="llava-hf/llava-v1.6-mistral-7b-hf",
         short_name="llava-next-mistral-7b",
@@ -474,7 +542,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     pytest.mark.skip(
                         reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "
                         "(see PR #9336); agg_router routing path is covered by "
-                        "Qwen and Phi-3 profiles"
+                        "Qwen profiles"
                     ),
                     pytest.mark.post_merge,
                 ],
@@ -484,7 +552,48 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.9,
+                        )
+                    )
+                ],
+            ),
+        },
+    ),
+    # CustomEncoder coverage. NOTE: Qwen2.5-1.5B-Instruct is a TEXT-ONLY LM —
+    # it sits in the multimodal profiles because the in-process CustomEncoder
+    # *plugin* (a custom vision encoder) gives it the image->embeds serving
+    # path; the multimodality comes from the encoder, not the model. The
+    # `agg_custom` topology launches examples/custom_encoder/launch/agg_custom.sh
+    # (hence the `directory` override) with the example HitchhikersVisionEncoder,
+    # which fakes an image as a fixed phrase so the spliced prompt answers "42".
+    MultimodalModelProfile(
+        name="Qwen/Qwen2.5-1.5B-Instruct",
+        short_name="custom-encoder",
+        topologies={
+            "agg_custom": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    # The single-GPU test container exposes its GPU at device 0,
+                    # so pin the worker there.
+                    "DYN_WORKER_GPU": "0",
+                    "DYN_ENCODER_CLASS": (
+                        "examples.custom_encoder.hitchhikers_vision_encoder."
+                        "HitchhikersVisionEncoder"
+                    ),
+                    "DYN_CUSTOM_JINJA_TEMPLATE": os.path.join(
+                        WORKSPACE_DIR,
+                        "examples/custom_encoder/templates/qwen_vl.jinja",
+                    ),
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[MmCase(payload=make_custom_encoder_payload())],
             ),
         },
     ),

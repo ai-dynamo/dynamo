@@ -47,11 +47,20 @@ pub(super) async fn query_tiered_matches(
     tokens: &[u32],
     block_size: u32,
     block_hashes: Vec<LocalBlockHash>,
+    cache_namespace: Option<&str>,
     retain_block_hashes: bool,
 ) -> Result<TieredLookupResult, KvRouterError> {
     if retain_block_hashes {
         let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =
-            query_retained(indexer, shared_cache, tokens, block_size, &block_hashes).await?;
+            query_retained(
+                indexer,
+                shared_cache,
+                tokens,
+                block_size,
+                &block_hashes,
+                cache_namespace,
+            )
+            .await?;
 
         return Ok(TieredLookupResult {
             tiered_matches,
@@ -62,8 +71,15 @@ pub(super) async fn query_tiered_matches(
         });
     }
 
-    let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =
-        query_owned(indexer, shared_cache, tokens, block_size, block_hashes).await?;
+    let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) = query_owned(
+        indexer,
+        shared_cache,
+        tokens,
+        block_size,
+        block_hashes,
+        cache_namespace,
+    )
+    .await?;
 
     Ok(TieredLookupResult {
         tiered_matches,
@@ -80,6 +96,7 @@ async fn query_retained(
     tokens: &[u32],
     block_size: u32,
     block_hashes: &[LocalBlockHash],
+    cache_namespace: Option<&str>,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -101,7 +118,14 @@ async fn query_retained(
     let indexer_fut = indexer
         .find_matches_by_tier_ref(block_hashes)
         .instrument(tracing::info_span!("kv_router.find_matches"));
-    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size).await
+    join_indexer_and_shared_cache(
+        indexer_fut,
+        shared_cache,
+        tokens,
+        block_size,
+        cache_namespace,
+    )
+    .await
 }
 
 async fn query_owned(
@@ -110,6 +134,7 @@ async fn query_owned(
     tokens: &[u32],
     block_size: u32,
     block_hashes: Vec<LocalBlockHash>,
+    cache_namespace: Option<&str>,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -131,7 +156,14 @@ async fn query_owned(
     let indexer_fut = indexer
         .find_matches_by_tier(block_hashes)
         .instrument(tracing::info_span!("kv_router.find_matches"));
-    join_indexer_and_shared_cache(indexer_fut, shared_cache, tokens, block_size).await
+    join_indexer_and_shared_cache(
+        indexer_fut,
+        shared_cache,
+        tokens,
+        block_size,
+        cache_namespace,
+    )
+    .await
 }
 
 async fn join_indexer_and_shared_cache<I>(
@@ -139,6 +171,7 @@ async fn join_indexer_and_shared_cache<I>(
     shared_cache: &dyn SharedKvCache,
     tokens: &[u32],
     block_size: u32,
+    cache_namespace: Option<&str>,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -152,7 +185,7 @@ where
     I: Future<Output = Result<TieredMatchDetails, KvRouterError>>,
 {
     let shared_fut = shared_cache
-        .check_blocks(tokens, block_size)
+        .check_blocks(tokens, block_size, cache_namespace)
         .instrument(tracing::info_span!("kv_router.shared_cache_check"));
 
     let indexer_timed = async {

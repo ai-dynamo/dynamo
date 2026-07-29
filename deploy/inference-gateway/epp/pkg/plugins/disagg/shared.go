@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -119,8 +120,10 @@ func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger
 		tokenIDs[i] = uint32(t)
 	}
 
-	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
-		TokenIDs: tokenIDs,
+	if req.Body != nil {
+		req.Body.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+			TokenIDs: tokenIDs,
+		}
 	}
 
 	// Inject into the PayloadMap so the body includes nvext.token_data.
@@ -158,4 +161,14 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+var enforceDisaggDeprecationOnce sync.Once
+
+func warnDeprecatedEnforceDisagg(logger logr.Logger) {
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		enforceDisaggDeprecationOnce.Do(func() {
+			logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+		})
+	}
 }

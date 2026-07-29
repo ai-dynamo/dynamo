@@ -3,6 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -15,6 +16,7 @@ from dynamo.sglang.publisher import (
     get_local_dp_rank_range,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
 )
 
 pytestmark = [
@@ -245,6 +247,8 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
             return FakeClient()
 
     server_args = SimpleNamespace(
+        dp_size=2,
+        enable_dp_attention=True,
         nnodes=2,
         node_rank=1,
         dist_timeout=5,
@@ -255,6 +259,7 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
         def __init__(self):
             self.generate_endpoint = FakeEndpoint()
             self.server_args = server_args
+            self.dynamo_args = SimpleNamespace(use_kv_events=True)
             self.kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -288,6 +293,55 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
+    resolve_leader = AsyncMock(return_value=1234)
+    kv_event_publisher = Mock()
+    monkeypatch.setattr(
+        publisher_mod,
+        "_resolve_multinode_leader_worker_id",
+        resolve_leader,
+    )
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", kv_event_publisher)
+
+    server_args = SimpleNamespace(
+        dp_size=1,
+        enable_dp_attention=False,
+        nnodes=2,
+        node_rank=1,
+    )
+    cleanup = Mock()
+    publisher = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            use_kv_events=True,
+        ),
+        generate_endpoint=SimpleNamespace(),
+        init_kv_event_publish=lambda: publisher_mod.KvEventPublisher(),
+        cleanup=cleanup,
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            SimpleNamespace(server_args=server_args),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+
+    resolve_leader.assert_not_awaited()
+    kv_event_publisher.assert_not_called()
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup.assert_called_once_with()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     monkeypatch,
 ):
@@ -302,6 +356,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
         kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -347,6 +402,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
 
         def cleanup(self):
             cleanup_called.set()
@@ -403,7 +459,11 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(),
@@ -418,6 +478,25 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+
+
+def test_init_kv_event_publish_uses_effective_kv_event_setting():
+    server_args = SimpleNamespace(
+        kv_events_config='{"publisher": "null", "endpoint": "tcp://*:5557"}',
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(use_kv_events=False),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    assert publisher.init_kv_event_publish() == []
 
 
 def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
@@ -460,7 +539,11 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
@@ -476,3 +559,168 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
     assert calls[0]["worker_id"] == 0
     publisher.cleanup()
+
+
+# ---- per-worker metric gating (embedding vs chat) ----
+
+
+@pytest.mark.asyncio
+async def test_setup_sgl_metrics_skips_chat_pipeline_for_embedding_worker(monkeypatch):
+    """``setup_sgl_metrics`` short-circuits for embedding workers.
+
+    Chat-shaped collectors (``sglang:*`` multiproc metrics, the Dynamo
+    ``LLMBackendMetrics`` gauges, ``DynamoSglangPublisher`` itself with
+    its KV-events / FPM relay wiring) emit zeros forever on a pooling
+    engine. Verify they are not constructed when
+    ``config.dynamo_args.embedding_worker`` is True, while preserving
+    the ``(publisher, task, metrics_labels)`` return shape so the
+    embedding init path can keep its uniform cleanup.
+    """
+    calls: dict[str, int] = {}
+
+    def _track(name):
+        def _wrapped(*_a, **_kw):
+            calls[name] = calls.get(name, 0) + 1
+            raise AssertionError(
+                f"setup_sgl_metrics should not call {name} on the embedding-worker path"
+            )
+
+        return _wrapped
+
+    monkeypatch.setattr(
+        publisher_mod, "setup_prometheus_registry", _track("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _track("register_engine_metrics_callback"),
+    )
+    monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _track("LLMBackendMetrics"))
+    monkeypatch.setattr(
+        publisher_mod, "DynamoSglangPublisher", _track("DynamoSglangPublisher")
+    )
+
+    engine = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="Qwen/Qwen3-Embedding-4B",
+            enable_metrics=True,  # would normally enable chat-shaped sglang:* metrics
+            node_rank=0,
+        )
+    )
+    config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(embedding_worker=True),
+        server_args=engine.server_args,
+    )
+    generate_endpoint = SimpleNamespace()
+
+    publisher, task, metrics_labels = await setup_sgl_metrics(
+        engine, config, generate_endpoint
+    )
+
+    try:
+        assert publisher is None
+        assert metrics_labels == [("model", "Qwen/Qwen3-Embedding-4B")]
+        assert isinstance(task, asyncio.Task)
+        # Task is intentionally a never-completing waiter so callers can
+        # ``cancel()`` + ``await`` uniformly in their finally blocks.
+        assert not task.done()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Hard assertion: NONE of the chat-shaped constructors fired.
+    assert calls == {}
+
+
+@pytest.mark.asyncio
+async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
+    """The chat-worker path still constructs the publisher.
+
+    Sibling to the embedding-worker test above: gives confidence the
+    gating doesn't accidentally short-circuit the default code path.
+    """
+    constructed: dict[str, int] = {}
+
+    def _count(name):
+        def _wrapped(*_a, **_kw):
+            constructed[name] = constructed.get(name, 0) + 1
+            return SimpleNamespace()
+
+        return _wrapped
+
+    monkeypatch.setattr(
+        publisher_mod, "setup_prometheus_registry", _count("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _count("register_engine_metrics_callback"),
+    )
+    monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _count("LLMBackendMetrics"))
+
+    # Replace the publisher constructor with one that returns a stub whose
+    # methods exist but no-op, so we can keep the test free of real ZMQ / NATS.
+    class _StubPublisher:
+        def __init__(self, *_a, **_kw):
+            constructed["DynamoSglangPublisher"] = (
+                constructed.get("DynamoSglangPublisher", 0) + 1
+            )
+            self.metrics_publisher = SimpleNamespace(
+                create_endpoint=lambda _ep: _async_noop()
+            )
+
+        def init_engine_metrics_publish(self):
+            pass
+
+        def init_kv_event_publish(self):
+            pass
+
+        def init_fpm_relay(self):
+            pass
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    async def _async_noop():
+        return None
+
+    monkeypatch.setattr(publisher_mod, "DynamoSglangPublisher", _StubPublisher)
+
+    engine = SimpleNamespace(
+        server_args=SimpleNamespace(
+            served_model_name="Qwen/Qwen3-0.6B",
+            enable_metrics=False,  # skip setup_prometheus_registry but still run chat path
+            node_rank=0,
+        )
+    )
+    config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(
+            embedding_worker=False,
+            component="sglang-decode",
+            use_kv_events=False,
+        ),
+        server_args=engine.server_args,
+    )
+    generate_endpoint = SimpleNamespace()
+
+    publisher, task, _labels = await setup_sgl_metrics(
+        engine, config, generate_endpoint
+    )
+
+    try:
+        assert publisher is not None
+        # All three chat-shaped constructors fired.
+        assert constructed.get("register_engine_metrics_callback", 0) == 1
+        assert constructed.get("LLMBackendMetrics", 0) == 1
+        assert constructed.get("DynamoSglangPublisher", 0) == 1
+        # setup_prometheus_registry was gated off by enable_metrics=False.
+        assert "setup_prometheus_registry" not in constructed
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

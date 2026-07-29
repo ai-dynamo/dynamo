@@ -193,7 +193,6 @@ async def _fetch_from_encode_workers(
         multimodal_groups: List[MultiModalGroup] = []
         for stream in encode_response_streams:
             async for response in stream:
-                logger.debug(f"Received response from encode worker: {response}")
                 output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
                 if output.multimodal_inputs:
                     multimodal_groups.extend(output.multimodal_inputs)

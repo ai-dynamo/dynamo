@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -27,7 +28,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -50,6 +56,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
@@ -131,6 +138,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		expectedAdapterCount int
 		expectedAdapters     map[string]int32 // map of adapter name to expected replicas
 		expectDeleted        []string         // adapter names that should be deleted
+		assertNoReplicaPatch bool
 	}{
 		{
 			name: "creates adapters for services with scalingAdapter.enabled=true",
@@ -183,6 +191,66 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			expectedAdapters: map[string]int32{
 				"test-dgd-worker": 1, // default replicas
 			},
+		},
+		{
+			name: "preserves existing adapter replicas across components",
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							Replicas: ptr.To(int32(2)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
+						},
+						"decode": {
+							Replicas: ptr.To(int32(3)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
+						},
+					},
+				},
+			}),
+			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-frontend",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						Replicas: 5,
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
+							Name:        "test-dgd",
+							ServiceName: "Frontend",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-decode",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						Replicas: 0,
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
+							Name:        "test-dgd",
+							ServiceName: "decode",
+						},
+					},
+				},
+			},
+			expectedAdapterCount: 2,
+			expectedAdapters: map[string]int32{
+				"test-dgd-frontend": 5,
+				"test-dgd-decode":   0,
+			},
+			assertNoReplicaPatch: true,
 		},
 		{
 			name: "skips adapter creation when not enabled",
@@ -368,10 +436,22 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			}
 
 			// Create fake client
-			fakeClient := fake.NewClientBuilder().
+			clientBuilder := fake.NewClientBuilder().
 				WithScheme(testScheme).
-				WithObjects(initObjs...).
-				Build()
+				WithObjects(initObjs...)
+			if tt.assertNoReplicaPatch {
+				t.Log("Intercept adapter patches and verify they exclude replicas")
+				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						data, err := patch.Data(obj)
+						require.NoError(t, err)
+						assert.NotContains(t, string(data), `"replicas"`,
+							"existing adapter patches must never include spec.replicas")
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			}
+			fakeClient := clientBuilder.Build()
 
 			// Create reconciler
 			r := &DynamoGraphDeploymentReconciler{
@@ -529,7 +609,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAV
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoGraphDeploymentReconciler{
-				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -554,7 +634,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResource
 	g := gomega.NewGomegaWithT(t)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -577,7 +657,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResource
 		Config: &configv1alpha1.OperatorConfiguration{
 			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	_, err := reconciler.reconcileResources(ctx, dgd)
@@ -610,7 +690,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Tole
 			WithObjects(dgd).
 			Build(),
 		Recorder:      record.NewFakeRecorder(100),
-		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
 	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
@@ -643,7 +723,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
 		Recorder:      record.NewFakeRecorder(100),
-		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
 	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
@@ -656,7 +736,127 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DoesNotDeleteCheckpointTemplate(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  commonconsts.MainContainerName,
+								Image: "checkpoint-writer:latest",
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									},
+								},
+							}},
+						},
+					},
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+						Checkpoint: &v1beta1.ComponentCheckpointConfig{
+							Enabled: true,
+							Mode:    v1beta1.CheckpointModeAuto,
+							Identity: &v1beta1.DynamoCheckpointIdentity{
+								Model:            identity.Model,
+								BackendFramework: identity.BackendFramework,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	existingCheckpoint := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + hash, Namespace: "default"},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				TargetContainerName: commonconsts.MainContainerName,
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: commonconsts.MainContainerName,
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
+							},
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
+	checkpointTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointGMSResourceClaimTemplateName(hash),
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(existingCheckpoint, v1alpha1.GroupVersion.WithKind("DynamoCheckpoint")),
+			},
+		},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Requests: []resourcev1.DeviceRequest{{
+						Name: "gpus",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: dra.DefaultDeviceClassName,
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	}
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd, existingCheckpoint, checkpointTemplate, deviceClass).
+		Build()
+	r := &DynamoGraphDeploymentReconciler{
+		Client:        cl,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true, GMSSnapshot: true}},
+	}
+
+	require.NoError(t, r.reconcileGMSResourceClaimTemplates(ctx, dgd))
+
+	template := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, cl.Get(ctx, client.ObjectKey{
+		Name:      checkpointGMSResourceClaimTemplateName(hash),
+		Namespace: "default",
+	}, template))
+	require.Len(t, template.Spec.Spec.Devices.Requests, 1)
+	request := template.Spec.Spec.Devices.Requests[0]
+	require.NotNil(t, request.Exactly)
+	assert.Equal(t, int64(1), request.Exactly.Count)
+	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
+	controllerRef := metav1.GetControllerOf(template)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
+	assert.Equal(t, existingCheckpoint.Name, controllerRef.Name)
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotReuseExistingCapture(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -696,14 +896,16 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 			WithScheme(testScheme).
 			WithObjects(existing).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		Recorder:      record.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 	})
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -731,8 +933,26 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
-	if ckpt.Name != "existing-worker-checkpoint" {
-		t.Fatalf("createCheckpointCR() returned checkpoint %s, want existing-worker-checkpoint", ckpt.Name)
+	if ckpt.Name == "existing-worker-checkpoint" {
+		t.Fatalf("createCheckpointCR() reused existing checkpoint")
+	}
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	if err != nil {
+		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
+	}
+	expectedID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	expectedName := fmt.Sprintf("checkpoint-%s", expectedID)
+	if ckpt.Name != expectedName {
+		t.Fatalf("createCheckpointCR() returned checkpoint %s, want %s", ckpt.Name, expectedName)
+	}
+	if got := ckpt.Labels[snapshotprotocol.CheckpointIDLabel]; got != expectedID {
+		t.Fatalf("checkpoint ID label = %s, want %s", got, expectedID)
 	}
 
 	updated := &v1alpha1.DynamoCheckpoint{}
@@ -745,29 +965,130 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
 		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
 	}
+	created := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: "default"}, created); err != nil {
+		t.Fatalf("Failed to get created checkpoint: %v", err)
+	}
+	if len(created.OwnerReferences) != 1 || created.OwnerReferences[0].UID != dgd.UID {
+		t.Fatalf("expected created checkpoint to be owned by DGD UID %q, got %#v", dgd.UID, created.OwnerReferences)
+	}
 }
 
-func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClient(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIdentityTemplate(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
 	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	require.NoError(t, err)
+
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-worker-checkpoint",
+			Namespace: "default",
+			UID:       types.UID("checkpoint-uid"),
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity:         identity,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			IdentityHash: hash,
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimTemplateName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(existing, dgd, template).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{GMSSnapshot: true},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
+				Identity: &v1beta1.DynamoCheckpointIdentity{
+					Model:            identity.Model,
+					BackendFramework: identity.BackendFramework,
+				},
+			},
+		},
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	require.NoError(t, err)
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	checkpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	assert.Equal(t, "checkpoint-"+checkpointID, ckpt.Name)
+	assert.NotEqual(t, existing.Name, ckpt.Name)
+
+	updatedTemplate := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Name: claimTemplateName, Namespace: "default"}, updatedTemplate))
+	controllerRef := metav1.GetControllerOf(updatedTemplate)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoGraphDeployment", controllerRef.Kind)
+	assert.Equal(t, dgd.Name, controllerRef.Name)
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClient(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(testScheme).
+			WithObjects(deviceClass).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{GMSSnapshot: true},
+		},
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 	})
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -830,6 +1151,37 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 	if got := saver.Command; len(got) != 1 || got[0] != "/bin/custom-saver" {
 		t.Fatalf("checkpoint saver command = %#v, want [/bin/custom-saver]", got)
 	}
+	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
+	require.NotNil(t, main)
+	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
+	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
+	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	checkpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	claimTemplateName := checkpointGMSResourceClaimTemplateName(checkpointID)
+	assert.Contains(t, ckpt.Spec.Job.PodTemplateSpec.Spec.ResourceClaims, corev1.PodResourceClaim{
+		Name:                      dra.ClaimName,
+		ResourceClaimTemplateName: &claimTemplateName,
+	})
+
+	template := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Name: claimTemplateName, Namespace: "default"}, template))
+	require.Len(t, template.Spec.Spec.Devices.Requests, 1)
+	request := template.Spec.Spec.Devices.Requests[0]
+	require.NotNil(t, request.Exactly)
+	assert.Equal(t, int64(1), request.Exactly.Count)
+	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
+	controllerRef := metav1.GetControllerOf(template)
+	require.NotNil(t, controllerRef)
+	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
+	assert.Equal(t, ckpt.Name, controllerRef.Name)
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t *testing.T) {
@@ -842,7 +1194,12 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{
+				Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -867,7 +1224,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 		},
 		Experimental: &v1beta1.ExperimentalSpec{
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
-				Mode: v1beta1.CheckpointModeAuto,
+				Enabled: true,
+				Mode:    v1beta1.CheckpointModeAuto,
 				Identity: &v1beta1.DynamoCheckpointIdentity{
 					Model:                identity.Model,
 					BackendFramework:     identity.BackendFramework,
@@ -885,10 +1243,13 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 	require.NotNil(t, main)
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_HOME", Value: "/models/huggingface"})
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "OVERRIDE_ME", Value: "component"})
+	assert.Equal(t,
+		discovery.GetK8sDiscoveryServiceAccountName("test-dgd"),
+		ckpt.Spec.Job.PodTemplateSpec.Spec.ServiceAccountName,
+	)
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -899,9 +1260,12 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{GMSSnapshot: true},
+		},
 	}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
 	})
 	checkpointIdentity := v1beta1.DynamoCheckpointIdentity{
 		Model:            identity.Model,
@@ -924,6 +1288,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 				Mode: v1beta1.GMSModeIntraPod,
 			},
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
+				Enabled:             true,
 				Mode:                v1beta1.CheckpointModeAuto,
 				TargetContainerName: "snapshot-me",
 				Identity:            &checkpointIdentity,
@@ -950,6 +1315,273 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 	assert.Equal(t, []string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers)
 	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName))
 	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "serve-sidecar"))
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetContainerWithoutIdentity(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: commonconsts.MainContainerName, Image: "main:latest"},
+							{Name: "snapshot-me", Image: "target:latest"},
+						},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:             true,
+						Mode:                v1beta1.CheckpointModeAuto,
+						TargetContainerName: "snapshot-me",
+					},
+				},
+			}},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	info := checkpointInfos["worker"]
+	require.NotNil(t, info)
+	assert.Equal(t, []string{"snapshot-me"}, info.RestoreTargetContainers)
+	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
+	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointID)
+
+	ckpt := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
+	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
+	assert.Equal(t, string(dynamo.BackendFrameworkVLLM), ckpt.Spec.Identity.BackendFramework)
+	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsRejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{
+					Type: configv1alpha1.CheckpointStorageTypePVC,
+					PVC: configv1alpha1.CheckpointPVCConfig{
+						PVCName: "checkpoint-storage",
+						Create:  true,
+						Size:    "1Gi",
+					},
+				},
+			},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+				},
+			}},
+		},
+	}
+
+	_, _, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.ErrorContains(t, err, "checkpoint functionality is disabled")
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	require.NoError(t, reconciler.List(ctx, checkpoints, client.InNamespace("default")))
+	assert.Empty(t, checkpoints.Items)
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	require.NoError(t, reconciler.List(ctx, pvcs, client.InNamespace("default")))
+	assert.Empty(t, pvcs.Items)
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTemplateMetadata(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"workload-label": "keep-me",
+						},
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationIstioSidecarInject: "false",
+							"policy.example.com/keep":                     "yes",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: commonconsts.MainContainerName, Image: "main:latest"},
+						},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
+					},
+				},
+			}},
+		},
+	}
+
+	checkpointStatuses, _, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
+
+	ckpt := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
+
+	jobMeta := ckpt.Spec.Job.PodTemplateSpec.ObjectMeta
+	// Workload pod-template labels/annotations must survive onto the checkpoint job.
+	assert.Equal(t, "keep-me", jobMeta.Labels["workload-label"])
+	assert.Equal(t, "false", jobMeta.Annotations[commonconsts.KubeAnnotationIstioSidecarInject])
+	assert.Equal(t, "yes", jobMeta.Annotations["policy.example.com/keep"])
+	// Controller-managed component label is still applied.
+	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLifecycle(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "main:latest",
+						}},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:        true,
+						Mode:           v1beta1.CheckpointModeAuto,
+						DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
+					},
+				},
+			}},
+		},
+	}
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	checkpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	existing := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("checkpoint-%s", checkpointID),
+			Namespace: "default",
+			Labels: map[string]string{
+				snapshotprotocol.CheckpointIDLabel:              checkpointID,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				commonconsts.KubeLabelDynamoComponent:           "worker",
+				commonconsts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.GroupVersion.String(),
+				Kind:       "DynamoGraphDeployment",
+				Name:       dgd.Name,
+				UID:        dgd.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{
+				Model:            "default/test-dgd",
+				BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			},
+			Job: v1alpha1.DynamoCheckpointJobConfig{
+				PodTemplateSpec: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "existing:latest",
+						}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			CheckpointID: checkpointID,
+			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
+		},
+	}
+	reconciler.Client = fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		Build()
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Name, checkpointStatuses["worker"].CheckpointName)
+	assert.Equal(t, checkpointID, checkpointStatuses["worker"].CheckpointID)
+	require.NotNil(t, checkpointInfos["worker"])
+	assert.True(t, checkpointInfos["worker"].Exists)
+
+	updated := &v1alpha1.DynamoCheckpoint{}
+	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
+	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
+		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
+	assert.Empty(t, updated.OwnerReferences)
+	assert.True(t, controller_common.ContainsFinalizer(updated))
+	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
@@ -994,8 +1626,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1003,6 +1636,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1084,8 +1718,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1093,6 +1728,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1135,7 +1771,6 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMSLoader(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1170,6 +1805,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMS
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{Checkpoint: true, GMSSnapshot: true},
+		},
 	}
 
 	ref := friendlyCheckpointName
@@ -1177,6 +1815,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMS
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1241,8 +1880,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_rejectsServiceGMSW
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1326,7 +1966,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 				},
 			},
 		},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	ref := friendlyCheckpointName
@@ -1411,14 +2052,16 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 			WithObjects(existing).
 			WithStatusSubresource(existing).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1456,13 +2099,24 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 		t.Fatalf("expected existing checkpoint to remain not ready")
 	}
 	if !info.Exists {
-		t.Fatalf("expected existing checkpoint to be detected")
+		t.Fatalf("expected auto checkpoint to exist")
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	if info.Hash == hash {
+		t.Fatalf("auto checkpoint unexpectedly reused legacy identity hash %s", hash)
 	}
-	if checkpointStatuses["worker"].CheckpointName != "existing-worker-checkpoint" {
-		t.Fatalf("checkpoint status name = %s, want existing-worker-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	if err != nil {
+		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
+	}
+	expectedName := fmt.Sprintf("checkpoint-%s", checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	))
+	if checkpointStatuses["worker"].CheckpointName != expectedName {
+		t.Fatalf("checkpoint status name = %s, want %s", checkpointStatuses["worker"].CheckpointName, expectedName)
 	}
 
 	updated := &v1alpha1.DynamoCheckpoint{}
@@ -1475,6 +2129,245 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
 		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
 	}
+	created := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: expectedName, Namespace: "default"}, created); err != nil {
+		t.Fatalf("failed to get auto checkpoint %s: %v", expectedName, err)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_checkpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
+	reconciler := &DynamoGraphDeploymentReconciler{}
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Envs:          []corev1.EnvVar{{Name: "GENERATION", Value: "next"}},
+				},
+			},
+		},
+	})
+	reconciler.setCurrentWorkerHashes(dgd, workerGenerationHashes{v1: "oldhash"})
+	desired, err := reconciler.desiredWorkerHashes(dgd)
+	if err != nil {
+		t.Fatalf("desiredWorkerHashes() error = %v", err)
+	}
+
+	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
+	if err != nil {
+		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
+	}
+	want := reconciler.activeWorkerHashForDCDGeneration(dgd, desired)
+	if workerHash != want {
+		t.Fatalf("checkpoint worker hash = %s, want active generated hash %s", workerHash, want)
+	}
+	if workerHash == "oldhash" {
+		t.Fatalf("checkpoint worker hash used previous current-worker-hash annotation")
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_deleteAutoCheckpointsForDGD(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+	})
+
+	auto := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "auto",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
+			},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+		},
+	}
+	manual := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "manual",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+		},
+	}
+	retained := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retained",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.GroupVersion.String(),
+				Kind:       "DynamoGraphDeployment",
+				Name:       "test-dgd",
+				UID:        dgd.UID,
+			}},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
+			},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+		},
+	}
+	otherDGD := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-dgd",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
+			},
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(auto, manual, retained, otherDGD).
+			Build(),
+	}
+
+	if err := reconciler.deleteAutoCheckpointsForDGD(ctx, dgd); err != nil {
+		t.Fatalf("deleteAutoCheckpointsForDGD() error = %v", err)
+	}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "auto", Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("auto checkpoint get err = %v, want not found", err)
+	}
+	for _, name := range []string{"manual", "retained", "other-dgd"} {
+		if err := reconciler.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); err != nil {
+			t.Fatalf("checkpoint %s should remain, get error = %v", name, err)
+		}
+	}
+	retainedAfter := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "retained", Namespace: "default"}, retainedAfter); err != nil {
+		t.Fatalf("retained checkpoint should remain, get error = %v", err)
+	}
+	if len(retainedAfter.OwnerReferences) != 0 {
+		t.Fatalf("retained checkpoint should be detached from DGD owner references, got %#v", retainedAfter.OwnerReferences)
+	}
+	if _, ok := retainedAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; ok {
+		t.Fatalf("retained checkpoint should not keep DGD label after finalizer detach")
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
+	reconciler := &DynamoGraphDeploymentReconciler{}
+	ckpt := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retained",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
+			},
+		},
+	}
+
+	got := reconciler.mapAutoCheckpointToDGDRequests(context.Background(), ckpt)
+	require.Len(t, got, 1)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
+}
+
+func TestApplyDCDCheckpointStartupPolicy(t *testing.T) {
+	t.Run("immediate stamps stable restore candidate metadata", func(t *testing.T) {
+		dcd := &v1beta1.DynamoComponentDeployment{
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{
+								snapshotprotocol.CheckpointIDLabel: "stale",
+							},
+							Annotations: map[string]string{
+								snapshotprotocol.CheckpointStatusAnnotation: "stale",
+							},
+						},
+					},
+				},
+			},
+		}
+		info := &checkpoint.CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			Ready:          true,
+			Hash:           "checkpoint-id",
+			CheckpointName: "checkpoint-name",
+			StartupPolicy:  v1alpha1.CheckpointStartupPolicyImmediate,
+		}
+
+		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
+			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
+		}
+
+		require.NotNil(t, dcd.Spec.Experimental)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Identity)
+		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
+		assert.Equal(t, v1beta1.CheckpointStartupPolicyImmediate, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
+		assert.Equal(t, int32(2), *dcd.Spec.Replicas)
+		assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
+		assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
+	})
+
+	t.Run("wait for checkpoint gates replicas until ready", func(t *testing.T) {
+		dcd := &v1beta1.DynamoComponentDeployment{
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+			},
+		}
+		info := &checkpoint.CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			Ready:          false,
+			CheckpointName: "checkpoint-name",
+			StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		}
+
+		if err := applyDCDCheckpointStartupPolicy(dcd, info); err != nil {
+			t.Fatalf("applyDCDCheckpointStartupPolicy() error = %v", err)
+		}
+
+		require.NotNil(t, dcd.Spec.Experimental)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
+		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+		assert.Equal(t, v1beta1.CheckpointStartupPolicyWaitForCheckpoint, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
+		assert.Equal(t, int32(0), *dcd.Spec.Replicas)
+	})
 }
 
 // mockScaleClient implements scale.ScalesGetter for testing
@@ -1512,7 +2405,32 @@ func Test_reconcileGroveResources(t *testing.T) {
 		draEnabled             bool
 		wantReconcileResult    ReconcileResult
 		wantErrSubstring       string
+		interceptorFuncs       interceptor.Funcs
 	}{
+		{
+			// Covers the error-propagation fix: a non-NotFound Grove read error
+			// must surface as a reconcile error (so it retries and does not
+			// advance ObservedGeneration), not be folded into a not-ready result.
+			name: "transient PodClique API error is propagated",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			},
+			interceptorFuncs: interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*grovev1alpha1.PodClique); ok {
+						return fmt.Errorf("transient API error")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			},
+			wantErrSubstring: "transient API error",
+		},
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
@@ -1537,6 +2455,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    2,
 						ReadyReplicas:      2,
+						ScheduledReplicas:  2,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -1547,11 +2466,13 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: "All resources are ready",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        2,
-						UpdatedReplicas: 2,
-						ReadyReplicas:   ptr.To(int32(2)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						ReadyReplicas:     ptr.To(int32(2)),
+						ScheduledReplicas: ptr.To(int32(2)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 				},
 			},
@@ -1584,6 +2505,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -1599,28 +2521,33 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1, // Only 1 ready, but 2 desired
+						ScheduledReplicas:  2, // both scheduled; rollout in progress
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "some_resources_are_not_ready",
-				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
+				Reason:  "updating",
+				Message: Message("Resources not ready: test-dgd: decode: desired=2, updated=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          1,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 					"decode": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-decode"},
-						Replicas:        2,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-decode"},
+						Replicas:          2,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
+						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
 			},
@@ -1659,6 +2586,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -1674,6 +2602,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -1689,6 +2618,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -1696,6 +2627,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 				},
 			},
@@ -1731,6 +2664,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -1746,21 +2680,24 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    2,
 						AvailableReplicas:  1, // Only 1 available, but 2 desired
+						ScheduledReplicas:  2, // both scheduled; availability (not scheduling) is the shortfall
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "some_resources_are_not_ready",
-				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
+				Reason:  "pods_not_ready",
+				Message: Message("Resources not ready: test-dgd: aggregated: scheduled but available=1/2"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          1,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 					"aggregated": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -1768,6 +2705,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
+						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
 			},
@@ -1796,6 +2735,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
+				WithInterceptorFuncs(tt.interceptorFuncs).
 				Build()
 
 			recorder := record.NewFakeRecorder(100)
@@ -1803,7 +2743,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: tt.draEnabled},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: tt.draEnabled}},
 				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -1838,11 +2778,13 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Labels:           map[string]string{"graph-label": "kept"},
+			Annotations:      map[string]string{"graph-annotation": "kept"},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType: commonconsts.ComponentTypeFrontend,
 					Replicas:      ptr.To(int32(1)),
 					Labels:        map[string]string{"legacy-label": "kept"},
+					Annotations:   map[string]string{"legacy-annotation": "kept"},
 					Ingress: &v1alpha1.IngressSpec{
 						Enabled:                    true,
 						Host:                       "legacy-frontend",
@@ -1894,6 +2836,8 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, service)).NotTo(gomega.HaveOccurred())
 	g.Expect(service.Labels["graph-label"]).To(gomega.Equal("kept"))
 	g.Expect(service.Labels["legacy-label"]).To(gomega.Equal("kept"))
+	g.Expect(service.Annotations["graph-annotation"]).To(gomega.Equal("kept"))
+	g.Expect(service.Annotations["legacy-annotation"]).To(gomega.Equal("kept"))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesLegacyWorkerSelectors(t *testing.T) {
@@ -2002,10 +2946,78 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
 		ComponentName:   "VllmDecodeWorker",
 		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decode),
 		IsK8sDiscovery:  true,
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+}
+
+func TestPrepareGroveTopologyConstraintUpgrade(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modernConstraint := func(topologyName string, domain grovev1alpha1.TopologyDomain) *grovev1alpha1.TopologyConstraint {
+		return &grovev1alpha1.TopologyConstraint{
+			TopologyName: topologyName,
+			Pack: &grovev1alpha1.TopologyPackConstraint{
+				RequiredDomain: domain,
+			},
+		}
+	}
+	legacyConstraint := func(domain grovev1alpha1.TopologyDomain) *grovev1alpha1.TopologyConstraint {
+		return &grovev1alpha1.TopologyConstraint{PackDomain: domain}
+	}
+
+	modern := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: modernConstraint("grove-topology", "zone"),
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "explicit", TopologyConstraint: modernConstraint("grove-topology", "rack")},
+					{Name: "inherited", TopologyConstraint: modernConstraint("", "rack")},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "workers", TopologyConstraint: modernConstraint("grove-topology", "block")},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: legacyConstraint("zone"),
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "inherited", TopologyConstraint: legacyConstraint("rack")},
+					{Name: "explicit", TopologyConstraint: legacyConstraint("rack")},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "workers", TopologyConstraint: legacyConstraint("block")},
+				},
+			},
+		},
+	}
+
+	firstStep := modern.DeepCopy()
+	prepareGroveTopologyConstraintUpgrade(firstStep, existing)
+
+	g.Expect(firstStep.Spec.Template.TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "zone",
+	}))
+	g.Expect(firstStep.Spec.Template.Cliques[0].TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "rack",
+	}))
+	// This constraint can inherit the topology name repaired on its parent, so
+	// Grove can migrate its packing field in the same update.
+	g.Expect(firstStep.Spec.Template.Cliques[1].TopologyConstraint).To(gomega.Equal(modern.Spec.Template.Cliques[1].TopologyConstraint))
+	g.Expect(firstStep.Spec.Template.PodCliqueScalingGroupConfigs[0].TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "block",
+	}))
+
+	secondStep := modern.DeepCopy()
+	prepareGroveTopologyConstraintUpgrade(secondStep, firstStep)
+	g.Expect(secondStep).To(gomega.Equal(modern), "a repaired constraint should proceed to pack.required on the next reconciliation")
 }
 
 func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
@@ -2057,6 +3069,73 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
 	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
+}
+
+func TestPreserveGrovePodCliqueSetReplicasSkipsCheckpointGatedComponents(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	desired := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{
+						Name: "worker",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "worker",
+						},
+						Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
+					},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", Replicas: ptr.To(int32(0))},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode", Replicas: ptr.To(int32(7))},
+				},
+			},
+		},
+	}
+
+	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+		"decode": {
+			Enabled:       true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	})
+
+	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(0)))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(0)))
+
+	preserveGrovePodCliqueSetReplicas(desired, existing, map[string]*checkpoint.CheckpointInfo{
+		"worker": {
+			Enabled:       true,
+			Ready:         true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+		"decode": {
+			Enabled:       true,
+			Ready:         true,
+			StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	})
+
+	g.Expect(desired.Spec.Template.Cliques[0].Spec.Replicas).To(gomega.Equal(int32(5)))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.Equal(int32(7)))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {
@@ -2962,7 +4041,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				Recorder: recorder,
 				Config:   &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{
-					GroveEnabled: tt.groveEnabled,
+					Gate: features.Gates{Grove: tt.groveEnabled},
 				},
 			}
 
@@ -2985,6 +4064,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 	tests := []struct {
 		name                string
 		dgdSpec             v1alpha1.DynamoGraphDeploymentSpec
+		dgdAnnotations      map[string]string
 		existingDCDs        []client.Object
 		wantReconcileResult ReconcileResult
 	}{
@@ -3195,6 +4275,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -3227,7 +4308,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-e1f2a6fe",
+						Name:      "test-dgd-decode-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -3235,6 +4316,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -3246,7 +4328,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
@@ -3256,7 +4338,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill-e1f2a6fe",
+						Name:      "test-dgd-prefill-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -3264,6 +4346,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -3275,7 +4358,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -3299,7 +4382,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -3307,7 +4390,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -3341,6 +4424,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -3373,7 +4457,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-e1f2a6fe",
+						Name:      "test-dgd-decode-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -3381,6 +4465,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -3392,7 +4477,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -3402,7 +4487,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill-e1f2a6fe",
+						Name:      "test-dgd-prefill-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -3410,6 +4495,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -3421,7 +4507,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -3433,7 +4519,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-1b69c0d3: Component deployment not ready - Available condition not true",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
@@ -3445,7 +4531,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -3453,7 +4539,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -3481,6 +4567,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "cabcd5c9"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -3513,7 +4600,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-5f3d46ba",
+						Name:      "test-dgd-decode-cabcd5c9",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -3521,6 +4608,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "cabcd5c9"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -3532,7 +4620,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-cabcd5c9-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -3544,7 +4632,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-cabcd5c9: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
@@ -3556,7 +4644,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-cabcd5c9-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -3577,8 +4665,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 
 			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
+					Name:        "test-dgd",
+					Namespace:   "default",
+					Annotations: tt.dgdAnnotations,
 				},
 				Spec: tt.dgdSpec,
 			})
@@ -3601,7 +4690,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 
-			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)
+			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
@@ -3802,7 +4891,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 				Client:   fakeClient,
 				Recorder: recorder,
 				RuntimeConfig: &controller_common.RuntimeConfig{
-					GroveEnabled: tt.groveEnabled,
+					Gate: features.Gates{Grove: tt.groveEnabled},
 				},
 			}
 
@@ -3995,6 +5084,170 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
 				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
 			}
+		})
+	}
+}
+
+func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
+	base := func() *grovev1alpha1.PodClique {
+		return &grovev1alpha1.PodClique{
+			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
+			Status: grovev1alpha1.PodCliqueStatus{
+				Replicas:              3,
+				ReadyReplicas:         1,
+				UpdatedReplicas:       3,
+				ScheduledReplicas:     1,
+				ScheduleGatedReplicas: 0,
+				ObservedGeneration:    ptr.To(int64(1)),
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(pc *grovev1alpha1.PodClique)
+		want   bool
+	}{
+		{
+			name:   "no change is filtered",
+			mutate: func(pc *grovev1alpha1.PodClique) {},
+			want:   false,
+		},
+		{
+			// The regression this predicate change fixes: scheduling advances
+			// 1/3 -> 3/3 while ready/updated/replicas and the condition are flat.
+			name:   "scheduled-only advance is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ScheduledReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "ready change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ReadyReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "updated change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.UpdatedReplicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "replicas change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.Replicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "schedule-gated change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ScheduleGatedReplicas = 1 },
+			want:   true,
+		},
+		{
+			name:   "spec replicas change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Spec.Replicas = 5 },
+			want:   true,
+		},
+		{
+			name:   "observedGeneration change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ObservedGeneration = ptr.To(int64(2)) },
+			want:   true,
+		},
+		{
+			name: "scheduling condition change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.Conditions = []metav1.Condition{{
+					Type:               groveconstants.ConditionTypePodCliqueScheduled,
+					Status:             metav1.ConditionFalse,
+					Reason:             groveconstants.ConditionReasonInsufficientScheduledPods,
+					LastTransitionTime: metav1.Now(),
+				}}
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPC := base()
+			newPC := base()
+			tt.mutate(newPC)
+			assert.Equal(t, tt.want, podCliqueStatusChangeIsSignificant(oldPC, newPC))
+		})
+	}
+}
+
+func TestPCSGStatusChangeIsSignificant(t *testing.T) {
+	base := func() *grovev1alpha1.PodCliqueScalingGroup {
+		return &grovev1alpha1.PodCliqueScalingGroup{
+			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
+			Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas:           3,
+				AvailableReplicas:  1,
+				UpdatedReplicas:    3,
+				ScheduledReplicas:  1,
+				ObservedGeneration: ptr.To(int64(1)),
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(pcsg *grovev1alpha1.PodCliqueScalingGroup)
+		want   bool
+	}{
+		{
+			name:   "no change is filtered",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {},
+			want:   false,
+		},
+		{
+			name:   "scheduled-only advance is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ScheduledReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "available change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.AvailableReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "updated change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.UpdatedReplicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "replicas change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.Replicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "spec replicas change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Spec.Replicas = 5 },
+			want:   true,
+		},
+		{
+			name:   "observedGeneration change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ObservedGeneration = ptr.To(int64(2)) },
+			want:   true,
+		},
+		{
+			name: "MinAvailableBreached condition change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				pcsg.Status.Conditions = []metav1.Condition{{
+					Type:               groveconstants.ConditionTypeMinAvailableBreached,
+					Status:             metav1.ConditionFalse,
+					Reason:             groveconstants.ConditionReasonInsufficientAvailablePCSGReplicas,
+					LastTransitionTime: metav1.Now(),
+				}}
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPCSG := base()
+			newPCSG := base()
+			tt.mutate(newPCSG)
+			assert.Equal(t, tt.want, pcsgStatusChangeIsSignificant(oldPCSG, newPCSG))
 		})
 	}
 }

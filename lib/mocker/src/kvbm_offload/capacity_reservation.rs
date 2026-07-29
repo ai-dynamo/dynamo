@@ -71,11 +71,16 @@ impl CapacityReservations {
         if blocks == 0 {
             return;
         }
-        let _ =
+        let result =
             self.reserved_blocks
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
-                    Some(reserved.saturating_sub(blocks))
+                    reserved.checked_sub(blocks)
                 });
+        if let Err(reserved) = result {
+            panic!(
+                "capacity reservation underflow: tried to release {blocks} blocks with {reserved} reserved"
+            );
+        }
     }
 }
 
@@ -214,5 +219,12 @@ mod tests {
             panic!("CapacityReservationPolicy should evaluate synchronously");
         };
         assert!(futures::executor::block_on(result).expect("policy should succeed"));
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity reservation underflow")]
+    fn capacity_reservation_release_panics_on_underflow() {
+        let reservations = CapacityReservations::default();
+        reservations.release(1);
     }
 }

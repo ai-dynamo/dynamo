@@ -16,6 +16,37 @@ fn work_handler_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::WORK_HANDLER, suffix)
 }
 
+/// Requests shed because the worker was at capacity: all engine in-flight slots
+/// (`--engine-request-limit`) held AND the overflow queue
+/// (`--dynamo-request-queue-limit`) full.
+pub static REJECTION_REQUEST_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        format!("{}_request_total", name_prefix::REJECTION),
+        "Requests rejected because the worker is at capacity (engine in-flight limit and Dynamo queue both full)",
+    )
+    .expect("rejection_request_total counter")
+});
+
+/// Requests currently in the engine (worker-pool permits in use). Driven from
+/// `ActiveTaskGuard`, alongside `WORK_HANDLER_POOL_ACTIVE_TASKS`.
+pub static ENGINE_REQUEST_GAUGE: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::new(
+        "dynamo_engine_request",
+        "Current number of requests being handled by the engine (--engine-request-limit)",
+    )
+    .expect("dynamo_engine_request gauge")
+});
+
+/// Requests queued in Dynamo but not yet in the engine. Driven alongside
+/// `WORK_HANDLER_QUEUE_DEPTH` (inc on enqueue, dec on dispatcher recv).
+pub static REQUEST_QUEUE_GAUGE: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::new(
+        "dynamo_request_queue",
+        "Current number of requests queued in Dynamo not yet in the engine (--dynamo-request-queue-limit)",
+    )
+    .expect("dynamo_request_queue gauge")
+});
+
 /// Current items sitting in the bounded mpsc work queue awaiting dispatcher
 /// pickup. Incremented on successful `work_tx.send()` and decremented immediately
 /// after `work_rx.recv()`. Permit-acquire wait is NOT counted here — see
@@ -37,9 +68,9 @@ pub static WORK_HANDLER_QUEUE_CAPACITY: Lazy<IntGauge> = Lazy::new(|| {
     .expect("work_handler_queue_capacity gauge")
 });
 
-/// Total times `work_tx.send().await` returned an error, which for tokio's
-/// bounded mpsc only happens when the receiver (dispatcher task) is gone — the
-/// channel applies backpressure on "full" rather than returning an error.
+/// Times enqueuing work failed because the dispatcher channel was closed
+/// (receiver gone). A full queue is a rejection, counted by
+/// `REJECTION_REQUEST_TOTAL`, not here.
 pub static WORK_HANDLER_ENQUEUE_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     IntCounter::new(
         work_handler_metric_name(work_handler::ENQUEUE_REJECTED_TOTAL),
@@ -110,6 +141,18 @@ pub fn ensure_work_handler_pool_metrics_registered(registry: &MetricsRegistry) {
         registry.add_metric_or_warn(
             Box::new(WORK_HANDLER_POOL_CAPACITY.clone()),
             "work_handler_pool_capacity",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REJECTION_REQUEST_TOTAL.clone()),
+            "rejection_request_total",
+        );
+        registry.add_metric_or_warn(
+            Box::new(ENGINE_REQUEST_GAUGE.clone()),
+            "dynamo_engine_request",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_QUEUE_GAUGE.clone()),
+            "dynamo_request_queue",
         );
     });
 }

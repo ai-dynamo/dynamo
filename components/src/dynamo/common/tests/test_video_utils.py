@@ -41,7 +41,7 @@ class TestEncodeToVideoBytes:
         iio.get_writer = MagicMock(return_value=writer)
         return iio, writer
 
-    def test_mp4_selects_libx264_codec(self):
+    def test_mp4_selects_h264_nvenc_codec(self):
         from dynamo.common.utils.video_utils import encode_to_video_bytes
 
         iio = self._mock_iio_v3()
@@ -56,7 +56,7 @@ class TestEncodeToVideoBytes:
 
             iio.imwrite.assert_called_once()
             _, kwargs = iio.imwrite.call_args
-            assert kwargs.get("codec") == "libx264"
+            assert kwargs.get("codec") == "h264_nvenc"
             assert kwargs.get("fps") == 8
 
     def test_webm_selects_libvpx_vp9_codec(self):

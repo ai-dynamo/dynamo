@@ -564,9 +564,8 @@ mod tests {
         let worker = WorkerWithDpRank::new(7, 0);
         let block_hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
-        let side = KvIndexer::new_with_frequency(
+        let side = KvIndexer::new_with_pruning(
             CancellationToken::new(),
-            None,
             4,
             Arc::new(KvIndexerMetrics::new_unregistered()),
             Some(PruneConfig {

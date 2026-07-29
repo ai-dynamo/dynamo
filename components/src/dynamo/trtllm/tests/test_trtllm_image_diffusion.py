@@ -345,7 +345,7 @@ class ConcurrencyTracker:
         with self._lock:
             self._active_count -= 1
 
-        # Return a mock MediaOutput with a video tensor
+        # Return a mock VisualGenOutput with a video tensor
         return SimpleNamespace(
             video=None,
             image=torch.zeros((1, 64, 64, 3), dtype=torch.uint8),
@@ -827,24 +827,13 @@ class _StubVisualGenParams:
     """Minimal stand-in for tensorrt_llm.visual_gen.params.VisualGenParams.
 
     Accepts the same keyword arguments DiffusionEngine.generate() passes and
-    exposes them as attributes, so the engine's `_merge_defaults` mirror code
-    can read/set them. extra_params defaults to None (matches real behavior).
+    exposes them as attributes.
     """
 
     def __init__(self, **kwargs):
+        self.kwargs = kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
-        if not hasattr(self, "extra_params"):
-            self.extra_params = None
-
-
-class _StubDiffusionRequest:
-    """Minimal stand-in for tensorrt_llm._torch.visual_gen.executor.DiffusionRequest."""
-
-    def __init__(self, request_id, prompt, params):
-        self.request_id = request_id
-        self.prompt = prompt
-        self.params = params
 
 
 @pytest.fixture
@@ -852,67 +841,53 @@ def stub_trtllm_modules(monkeypatch):
     """Install minimal tensorrt_llm stubs so DiffusionEngine.generate() can run
     in unit tests without TRT-LLM installed.
 
-    DiffusionEngine.generate() does two lazy imports inside its body:
-        from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
-        from tensorrt_llm.visual_gen.params import VisualGenParams
-    The unit-test environment doesn't ship TRT-LLM (see this file's header
-    docstring), so we substitute minimal classes that match the surface the
-    engine uses.
+    The unit-test environment doesn't ship TRT-LLM, so we substitute the
+    public ``tensorrt_llm.visual_gen`` module surface the engine uses.
     """
-    params_mod = types.ModuleType("tensorrt_llm.visual_gen.params")
-    params_mod.VisualGenParams = _StubVisualGenParams
-
-    executor_mod = types.ModuleType("tensorrt_llm._torch.visual_gen.executor")
-    executor_mod.DiffusionRequest = _StubDiffusionRequest
+    visual_gen_mod = types.ModuleType("tensorrt_llm.visual_gen")
+    visual_gen_mod.VisualGenParams = _StubVisualGenParams
 
     parent_modules = [
         "tensorrt_llm",
-        "tensorrt_llm._torch",
-        "tensorrt_llm._torch.visual_gen",
-        "tensorrt_llm.visual_gen",
     ]
     for name in parent_modules:
         if name not in sys.modules:
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(
-        sys.modules, "tensorrt_llm._torch.visual_gen.executor", executor_mod
-    )
-    monkeypatch.setitem(sys.modules, "tensorrt_llm.visual_gen.params", params_mod)
+    monkeypatch.setitem(sys.modules, "tensorrt_llm.visual_gen", visual_gen_mod)
 
 
 class TestDiffusionEngineMismatchWarning:
-    """Tests for DiffusionEngine.generate()'s pipeline-output mismatch warning.
+    """Tests for DiffusionEngine.generate()'s image-count mismatch warning.
 
     The underlying TRT-LLM Flux2Pipeline (and likely FluxPipeline) silently
     returns batch=1 regardless of the requested num_images_per_prompt.
-    DiffusionEngine.generate() stays a thin pass-through over pipeline.infer()
-    but logs a WARNING when output.image.shape[0] != num_images_per_prompt so
-    operators can see the mismatch in production logs. The pipeline output is
-    not mutated, padded, or looped — the engine is observability, not workaround.
+    DiffusionEngine.generate() logs a WARNING when
+    output.image.shape[0] != num_images_per_prompt so operators can see the
+    mismatch in production logs. The VisualGen output is not mutated, padded,
+    or looped — the engine is observability, not workaround.
     """
 
-    def _make_pipeline(self, returned_batch: int):
-        """Mock pipeline that returns an image tensor with the given batch size."""
-        pipeline = MagicMock()
-        pipeline.default_generation_params = {}
-        pipeline.extra_param_specs = {}
-        pipeline.infer = MagicMock(
+    def _make_visual_gen(self, returned_batch: int):
+        """Mock VisualGen that returns an image tensor with the given batch size."""
+        visual_gen = MagicMock()
+        visual_gen.generate = MagicMock(
             return_value=SimpleNamespace(
                 video=None,
                 image=torch.zeros((returned_batch, 64, 64, 3), dtype=torch.uint8),
                 audio=None,
+                error=None,
             )
         )
-        return pipeline
+        return visual_gen
 
-    def _make_engine(self, pipeline, tmp_path):
-        """Construct a DiffusionEngine with the given mock pipeline already loaded."""
+    def _make_engine(self, visual_gen, tmp_path):
+        """Construct a DiffusionEngine with the given mock VisualGen already loaded."""
         from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 
         config = DiffusionConfig(media_output_fs_url=(tmp_path / "test_media").as_uri())
         engine = DiffusionEngine(config)
         engine._initialized = True
-        engine._pipeline = pipeline
+        engine._visual_gen = visual_gen
         return engine
 
     def _warning_records(self, caplog):
@@ -924,7 +899,7 @@ class TestDiffusionEngineMismatchWarning:
 
     def test_warns_on_count_mismatch(self, tmp_path, caplog, stub_trtllm_modules):
         """Pipeline returns 1 image when 2 were requested -> WARNING naming both values."""
-        engine = self._make_engine(self._make_pipeline(returned_batch=1), tmp_path)
+        engine = self._make_engine(self._make_visual_gen(returned_batch=1), tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
             engine.generate(prompt="a test prompt", num_images_per_prompt=2)
@@ -942,7 +917,7 @@ class TestDiffusionEngineMismatchWarning:
 
     def test_silent_when_count_matches(self, tmp_path, caplog, stub_trtllm_modules):
         """Pipeline returns 2 images when 2 were requested -> no WARNING."""
-        engine = self._make_engine(self._make_pipeline(returned_batch=2), tmp_path)
+        engine = self._make_engine(self._make_visual_gen(returned_batch=2), tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
             engine.generate(prompt="a test prompt", num_images_per_prompt=2)
@@ -952,3 +927,16 @@ class TestDiffusionEngineMismatchWarning:
             f"Expected no WARNING when pipeline returns the requested batch size, "
             f"got {[r.getMessage() for r in warnings]}"
         )
+
+    def test_image_generate_does_not_send_num_frames(
+        self, tmp_path, stub_trtllm_modules
+    ):
+        """Image requests must not set video-only VisualGen params."""
+        visual_gen = self._make_visual_gen(returned_batch=1)
+        engine = self._make_engine(visual_gen, tmp_path)
+
+        engine.generate(prompt="a test prompt", num_images_per_prompt=1)
+
+        _, kwargs = visual_gen.generate.call_args
+        assert "num_frames" not in kwargs["params"].kwargs
+        assert kwargs["params"].kwargs["num_images_per_prompt"] == 1

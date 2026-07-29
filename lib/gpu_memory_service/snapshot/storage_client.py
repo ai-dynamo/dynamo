@@ -12,72 +12,27 @@ import os
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from dataclasses import asdict
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from gpu_memory_service.snapshot.backends.sharded_ssd import (
-    SHARDED_SSD_ROOTS_CONFIG_KEY,
-)
-from gpu_memory_service.snapshot.disk import DeviceToFileWriter
-from gpu_memory_service.snapshot.disk import decode_metadata as _decode_metadata_impl
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.disk import (
-    load_manifest_and_metadata as _load_manifest_and_metadata_impl,
+    DeviceToFileWriter,
+    load_manifest_and_metadata,
+    plan_shard_layout,
 )
-from gpu_memory_service.snapshot.disk import (
-    plan_shard_layout as _plan_shard_layout_impl,
-)
-from gpu_memory_service.snapshot.model import CURRENT_VERSION as _CURRENT_VERSION
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
-from gpu_memory_service.snapshot.transfer import (
-    DEFAULT_TRANSFER_BACKEND as _DEFAULT_TRANSFER_BACKEND,
-)
 from gpu_memory_service.snapshot.transfer import (
     GMSSnapshotConfig,
     GMSTransferTarget,
+    TransferBackendKind,
     build_file_transfer_sources,
     create_transfer_backend,
 )
 
 logger = logging.getLogger(__name__)
-
-try:
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.common.locks import RequestedLockType
-
-    _GMS_CORE_IMPORTS_AVAILABLE = True
-except ImportError:
-    _GMS_CORE_IMPORTS_AVAILABLE = False
-    GMSClientMemoryManager = None  # type: ignore[assignment,misc]
-    RequestedLockType = None  # type: ignore[assignment]
-
-
-def _decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    # Re-exported for external callers (e.g. multi_ssd_bench.py).
-    return _decode_metadata_impl(raw_meta)
-
-
-def _allocation_record(alloc: Any) -> Dict[str, Any]:
-    if isinstance(alloc, dict):
-        return alloc
-    return {
-        "allocation_id": str(alloc.allocation_id),
-        "size": int(alloc.size),
-        "aligned_size": int(alloc.aligned_size),
-        "tag": str(alloc.tag),
-        "layout_slot": int(alloc.layout_slot),
-    }
-
-
-def _plan_shard_layout(
-    allocations_info: List[Dict[str, Any]],
-    shard_size_bytes: int,
-) -> List[Tuple[int, int]]:
-    return _plan_shard_layout_impl(allocations_info, shard_size_bytes)
-
-
-def _load_manifest_and_metadata(
-    input_dir: str,
-) -> Tuple[SaveManifest, Dict[str, Dict[str, Any]]]:
-    return _load_manifest_and_metadata_impl(input_dir)
 
 
 class GMSStorageClient:
@@ -91,8 +46,10 @@ class GMSStorageClient:
         *,
         timeout_ms: Optional[int] = None,
         shard_size_bytes: int = 4 * 1024**3,
-        transfer_backend: str = _DEFAULT_TRANSFER_BACKEND,
+        transfer_backend: str = TransferBackendKind.NIXL.value,
         sharded_ssd_roots: Optional[Sequence[str]] = None,
+        sharded_ssd_queues_per_root: int = 2,
+        posix_backend_params: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -106,6 +63,14 @@ class GMSStorageClient:
                 os.path.abspath(root) for root in sharded_ssd_roots if str(root).strip()
             ]
         )
+        self._sharded_ssd_queues_per_root = int(sharded_ssd_queues_per_root)
+        if self._sharded_ssd_queues_per_root <= 0:
+            raise ValueError("sharded_ssd_queues_per_root must be positive")
+        self._posix_backend_params = (
+            None
+            if posix_backend_params is None
+            else {str(key): str(value) for key, value in posix_backend_params.items()}
+        )
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -115,7 +80,10 @@ class GMSStorageClient:
 
     def save(self, max_workers: int = 4) -> SaveManifest:
         """Connect to GMS in RO mode and save all allocations + metadata to disk."""
-        self._validate_save_request()
+        if self.output_dir is None:
+            raise ValueError(
+                "output_dir must be set to call save(); pass it to GMSStorageClient()"
+            )
         output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
 
         mm = GMSClientMemoryManager(self._socket_path, device=self.device)
@@ -126,10 +94,12 @@ class GMSStorageClient:
                 raise RuntimeError(
                     "GMS server has no committed weights; nothing to dump"
                 )
-            allocations_info = [
-                _allocation_record(alloc) for alloc in mm.list_handles()
+            allocations_info = mm.list_handles()
+            va_list = [
+                mm.create_mapping(allocation_id=alloc.allocation_id)
+                for alloc in allocations_info
             ]
-            va_list = self._import_source_mappings(mm, allocations_info)
+            logger.info("Imported %d source allocation VAs", len(va_list))
             entries = self._write_shards(
                 shard_dirs,
                 allocations_info,
@@ -139,35 +109,34 @@ class GMSStorageClient:
             )
             metadata = self._save_metadata(mm)
         except Exception:
-            mm.close(best_effort=True)
+            mm.close()
             raise
 
-        self._write_json(os.path.join(output_dir, "gms_metadata.json"), metadata)
+        with open(
+            os.path.join(output_dir, "gms_metadata.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(metadata, handle, indent=2)
         manifest = SaveManifest(
-            version=_CURRENT_VERSION,
             timestamp=time.time(),
             layout_hash=layout_hash,
             device=self.device,
             allocations=entries,
         )
-        self._write_json(os.path.join(output_dir, "manifest.json"), manifest.to_dict())
+        with open(
+            os.path.join(output_dir, "manifest.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(asdict(manifest), handle, indent=2)
         logger.info("Wrote manifest with %d allocations", len(entries))
 
-        # Best-effort cleanup; CUDA context may be invalid after
-        # checkpoint (cuda-checkpoint tears down device state).
-        mm.close(best_effort=True)
+        mm.close()
 
         return manifest
 
-    def _validate_save_request(self) -> None:
-        if not _GMS_CORE_IMPORTS_AVAILABLE:
-            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
-        if self.output_dir is None:
-            raise ValueError(
-                "output_dir must be set to call save(); pass it to GMSStorageClient()"
-            )
-
-    def _prepare_output_dir(self) -> Tuple[str, List[str], bool]:
+    def _prepare_output_dir(self) -> Tuple[str, list[str], bool]:
         assert self.output_dir is not None
         os.makedirs(self.output_dir, exist_ok=True)
         shard_roots = self._sharded_ssd_roots or [self.output_dir]
@@ -179,36 +148,24 @@ class GMSStorageClient:
                     os.unlink(os.path.join(shards_dir, name))
         return self.output_dir, shard_dirs, bool(self._sharded_ssd_roots)
 
-    def _import_source_mappings(
-        self,
-        mm: Any,
-        allocations_info: List[Dict[str, Any]],
-    ) -> List[int]:
-        va_list = [
-            mm.create_mapping(allocation_id=alloc["allocation_id"])
-            for alloc in allocations_info
-        ]
-        logger.info("Phase A complete: imported %d allocation VAs", len(va_list))
-        return va_list
-
     def _write_shards(
         self,
-        shard_dirs: List[str],
-        allocations_info: List[Dict[str, Any]],
-        va_list: List[int],
+        shard_dirs: list[str],
+        allocations_info: Sequence[GetAllocationResponse],
+        va_list: Sequence[int],
         *,
         max_workers: int,
         use_absolute_shard_paths: bool = False,
-    ) -> List[AllocationEntry]:
-        layout = _plan_shard_layout(allocations_info, self._shard_size)
-        shard_groups: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+    ) -> list[AllocationEntry]:
+        layout = plan_shard_layout(allocations_info, self._shard_size)
+        shard_groups: Dict[int, list[Tuple[int, int]]] = defaultdict(list)
         for index, (shard_idx, byte_offset) in enumerate(layout):
             shard_groups[shard_idx].append((index, byte_offset))
 
-        entries: List[Optional[AllocationEntry]] = [None] * len(allocations_info)
+        entries: list[Optional[AllocationEntry]] = [None] * len(allocations_info)
 
         def _write_one_shard(
-            shard_idx: int, alloc_pairs: List[Tuple[int, int]]
+            shard_idx: int, alloc_pairs: list[Tuple[int, int]]
         ) -> None:
             filename = f"shard_{shard_idx:04d}.bin"
             shards_dir = shard_dirs[shard_idx % len(shard_dirs)]
@@ -218,13 +175,12 @@ class GMSStorageClient:
             with DeviceToFileWriter(abs_path, device=self.device) as writer:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
-                    aligned_size = int(alloc["aligned_size"])
-                    writer.write_device(va_list[index], aligned_size)
+                    writer.write_device(va_list[index], alloc.aligned_size)
                     entries[index] = AllocationEntry(
-                        allocation_id=alloc["allocation_id"],
-                        size=int(alloc["size"]),
-                        aligned_size=aligned_size,
-                        tag=str(alloc.get("tag", "default")),
+                        allocation_id=alloc.allocation_id,
+                        size=alloc.size,
+                        aligned_size=alloc.aligned_size,
+                        tag=alloc.tag,
                         tensor_file=tensor_file,
                         tensor_offset=byte_offset,
                     )
@@ -243,21 +199,18 @@ class GMSStorageClient:
                 f"BUG: {missing} allocation(s) missing after shard writers completed"
             )
         logger.info(
-            "Phase B complete: wrote %d shards across %d shard root(s)",
+            "Wrote %d snapshot shard(s) across %d shard root(s)",
             len(shard_groups),
             len(shard_dirs),
         )
         return [entry for entry in entries if entry is not None]
-
-    def _write_json(self, path: str, payload: Dict[str, Any]) -> None:
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
 
     def _allocate_restore_targets(
         self,
         mm: Any,
         manifest: SaveManifest,
     ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
+        t0 = time.monotonic()
         id_map: Dict[str, str] = {}
         targets: Dict[str, GMSTransferTarget] = {}
         for entry in manifest.allocations:
@@ -271,8 +224,9 @@ class GMSStorageClient:
                 byte_count=entry.aligned_size,
             )
         logger.info(
-            "Phase A complete: allocated %d GMS VAs",
+            "Allocated %d restore target GMS VAs in %.3fs",
             len(targets),
+            time.monotonic() - t0,
         )
         return id_map, targets
 
@@ -285,17 +239,16 @@ class GMSStorageClient:
         transfer_backend: Optional[str] = None,
     ) -> Dict[str, str]:
         backend_name = transfer_backend or self._transfer_backend
-        self._validate_load_request()
 
-        manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        sources = build_file_transfer_sources(input_dir, manifest.allocations)
         backend = create_transfer_backend(
             backend_name,
             GMSSnapshotConfig(
                 device=self.device,
                 max_workers=max_workers,
                 backend_config={
-                    SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
+                    "sharded_ssd_roots": self._sharded_ssd_roots,
+                    "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
+                    "posix_backend_params": self._posix_backend_params,
                 },
             ),
         )
@@ -303,6 +256,8 @@ class GMSStorageClient:
         id_map: Dict[str, str] = {}
 
         try:
+            manifest, saved_metadata = load_manifest_and_metadata(input_dir)
+            sources = build_file_transfer_sources(input_dir, manifest.allocations)
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
                 mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
@@ -312,8 +267,8 @@ class GMSStorageClient:
                 id_map, targets = self._allocate_restore_targets(mm, manifest)
                 session.restore(targets)
                 logger.info(
-                    "Phase B complete: %s restored %d allocations to GMS memory",
-                    backend.name,
+                    "%s restored %d allocation(s) to GMS memory",
+                    backend_name,
                     len(manifest.allocations),
                 )
 
@@ -331,10 +286,6 @@ class GMSStorageClient:
             len(saved_metadata),
         )
         return id_map
-
-    def _validate_load_request(self) -> None:
-        if not _GMS_CORE_IMPORTS_AVAILABLE:
-            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
 
     def _restore_metadata(
         self,
