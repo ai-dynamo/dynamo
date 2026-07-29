@@ -3,9 +3,9 @@
 
 use std::cmp::Ordering;
 
-use super::core::EngineEventBatch;
+use super::core::{EngineEventBatch, EngineProgress};
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::OutputSignal;
+use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,20 @@ pub(crate) enum SimulationWorkerStage {
     Aggregated,
     Prefill,
     Decode,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
+    pub stage: SimulationWorkerStage,
+    pub worker_idx: usize,
+    pub completed_requests: usize,
+    pub output_signals: Vec<OutputSignal>,
+    pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub engine_events: Events,
+    pub progress: EngineProgress,
+    pub fpm: Option<ForwardPassSnapshot>,
+    pub accept_length_output_tokens: usize,
+    pub accept_length_decode_forwards: usize,
 }
 
 #[derive(Debug)]
@@ -29,6 +43,9 @@ pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
         fpm: Option<Box<crate::common::protocols::ForwardPassSnapshot>>,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
+    },
+    WorkerCompletionBatch {
+        payloads: Box<[WorkerCompletionPayload<Events>]>,
     },
     TransferComplete {
         handoff_id: HandoffId,
