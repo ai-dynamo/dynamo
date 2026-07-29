@@ -27,6 +27,30 @@ on:
         description: 'Buildkit builder name'
         required: true
         type: string
+      # TEMPORARY SIZING — raised during the BuildKit pool scale-up.
+      #
+      # Builds run on a shared pool of persistent BuildKit worker pods. There is
+      # no registry layer cache on this path (see .github/actions/docker-remote-build:
+      # the buildx invocation has no --cache-from/--cache-to), so the ONLY layer
+      # cache is whatever is resident on the pod a build happens to land on.
+      # route_buildkit.sh assigns pods to cache groups by rendezvous-hashing the
+      # group key against the ACTIVE pod index set, so every change in pod count
+      # reshuffles which pods serve which group and their local caches restart
+      # cold. Measured effect during the transient: 48-77% of build wall-clock is
+      # spent stalled between BuildKit vertices, with sccache still reporting a
+      # ~100% hit rate — i.e. the builds are queueing, not compiling.
+      #
+      # These budgets absorb that transient. They are NOT steady-state sizing:
+      # steady-state successful builds are p50 ~11-17 min. Reduce them back —
+      # the PR pipeline first — once BOTH are true:
+      #   1. layer-cache hit rates recover after the pool settles at its new size, and
+      #   2. the general/TRT-LLM cache group is rebalanced. It currently carries
+      #      ~52% of build demand (dynamo-runtime, frontend, planner, operator,
+      #      snapshot AND every trtllm build) on a flat one-third of the pods,
+      #      because pool_size is ceil(active_pods/3) and flavor_to_group() maps
+      #      'trtllm|general|*' to the same group. Scaling the pool up raises
+      #      absolute headroom but does not change that share, so a load spike
+      #      will saturate this group again at the higher caps.
       build_timeout_minutes:
         description: 'Timeout in minutes for the build step'
         required: false
@@ -366,7 +390,7 @@ jobs:
           IMAGE_REPOSITORY: ai-dynamo/dynamo
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-        timeout-minutes: 30
+        timeout-minutes: 60  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
         run: |
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"

@@ -27,7 +27,7 @@ on:
       build_timeout_minutes:
         required: false
         type: number
-        default: 30
+        default: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
       no_cache:
         description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
         required: false
