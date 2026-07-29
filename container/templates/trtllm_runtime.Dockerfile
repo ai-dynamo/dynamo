@@ -20,13 +20,13 @@ COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dyna
 COPY --chmod=775 lib /workspace_src/lib
 COPY --chmod=664 LICENSE /workspace_src/
 
-# Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
-# because upstream is usrmerged and cross-stage COPY chokes on the symlink.
+# Transport stage for dynamo_base artifacts. nats-server goes to /usr/bin (not
+# /bin) because upstream is usrmerged and cross-stage COPY chokes on the symlink.
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /usr/bin/uv
-COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uv
+COPY --from=dynamo_base /opt/uv/bin/uvx /opt/uv/bin/uvx
 
 {% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
@@ -86,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
+ENV PATH=/opt/uv/bin:${PATH}
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
 # (otherwise pytest collects broken tutorial test files), and create the
@@ -101,7 +102,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh{% if target not in ("dev", "local-dev") %} \
     && python3 -m venv --system-site-packages /opt/dynamo/venv \
-    && ln -sf /usr/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
+    && ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
@@ -115,7 +116,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
@@ -205,7 +206,7 @@ COPY --from=runtime_full / /
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
@@ -214,7 +215,7 @@ ENV DYNAMO_HOME=/workspace \
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
