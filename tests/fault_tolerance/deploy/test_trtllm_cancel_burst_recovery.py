@@ -517,6 +517,7 @@ def _wait_for_all_visible_inflight_drain(
 
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.nightly
@@ -675,5 +676,5 @@ async def test_trtllm_cancel_burst_recovery(
             for label, pf in port_forwards.items():
                 try:
                     pf.stop()
-                except Exception as exc:
+                except OSError as exc:
                     logger.debug("%s port-forward cleanup failed: %s", label, exc)
