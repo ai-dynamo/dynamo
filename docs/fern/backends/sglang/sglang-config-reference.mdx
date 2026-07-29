@@ -121,7 +121,7 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
 ## Multimodal decoding
 
 <ParamField path="--frontend-decoding" type="boolean" default="false">
-  Decode multimodal images in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Incompatible with the deprecated EPD multimodal flags (`--multimodal-encode-worker` / `--multimodal-worker`); use it on the default aggregated decode worker instead.
+  Decode multimodal images in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Incompatible with the dedicated encoder topology (`--disaggregation-mode=encode` or `--dedicated-mm-encoder`); use it on a native worker instead.
 
   Environment variable: `DYN_SGL_FRONTEND_DECODING`
 </ParamField>
@@ -138,7 +138,7 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
 
 ## Deprecated
 
-These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+This flag is retained for backward compatibility and will be removed in a future release.
 
 <ParamField path="--use-sglang-tokenizer" type="boolean" default="false" deprecated={true}>
   Use SGLang's tokenizer for pre- and post-processing. **Deprecated** — use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support. See [SGLang Chat Processor](sglang-chat-processor.md).
@@ -146,24 +146,12 @@ These flags are retained for backward compatibility and will be removed in a fut
   Environment variable: `DYN_SGL_USE_TOKENIZER`
 </ParamField>
 
-<ParamField path="--multimodal-encode-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal --disaggregation-mode=encode`. The legacy flag is mapped to those arguments at startup.
-
-  Environment variable: `DYN_SGL_MULTIMODAL_ENCODE_WORKER`
-</ParamField>
-
-<ParamField path="--multimodal-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal --dedicated-mm-encoder` with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
-
-  Environment variable: `DYN_SGL_MULTIMODAL_WORKER`
-</ParamField>
-
 ## Validation rules
 
 - `--disagg-config` and `--disagg-config-key` must both be set, or both unset.
 - `--dedicated-mm-encoder` requires `--enable-multimodal`.
 - `--dedicated-mm-encoder` is valid only with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`; do not combine it with `--disaggregation-mode=encode`.
-- `--frontend-decoding` cannot be combined with the dedicated EPD multimodal topology (`--dedicated-mm-encoder`, `--multimodal-encode-worker`, or `--multimodal-worker`).
+- `--frontend-decoding` cannot be combined with the dedicated encoder topology (`--disaggregation-mode=encode` or `--dedicated-mm-encoder`).
 
 ## Related pages
 

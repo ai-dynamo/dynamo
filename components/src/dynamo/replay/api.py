@@ -119,8 +119,8 @@ def run_trace_replay(
         report_jsonl_path=report_jsonl_path,
         max_sim_time_ms=max_sim_time_ms,
         model_name=model_name,
-        # Goodput SLA (offline replay only): when set, the report carries
-        # goodput_* keys classifying SLA-satisfying requests.
+        # Goodput SLA: when set, the report carries goodput_* keys classifying
+        # SLA-satisfying requests.
         sla_ttft_ms=sla_ttft_ms,
         sla_itl_ms=sla_itl_ms,
         sla_e2e_ms=sla_e2e_ms,
@@ -221,7 +221,7 @@ def run_synthetic_trace_replay(
         num_prefix_groups=num_prefix_groups,
         inter_turn_delay_ms=inter_turn_delay_ms,
         model_name=model_name,
-        # Goodput SLA for synthetic-static (offline): emits goodput_* in the report.
+        # Goodput SLA: emits goodput_* in the report.
         sla_ttft_ms=sla_ttft_ms,
         sla_itl_ms=sla_itl_ms,
         sla_e2e_ms=sla_e2e_ms,

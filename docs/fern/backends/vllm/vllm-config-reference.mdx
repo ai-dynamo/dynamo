@@ -99,7 +99,7 @@ These flags control which role this worker plays in a disaggregated deployment. 
 </ParamField>
 
 <ParamField path="--enable-multimodal" type="boolean" default="false">
-  Enable multimodal processing. Must be set when using any multimodal worker role flag; without it, none of the multimodal components can be activated.
+  Enable multimodal processing. Combine it with `--disaggregation-mode=encode`, `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode` to select a disaggregated multimodal role. Use the default `agg` mode for aggregated multimodal serving.
 
   Environment variable: `DYN_VLLM_ENABLE_MULTIMODAL`
 </ParamField>
@@ -216,24 +216,6 @@ These flags are retained for backward compatibility and will be removed in a fut
   Environment variable: `DYN_VLLM_IS_DECODE_WORKER`
 </ParamField>
 
-<ParamField path="--multimodal-encode-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal --disaggregation-mode=encode`. The legacy flag is mapped to those arguments at startup.
-
-  Environment variable: `DYN_VLLM_MULTIMODAL_ENCODE_WORKER`
-</ParamField>
-
-<ParamField path="--multimodal-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal` with `--disaggregation-mode=pd` or `--disaggregation-mode=prefill`. The legacy flag is mapped to those arguments at startup.
-
-  Environment variable: `DYN_VLLM_MULTIMODAL_WORKER`
-</ParamField>
-
-<ParamField path="--multimodal-decode-worker" type="boolean" default="false" deprecated={true}>
-  **Deprecated** — use `--enable-multimodal --disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
-
-  Environment variable: `DYN_VLLM_MULTIMODAL_DECODE_WORKER`
-</ParamField>
-
 <ParamField path="--model-express-url" type="string" default="null" deprecated={true}>
   **Deprecated** — accepted for compatibility with older ModelExpress manifests only. The vLLM ModelExpress plugin reads its own configuration.
 
@@ -244,9 +226,7 @@ These flags are retained for backward compatibility and will be removed in a fut
 
 - `--disaggregation-mode` cannot be combined with `--is-prefill-worker` or `--is-decode-worker`.
 - `--is-prefill-worker` and `--is-decode-worker` cannot both be set at the same time.
-- Only one of `--multimodal-encode-worker`, `--multimodal-worker`, `--multimodal-decode-worker` may be set.
-- `--enable-multimodal` is required when any multimodal role flag is set.
-- `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with multimodal flags or `--benchmark-mode`.
+- `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
 
 ## Related pages
 
