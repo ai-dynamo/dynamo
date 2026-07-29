@@ -216,6 +216,25 @@ async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> 
         await start_profile(**body)
 
 
+def set_resolved_server_arg(server_args: Any, **fields: Any) -> None:
+    """Mutate SGLang ``ServerArgs`` fields after resolution.
+
+    Newer SGLang freezes ``ServerArgs`` once ``__post_init__`` resolves it: a
+    bare ``server_args.field = value`` raises ``AttributeError`` ("assigned
+    after resolution") and must go through ``ServerArgs.override()``, the single
+    sanctioned post-resolution mutation point. Older SGLang -- and the
+    ``SimpleNamespace`` diffusion stub -- have no ``override`` and accept direct
+    assignment. Remove the fallback when the minimum supported SGLang carries
+    ``override``.
+    """
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override("dynamo", **fields)
+    else:
+        for name, value in fields.items():
+            setattr(server_args, name, value)
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """Enable SGLang's disjoint streaming output.
 
@@ -223,7 +242,7 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
     field, so this is a no-op when the attribute is absent.
     """
     if hasattr(server_args, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
+        set_resolved_server_arg(server_args, incremental_streaming_output=True)
 
 
 __all__ = [
@@ -232,5 +251,6 @@ __all__ = [
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
     "require_reasoning_kwargs",
+    "set_resolved_server_arg",
     "start_profile_compat",
 ]

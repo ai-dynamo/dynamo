@@ -23,6 +23,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
+    set_resolved_server_arg,
     start_profile_compat,
 )
 from dynamo.sglang.args import (
@@ -426,6 +427,45 @@ async def test_compat_starts_profile_with_request_object(monkeypatch):
     )
 
     assert manager.received is request
+
+
+def test_set_resolved_server_arg_uses_sglang_override():
+    calls = []
+
+    class ResolvedServerArgs:
+        def override(self, source, **fields):
+            calls.append((source, fields))
+
+    server_args = ResolvedServerArgs()
+    set_resolved_server_arg(
+        server_args,
+        weight_version="v2",
+        enable_forward_pass_metrics=True,
+    )
+
+    assert calls == [
+        (
+            "dynamo",
+            {
+                "weight_version": "v2",
+                "enable_forward_pass_metrics": True,
+            },
+        )
+    ]
+    assert not hasattr(server_args, "weight_version")
+
+
+def test_set_resolved_server_arg_falls_back_for_legacy_objects():
+    server_args = SimpleNamespace()
+
+    set_resolved_server_arg(
+        server_args,
+        weight_version="v2",
+        enable_forward_pass_metrics=True,
+    )
+
+    assert server_args.weight_version == "v2"
+    assert server_args.enable_forward_pass_metrics is True
 
 
 @pytest.mark.asyncio
