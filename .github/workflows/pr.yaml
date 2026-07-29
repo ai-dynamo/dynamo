@@ -786,7 +786,6 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
-      arm_cpu_only_test_markers: 'pre_merge and planner and gpu_0 and not aic_full'
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: '2'
       run_gpu_tests: false
@@ -796,9 +795,9 @@ jobs:
     name: frontend
     needs: [changed-files, frontend-build]
     if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.aic == 'true'
-    # This is intentionally a lightweight import/payload/native-engine contract
-    # smoke on both architectures. Full AIC behavior tests remain amd64-only via
-    # the aic_full marker exclusion used by the shared pytest jobs.
+    # The frontend process hosts the KV router. Validate the experimental
+    # --router-prefill-load-model=aic dependency and native prefill predictor in
+    # the shipped frontend image on both architectures.
     strategy:
       fail-fast: false
       matrix:
@@ -810,9 +809,9 @@ jobs:
         HOME: /home/dynamo
         USER: dynamo
     steps:
-      - name: Validate AIC in the frontend image
+      - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
-        run: python tests/frontend/aic_image_smoke.py
+        run: python tests/frontend/router_aic_image_smoke.py
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -835,9 +834,6 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
-      # Marker deselection happens after collection/import. Ignore these paths
-      # so runtime jobs do not import Planner/Profiler or AIC-upper contracts.
-      cpu_test_ignore_paths: 'components/src/dynamo/planner components/src/dynamo/profiler'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 

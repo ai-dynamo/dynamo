@@ -92,7 +92,7 @@ def _project_requirements(path: Path, *, extra: str | None = None) -> dict[str, 
 
 def _requirements_file(path: Path) -> dict[str, str]:
     requirements = [
-        line.strip()
+        line.partition(" #")[0].strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
@@ -120,6 +120,9 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     root_requirements = _project_requirements(ROOT / "pyproject.toml", extra="mocker")
     aisimulate_requirements = _project_requirements(ROOT / "aisimulate/pyproject.toml")
     benchmark_requirements = _project_requirements(ROOT / "benchmarks/pyproject.toml")
+    frontend_requirements = _requirements_file(
+        ROOT / "container/deps/requirements.frontend.txt"
+    )
     planner_requirements = _requirements_file(
         ROOT / "container/deps/requirements.planner.txt"
     )
@@ -127,6 +130,7 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     assert set(root_requirements) == {"aiconfigurator-core"}
     assert set(aisimulate_requirements) == AIC_PACKAGES
     assert set(benchmark_requirements) == {"aiconfigurator-core"}
+    assert set(frontend_requirements) == {"aiconfigurator-core"}
     assert set(planner_requirements) == AIC_PACKAGES
 
     versions = {
@@ -154,6 +158,10 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
         ),
         "benchmarks core": _python_exact_version(
             benchmark_requirements["aiconfigurator-core"],
+            package="aiconfigurator-core",
+        ),
+        "frontend core": _python_exact_version(
+            frontend_requirements["aiconfigurator-core"],
             package="aiconfigurator-core",
         ),
         "planner upper": _python_exact_version(
