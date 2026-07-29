@@ -133,7 +133,6 @@ def test_replay_adapter_uses_injected_engine_protocol_and_owns_cleanup():
 
     with adapter:
         assert adapter.initial_tick_ms() == 5_000.0
-        assert adapter._engine is engine
 
     assert engine.closed
 

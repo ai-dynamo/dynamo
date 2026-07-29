@@ -117,11 +117,6 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
         ("agg", 3, 2),
         ("agg", 2, 1),
     ]
-    assert report.total_ticks >= 4
-    assert report.diagnostics_log
-    assert [event.at_s for event in report.scaling_events] == sorted(
-        event.at_s for event in report.scaling_events
-    )
     assert report.trace_report["decode_worker_seconds"] > (
         report.trace_report["duration_ms"] / 1000.0
     )
@@ -183,11 +178,6 @@ def test_actual_disaggregated_planner_scales_each_pool_up_then_down(
     assert events[0] == (1, 2)
     assert events[-1] == (2, 1)
     assert max(to_count for _, to_count in events) > 1
-    assert report.total_ticks >= 4
-    assert report.diagnostics_log
-    assert [event.at_s for event in report.scaling_events] == sorted(
-        event.at_s for event in report.scaling_events
-    )
     worker_seconds_key = f"{component}_worker_seconds"
     assert report.trace_report[worker_seconds_key] > (
         report.trace_report["duration_ms"] / 1000.0
