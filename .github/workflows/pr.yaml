@@ -679,8 +679,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'  # TEMP-11836: post_merge validation, revert to pre_merge before merge
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'  # TEMP-11836
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -701,7 +701,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'  # TEMP-11836
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -718,8 +718,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'  # TEMP-11836
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'  # TEMP-11836
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -740,7 +740,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'  # TEMP-11836
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -757,8 +757,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'  # TEMP-11836
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'  # TEMP-11836
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -779,7 +779,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'  # TEMP-11836
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""GPU (NVDEC) video decode for H.264/H.265 via PyNvVideoCodec.
+
+Dual-path companion to the VP8/VP9 in-tree FFmpeg decoders. Royalty-free codecs
+(VP8/VP9/AV1) stay on the existing CPU path; H.264/H.265 decode on the GPU
+through NVDEC, which links ``libnvcuvid`` at runtime and carries no bundled
+software codec. NVDEC does not use SMs beyond a small YUV->RGB conversion, so the
+inference-time impact is minimal.
+
+This module is backend-agnostic. Each backend's decode site (vLLM ``VideoLoader``,
+TRT-LLM ``multimodal_processor``, SGLang encode worker) routes on the probed codec:
+
+    codec = probe_video_codec(video_bytes)
+    if should_use_nvdec(codec):
+        frames, meta = decode_video_nvdec(video_bytes, num_frames)
+    else:
+        frames, meta = <existing decoder>
+
+The returned frames match the existing ``VideoLoader`` contract: a host numpy
+array of shape ``(T, H, W, 3)``, dtype ``uint8``, RGB, C-contiguous, plus a
+metadata dict ``{"fps", "frames_indices", "total_num_frames"}``.
+
+Gating: NVDEC is used when PyNvVideoCodec is importable and ``DYN_DISABLE_NVDEC``
+is not set. When it is unavailable (CPU image, unsupported profile) the caller
+falls back to the software carriers (``DYN_ENABLE_MEDIA_DECODERS``) or surfaces
+the actionable "unsupported codec" error.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+import tempfile
+
+import numpy as np
+
+from dynamo.common.utils.env import env_bool
+
+logger = logging.getLogger(__name__)
+
+DISABLE_ENV = "DYN_DISABLE_NVDEC"
+GPU_ID_ENV = "DYN_NVDEC_GPU_ID"
+
+# Codecs routed to NVDEC. VP8/VP9/AV1 stay on the existing royalty-free path.
+HW_ROUTED_CODECS = frozenset({"h264", "hevc"})
+
+# Container byte markers -> codec id. A video file carries exactly one video
+# codec, so the first match wins. Covers ISO-BMFF (mp4/mov) sample-entry fourccs
+# and Matroska/WebM CodecID strings. HEVC/AV1 checked before H.264 so a more
+# specific marker is not shadowed. This is a routing hint, not a full demux --
+# PyNvVideoCodec re-parses the stream authoritatively at decode time.
+_CODEC_MARKERS: tuple[tuple[bytes, str], ...] = (
+    (b"hev1", "hevc"),
+    (b"hvc1", "hevc"),
+    (b"V_MPEGH/ISO/HEVC", "hevc"),
+    (b"av01", "av1"),
+    (b"V_AV1", "av1"),
+    (b"avc1", "h264"),
+    (b"avc3", "h264"),
+    (b"V_MPEG4/ISO/AVC", "h264"),
+    (b"vp09", "vp9"),
+    (b"V_VP9", "vp9"),
+    (b"vp08", "vp8"),
+    (b"V_VP8", "vp8"),
+)
+
+
+def probe_video_codec(data: bytes) -> str | None:
+    """Best-effort codec identification from container bytes.
+
+    Returns a codec id (``"h264"``/``"hevc"``/``"vp9"``/``"vp8"``/``"av1"``) or
+    ``None`` when it can't tell. Scans the whole buffer because an mp4 ``moov``
+    (which holds the codec fourcc) may sit at the end of a non-faststart file;
+    multimodal clips are small and already in memory.
+    """
+    if not data:
+        return None
+    for marker, codec in _CODEC_MARKERS:
+        if marker in data:
+            return codec
+    return None
+
+
+def should_use_nvdec(codec: str | None) -> bool:
+    """True if `codec` is one we route to NVDEC and NVDEC is available."""
+    return codec in HW_ROUTED_CODECS and nvdec_available()
+
+
+@functools.lru_cache(maxsize=1)
+def nvdec_available() -> bool:
+    """True if NVDEC decode can run in this process.
+
+    Cached: PyNvVideoCodec is only installed in GPU images, and the import is the
+    reliable signal. ``DYN_DISABLE_NVDEC`` forces the software path. A GPU that is
+    absent at decode time still raises and is caught by the caller's fallback.
+    """
+    if env_bool(DISABLE_ENV):
+        return False
+    try:
+        import PyNvVideoCodec  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        # ImportError when the wheel is absent; RuntimeError when the wheel is
+        # present but the NVDEC/NVENC driver libs are not loadable -- the
+        # container must expose NVIDIA_DRIVER_CAPABILITIES=...,video for
+        # libnvcuvid/libnvidia-encode. Either way, fall back to software decode.
+        logger.debug("PyNvVideoCodec unavailable (%s); NVDEC decode disabled", exc)
+        return False
+    return True
+
+
+def _gpu_id() -> int:
+    raw = os.environ.get(GPU_ID_ENV, "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("invalid %s=%r; using GPU 0", GPU_ID_ENV, raw)
+        return 0
+
+
+def _frame_to_rgb_hwc(frame) -> np.ndarray:
+    """Copy a decoded (device) RGB frame to a host ``(H, W, 3)`` uint8 array.
+
+    A 2.x ``DecodedFrame`` (``output_color_type=RGB``) holds a CUDA buffer and
+    supports the DLPack protocol, so torch wraps it zero-copy on the GPU and
+    ``.cpu()`` copies to host. Validated on PyNvVideoCodec 2.1.1 for H.264/H.265.
+    """
+    import torch
+
+    try:
+        tensor = torch.from_dlpack(frame)
+    except Exception:  # noqa: BLE001 - fall back to the CUDA-array-interface path
+        tensor = torch.as_tensor(frame, device="cuda")
+    arr = tensor.cpu().numpy()
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.uint8)
+    return arr
+
+
+def _source_fps(decoder) -> float:
+    """Best-effort source fps for metadata; 0.0 if the API doesn't expose it."""
+    for attr in ("get_fps", "fps", "GetFPS"):
+        val = getattr(decoder, attr, None)
+        try:
+            val = val() if callable(val) else val
+            if val:
+                return float(val)
+        except Exception:  # noqa: BLE001 - metadata only, never fatal
+            continue
+    return 0.0
+
+
+def decode_video_nvdec(
+    data: bytes, num_frames: int, gpu_id: int | None = None
+) -> tuple[np.ndarray, dict]:
+    """Decode H.264/H.265 (or any NVDEC-supported codec) bytes to sampled frames.
+
+    Returns ``(frames, metadata)`` where ``frames`` is host numpy
+    ``(num_frames, H, W, 3)`` uint8 RGB C-contiguous, uniformly sampled across the
+    clip, and ``metadata`` has ``fps``/``frames_indices``/``total_num_frames`` --
+    the same contract as ``VideoLoader.load_video``. Raises on decode failure so
+    the caller can fall back.
+    """
+    import PyNvVideoCodec as nvc
+
+    if gpu_id is None:
+        gpu_id = _gpu_id()
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}")
+
+    # SimpleDecoder takes a file PATH (not bytes) and reads frames lazily, so the
+    # temp file must stay alive for the whole decode -- keep it inside the context.
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+        tmp.write(data)
+        tmp.flush()
+        decoder = nvc.SimpleDecoder(
+            tmp.name,
+            gpu_id=gpu_id,
+            output_color_type=nvc.OutputColorType.RGB,
+            use_device_memory=False,
+        )
+        total = len(decoder)
+        if total <= 0:
+            raise RuntimeError("NVDEC decode produced no frames")
+        n = min(num_frames, total)
+        indices = np.unique(np.linspace(0, total - 1, n).astype(int))
+        frames = [_frame_to_rgb_hwc(decoder[int(i)]) for i in indices]
+        fps = _source_fps(decoder)
+
+    stacked = np.ascontiguousarray(np.stack(frames)).astype(np.uint8, copy=False)
+    if stacked.ndim != 4 or stacked.shape[-1] != 3:
+        raise RuntimeError(
+            f"NVDEC frames have unexpected shape {stacked.shape}; expected (T,H,W,3)"
+        )
+    metadata = {
+        "fps": fps,
+        "frames_indices": indices.tolist(),
+        "total_num_frames": int(total),
+    }
+    return stacked, metadata

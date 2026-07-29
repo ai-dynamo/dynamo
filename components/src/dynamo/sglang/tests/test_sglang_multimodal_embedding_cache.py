@@ -308,3 +308,137 @@ async def test_video_cache_key_includes_sampling_config(
     assert cache_handler.encoder.encode_mock.await_count == 2
     assert cache_handler._embedding_cache.get(first_key) is not None
     assert cache_handler._embedding_cache.get(second_key) is not None
+
+
+# --- NVDEC video routing -------------------------------------------------------
+
+_HANDLER_MOD = "dynamo.sglang.request_handlers.multimodal.encode_worker_handler"
+
+
+@pytest.fixture
+def nvdec_handler(cache_handler) -> MultimodalEncodeWorkerHandler:
+    """cache_handler wired with the attributes the NVDEC path reads."""
+    cache_handler.num_video_frames = 32
+    cache_handler._url_policy = SimpleNamespace()
+    return cache_handler
+
+
+def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+
+    # Disabled explicitly.
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    assert nvdec_handler._nvdec_video_enabled() is False
+    monkeypatch.delenv("DYN_DISABLE_NVDEC", raising=False)
+
+    # No PyNvVideoCodec / CUDA.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: False)
+    assert nvdec_handler._nvdec_video_enabled() is False
+
+    # Available + a model type whose pre-decoded video path crashes upstream.
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen3_vl"
+    assert nvdec_handler._nvdec_video_enabled() is False
+
+    # Available + a safe model type.
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    assert nvdec_handler._nvdec_video_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_build_encode_inputs_non_video_passthrough(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Image modality never touches NVDEC; URLs pass through unchanged."""
+    called = False
+
+    async def _fail(_url):
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(nvdec_handler, "_maybe_nvdec_frames", _fail)
+    urls = ["https://x/a.jpg", "https://x/b.jpg"]
+    out = await nvdec_handler._build_encode_inputs(urls, "IMAGE")
+    assert out == urls
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_build_encode_inputs_swaps_only_nvdec_hits(
+    nvdec_handler, monkeypatch
+) -> None:
+    """H.264/H.265 URLs become frames; others keep their URL positionally."""
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    frames = object()  # stand-in for the decoded ndarray
+
+    async def _decode(url):
+        return frames if url.endswith("h264.mp4") else None
+
+    monkeypatch.setattr(nvdec_handler, "_maybe_nvdec_frames", _decode)
+    urls = ["https://x/h264.mp4", "https://x/vp9.webm"]
+    out = await nvdec_handler._build_encode_inputs(urls, "VIDEO")
+    assert out[0] is frames
+    assert out[1] == "https://x/vp9.webm"
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_frames_decodes_h264_only(nvdec_handler, monkeypatch) -> None:
+    frames = object()
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.decode_video_nvdec", lambda _b, _n: (frames, {})
+    )
+    assert await nvdec_handler._maybe_nvdec_frames("https://x/clip.mp4") is frames
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_frames_skips_non_hw_codec(
+    nvdec_handler, monkeypatch
+) -> None:
+    """VP9 (not HW-routed) returns None so the URL passthrough is used."""
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.webm"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
+    assert await nvdec_handler._maybe_nvdec_frames("https://x/clip.webm") is None
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_frames_rejects_non_http_scheme(
+    nvdec_handler, monkeypatch
+) -> None:
+    """file:// (or any non-http) is never NVDEC-decoded here."""
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="file:///etc/passwd"),
+    )
+    fetch = AsyncMock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    assert await nvdec_handler._maybe_nvdec_frames("file:///etc/passwd") is None
+    fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_nvdec_frames_falls_back_on_error(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Any failure (fetch/probe/decode) degrades to URL passthrough (None)."""
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    assert await nvdec_handler._maybe_nvdec_frames("https://x/clip.mp4") is None
