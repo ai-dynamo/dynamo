@@ -102,7 +102,8 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
 
 # Copy uv from base stage and wheels from wheel_builder (no runtime stage dependency)
-COPY --chown=dynamo: --from=dynamo_base /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+COPY --chown=dynamo: --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/

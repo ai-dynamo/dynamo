@@ -382,7 +382,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
+    ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv
 {% else %}
 # CPU/XPU: Runtime uses /opt/venv from upstream vLLM-CPU image. Reuse it directly
 # instead of creating /opt/dynamo/venv, since --system-site-packages points to UV Python
@@ -392,7 +392,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # Point /usr/local/bin/python to /opt/venv so scripts using 'python' work correctly
 # Use a wrapper script instead of symlink to ensure Python recognizes the venv context
 RUN chown -R dynamo:0 /opt/venv && \
-    ln -sf /usr/local/bin/uv /opt/venv/bin/uv && \
+    ln -sf /opt/uv/bin/uv /opt/venv/bin/uv && \
     rm -f /usr/local/bin/python && \
     echo '#!/bin/bash' > /usr/local/bin/python && \
     echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \

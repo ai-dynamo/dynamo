@@ -30,10 +30,14 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
     mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/ && \
     rm -rf sccache*
 
-# Install uv package manager. Targets /usr/local/bin so it takes precedence over
-# any uv a downstream base image bundles: every stage shares one uv cache mount,
-# and uv rejects cache entries written by a newer version.
-COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /usr/local/bin/
+# Install uv package manager. It lives in a directory of its own, prepended to
+# PATH, because some bases ship a uv earlier on PATH than /usr/local/bin
+# (/root/.local/bin, /opt/venv/bin). All stages share one uv cache mount and uv
+# rejects cache entries written by a newer version, so the pinned copy has to be
+# the one that runs. Holding only uv/uvx keeps the prepend from shadowing
+# anything else, notably a framework venv's python.
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 
 # Install NATS server
 ARG NATS_VERSION

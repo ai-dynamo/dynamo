@@ -204,10 +204,10 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
-# Install uv package manager. Targets /usr/local/bin so it takes precedence over
-# the copy manylinux bundles: every stage shares one uv cache mount, and uv
-# rejects cache entries written by a newer version.
-COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /usr/local/bin/
+# Install uv package manager, ahead of the copy manylinux bundles in
+# /usr/local/bin. See dynamo_base.Dockerfile for why it gets its own directory.
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 
 {% if device == "xpu" or device == "cpu" %}
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}

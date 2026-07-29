@@ -25,8 +25,8 @@ COPY --chmod=664 LICENSE /workspace_src/
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /usr/local/bin/uv /usr/local/bin/uv
-COPY --from=dynamo_base /usr/local/bin/uvx /usr/local/bin/uvx
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uv
+COPY --from=dynamo_base /opt/uv/bin/uvx /opt/uv/bin/uvx
 
 {% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
@@ -86,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
+ENV PATH=/opt/uv/bin:${PATH}
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
 # (otherwise pytest collects broken tutorial test files), and create the
@@ -101,7 +102,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh{% if target not in ("dev", "local-dev") %} \
     && python3 -m venv --system-site-packages /opt/dynamo/venv \
-    && ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
+    && ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
