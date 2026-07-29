@@ -843,6 +843,21 @@ def build_sampling_params(
     return sampling_params
 
 
+def _with_preserved_router_hint(
+    kv_transfer_params: Mapping[str, Any],
+    extra_args: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(kv_transfer_params)
+    existing = (
+        extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+        if isinstance(extra_args, Mapping)
+        else None
+    )
+    if isinstance(existing, Mapping) and _ROUTER_HINT_EXTRA_ARGS_KEY in existing:
+        merged[_ROUTER_HINT_EXTRA_ARGS_KEY] = existing[_ROUTER_HINT_EXTRA_ARGS_KEY]
+    return merged
+
+
 def build_sampling_params_openai(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -2093,7 +2108,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
-        enable_router_hint_support(runtime_config, self.config.engine_args)
         runtime_config.context_length = self.model_max_len
         runtime_config.kv_event_publishing_enabled = getattr(
             self.config, "use_kv_events", False
@@ -2115,6 +2129,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set = []
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
+        enable_router_hint_support(
+            runtime_config,
+            self.config.engine_args,
+            lora_worker_type,
+            self.dp_range,
+        )
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(
@@ -2434,8 +2454,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if not is_hot_swap:
                         try:
                             await self._register_lora_discovery(lora_name, lora_id)
-
-
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                             )
@@ -3567,8 +3585,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
         sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+            _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
+        ] = _with_preserved_router_hint(
+            kv_protocol.prefill_request_kv_transfer_params(),
+            sampling_params.extra_args,
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1

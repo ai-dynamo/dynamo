@@ -1181,6 +1181,32 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     }
 
 
+def test_prefill_kv_transfer_params_preserves_router_hint_only():
+    from dynamo.vllm.handlers import _with_preserved_router_hint
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    extra_args = {
+        "kv_transfer_params": {
+            "router_hint": router_hint,
+            "untrusted_connector_param": "dropped",
+        }
+    }
+
+    merged = _with_preserved_router_hint(
+        {"do_remote_decode": False, "transfer_id": "prefill-1"},
+        extra_args,
+    )
+
+    assert merged == {
+        "do_remote_decode": False,
+        "transfer_id": "prefill-1",
+        "router_hint": router_hint,
+    }
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 

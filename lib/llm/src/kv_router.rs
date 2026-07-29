@@ -622,12 +622,9 @@ where
                                     .is_some_and(|endpoint| !endpoint.is_empty())
                         })
                 })?;
-            let source_control_endpoint = configs
-                .get(&source.worker_id)
-                .and_then(|config| {
-                    config.router_hint_source_control_endpoint_for_dp_rank(source.dp_rank)
-                })?
-                .to_string();
+            let source_control_endpoint = configs.get(&source.worker_id).and_then(|config| {
+                config.router_hint_source_control_endpoint_for_dp_rank(source.dp_rank)
+            })?;
             (block_hashes, source_control_endpoint)
         };
 
@@ -1881,10 +1878,15 @@ mod tests {
             serde_json::Value::Bool(true),
         );
         if let Some(endpoint) = endpoint {
-            runtime_config.runtime_data.insert(
-                dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY
-                    .to_string(),
+            let mut endpoints = serde_json::Map::new();
+            endpoints.insert(
+                "0".to_string(),
                 serde_json::Value::String(endpoint.to_string()),
+            );
+            runtime_config.runtime_data.insert(
+                dynamo_kv_router::router_hint::ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+                    .to_string(),
+                serde_json::Value::Object(endpoints),
             );
         }
         runtime_config

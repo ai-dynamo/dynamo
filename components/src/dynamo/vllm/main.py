@@ -666,7 +666,10 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    enable_router_hint_support(runtime_config, config.engine_args)
+    dp_range = get_dp_range_for_worker(vllm_config)
+    enable_router_hint_support(
+        runtime_config, config.engine_args, worker_type, dp_range
+    )
     runtime_config.context_length = vllm_config.model_config.max_model_len
 
     # Get runtime configuration from vLLM engine
@@ -676,7 +679,6 @@ async def register_vllm_model(
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
     # Get data_parallel_size from vllm_config (defaults to 1)
-    dp_range = get_dp_range_for_worker(vllm_config)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates
         # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.

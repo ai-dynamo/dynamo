@@ -13,8 +13,7 @@ use validator::{Validate, ValidationError};
 use dynamo_kv_router::{
     protocols::KvTransferEnforcement,
     router_hint::{
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     },
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
@@ -331,25 +330,29 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         }
     }
 
-    fn router_hint_source_control_endpoint(&self) -> Option<&str> {
-        self.runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY)
-            .and_then(serde_json::Value::as_str)
-            .filter(|endpoint| !endpoint.is_empty())
-    }
-
-    fn router_hint_source_control_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
-        if let Some(endpoints) = self
+    fn router_hint_source_control_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<String> {
+        let dp_rank = dp_rank.to_string();
+        let endpoint = match self
             .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)
+            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
         {
-            return endpoints
-                .as_object()
-                .and_then(|endpoints| endpoints.get(&dp_rank.to_string()))
+            serde_json::Value::Object(endpoints) => endpoints
+                .get(&dp_rank)
                 .and_then(serde_json::Value::as_str)
-                .filter(|endpoint| !endpoint.is_empty());
-        }
-        self.router_hint_source_control_endpoint()
+                .map(str::to_string),
+            serde_json::Value::String(encoded) => {
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(encoded)
+                    .ok()
+                    .and_then(|endpoints| {
+                        endpoints
+                            .get(&dp_rank)
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+            }
+            _ => None,
+        }?;
+        (!endpoint.is_empty()).then_some(endpoint)
     }
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
@@ -803,16 +806,25 @@ mod tests {
             .unwrap();
         assert!(!config.supports_router_hints());
 
-        assert!(config.router_hint_source_control_endpoint().is_none());
+        assert!(
+            config
+                .router_hint_source_control_endpoint_for_dp_rank(0)
+                .is_none()
+        );
         config
             .set_engine_specific(
-                ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
-                "tcp://127.0.0.1:23280",
+                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                r#"{"0":"tcp://127.0.0.1:23280"}"#,
             )
             .unwrap();
         assert_eq!(
-            config.router_hint_source_control_endpoint(),
-            Some("tcp://127.0.0.1:23280")
+            config.router_hint_source_control_endpoint_for_dp_rank(0),
+            Some("tcp://127.0.0.1:23280".to_string())
+        );
+        assert!(
+            config
+                .router_hint_source_control_endpoint_for_dp_rank(1)
+                .is_none()
         );
     }
 
