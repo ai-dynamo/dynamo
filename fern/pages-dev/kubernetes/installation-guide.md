@@ -348,7 +348,7 @@ For manual installation, the full command reference, and the supported environme
 
 ## Next Steps
 
-Your cluster is ready. Follow the **[Deployment Overview](model-deployment-guide.md)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
+Your cluster is ready. Follow the **[Model Deployment guide](../getting-started/kubernetes-deployment.mdx)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
 

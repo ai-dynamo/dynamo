@@ -20,7 +20,7 @@ Before authoring a DGD, make sure you have:
 - A **HuggingFace token** for gated or rate-limited models (you create the Secret in step 1).
 - New to Dynamo on Kubernetes? Run one model end to end with the [Kubernetes Quickstart](quickstart.mdx) first, then come back here to author your own spec.
 
-For the concepts behind the CRDs and the operator, see the [Deployment Overview](model-deployment-guide.md) and the [API Reference](api-reference.md).
+For the concepts behind the CRDs and the operator, see the [Model Deployment](../getting-started/kubernetes-deployment.mdx) and the [API Reference](api-reference.md).
 
 ## How a DGD is structured
 
@@ -746,7 +746,7 @@ These are independent capabilities you opt into per workload. None are required 
   <Card title="Expose the Frontend" icon="regular globe" href="dgd-expose-frontend.md">
     Give the Frontend a stable external address with a Kubernetes Ingress, a LoadBalancer Service, or GAIE.
   </Card>
-  <Card title="Customize Health Probes" icon="regular heart-pulse" href="dgd-probes.md">
+  <Card title="Customize Health Probes" icon="regular heart-pulse" href="observability/metrics.mdx#check-and-customize-health-probes">
     Override the operator's default liveness, readiness, and startup probes when needed.
   </Card>
   <Card title="Observability and Metrics" icon="regular chart-line" href="observability/metrics.mdx">

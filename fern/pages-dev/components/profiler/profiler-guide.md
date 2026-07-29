@@ -173,6 +173,10 @@ The profiler enforces these rules at startup:
 
 ## Support Matrix
 
+Check the [AIConfigurator support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
+for current model, GPU, backend, generator, and performance-model coverage. The tables below summarize
+the Profiler's backend and parallelization support.
+
 | Backend | Dense Models | MoE Models |
 |---------|-------------|------------|
 | vLLM | ✅ | 🚧 |

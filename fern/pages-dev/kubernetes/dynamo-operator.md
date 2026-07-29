@@ -140,8 +140,9 @@ For the complete technical API reference for Dynamo Custom Resource Definitions,
 
 For user-focused workflows, see:
 
-- **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
-- **[DGDR Reference](./dgdr-reference.mdx)** for deploy-by-intent generated deployments
+- **[Model Deployment](../getting-started/kubernetes-deployment.mdx)** for creating a DGD from a recipe, template, or custom manifest
+- **[Auto Deployment](auto-deployment-overview.mdx)** for generating a DGD with DGDR, the Profiler, and optional Planner autoscaling
+- **[DGDR Reference](./dgdr-reference.mdx)** for DGDR fields, lifecycle, and generated deployments
 - **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 - **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 

@@ -34,6 +34,23 @@ For more background on the snapshot architecture and startup improvements, see
   `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
+## Backend and Topology Support
+
+| Backend | Single GPU | Multi-GPU, Single Node | Multinode |
+| :--- | :---: | :---: | :---: |
+| **vLLM** | Supported | Highly experimental | Work in progress |
+| **SGLang** | Supported | Work in progress | Work in progress |
+| **TensorRT-LLM** | Experimental | Work in progress | Work in progress |
+
+- TensorRT-LLM support is limited to the experimental single-GPU aggregated text-worker path.
+- Snapshot with GMS is not a supported production path and is disabled in normal deployments.
+  Experimental testing requires the internal GMS Snapshot feature gate and CUDA Driver r610 or
+  later.
+- Multi-GPU support has limited validation and currently uses legacy IPC only for peer-to-peer
+  communication.
+
+For the cross-feature backend overview, see [Compatibility](../reference/compatibility.mdx).
+
 ## Quick Start via `DynamoCheckpoint` CR
 
 1. Build a placeholder image
@@ -561,7 +578,7 @@ status:
 
 ## Limitations
 
-- **Backend support is limited**: checkpoint/restore currently supports vLLM workers only, and that support is still a limited preview.
+- **Backend and topology support is limited**: single-GPU support is the most mature path; see [Backend and Topology Support](#backend-and-topology-support) for the current scope.
 - **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
 - **GMS restore remains experimental**: GMS + Snapshot is currently disabled.

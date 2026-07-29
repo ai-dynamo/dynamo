@@ -96,7 +96,7 @@ spec:
 
 Reach for rapid when you are getting started, iterating on SLA targets, or running in CI. It supports all three backends and both aggregated and disaggregated topologies. The tradeoff is accuracy: results are estimated, and unusual configurations can carry error.
 
-If AIC does not support your model, GPU SKU, and backend combination, the profiler falls back to a naive memory-fit calculation and logs `AIC does not support this combo — falling back to naive config generation`. The fallback may not be optimal and skips the ranked tables above, so confirm your SKU is in the [AIC support matrix](model-deployment-guide.md#dgdr-detail-aic-support-matrix) first.
+If AIC does not support your model, GPU SKU, and backend combination, the profiler falls back to a naive memory-fit calculation and logs `AIC does not support this combo — falling back to naive config generation`. The fallback may not be optimal and skips the ranked tables above, so confirm your SKU is in the [Profiler support matrix](../components/profiler/profiler-guide.md#support-matrix) first.
 
 ### Thorough
 
@@ -211,7 +211,7 @@ The interpolation `.npz` files are the same data the Planner consumes for autosc
 |---|---|
 | Author a DGDR step by step | [Auto Deploy with DGDR](dgdr-guide.md) |
 | Full field table and lifecycle | [DGDR Reference](dgdr-reference.mdx) |
-| Copy-ready DGDR manifests | [DGDR Examples](dgdr-examples.md) |
+| Copy-ready DGDR manifests | [DGDR Templates](../templates/dgdr.mdx) |
 | Runtime autoscaling from profiling data | [Planner Guide](../components/planner/planner-guide.md) |
 | Simulate engines without GPUs | [Live Simulation with Mocker](../dynosim/mocker.mdx) |
 | Profiling algorithm internals and interpolation schema | [Profiler Guide](../components/profiler/profiler-guide.md) |

@@ -7,7 +7,7 @@ subtitle: Examples for custom load predictors and the VirtualConnector for non-K
 
 Planner-specific examples for advanced configuration and non-Kubernetes
 integrations. For DGDR manifests, see
-[DGDR Examples](../../kubernetes/dgdr-examples.md). For the full configuration
+[DGDR Templates](../../templates/dgdr.mdx). For the full configuration
 reference, see the [Planner Guide](planner-guide.md).
 
 ## Custom Load Predictors
@@ -88,5 +88,5 @@ example.
 ## Related Documentation
 
 - [Planner Guide](planner-guide.md) -- Planner configuration reference
-- [DGDR Examples](../../kubernetes/dgdr-examples.md) -- DGDR YAML examples
+- [DGDR Templates](../../templates/dgdr.mdx) -- DGDR YAML examples
 - [Profiler Guide](../profiler/profiler-guide.md) -- Profiling workflow

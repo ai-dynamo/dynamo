@@ -7,7 +7,7 @@ subtitle: Deploy a model by intent — describe the model, workload, and SLA tar
 
 A **DynamoGraphDeploymentRequest (DGDR)** is Dynamo's deploy-by-intent path. Instead of hand-authoring a [DynamoGraphDeployment (DGD)](dgd-guide.md) with explicit parallelism, replica counts, and resource limits, you describe *what* you want to run — model, backend, workload, and optional latency targets — and Dynamo's profiler analyzes your cluster's GPUs, selects a configuration, and generates the DGD that serves traffic.
 
-This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the full field table and lifecycle reference, see the [DGDR Reference](dgdr-reference.mdx); for ready-to-copy manifests, see [DGDR Examples](dgdr-examples.md).
+This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the component relationships and guidance on choosing DGDR, see the [Auto Deployment overview](auto-deployment-overview.mdx). For the full field table and lifecycle reference, see the [DGDR Reference](dgdr-reference.mdx); for ready-to-copy manifests, see [DGDR Templates](../templates/dgdr.mdx).
 
 <Note>
 In a release installation, when you omit `spec.image`, the DGDR webhook selects
@@ -17,19 +17,6 @@ operator build without a known version, set `spec.image` explicitly. Use the
 releases earlier than 1.1.0, use the matching `dynamo-frontend` image. The
 generated Planner and backend images retain that registry and tag.
 </Note>
-
-## When to use DGDR
-
-Reach for a DGDR when you want Dynamo to size the deployment for you. Use a direct [DGD](dgd-guide.md) or a [recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes) when you already know the topology.
-
-| | DGDR (this guide) | DGD ([DGD Guide](dgd-guide.md)) |
-|---|---|---|
-| **You provide** | Model, backend, workload, hardware, optional SLA targets | Full spec: services, parallelism, replicas, resource limits |
-| **What happens** | The profiler generates a DGD; with `autoApply: true` the operator deploys it | The operator reconciles your spec into pods directly |
-| **Best for** | New model/hardware combinations, SLA-driven sizing, generated YAML | Known-good configs, tuned recipes, full manual control |
-| **Outcome** | Reaches a terminal state after generation/deploy | Persists and serves traffic |
-
-For the full mental model — DGD, DCD, DGDR, recipes, and strategy selection — see the [Deployment Overview](model-deployment-guide.md).
 
 ## Prerequisites
 
@@ -141,7 +128,7 @@ spec:
   searchStrategy: rapid
 ```
 
-Use rapid when getting started, iterating quickly, or running in CI/CD — provided your GPU SKU is in the [AIC support matrix](model-deployment-guide.md#dgdr-detail-aic-support-matrix). If AIC does not support your model/hardware/backend combination, the profiler falls back to a naive memory-fit config that may not be optimal.
+Use rapid when getting started, iterating quickly, or running in CI/CD — provided your GPU SKU is in the [Profiler support matrix](../components/profiler/profiler-guide.md#support-matrix). If AIC does not support your model/hardware/backend combination, the profiler falls back to a naive memory-fit config that may not be optimal.
 
 **Thorough** enumerates candidate parallelization configs, deploys each on real GPUs, and benchmarks them with AIPerf. Takes 2–4 hours and produces measured rather than simulated data.
 
@@ -180,7 +167,7 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 - [Multinode Orchestration](multinode-installation.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
 - [Grove](grove.md) (default) and [LWS](lws.md) — the two orchestration backends.
 
-For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See [Backend Selection](model-deployment-guide.md#production-detail-backend-selection).
+For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../components/profiler/profiler-guide.md#support-matrix).
 
 <Note>
 DGDR does not expose `multinode.nodeCount`. `hardware.totalGpus` sets the
@@ -326,9 +313,30 @@ For the full lifecycle, conditions, and monitoring command reference, see [DGDR 
 |---|---|
 | **OOM during profiling or serving** | The model doesn't fit in GPU memory at the selected TP. Raise `hardware.totalGpus`; edge cases (long context, KV overhead) need more than the minimum. |
 | **Profiler ignores extra GPUs** | Auto-detection caps at 32. Set `hardware.totalGpus` explicitly. |
-| **Profiling job won't schedule** | GPU nodes are tainted. Add tolerations via `overrides.profilingJob` — see [Profiling Job Fails to Schedule](model-deployment-guide.md#profiling-job-fails-to-schedule). |
+| **Profiling job won't schedule** | GPU nodes are tainted. Add tolerations through `overrides.profilingJob`. |
 | **Spec edits rejected** | The DGDR spec is immutable once it enters `Profiling`. Delete and recreate the DGDR. |
 | **Multinode deployment errors out** | Grove or LWS is missing. See [Multinode Orchestration](multinode-installation.md). |
+
+### Profiling Job Fails to Schedule
+
+GPU nodes commonly use taints. Add the required tolerations to the generated profiling Job through
+`overrides.profilingJob`:
+
+```yaml
+spec:
+  overrides:
+    profilingJob:
+      template:
+        spec:
+          containers: []
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+```
+
+The empty `containers` list is a required placeholder. The operator merges the override into the
+container configuration it generates for the profiling Job.
 
 ## Clean up
 
@@ -394,7 +402,7 @@ For the complete merge, metadata, and validation rules, see
 
 | Goal | Guide |
 |---|---|
-| Copy-ready DGDR manifests | [DGDR Examples](dgdr-examples.md), [Profiler Examples](../components/profiler/profiler-examples.md) |
+| Copy-ready DGDR manifests | [DGDR Templates](../templates/dgdr.mdx), [Profiler Examples](../components/profiler/profiler-examples.md) |
 | Full field table and lifecycle | [DGDR Reference](dgdr-reference.mdx) |
 | Author the deployment by hand instead | [DGD Guide](dgd-guide.md) |
 | Profiling algorithms and modes | [Profiler Guide](../components/profiler/profiler-guide.md) |

@@ -14,19 +14,25 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, User Guide, Features, Recipes, Developer Guide, Reference,
-# Blog, and Community. Each content tab sets skip-slug: true so page URLs stay
-# independent of which tab contains them. The Recipes tab keeps its recipes/ URL prefix.
+# Tab-based navigation: Home, Kubernetes Guide, CLI Guide, Features, Recipes,
+# Developer Guide, Reference,
+# Blog, and Community. The Kubernetes Guide and CLI Guide tabs retain their
+# kubernetes/ and cli/ URL prefixes; Recipes retains its recipes/ prefix.
+# Other content tabs use skip-slug: true so their page URLs remain stable.
 
 tabs:
   home:
     display-name: Home
     icon: house
     skip-slug: true
-  user-guide:
-    display-name: User Guide
-    icon: book-open
-    skip-slug: true
+  kubernetes-guide:
+    display-name: Kubernetes Guide
+    icon: fa-brands fa-kubernetes
+    slug: kubernetes
+  cli-guide:
+    display-name: CLI Guide
+    icon: fa-solid fa-rectangle-terminal
+    slug: cli
   use-cases:
     display-name: Features
     icon: puzzle-piece
@@ -55,242 +61,230 @@ navigation:
     layout:
       - page: Welcome
         path: ../welcome.mdx
-  - tab: user-guide
-    variants:
-      # ==================== Kubernetes Deployment variant ====================
-      # The variant contributes an explicit `kubernetes` slug segment, mirroring
-      # the sibling Local (CLI) variant's `slug: cli`. This namespaces every K8s
-      # page (kubernetes/...), keeps it collision-free, and matches the
-      # kubernetes/ redirect destinations in docs.yml. All previously-live K8s
-      # URLs are preserved via the docs.yml redirect table (see B2).
-      - title: Kubernetes
-        slug: kubernetes
-        icon: fa-brands fa-kubernetes
-        layout:
-          # ==================== Getting Started ====================
-          - section: Getting Started
-            icon: rocket
+  # ==================== Kubernetes Guide ====================
+  - tab: kubernetes-guide
+    layout:
+      # ==================== Getting Started ====================
+      - section: Getting Started
+        icon: rocket
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-dev/getting-started/introduction.mdx
+          - page: Quickstart
+            path: ../pages-dev/kubernetes/quickstart.mdx
+          - link: Compatibility
+            href: /dynamo/dev/reference/compatibility
+            target: _blank
+            # - page: Local Quickstart
+            #   path: getting-started/quickstart.mdx
+      - section: Installation
+        icon: download
+        collapsed: open-by-default
+        contents:
+          - page: Install Dynamo
+            path: ../pages-dev/kubernetes/installation-guide.md
+          - page: Multinode Orchestration
+            path: ../pages-dev/kubernetes/multinode-installation.md
+          - page: Gateway API Routing
+            path: ../pages-dev/kubernetes/gateway-api-installation.mdx
+          - section: RDMA Setup
+            contents:
+              - page: Overview
+                path: ../pages-dev/kubernetes/cloud-providers/rdma-setup.md
+              - page: Infiniband on Azure
+                path: ../pages-dev/kubernetes/cloud-providers/aks/rdma-infiniband.mdx
+              - page: EFA on AWS
+                path: ../pages-dev/kubernetes/cloud-providers/eks/efa.mdx
+          - section: Model Storage
+            contents:
+              - page: Overview
+                path: ../pages-dev/kubernetes/cloud-providers/model-storage-overview.md
+              - page: AKS Storage
+                path: ../pages-dev/kubernetes/cloud-providers/aks/storage.md
+              - page: Azure Lustre CSI Driver
+                path: ../pages-dev/kubernetes/cloud-providers/aks/azure-lustre-csi.mdx
+              - page: EFS
+                path: ../pages-dev/kubernetes/cloud-providers/eks/efs.mdx
+          - page: Observability
+            path: ../pages-dev/observability/README.md
+          - section: Managed Kubernetes
+            contents:
+              - section: EKS
+                contents:
+                  - page: EKS Setup
+                    path: ../pages-dev/kubernetes/cloud-providers/eks/eks.mdx
+                  - page: ECS
+                    path: ../pages-dev/kubernetes/cloud-providers/ecs/ecs.mdx
+              - section: Azure
+                contents:
+                  - page: AKS Setup
+                    path: ../pages-dev/kubernetes/cloud-providers/aks/aks.mdx
+                  - page: Spot VMs
+                    slug: spot-vms
+                    path: ../pages-dev/kubernetes/cloud-providers/aks/spot-vms.mdx
+              - section: GCP
+                contents:
+                  - page: GKE Setup
+                    path: ../pages-dev/kubernetes/cloud-providers/gke/gke.mdx
+      # ==================== Usage ====================
+      - section: Model Deployment
+        icon: microchip
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-dev/getting-started/kubernetes-deployment.mdx
+          - page: Deploy with DGD
+            path: ../pages-dev/kubernetes/dgd-guide.md
+          - page: Expose the Frontend
+            path: ../pages-dev/kubernetes/dgd-expose-frontend.md
+          - page: Deploy on Intel GPUs
+            path: ../pages-dev/kubernetes/dgd-intel-xpu.mdx
+          - page: Disaggregated Serving
+            path: ../pages-dev/features/disaggregated-serving/README.md
+          - page: Sizing with AIConfigurator
+            slug: size-with-ai-configurator
+            path: ../pages-dev/kubernetes/dgd-aiconfigurator.mdx
+          - page: Multinode Deployments
+            path: ../pages-dev/kubernetes/deployment/multinode-deployment.md
+          - section: Model Loading
             collapsed: open-by-default
             contents:
-              - page: Introduction
-                path: ../pages-dev/getting-started/introduction.mdx
-              - page: Quickstart
-                path: ../pages-dev/kubernetes/quickstart.mdx
-              - link: Compatibility
-                href: /dynamo/dev/reference/compatibility
-                target: _blank
-                # - page: Local Quickstart
-                #   path: getting-started/quickstart.mdx
-          - section: Installation
-            icon: download
-            collapsed: open-by-default
-            contents:
-              - page: Install Dynamo
-                path: ../pages-dev/kubernetes/installation-guide.md
-              - page: Multinode Orchestration
-                path: ../pages-dev/kubernetes/multinode-installation.md
-              - page: Gateway API Routing
-                path: ../pages-dev/kubernetes/gateway-api-installation.mdx
-              - section: RDMA Setup
-                contents:
-                  - page: Overview
-                    path: ../pages-dev/kubernetes/cloud-providers/rdma-setup.md
-                  - page: Infiniband on Azure
-                    path: ../pages-dev/kubernetes/cloud-providers/aks/rdma-infiniband.mdx
-                  - page: EFA on AWS
-                    path: ../pages-dev/kubernetes/cloud-providers/eks/efa.mdx
-              - section: Model Storage
-                contents:
-                  - page: Overview
-                    path: ../pages-dev/kubernetes/cloud-providers/model-storage-overview.md
-                  - page: AKS Storage
-                    path: ../pages-dev/kubernetes/cloud-providers/aks/storage.md
-                  - page: Azure Lustre CSI Driver
-                    path: ../pages-dev/kubernetes/cloud-providers/aks/azure-lustre-csi.mdx
-                  - page: EFS
-                    path: ../pages-dev/kubernetes/cloud-providers/eks/efs.mdx
-              - page: Observability
-                path: ../pages-dev/observability/README.md
-              - section: Managed Kubernetes
-                contents:
-                  - section: EKS
-                    contents:
-                      - page: EKS Setup
-                        path: ../pages-dev/kubernetes/cloud-providers/eks/eks.mdx
-                      - page: ECS
-                        path: ../pages-dev/kubernetes/cloud-providers/ecs/ecs.mdx
-                  - section: Azure
-                    contents:
-                      - page: AKS Setup
-                        path: ../pages-dev/kubernetes/cloud-providers/aks/aks.mdx
-                      - page: Spot VMs
-                        slug: spot-vms
-                        path: ../pages-dev/kubernetes/cloud-providers/aks/spot-vms.mdx
-                  - section: GCP
-                    contents:
-                      - page: GKE Setup
-                        path: ../pages-dev/kubernetes/cloud-providers/gke/gke.mdx
-          # ==================== Usage ====================
-          - section: Model Deployment
-            icon: microchip
-            collapsed: open-by-default
-            contents:
-              - page: Model Deployment Guide
-                path: ../pages-dev/kubernetes/model-deployment-guide.md
-              - page: Introduction
-                path: ../pages-dev/getting-started/kubernetes-deployment.md
-              - page: Deploy with DGD
-                path: ../pages-dev/kubernetes/dgd-guide.md
-              - page: Expose the Frontend
-                path: ../pages-dev/kubernetes/dgd-expose-frontend.md
-              - page: Deploy on Intel GPUs
-                path: ../pages-dev/kubernetes/dgd-intel-xpu.mdx
-              - section: KV-Aware Routing
-                collapsed: open-by-default
-                contents:
-                  - page: Overview
-                    path: ../pages-dev/kubernetes/kv-aware-routing.md
-                  - page: Dynamo Frontend
-                    path: ../pages-dev/kubernetes/dgd-kv-routing.md
-                  - page: Gateway API
-                    path: ../pages-dev/kubernetes/inference-gateway.mdx
-              - page: Disaggregated Serving
-                path: ../pages-dev/features/disaggregated-serving/README.md
-              - page: Sizing with AIConfigurator
-                slug: size-with-ai-configurator
-                path: ../pages-dev/kubernetes/dgd-aiconfigurator.mdx
-              - page: Multinode Deployments
-                path: ../pages-dev/kubernetes/deployment/multinode-deployment.md
               - page: Model Caching
                 path: ../pages-dev/kubernetes/model-caching.mdx
-              - page: KV Cache Offloading
-                path: ../pages-dev/kubernetes/dgd-kv-offloading.mdx
-          - section: Fault Tolerance
-            icon: shield-halved
+              - page: Fast Model Loading
+                path: ../pages-dev/kubernetes/fast-model-loading.mdx
+          - page: KV Cache Offloading
+            path: ../pages-dev/kubernetes/dgd-kv-offloading.mdx
+      - section: KV-Aware Routing
+        icon: route
+        collapsed: true
+        contents:
+          - page: Overview
+            path: ../pages-dev/kubernetes/kv-aware-routing.md
+          - page: Dynamo Frontend
+            path: ../pages-dev/kubernetes/dgd-kv-routing.md
+          - page: Gateway API
+            path: ../pages-dev/kubernetes/inference-gateway.mdx
+      - section: Fault Tolerance
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Introduction
+            path: ../pages-dev/fault-tolerance/README.md
+          - page: Request Migration
+            path: ../pages-dev/fault-tolerance/request-migration.md
+          - page: Request Rejection
+            path: ../pages-dev/fault-tolerance/request-rejection.md
+          - page: Graceful Shutdown
+            path: ../pages-dev/fault-tolerance/graceful-shutdown.md
+      - section: Auto Deployment
+        icon: wand-magic-sparkles
+        collapsed: open-by-default
+        contents:
+          - page: Overview
+            path: ../pages-dev/kubernetes/auto-deployment-overview.mdx
+          - page: Auto Deploy with DGDR
+            slug: dgdr-walkthrough
+            path: ../pages-dev/kubernetes/dgdr-guide.md
+          - page: Dynamo Profiler
+            path: ../pages-dev/kubernetes/dgdr-profiler.md
+          - page: Dynamo Planner
+            path: ../pages-dev/kubernetes/dgdr-planner.mdx
+      - section: Operations
+        icon: screwdriver-wrench
+        collapsed: open-by-default
+        contents:
+          - page: Observability
+            path: ../pages-dev/kubernetes/observability/metrics.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-dev/tools/aiperf.mdx
+          - page: Performance Tuning
+            path: ../pages-dev/performance/tuning.md
+          - section: DynoSim
+            slug: dynosim
             contents:
-              - page: Introduction
-                path: ../pages-dev/fault-tolerance/README.md
-              - page: Request Migration
-                path: ../pages-dev/fault-tolerance/request-migration.md
-              - page: Request Rejection
-                path: ../pages-dev/fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: ../pages-dev/fault-tolerance/graceful-shutdown.md
-          - section: Auto Deployment
-            icon: wand-magic-sparkles
-            collapsed: open-by-default
+              - page: Overview
+                path: ../pages-dev/dynosim/README.md
+              - page: Simulation Model
+                slug: simulation-model
+                path: ../pages-dev/dynosim/modeling.md
+              - page: Mocker Live Simulation
+                slug: live-simulation-with-mocker
+                path: ../pages-dev/dynosim/mocker.mdx
+              - page: DynoSim Replay
+                slug: simulation-runs
+                path: ../pages-dev/dynosim/runs.mdx
+              - page: DynoSim Sweeps
+                slug: simulation-sweeps
+                path: ../pages-dev/dynosim/sweeps.mdx
+              - page: DynoSim Planner Replay
+                slug: planner-simulation-benchmarking
+                path: ../pages-dev/dynosim/planner-benchmarking.mdx
+  # ==================== CLI Guide ====================
+  - tab: cli-guide
+    layout:
+      - section: Getting Started
+        icon: rocket
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-dev/cli/introduction.mdx
+          - page: Quickstart
+            path: ../pages-dev/getting-started/quickstart.mdx
+          - link: Compatibility
+            href: /dynamo/dev/reference/compatibility
+            target: _blank
+      - section: Installation
+        icon: download
+        collapsed: open-by-default
+        contents:
+          - page: Install Dynamo
+            path: ../pages-dev/getting-started/local-installation.mdx
+          - page: Minikube Setup
+            path: ../pages-dev/kubernetes/deployment/minikube.mdx
+          - page: Observability
+            path: ../pages-dev/cli/observability.mdx
+      - section: Model Deployment
+        icon: microchip
+        collapsed: open-by-default
+        contents:
+          - page: Introduction
+            path: ../pages-dev/cli/overview.mdx
+          - page: KV-Aware Routing
+            path: ../pages-dev/cli/kv-routing.mdx
+          - page: Disaggregated Serving
+            path: ../pages-dev/cli/disaggregated-serving.mdx
+          - page: Sizing with AIConfigurator
+            path: ../pages-dev/cli/aiconfigurator.mdx
+          - page: Multi-Node Deployment
+            path: ../pages-dev/cli/multinode-deployment.mdx
+          - page: KV Cache Offloading
+            path: ../pages-dev/cli/kv-cache-offloading.mdx
+      - section: Operations
+        icon: screwdriver-wrench
+        collapsed: open-by-default
+        contents:
+          - page: Observability
+            path: ../pages-dev/observability/local-observability.mdx
+          - page: Benchmarking with AIPerf
+            path: ../pages-dev/cli/aiperf.mdx
+          - section: DynoSim
+            slug: dynosim
             contents:
-              - page: Auto Deploy with DGDR
-                slug: dgdr-walkthrough
-                path: ../pages-dev/kubernetes/dgdr-guide.md
-              - page: DGDR Examples
-                path: ../pages-dev/kubernetes/dgdr-examples.md
-              - page: Dynamo Profiler
-                path: ../pages-dev/kubernetes/dgdr-profiler.md
-              - page: Dynamo Planner
-                path: ../pages-dev/kubernetes/dgdr-planner.mdx
-          - section: Operations
-            icon: screwdriver-wrench
-            collapsed: open-by-default
-            contents:
-              - page: Observability
-                path: ../pages-dev/kubernetes/observability/metrics.mdx
-              - page: Benchmarking with AIPerf
-                path: ../pages-dev/tools/aiperf.mdx
-              - page: Health Probes
-                path: ../pages-dev/kubernetes/dgd-probes.md
-              - page: Cold Start and Resiliency
-                path: ../pages-dev/kubernetes/cold-start-and-resiliency.md
-              - page: Performance Tuning
-                path: ../pages-dev/performance/tuning.md
-              - section: DynoSim
-                slug: dynosim
-                contents:
-                  - page: Overview
-                    path: ../pages-dev/dynosim/README.md
-                  - page: Simulation Model
-                    slug: simulation-model
-                    path: ../pages-dev/dynosim/modeling.md
-                  - page: Mocker Live Simulation
-                    slug: live-simulation-with-mocker
-                    path: ../pages-dev/dynosim/mocker.mdx
-                  - page: DynoSim Replay
-                    slug: simulation-runs
-                    path: ../pages-dev/dynosim/runs.mdx
-                  - page: DynoSim Sweeps
-                    slug: simulation-sweeps
-                    path: ../pages-dev/dynosim/sweeps.mdx
-                  - page: DynoSim Planner Replay
-                    slug: planner-simulation-benchmarking
-                    path: ../pages-dev/dynosim/planner-benchmarking.mdx
-      # ==================== Local Deployment variant ====================
-      # slug: cli preserves the existing CLI page URLs (previously the
-      # CLI Guide tab used slug: cli).
-      - title: Local (CLI)
-        icon: rectangle-terminal
-        slug: cli
-        layout:
-          - section: Getting Started
-            icon: rocket
-            collapsed: open-by-default
-            contents:
-              - page: Introduction
-                path: ../pages-dev/cli/introduction.mdx
-              - page: Quickstart
-                path: ../pages-dev/getting-started/quickstart.mdx
-              - link: Compatibility
-                href: /dynamo/dev/reference/compatibility
-                target: _blank
-          - section: Installation
-            icon: download
-            collapsed: open-by-default
-            contents:
-              - page: Install Dynamo
-                path: ../pages-dev/getting-started/local-installation.mdx
-              - page: Minikube Setup
-                path: ../pages-dev/kubernetes/deployment/minikube.mdx
-              - page: Observability
-                path: ../pages-dev/cli/observability.mdx
-          - section: Model Deployment
-            icon: microchip
-            collapsed: open-by-default
-            contents:
-              - page: Introduction
-                path: ../pages-dev/cli/overview.mdx
-              - page: KV-Aware Routing
-                path: ../pages-dev/cli/kv-routing.mdx
-              - page: Disaggregated Serving
-                path: ../pages-dev/cli/disaggregated-serving.mdx
-              - page: Sizing with AIConfigurator
-                path: ../pages-dev/cli/aiconfigurator.mdx
-              - page: Multi-Node Deployment
-                path: ../pages-dev/cli/multinode-deployment.mdx
-              - page: KV Cache Offloading
-                path: ../pages-dev/cli/kv-cache-offloading.mdx
-          - section: Operations
-            icon: screwdriver-wrench
-            collapsed: open-by-default
-            contents:
-              - page: Observability
-                path: ../pages-dev/observability/local-observability.mdx
-              - page: Benchmarking with AIPerf
-                path: ../pages-dev/cli/aiperf.mdx
-              - section: DynoSim
-                slug: dynosim
-                contents:
-                  - page: Overview
-                    path: ../pages-dev/dynosim/README.md
-                  - page: Simulation Model
-                    slug: simulation-model
-                    path: ../pages-dev/dynosim/modeling.md
-                  - page: Mocker Live Simulation
-                    path: ../pages-dev/dynosim/mocker-local.mdx
-                  - page: DynoSim Replay
-                    slug: simulation-runs
-                    path: ../pages-dev/dynosim/runs.mdx
-                  - page: DynoSim Sweeps
-                    slug: simulation-sweeps
-                    path: ../pages-dev/dynosim/sweeps.mdx
+              - page: Overview
+                path: ../pages-dev/dynosim/README.md
+              - page: Simulation Model
+                slug: simulation-model
+                path: ../pages-dev/dynosim/modeling.md
+              - page: Mocker Live Simulation
+                path: ../pages-dev/dynosim/mocker-local.mdx
+              - page: DynoSim Replay
+                slug: simulation-runs
+                path: ../pages-dev/dynosim/runs.mdx
+              - page: DynoSim Sweeps
+                slug: simulation-sweeps
+                path: ../pages-dev/dynosim/sweeps.mdx
   - tab: use-cases
     layout:
       # ==================== Features ====================
@@ -446,12 +440,17 @@ navigation:
       - section: Kubernetes Templates
         icon: fa-brands fa-kubernetes
         contents:
-          - page: vLLM
-            path: ../pages-dev/templates/vllm.mdx
-          - page: TensorRT-LLM
-            path: ../pages-dev/templates/trtllm.mdx
-          - page: SGLang
-            path: ../pages-dev/templates/sglang.mdx
+          - section: DGD
+            collapsed: open-by-default
+            contents:
+              - page: vLLM
+                path: ../pages-dev/templates/vllm.mdx
+              - page: TensorRT-LLM
+                path: ../pages-dev/templates/trtllm.mdx
+              - page: SGLang
+                path: ../pages-dev/templates/sglang.mdx
+          - page: DGDR
+            path: ../pages-dev/templates/dgdr.mdx
       # ==================== CLI Templates ====================
       - section: CLI Templates
         icon: rectangle-terminal
@@ -527,6 +526,47 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-dev/design-docs/architecture.md
+          - section: Concepts
+            collapsed: open-by-default
+            contents:
+              - section: System Architecture
+                collapsed: true
+                contents:
+                  - page: Architecture Flow
+                    path: ../pages-dev/design-docs/dynamo-flow.md
+                  - page: Distributed Runtime
+                    path: ../pages-dev/design-docs/distributed-runtime.md
+                  - page: Disaggregated Serving
+                    path: ../pages-dev/design-docs/disagg-serving.md
+              - section: Communication Planes
+                collapsed: true
+                contents:
+                  - page: Discovery Plane
+                    path: ../pages-dev/design-docs/discovery-plane.md
+                  - page: Request Plane
+                    path: ../pages-dev/design-docs/request-plane.md
+                  - page: Event Plane
+                    path: ../pages-dev/design-docs/event-plane.md
+              - page: Observability Architecture
+                path: ../pages-dev/design-docs/observability.md
+              - section: Simulation
+                collapsed: true
+                contents:
+                  - page: DynoSim Architecture
+                    path: ../pages-dev/design-docs/dynosim-architecture.md
+              - section: Fault Tolerance
+                collapsed: true
+                contents:
+                  - page: Request Migration Architecture
+                    path: ../pages-dev/design-docs/request-migration.md
+                  - page: Request Cancellation Architecture
+                    path: ../pages-dev/design-docs/request-cancellation.md
+                  - page: Request Rejection Architecture
+                    path: ../pages-dev/design-docs/request-rejection.md
+                  - page: Graceful Shutdown Architecture
+                    path: ../pages-dev/design-docs/graceful-shutdown.md
+                  - page: Fault Tolerance Testing
+                    path: ../pages-dev/design-docs/fault-tolerance-testing.md
           - section: Modular Components
             collapsed: open-by-default
             contents:
@@ -700,6 +740,13 @@ navigation:
                       - page: Multimodal
                         slug: vllm-multimodal
                         path: ../pages-dev/features/multimodal/multimodal-vllm.md
+                      - page: vLLM-Omni Disaggregated Serving
+                        path: ../pages-dev/design-docs/vllm-omni-disaggregated.md
+                  - section: Mocker
+                    collapsed: true
+                    contents:
+                      - page: Mocker Engine Architecture
+                        path: ../pages-dev/design-docs/mocker-architecture.md
           - section: Kubernetes
             collapsed: true
             contents:
@@ -731,6 +778,8 @@ navigation:
                     path: ../pages-dev/kubernetes/shadow-engine-failover.md
                   - page: Disagg Communication
                     path: ../pages-dev/kubernetes/disagg-communication-guide.md
+                  - page: Gateway API Routing
+                    path: ../pages-dev/design-docs/gateway-api-routing.md
               - section: Multinode
                 collapsed: true
                 contents:
@@ -744,47 +793,6 @@ navigation:
                     path: ../pages-dev/kubernetes/topology-aware-kv-transfer.md
                   - page: LWS
                     path: ../pages-dev/kubernetes/lws.md
-          - section: Design Documents
-            collapsed: true
-            contents:
-              - page: Architecture Flow
-                path: ../pages-dev/design-docs/dynamo-flow.md
-              - page: Disaggregated Serving
-                path: ../pages-dev/design-docs/disagg-serving.md
-              - page: vLLM-Omni Disaggregated Serving
-                path: ../pages-dev/design-docs/vllm-omni-disaggregated.md
-              - page: Distributed Runtime
-                path: ../pages-dev/design-docs/distributed-runtime.md
-              - page: Gateway API Routing
-                path: ../pages-dev/design-docs/gateway-api-routing.md
-              - page: Observability Architecture
-                path: ../pages-dev/design-docs/observability.md
-              - page: DynoSim Architecture
-                path: ../pages-dev/design-docs/dynosim-architecture.md
-              - page: Mocker Engine Architecture
-                path: ../pages-dev/design-docs/mocker-architecture.md
-              - section: Communication Planes
-                collapsed: true
-                contents:
-                  - page: Discovery Plane
-                    path: ../pages-dev/design-docs/discovery-plane.md
-                  - page: Request Plane
-                    path: ../pages-dev/design-docs/request-plane.md
-                  - page: Event Plane
-                    path: ../pages-dev/design-docs/event-plane.md
-              - section: Fault Tolerance
-                collapsed: true
-                contents:
-                  - page: Request Migration Architecture
-                    path: ../pages-dev/design-docs/request-migration.md
-                  - page: Request Cancellation Architecture
-                    path: ../pages-dev/design-docs/request-cancellation.md
-                  - page: Request Rejection Architecture
-                    path: ../pages-dev/design-docs/request-rejection.md
-                  - page: Graceful Shutdown Architecture
-                    path: ../pages-dev/design-docs/graceful-shutdown.md
-                  - page: Fault Tolerance Testing
-                    path: ../pages-dev/design-docs/fault-tolerance-testing.md
       - section: Contributing
         icon: code-pull-request
         contents:
