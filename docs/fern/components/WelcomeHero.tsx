@@ -119,9 +119,9 @@ function CalendarAppIcon() {
 function CommunityRail() {
   const notifications = [
     {
-      app: "CNCF Slack",
-      message: "Join the #ai-dynamo channel",
-      href: "https://slack.cncf.io",
+      app: "AI Dynamo Slack",
+      message: "Join the Dynamo community",
+      href: "http://ai-dynamo.org/slack",
       icon: <SlackIcon />,
       tone: "slack",
     },
