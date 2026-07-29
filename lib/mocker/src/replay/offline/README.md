@@ -297,9 +297,11 @@ Online replay retains its existing summary dictionary.
 The replay CLI follows the same model. `--report-json` writes the complete
 four-field human-readable report without enabling request capture.
 `--per-request-jsonl` enables request capture and writes one request per line.
-An opt-in `canonical-replay` feature adds deterministic
-`--canonical-reports-jsonl` output with runtime-dependent throughput fields
-excluded by the versioned canonical schema.
+
+Canonical parity output is not part of the Python API or CLI. The Rust
+`offline_replay_bench` harness exposes `--canonical-reports-jsonl` when built
+with the opt-in `replay-bench` feature; its versioned schema excludes
+runtime-dependent throughput fields.
 
 ## Mental Model
 

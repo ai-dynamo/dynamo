@@ -2562,14 +2562,6 @@ class _OfflineReplayResult:
     def coverage(self) -> Dict[str, Any]: ...
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
-    def canonical_dict(
-        self, planner: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]: ...
-    def canonical_json_line(
-        self, planner: Optional[Dict[str, Any]] = None
-    ) -> bytes: ...
-
-def canonical_replay_available() -> bool: ...
 
 @overload
 def run_mocker_trace_replay(
@@ -2621,7 +2613,6 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
-    canonical_capture: bool = False,
     scaling_policy: Optional[Any] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
@@ -2695,7 +2686,6 @@ def run_mocker_synthetic_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
-    canonical_capture: bool = False,
     scaling_policy: Optional[Any] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.

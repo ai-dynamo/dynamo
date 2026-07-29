@@ -420,7 +420,6 @@ def _prepare_planner_replay(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
-    canonical_capture: bool = False,
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
@@ -438,10 +437,6 @@ def _prepare_planner_replay(
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
-    if canonical_capture:
-        planner_config.report_interval_hours = None
-        planner_config.report_write_gzip_log = False
-        planner_config.live_dashboard_port = 0
 
     if planner_config.mode == "agg":
         extra_engine_args = extra_engine_args or MockEngineArgs()
@@ -464,7 +459,6 @@ def _prepare_planner_replay(
         planner_config=planner_config,
         capabilities=capabilities,
         benchmark_granularity=benchmark_granularity,
-        canonical_capture=canonical_capture,
     )
     adapter.set_bootstrap_metadata({"status": "not_required"})
 
@@ -559,11 +553,6 @@ def _prepare_planner_replay(
                 KeyError,
                 FileNotFoundError,
             ) as e:
-                if canonical_capture:
-                    adapter.close()
-                    raise RuntimeError(
-                        "canonical planner replay requires successful AIC session creation"
-                    ) from e
                 sys.stderr.write(
                     f"Warning: AIC session creation failed ({e}); "
                     "throughput regression will not be bootstrapped.\n"
@@ -591,11 +580,6 @@ def _prepare_planner_replay(
                         aic_session, d_args, benchmark_granularity
                     )
                 except (RuntimeError, ValueError, KeyError, ArithmeticError) as e:
-                    if canonical_capture:
-                        adapter.close()
-                        raise RuntimeError(
-                            "canonical planner replay requires successful AIC benchmark generation"
-                        ) from e
                     sys.stderr.write(
                         f"Warning: AIC benchmark generation failed ({e}); "
                         "throughput regression will not be bootstrapped.\n"
@@ -617,11 +601,6 @@ def _prepare_planner_replay(
                     if agg_fpms:
                         adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
                     else:
-                        if canonical_capture:
-                            adapter.close()
-                            raise RuntimeError(
-                                "canonical planner replay requires non-empty aggregate AIC benchmark FPMs"
-                            )
                         bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             "Warning: AIC produced no agg benchmark FPMs\n"
@@ -632,11 +611,6 @@ def _prepare_planner_replay(
                             prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
                         )
                     else:
-                        if canonical_capture:
-                            adapter.close()
-                            raise RuntimeError(
-                                "canonical planner replay requires non-empty prefill and decode AIC benchmark FPMs"
-                            )
                         bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             f"Warning: AIC produced empty benchmark FPMs "
@@ -654,7 +628,6 @@ def _planner_replay_adapter(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
-    canonical_capture: bool = False,
 ):
     """Own planner preparation, replay execution, and cleanup as one scope."""
     adapter = _prepare_planner_replay(
@@ -663,7 +636,6 @@ def _planner_replay_adapter(
         decode_engine_args=decode_engine_args,
         planner_config_arg=planner_config_arg,
         benchmark_granularity=benchmark_granularity,
-        canonical_capture=canonical_capture,
     )
     with adapter:
         yield adapter
@@ -681,14 +653,6 @@ def _write_per_request_jsonl(
         for record in records:
             output.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
             output.write("\n")
-
-
-def _write_canonical_report_jsonl(
-    output_path: str | Path, canonical_json_line: bytes
-) -> None:
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_json_line)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -836,14 +800,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
     )
     parser.add_argument(
-        "--canonical-reports-jsonl",
-        default=None,
-        help=(
-            "optional path to emit the deterministic canonical offline report. "
-            "Requires a binding built with --features canonical-replay."
-        ),
-    )
-    parser.add_argument(
         "--planner-config",
         help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg/disagg)",
     )
@@ -944,8 +900,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--per-request-jsonl with online replay currently only supports trace files"
         )
-    if args.canonical_reports_jsonl is not None and args.replay_mode != "offline":
-        parser.error("--canonical-reports-jsonl only supports --replay-mode=offline")
     if args.max_sim_time_seconds is not None:
         if args.planner_config is not None:
             parser.error(
@@ -973,10 +927,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if using_trace_file and args.trace_format != "mooncake":
             parser.error("--planner-config only supports --trace-format=mooncake")
 
-    capture_per_request = args.replay_mode == "offline" and (
-        args.per_request_jsonl is not None or args.canonical_reports_jsonl is not None
+    capture_per_request = (
+        args.replay_mode == "offline" and args.per_request_jsonl is not None
     )
-    canonical_capture = args.canonical_reports_jsonl is not None
     replay_options = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -997,7 +950,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "planner_config": args.planner_config,
         "benchmark_granularity": args.benchmark_granularity,
         "capture_per_request": capture_per_request,
-        "canonical_capture": canonical_capture,
     }
 
     if using_trace_file:
@@ -1041,10 +993,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         report_payload = report.to_dict()
         if args.per_request_jsonl is not None:
             _write_per_request_jsonl(args.per_request_jsonl, report.per_request)
-        if args.canonical_reports_jsonl is not None:
-            _write_canonical_report_jsonl(
-                args.canonical_reports_jsonl, report._canonical_json_line()
-            )
 
     report_path = write_report_json(report_payload, args.report_json)
     sys.stdout.write(format_report_table(summary))

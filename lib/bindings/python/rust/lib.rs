@@ -179,10 +179,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
-        llm::replay::canonical_replay_available,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
         llm::replay::run_mocker_synthetic_trace_replay,
         m
     )?)?;

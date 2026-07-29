@@ -321,10 +321,10 @@ pub(crate) fn lifecycle_capture_active() -> bool {
 
 #[inline]
 pub(crate) fn canonical_evidence_capture_active() -> bool {
-    #[cfg(not(feature = "canonical-replay"))]
+    #[cfg(not(feature = "replay-bench"))]
     return false;
 
-    #[cfg(feature = "canonical-replay")]
+    #[cfg(feature = "replay-bench")]
     ACTIVE_EVIDENCE.with(|active| {
         active
             .borrow()
@@ -735,7 +735,7 @@ mod tests {
 
     use crate::replay::ReplayCaptureOptions;
 
-    #[cfg(feature = "canonical-replay")]
+    #[cfg(feature = "replay-bench")]
     use super::{
         EnginePressureState, PressureKind, record_pressure, record_pressure_readmission,
         with_engine_evidence_context,
@@ -854,7 +854,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "canonical-replay")]
+    #[cfg(feature = "replay-bench")]
     #[test]
     fn pressure_readmission_updates_latest_outstanding_record() {
         let uuid = Uuid::from_u128(42);

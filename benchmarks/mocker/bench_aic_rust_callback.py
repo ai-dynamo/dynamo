@@ -113,7 +113,6 @@ def _run_one(isl, osl, request_count, concurrency, num_workers):
         replay_mode="offline",
         replay_concurrency=concurrency,
         capture_per_request=False,
-        canonical_capture=False,
     )
     elapsed = time.perf_counter() - start
     return report.summary, elapsed

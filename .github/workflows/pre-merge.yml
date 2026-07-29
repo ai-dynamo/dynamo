@@ -149,12 +149,6 @@ jobs:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         lfs: true
-    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-      if: matrix.dir == 'lib/bindings/python'
-      with:
-        python-version: '3.12'
-    - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6
-      if: matrix.dir == 'lib/bindings/python'
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -200,32 +194,7 @@ jobs:
     - name: Run canonical replay digest tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-mocker --features canonical-replay --lib canonical_digest_tests
-    - name: Build canonical replay Python binding
-      if: matrix.dir == 'lib/bindings/python'
-      env:
-        VIRTUAL_ENV: ${{ github.workspace }}/.canonical-replay-venv
-      working-directory: lib/bindings/python
-      run: |
-        uv venv ../../../.canonical-replay-venv --python 3.12
-        uv pip install --python ../../../.canonical-replay-venv/bin/python \
-          'maturin[patchelf]>=1.9,<2'
-        ../../../.canonical-replay-venv/bin/maturin develop --uv \
-          --features canonical-replay
-        uv pip install --python ../../../.canonical-replay-venv/bin/python \
-          -e ../../../ filterpy 'numpy<2' pandas plotly pmdarima \
-          prometheus-api-client prophet pydantic pytest pytest-asyncio \
-          pytest-benchmark pytest-timeout pyyaml scikit-learn
-    - name: Run canonical replay Python integration tests
-      if: matrix.dir == 'lib/bindings/python'
-      env:
-        PYTHONPATH: components/src
-      run: |
-        .canonical-replay-venv/bin/python -m pytest -q \
-          --confcutdir=lib/bindings/python/tests/replay \
-          lib/bindings/python/tests/replay/test_replay_smoke.py::test_canonical_offline_replay_is_byte_stable_and_preserves_random_runs \
-          lib/bindings/python/tests/replay/test_replay_cli.py::test_replay_cli_canonical_jsonl_uses_native_record_and_enables_capture \
-          lib/bindings/python/tests/replay/test_replay_planner_scaling.py::test_canonical_planner_jsonl_is_stable_across_process_hash_seeds
+      run: cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

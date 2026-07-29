@@ -199,7 +199,6 @@ class ReplayEvaluator:
             planner_config=None if plan.is_static else plan.planner_config,
             benchmark_granularity=self.benchmark_granularity,
             capture_per_request=False,
-            canonical_capture=False,
             **self._goodput_sla_kwargs(),
         )
         if plan.deployment_mode == "agg":
@@ -243,7 +242,6 @@ class ReplayEvaluator:
             planner_config=None if plan.is_static else plan.planner_config,
             benchmark_granularity=self.benchmark_granularity,
             capture_per_request=False,
-            canonical_capture=False,
             **self._goodput_sla_kwargs(),
             **self._synthetic_kwargs(concurrency_override),
         )

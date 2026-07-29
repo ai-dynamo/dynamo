@@ -16,9 +16,7 @@ readme = "README.md"
 default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
-deterministic-selection = []
-# Compatibility alias for existing benchmark invocations.
-bench = ["deterministic-selection"]
+bench = []
 profile = []
 standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:serde_json", "dep:zmq"]

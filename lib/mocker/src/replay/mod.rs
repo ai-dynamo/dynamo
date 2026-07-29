@@ -82,7 +82,7 @@ pub fn with_replay_determinism<T>(determinism: ReplayDeterminism, run: impl FnOn
     run()
 }
 
-#[cfg(feature = "canonical-replay")]
+#[cfg(feature = "replay-bench")]
 pub(crate) fn canonical_replay_active() -> bool {
     REPLAY_DETERMINISM.with(|current| current.get() == ReplayDeterminism::CanonicalV1)
 }

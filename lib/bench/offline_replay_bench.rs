@@ -257,7 +257,7 @@ struct Args {
     timings_jsonl: Option<PathBuf>,
 
     /// Emit one canonical full replay report per iteration for parity checks.
-    /// Requires building with the `canonical-replay` Cargo feature.
+    /// Requires building with the `replay-bench` Cargo feature.
     #[arg(long)]
     canonical_reports_jsonl: Option<PathBuf>,
 
@@ -399,22 +399,28 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     anyhow::ensure!(
-        args.canonical_reports_jsonl.is_none() || cfg!(feature = "canonical-replay"),
-        "--canonical-reports-jsonl requires building with --features canonical-replay"
+        args.canonical_reports_jsonl.is_none() || cfg!(feature = "replay-bench"),
+        "--canonical-reports-jsonl requires building with --features replay-bench"
     );
     let engine_args = build_engine_args(&args)?;
-    let trace_bytes = std::fs::read(&args.trace_file)
-        .with_context(|| format!("failed to read trace input at {:?}", args.trace_file))?;
-    let mut workload_hasher = blake3::Hasher::new();
-    workload_hasher.update(b"dynamo.offline-replay.trace.v1");
-    workload_hasher.update(&(trace_bytes.len() as u64).to_be_bytes());
-    workload_hasher.update(&trace_bytes);
-    let workload_digest = workload_hasher.finalize().to_hex().to_string();
+    let canonical_workload = if args.canonical_reports_jsonl.is_some() {
+        let trace_bytes = std::fs::read(&args.trace_file)
+            .with_context(|| format!("failed to read trace input at {:?}", args.trace_file))?;
+        let mut workload_hasher = blake3::Hasher::new();
+        workload_hasher.update(b"dynamo.offline-replay.trace.v1");
+        workload_hasher.update(&(trace_bytes.len() as u64).to_be_bytes());
+        workload_hasher.update(&trace_bytes);
+        Some((trace_bytes, workload_hasher.finalize().to_hex().to_string()))
+    } else {
+        None
+    };
     let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?;
-    ensure!(
-        std::fs::read(&args.trace_file)? == trace_bytes,
-        "trace input changed while it was being loaded"
-    );
+    if let Some((trace_bytes, _)) = canonical_workload.as_ref() {
+        ensure!(
+            std::fs::read(&args.trace_file)? == *trace_bytes,
+            "trace input changed while it was being loaded"
+        );
+    }
     anyhow::ensure!(args.iterations > 0, "iterations must be greater than 0");
     let mut timing_writer = args
         .timings_jsonl
@@ -501,7 +507,7 @@ fn main() -> Result<()> {
                     "router_mode": args.router_mode.as_str(),
                     "engine_type": args.engine_type.as_str(),
                     "native_router_event_visibility": args.engine_type.native_router_event_visibility(),
-                    "replay_bench": cfg!(feature = "canonical-replay"),
+                    "replay_bench": cfg!(feature = "replay-bench"),
                 }),
             )?;
             writer.write_all(b"\n")?;
@@ -512,7 +518,10 @@ fn main() -> Result<()> {
                     &report,
                     &args,
                     &engine_args,
-                    &workload_digest,
+                    &canonical_workload
+                        .as_ref()
+                        .expect("canonical writer requires canonical workload identity")
+                        .1,
                     &runtime_evidence,
                 )?
                 .into_json_line()
@@ -521,10 +530,12 @@ fn main() -> Result<()> {
         }
         last_report = Some(report);
     }
-    ensure!(
-        std::fs::read(&args.trace_file)? == trace_bytes,
-        "trace input changed during replay"
-    );
+    if let Some((trace_bytes, _)) = canonical_workload.as_ref() {
+        ensure!(
+            std::fs::read(&args.trace_file)? == *trace_bytes,
+            "trace input changed during replay"
+        );
+    }
     if let Some(writer) = timing_writer.as_mut() {
         writer
             .flush()

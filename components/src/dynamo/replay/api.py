@@ -7,7 +7,6 @@ from typing import Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
-from dynamo._core import canonical_replay_available as _canonical_replay_available
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -34,7 +33,6 @@ class _CommonReplayOptions(TypedDict, total=False):
     planner_config: Any
     benchmark_granularity: int
     capture_per_request: bool
-    canonical_capture: bool
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
@@ -70,35 +68,16 @@ def _planner_config_arg(planner_config):
     return planner_config
 
 
-def _validate_canonical_request(replay_mode, trace_format=None):
-    if replay_mode != "offline":
-        raise ValueError("canonical_capture only supports replay_mode='offline'")
-    if not _canonical_replay_available():
-        raise ValueError(
-            "canonical_capture requires a binding built with --features canonical-replay"
-        )
-    if trace_format in {
-        "agentic_mooncake",
-        "agentic-mooncake",
-        "applied_compute_agentic",
-    }:
-        raise ValueError(
-            f"canonical_capture does not support trace_format={trace_format!r}"
-        )
-
-
 def _materialize_offline_report(
     native,
     *,
     planner: PlannerReplayDetails | None,
-    canonical_capture: bool,
 ) -> ReplayReport:
     return ReplayReport(
         summary=native.summary,
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
-        _native=native if canonical_capture else None,
     )
 
 
@@ -160,7 +139,6 @@ def run_trace_replay(
     planner_config=None,
     benchmark_granularity=8,
     capture_per_request=False,
-    canonical_capture=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
@@ -192,12 +170,8 @@ def run_trace_replay(
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
-        "canonical_capture": canonical_capture,
     }
-    if canonical_capture:
-        _validate_canonical_request(replay_mode, trace_format)
-        replay_kwargs["capture_per_request"] = True
-    elif capture_per_request and replay_mode == "online":
+    if capture_per_request and replay_mode == "online":
         raise ValueError(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
@@ -231,7 +205,6 @@ def run_trace_replay(
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
-            canonical_capture=canonical_capture,
         )
         with adapter_scope as adapter:
             native = _run_mocker_trace_replay(
@@ -242,7 +215,6 @@ def run_trace_replay(
             return _materialize_offline_report(
                 native,
                 planner=adapter.finalize(native.lifecycle_operations),
-                canonical_capture=canonical_capture,
             )
     result = _run_mocker_trace_replay(
         trace_files,
@@ -254,7 +226,6 @@ def run_trace_replay(
     return _materialize_offline_report(
         result,
         planner=None,
-        canonical_capture=canonical_capture,
     )
 
 
@@ -325,7 +296,6 @@ def run_synthetic_trace_replay(
     planner_config=None,
     benchmark_granularity=8,
     capture_per_request=False,
-    canonical_capture=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
     replay_kwargs = {
@@ -353,12 +323,8 @@ def run_synthetic_trace_replay(
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
-        "canonical_capture": canonical_capture,
     }
-    if canonical_capture:
-        _validate_canonical_request(replay_mode)
-        replay_kwargs["capture_per_request"] = True
-    elif capture_per_request and replay_mode == "online":
+    if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
     if planner_config is not None:
         if replay_mode != "offline":
@@ -373,7 +339,6 @@ def run_synthetic_trace_replay(
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
-            canonical_capture=canonical_capture,
         )
         with adapter_scope as adapter:
             native = _run_mocker_synthetic_trace_replay(
@@ -386,7 +351,6 @@ def run_synthetic_trace_replay(
             return _materialize_offline_report(
                 native,
                 planner=adapter.finalize(native.lifecycle_operations),
-                canonical_capture=canonical_capture,
             )
     result = _run_mocker_synthetic_trace_replay(
         input_tokens,
@@ -400,5 +364,4 @@ def run_synthetic_trace_replay(
     return _materialize_offline_report(
         result,
         planner=None,
-        canonical_capture=canonical_capture,
     )

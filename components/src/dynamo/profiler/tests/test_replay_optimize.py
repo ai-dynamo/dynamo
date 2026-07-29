@@ -222,7 +222,6 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
     assert captured["kwargs"]["trace_num_prefix_groups"] == 1
     assert captured["kwargs"]["capture_per_request"] is False
-    assert captured["kwargs"]["canonical_capture"] is False
 
 
 def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
@@ -265,7 +264,6 @@ def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
     assert captured["kwargs"]["arrival_interval_ms"] is None
     assert captured["kwargs"]["arrival_seed"] == 17
     assert captured["kwargs"]["capture_per_request"] is False
-    assert captured["kwargs"]["canonical_capture"] is False
 
 
 def _disagg_spec(

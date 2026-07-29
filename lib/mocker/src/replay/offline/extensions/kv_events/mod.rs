@@ -283,7 +283,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
     Ok(artifacts)
 }
 
-#[cfg(all(test, feature = "canonical-replay"))]
+#[cfg(all(test, feature = "replay-bench"))]
 mod canonical_digest_tests {
     use dynamo_kv_router::protocols::{
         BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent,

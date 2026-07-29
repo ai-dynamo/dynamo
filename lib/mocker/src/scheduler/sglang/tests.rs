@@ -26,7 +26,7 @@ use crate::common::protocols::{
 };
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::ActiveKvLease;
-#[cfg(feature = "canonical-replay")]
+#[cfg(feature = "replay-bench")]
 use crate::replay::offline::PressureKind;
 use crate::replay::offline::evidence::with_engine_evidence_context;
 use crate::replay::offline::{WorkerPool, with_runtime_evidence};
@@ -236,7 +236,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_indices() {
     );
     assert_eq!(retracted.len(), 1);
     assert_eq!(retracted[0].uuid, Uuid::from_u128(90_002));
-    #[cfg(feature = "canonical-replay")]
+    #[cfg(feature = "replay-bench")]
     {
         let pressure = _evidence.pressure.unwrap();
         assert_eq!(pressure.vllm_preemptions_total, 0);

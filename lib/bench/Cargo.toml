@@ -82,8 +82,7 @@ test-support = [
 ]
 mocker-kvbm-offload = ["offline-replay", "dynamo-mocker/kvbm-offload"]
 profile = ["offline-replay", "dynamo-mocker/profile"]
-canonical-replay = ["offline-replay", "dynamo-mocker/canonical-replay"]
-replay-bench = ["canonical-replay"]
+replay-bench = ["offline-replay", "dynamo-mocker/replay-bench"]
 
 [[bench]]
 name = "multiturn_bench"

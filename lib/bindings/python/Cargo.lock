@@ -2427,7 +2427,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "blake3",
  "bytes",
  "clap",
  "dashmap",

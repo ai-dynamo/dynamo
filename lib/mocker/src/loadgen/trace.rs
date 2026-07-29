@@ -138,7 +138,7 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
 }
 
 fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
-    #[cfg(feature = "canonical-replay")]
+    #[cfg(feature = "replay-bench")]
     if crate::replay::canonical_replay_active() {
         return Uuid::from_u128(_request_ordinal as u128 + 1);
     }

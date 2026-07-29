@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 import dynamo.replay.main as replay_main
-from dynamo._core import canonical_replay_available
 
 from .replay_utils import (
     _assert_basic_report_counts,
@@ -171,6 +170,7 @@ def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["per_request"] is None
     _assert_basic_report_counts(
         report,
         num_requests=10,
@@ -304,47 +304,6 @@ def test_replay_cli_offline_per_request_jsonl_enables_capture(tmp_path):
     report = _assert_replay_cli_outputs(completed, report_path)
     assert len(report["per_request"]) == 4
     assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
-
-
-@pytest.mark.timeout(30)
-def test_replay_cli_canonical_jsonl_uses_native_record_and_enables_capture(
-    tmp_path,
-):
-    if not canonical_replay_available():
-        pytest.skip("binding was not built with canonical-replay")
-
-    trace_path = _write_multiturn_trace(tmp_path)
-    report_path = tmp_path / "offline_trace_report.json"
-    canonical_path = tmp_path / "canonical_reports.jsonl"
-
-    completed = _run_replay_cli(
-        tmp_path,
-        str(trace_path),
-        "--replay-mode",
-        "offline",
-        "--canonical-reports-jsonl",
-        str(canonical_path),
-        "--report-json",
-        str(report_path),
-        "--extra-engine-args",
-        '{"block_size":64,"speedup_ratio":1000.0}',
-    )
-
-    report = _assert_replay_cli_outputs(completed, report_path)
-    canonical_bytes = canonical_path.read_bytes()
-    canonical = json.loads(canonical_bytes)
-    assert len(report["per_request"]) == 4
-    assert canonical_bytes.endswith(b"\n")
-    assert set(canonical) == {
-        "metadata",
-        "summary",
-        "per_request",
-        "coverage",
-        "planner",
-    }
-    assert canonical["per_request"] == sorted(
-        canonical["per_request"], key=lambda record: record["uuid"]
-    )
 
 
 @pytest.mark.timeout(30)

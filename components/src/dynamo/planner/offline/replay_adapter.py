@@ -202,7 +202,6 @@ class ReplayPlannerAdapter:
         self._warmup_observations = list(warmup_observations or [])
         self._benchmark_granularity = benchmark_granularity
         self._bootstrap_metadata: dict[str, Any] = {"status": "not_attempted"}
-        self._canonical_replay_contract: Optional[str] = None
         self._orchestrator_bootstrapped = False
         # Replay's ``run()`` is synchronous; we own a scoped event loop to
         # drive the async engine calls without forcing callers to use
@@ -756,22 +755,8 @@ def create_replay_planner_adapter(
     capabilities: Optional[WorkerCapabilities] = None,
     warmup_observations: Optional[list[TrafficObservation]] = None,
     benchmark_granularity: Optional[int] = None,
-    canonical_capture: bool = False,
 ) -> ReplayPlannerAdapter:
     """Create a replay adapter backed by the builtin planner orchestrator."""
-    if canonical_capture:
-        if planner_config.scheduling.external_plugins:
-            raise ValueError(
-                "canonical planner replay does not support external plugins"
-            )
-        if planner_config.scheduling.gateway.enabled:
-            raise ValueError(
-                "canonical planner replay does not support the registration gateway"
-            )
-        if planner_config.plugin_registration.in_process_plugins:
-            raise ValueError(
-                "canonical planner replay does not support configured in-process plugins"
-            )
     engine = OrchestratorEngineAdapter(
         planner_config,
         capabilities or WorkerCapabilities(),
@@ -784,6 +769,4 @@ def create_replay_planner_adapter(
         warmup_observations=warmup_observations,
         benchmark_granularity=benchmark_granularity,
     )
-    if canonical_capture:
-        adapter._canonical_replay_contract = "builtin-planner-v1"
     return adapter

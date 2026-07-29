@@ -5,11 +5,8 @@ import json
 
 import pytest
 
-from dynamo._core import canonical_replay_available
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
-
-from .replay_utils import _run_replay_cli
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -168,116 +165,6 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
     assert report.summary["decode_worker_seconds"] > (
         report.summary["duration_ms"] / 1000.0
     )
-
-
-def test_canonical_planner_report_is_stable_across_output_directories(tmp_path):
-    if not canonical_replay_available():
-        pytest.skip("binding was not built with canonical-replay")
-
-    trace_path = _write_burst_idle_trace(
-        tmp_path,
-        input_tokens=128,
-        output_tokens=64,
-        request_count=8,
-    )
-    replay_kwargs = {
-        "extra_engine_args": MockEngineArgs(
-            block_size=64,
-            num_gpu_blocks=16,
-            max_num_seqs=8,
-            speedup_ratio=50.0,
-        ),
-        "num_workers": 1,
-        "capture_per_request": False,
-        "canonical_capture": True,
-    }
-    first = run_trace_replay(
-        trace_path,
-        planner_config=_planner_config("agg", tmp_path / "first"),
-        **replay_kwargs,
-    )
-    second = run_trace_replay(
-        trace_path,
-        planner_config=_planner_config("agg", tmp_path / "second"),
-        **replay_kwargs,
-    )
-
-    assert first.planner is not None
-    assert first.planner.total_ticks == len(first.planner.ticks)
-    assert first.planner.total_ticks > 0
-    assert first.planner.scaling_events
-    assert any(
-        tick["runtime_decision"]["target_decode"] is None
-        for tick in first.planner.ticks
-    )
-    for tick in first.planner.ticks:
-        for pool in tick["topology"].values():
-            assert pool["active_count"] == len(pool["active"])
-            assert pool["starting_count"] == len(pool["starting"])
-            assert pool["draining_count"] == len(pool["draining"])
-    first.planner.metadata["nonfinite"] = float("nan")
-    with pytest.raises(ValueError, match="non-finite number"):
-        first.to_canonical_dict()
-    del first.planner.metadata["nonfinite"]
-    planner_metadata = first.to_canonical_dict()["metadata"]["planner"]
-    assert planner_metadata["benchmark_granularity"] == 8
-    assert planner_metadata["bootstrap"] == {"status": "not_required"}
-    assert first._canonical_json_line() == second._canonical_json_line()
-
-
-def test_canonical_planner_jsonl_is_stable_across_process_hash_seeds(
-    tmp_path, monkeypatch
-):
-    if not canonical_replay_available():
-        pytest.skip("binding was not built with canonical-replay")
-
-    trace_path = _write_burst_idle_trace(
-        tmp_path,
-        input_tokens=128,
-        output_tokens=64,
-        request_count=8,
-    )
-    outputs = []
-    for run_name, hash_seed in (("first", "1"), ("second", "999")):
-        run_dir = tmp_path / run_name
-        run_dir.mkdir()
-        canonical_path = run_dir / "canonical.jsonl"
-        report_path = run_dir / "report.json"
-        planner_config = _planner_config("agg", run_dir / "planner")
-        monkeypatch.setenv("PYTHONHASHSEED", hash_seed)
-        _run_replay_cli(
-            run_dir,
-            str(trace_path),
-            "--extra-engine-args",
-            json.dumps(
-                {
-                    "block_size": 64,
-                    "num_gpu_blocks": 16,
-                    "max_num_seqs": 8,
-                    "speedup_ratio": 50.0,
-                }
-            ),
-            "--num-workers",
-            "2",
-            "--router-mode",
-            "kv_router",
-            "--planner-config",
-            json.dumps(planner_config),
-            "--canonical-reports-jsonl",
-            str(canonical_path),
-            "--report-json",
-            str(report_path),
-        )
-        outputs.append(canonical_path.read_bytes())
-
-    assert outputs[0] == outputs[1]
-    canonical = json.loads(outputs[0])
-    routes = [
-        (record["uuid"], record["routing_history"][0]["logical_worker_id"])
-        for record in canonical["per_request"]
-    ]
-    assert len(routes) == 9
-    assert {worker_id for _, worker_id in routes} >= {0, 1}
 
 
 @pytest.mark.parametrize(

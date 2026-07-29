@@ -103,7 +103,6 @@ def test_static_agg_uses_plain_path(monkeypatch):
         and rec["router_mode"] == "round_robin"
     )
     assert rec["capture_per_request"] is False
-    assert rec["canonical_capture"] is False
     assert "sla_ttft_ms" not in rec  # no SLA on a throughput goal -> none threaded
 
 
@@ -216,7 +215,6 @@ def test_scaling_agg_threads_planner_config_when_supported(monkeypatch):
     assert rec["planner_config"]["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
     assert rec["capture_per_request"] is False
-    assert rec["canonical_capture"] is False
 
 
 def test_scaling_report_preserves_planner_tick_count(monkeypatch):

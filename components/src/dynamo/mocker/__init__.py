@@ -56,7 +56,6 @@ else:
         sla_itl_ms=None,
         sla_e2e_ms=None,
         capture_per_request=False,
-        canonical_capture=False,
     ):
         if isinstance(trace_files, (str, os.PathLike)):
             trace_files = [trace_files]
@@ -81,7 +80,6 @@ else:
             sla_itl_ms=sla_itl_ms,
             sla_e2e_ms=sla_e2e_ms,
             capture_per_request=capture_per_request,
-            canonical_capture=canonical_capture,
         )
 
 
