@@ -1714,6 +1714,48 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 }
 
+func TestAddStandardEnvVars_NATS(t *testing.T) {
+	tests := []struct {
+		name        string
+		natsAddress string
+		wantNATS    bool
+	}{
+		{
+			name: "default configuration omits NATS_SERVER",
+		},
+		{
+			name:        "bundled NATS injects NATS_SERVER",
+			natsAddress: "nats://dynamo-nats.dynamo-system.svc.cluster.local:4222",
+			wantNATS:    true,
+		},
+		{
+			name:        "external NATS injects NATS_SERVER",
+			natsAddress: "nats://external-nats:4222",
+			wantNATS:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					NATSAddress: tt.natsAddress,
+				},
+			}
+
+			AddStandardEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+
+			if tt.wantNATS {
+				assert.Equal(t, tt.natsAddress, envByName["NATS_SERVER"])
+			} else {
+				assert.NotContains(t, envByName, "NATS_SERVER")
+			}
+		})
+	}
+}
+
 func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
@@ -4665,7 +4707,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
-						Args: []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+						Args: []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 					},
 				},
 			},
@@ -4673,7 +4715,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 			expectNotContains: []string{"ray start"},
 		},
 	}

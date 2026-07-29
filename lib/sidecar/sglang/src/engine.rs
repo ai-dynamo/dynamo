@@ -87,7 +87,7 @@ impl SglangSidecarEngine {
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_mode(disaggregation_mode).to_string(),
+            component: disaggregation_mode.discovery_component().to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
@@ -421,14 +421,6 @@ fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoErr
     }
 }
 
-fn component_for_mode(mode: DisaggregationMode) -> &'static str {
-    if mode.is_prefill() {
-        "prefill"
-    } else {
-        "backend"
-    }
-}
-
 fn discovery_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -475,6 +467,14 @@ fn resolve_bootstrap_host_with_local(
     local_host: &str,
 ) -> Result<Option<String>, DynamoError> {
     if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
+        return Ok(Some(host.trim().to_string()));
+    }
+    let from_server = discovery
+        .server_info
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|host| is_routable_host(host));
+    if let Some(host) = from_server {
         return Ok(Some(host.trim().to_string()));
     }
     let from_dist = discovery
@@ -557,13 +557,10 @@ fn build_engine_config(
         .get("enable_dp_attention")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let nnodes = client::json_u32(&discovery.server_info, "nnodes")
-        .unwrap_or(1)
-        .max(1);
-    let node_rank = client::json_u32(&discovery.server_info, "node_rank").unwrap_or(0);
     let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        let local_size = (dp_size / nnodes).max(1);
-        (Some(node_rank.saturating_mul(local_size)), Some(local_size))
+        // Native gRPC is exposed by the rank-zero frontend for the complete
+        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
+        (Some(0), Some(dp_size))
     } else {
         (Some(0), Some(1))
     };
@@ -602,7 +599,9 @@ fn build_engine_config(
 mod tests {
     use serde_json::json;
 
-    use super::{Discovery, resolve_bootstrap_host_with_local};
+    use super::{
+        DisaggregationMode, Discovery, build_engine_config, resolve_bootstrap_host_with_local,
+    };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
@@ -628,11 +627,29 @@ mod tests {
     }
 
     #[test]
-    fn dist_init_addr_precedes_local_address() {
+    fn server_host_precedes_dist_init_addr() {
         let host = resolve_bootstrap_host_with_local(
             None,
             "http://127.0.0.1:30001",
-            &discovery(json!({"dist_init_addr": "10.0.0.1:20000"})),
+            &discovery(json!({
+                "host": "10.0.0.1",
+                "dist_init_addr": "10.0.0.2:20000"
+            })),
+            "10.0.0.3",
+        )
+        .unwrap();
+        assert_eq!(host.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn wildcard_server_host_uses_dist_init_addr() {
+        let host = resolve_bootstrap_host_with_local(
+            None,
+            "http://127.0.0.1:30001",
+            &discovery(json!({
+                "host": "0.0.0.0",
+                "dist_init_addr": "10.0.0.1:20000"
+            })),
             "10.0.0.2",
         )
         .unwrap();
@@ -661,5 +678,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("--bootstrap-host"));
+    }
+
+    #[test]
+    fn multi_node_grpc_endpoint_registers_all_dp_ranks() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 16,
+                "enable_dp_attention": true,
+                "nnodes": 4,
+                "node_rank": 0,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+        let registration = config.llm.unwrap();
+
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert_eq!(registration.data_parallel_size, Some(16));
     }
 }

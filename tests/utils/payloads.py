@@ -78,6 +78,10 @@ class BasePayload:
             p.body = {**p.body, "model": model}
         return p
 
+    def body_for_iteration(self, _iteration: int) -> Dict[str, Any]:
+        """Return the request body for one repeat_count iteration."""
+        return self.body
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")
@@ -1705,6 +1709,62 @@ class MetricsPayload(BasePayload):
 
         # Run all validations
         self._validate_metric_checks(metrics_to_check, content)
+
+
+@dataclass
+class ImageTokenMetricsPayload(MetricsPayload):
+    """Validate frontend image-token usage aggregates for one model."""
+
+    model: Optional[str] = None
+    port: int = DefaultPort.FRONTEND.value
+
+    def with_model(self, model: str) -> "ImageTokenMetricsPayload":
+        payload = deepcopy(self)
+        payload.model = model
+        return payload
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        if self.model is None:
+            raise ValueError("ImageTokenMetricsPayload requires a model")
+
+        prefix = prometheus_names.name_prefix.FRONTEND
+        metric = prometheus_names.frontend_service.IMAGE_TOKENS_PER_REQUEST
+        count_name = f"{prefix}_{metric}_count"
+        sum_name = f"{prefix}_{metric}_sum"
+        escaped_model = re.escape(self.model)
+
+        def model_metric_pattern(name: str) -> str:
+            return (
+                rf'{re.escape(name)}\{{(?:[^}}]*,)?model="{escaped_model}"'
+                r"(?:,[^}]*)?\}"
+                r"\s+([\d.eE+-]+)"
+            )
+
+        return [
+            MetricCheck(
+                name=count_name,
+                pattern=model_metric_pattern,
+                validator=lambda value: int(float(value)) >= self.min_num_requests,
+                error_msg=lambda name, value: (
+                    f"{name} has count {value}, expected at least "
+                    f"{self.min_num_requests}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} with count: {value}"
+                ),
+            ),
+            MetricCheck(
+                name=sum_name,
+                pattern=model_metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: (
+                    f"{name} should contain positive image-token usage, got {value}"
+                ),
+                success_msg=lambda name, value: (
+                    f"SUCCESS: Found {name} with aggregate image-token usage: {value}"
+                ),
+            ),
+        ]
 
 
 @dataclass
