@@ -8,7 +8,8 @@ use axum::http::HeaderMap;
 pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id";
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
 pub(crate) const HEADER_CLAUDE_CODE_PARENT_AGENT_ID: &str = "x-claude-code-parent-agent-id";
-pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
+pub(crate) const HEADER_CODEX_THREAD_ID: &str = "thread-id";
+pub(crate) const HEADER_CODEX_PARENT_THREAD_ID: &str = "x-codex-parent-thread-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
@@ -31,9 +32,9 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
         infer_parent_from_session_for_child: true,
     },
     AgentHeaderMapping {
-        root_session_header: HEADER_CODEX_SESSION_ID,
+        root_session_header: HEADER_CODEX_THREAD_ID,
         child_session_header: None,
-        parent_session_header: None,
+        parent_session_header: Some(HEADER_CODEX_PARENT_THREAD_ID),
         infer_parent_from_session_for_child: false,
     },
     AgentHeaderMapping {

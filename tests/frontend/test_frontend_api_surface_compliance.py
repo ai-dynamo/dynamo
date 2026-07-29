@@ -5,18 +5,20 @@
 
 Subject under test is Dynamo's HTTP surface (`/v1/responses` and
 `/v1/messages` wire shapes, tool-call routing through both); sglang is
-just the backend vehicle for producing real traffic. Runs three suites
+just the backend vehicle for producing real traffic. Runs six checks
 sequentially against one server:
 
 1. Upstream OpenResponses compliance-test.ts harness (bun/TypeScript
    validator against zod schemas generated from the OpenAPI spec).
 2. `codex exec` smoke — forces the shell tool-call path through
    `/v1/responses`.
-3. `claude -p` smoke — forces the Bash tool-call path through
+3. Codex child-header smoke — sends the stable `thread-id` and
+   `x-codex-parent-thread-id` pair through `/v1/responses`.
+4. `claude -p` smoke — forces the Bash tool-call path through
    `/v1/messages` (Anthropic Messages API).
-4. `opencode run --command ...` smoke — forces an OpenCode subtask request
+5. `opencode run --command ...` smoke — forces an OpenCode subtask request
    through `/v1/chat/completions`.
-5. Optional `claude -p` subagent smoke — collects CI signal for Claude Code
+6. Optional `claude -p` subagent smoke — collects CI signal for Claude Code
    child-agent headers without gating the suite while invocation is calibrated.
 
 All external tooling (bun, node, the OpenResponses suite, and the coding-agent
@@ -461,10 +463,10 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
-# codex exec (up to 180s) + claude exec (up to 180s) + optional claude
-# subagent probe (up to 45s) + opencode run (up to 180s) + inter-suite
-# health checks + teardown. 975s leaves headroom for CI variance without
-# masking real hangs.
+# codex exec (up to 180s) + Codex child request (up to 60s) + claude exec
+# (up to 180s) + optional claude subagent probe (up to 45s) + opencode run
+# (up to 180s) + inter-suite health checks + teardown. 975s leaves headroom
+# for CI variance without masking real hangs.
 @pytest.mark.timeout(975)
 @pytest.mark.frontend_api_surface_compliance
 @pytest.mark.pre_merge
@@ -574,6 +576,20 @@ def test_frontend_api_surface_compliance(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
         _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
+        _wait_for_frontend_healthy(frontend_port)
+        codex_child_trace_start = _request_trace_record_count(request_trace_path)
+        codex_parent_thread_id = f"codex-parent-{uuid.uuid4().hex}"
+        codex_child_thread_id = f"codex-child-{uuid.uuid4().hex}"
+        _run_codex_child_header_smoke(
+            frontend_port, codex_child_thread_id, codex_parent_thread_id
+        )
+        _assert_agent_context_in_trace(
+            request_trace_path,
+            "codex child",
+            codex_child_trace_start,
+            expected_session_id=codex_child_thread_id,
+            expected_parent_session_id=codex_parent_thread_id,
+        )
         _wait_for_frontend_healthy(frontend_port)
         claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
@@ -721,13 +737,20 @@ def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict
 
 
 def _assert_agent_context_in_trace(
-    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
+    trace_path: Path,
+    source_label: str,
+    start_index: int,
+    timeout_s: float = 30.0,
+    expected_session_id: str | None = None,
+    expected_parent_session_id: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
         last_records = _read_request_trace_records_since(trace_path, start_index)
-        if _trace_contains_agent_context(last_records):
+        if _trace_contains_agent_context(
+            last_records, expected_session_id, expected_parent_session_id
+        ):
             return
         time.sleep(0.2)
 
@@ -738,7 +761,8 @@ def _assert_agent_context_in_trace(
     ]
     pytest.fail(
         f"request trace did not contain agent_context after {source_label!r} "
-        f"within {timeout_s}s; saw {seen}"
+        f"within {timeout_s}s; expected session={expected_session_id!r}, "
+        f"parent={expected_parent_session_id!r}; saw {seen}"
     )
 
 
@@ -764,7 +788,11 @@ def _assert_agent_parent_context_in_trace(
     )
 
 
-def _trace_contains_agent_context(records: list[dict]) -> bool:
+def _trace_contains_agent_context(
+    records: list[dict],
+    expected_session_id: str | None = None,
+    expected_parent_session_id: str | None = None,
+) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
@@ -772,6 +800,13 @@ def _trace_contains_agent_context(records: list[dict]) -> bool:
 
         session_id = agent_context.get("session_id")
         if not session_id:
+            continue
+        if expected_session_id and session_id != expected_session_id:
+            continue
+        if (
+            expected_parent_session_id
+            and agent_context.get("parent_session_id") != expected_parent_session_id
+        ):
             continue
         return True
     return False
@@ -927,6 +962,31 @@ def _run_codex_exec_smoke(
             "codex exec did not report the marker file — expected stdout to "
             f"contain {marker_filename!r} (implies the shell tool was invoked "
             f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
+        )
+
+
+def _run_codex_child_header_smoke(
+    frontend_port: int, child_thread_id: str, parent_thread_id: str
+) -> None:
+    """Exercise Codex child headers without model-mediated delegation."""
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/responses",
+        headers={
+            "Authorization": "Bearer sk-compliance-dummy",
+            "thread-id": child_thread_id,
+            "x-codex-parent-thread-id": parent_thread_id,
+        },
+        json={
+            "model": COMPLIANCE_MODEL,
+            "input": "Reply with exactly OK.",
+            "max_output_tokens": 32,
+        },
+        timeout=60,
+    )
+    if not response.ok:
+        pytest.fail(
+            "Codex child-header smoke failed "
+            f"(status={response.status_code}): {response.text}"
         )
 
 
