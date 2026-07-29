@@ -12,9 +12,10 @@
  *   This repo ships NO package.json alongside fern/, and neither existing
  *   custom component (CustomFooter, RecipeStyles) pulls an external npm dep —
  *   the build-safe pattern here is self-contained, dependency-free components.
- *   So instead of `import "asciinema-player"` (which Fern's mdx-components
- *   bundling can't resolve without a declared dep), we inject the player's JS +
- *   CSS from jsDelivr at runtime and call the global AsciinemaPlayer.create().
+ *   So instead of importing `asciinema-player` directly (which Fern's
+ *   mdx-components bundling can't resolve without a declared dep), we inject
+ *   the player's JS + CSS from jsDelivr at runtime and call the global
+ *   AsciinemaPlayer.create().
  *   The site already loads third-party JS (adobedtm) and iframes (ghbtns), so
  *   an external <script>/<link> is consistent with the page's existing origins.
  *
@@ -24,8 +25,11 @@
  *   DOM access is inside useEffect and guarded, so SSR renders an empty frame
  *   and hydration wires up the player. dispose() runs on unmount.
  *
- * USAGE (import — ambient JSX is unsupported, per the RecipeStyles note):
- *   import { TerminalDemo } from "@/components/TerminalDemo";
+ * USAGE (import — ambient JSX is unsupported, per the RecipeStyles note). The
+ * backticks below stand in for the double quotes the real page uses, for the
+ * reason spelled out in RecipeStyles.tsx — a quoted non-relative specifier in a
+ * comment still triggers Fern's `npx rolldown` bundling:
+ *   import { TerminalDemo } from `@/components/TerminalDemo`;
  *
  *   <TerminalDemo
  *     src="/dynamo/assets/dynamo-demo.cast"

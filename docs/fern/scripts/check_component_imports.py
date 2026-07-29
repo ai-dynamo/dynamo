@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Fail on imports that make Fern shell out to rolldown during a docs build.
+
+Fern's `experimental.mdx-components` bundler regex-scans every .js/.jsx/.ts/.tsx
+file under docs/fern/components for import/export/require specifiers. Anything
+that is neither relative (./, ../) nor in Fern's allowlist (react, react-dom,
+@mdx-js/react, next) is treated as a third-party dependency, and Fern runs
+
+    npx --quiet --yes rolldown@<pinned> -c <config>
+
+once per offending file. That is a registry download on every docs build, and it
+is the direct cause of the intermittent preview failures:
+
+    rolldown exited with code 127 / sh: 1: rolldown: not found
+    rolldown exited with code 1 / ERR_MODULE_NOT_FOUND ... _npx/.../rolldown/...
+
+The scan does not skip comments, so a docblock usage example such as
+
+    import { RecipeStyles } from "@/components/RecipeStyles";
+
+is enough to trigger it even though no component actually depends on anything
+outside the allowlist. Write such examples with backticks around the specifier
+instead of quotes, and say so in the surrounding comment.
+
+If a component ever needs a real third-party dependency, this check has to be
+revisited together with a package.json + node_modules for the docs project —
+which is exactly what Fern's error message asks for.
+
+The constants below mirror fern-api's own bundler; keep them in sync when the
+pin in docs/fern/fern.config.json moves.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+COMPONENTS = Path(__file__).resolve().parents[1] / "components"
+SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+
+# Verbatim from fern-api's cli.cjs.
+SPECIFIER = re.compile(
+    r"""(?:^|[^\w.])(?:import|export)\s+(?:[\w*\s{},$]*?from\s+)?["']([^"'\n]+)["']"""
+    r"""|import\(\s*["']([^"'\n]+)["']\s*\)"""
+    r"""|require\(\s*["']([^"'\n]+)["']\s*\)""",
+    re.MULTILINE,
+)
+ALLOWLIST = {"react", "react-dom", "@mdx-js/react", "next"}
+
+
+def package_name(specifier: str) -> str:
+    parts = specifier.split("/")
+    if specifier.startswith("@"):
+        return "/".join(parts[:2])
+    return parts[0] if parts else specifier
+
+
+def is_relative(specifier: str) -> bool:
+    return specifier.startswith(("./", "../")) or specifier in {".", ".."}
+
+
+def offenders(text: str) -> list[str]:
+    found: list[str] = []
+    for match in SPECIFIER.finditer(text):
+        specifier = next((g for g in match.groups() if g is not None), None)
+        if specifier is None or is_relative(specifier):
+            continue
+        if package_name(specifier) in ALLOWLIST:
+            continue
+        if specifier not in found:
+            found.append(specifier)
+    return found
+
+
+def main() -> int:
+    failures = 0
+    for path in sorted(COMPONENTS.rglob("*")):
+        if not path.is_file() or path.suffix not in SUFFIXES:
+            continue
+        found = offenders(path.read_text())
+        if not found:
+            continue
+        failures += 1
+        rel = path.relative_to(COMPONENTS.parents[2])
+        print(
+            f"{rel}: Fern will bundle this file with rolldown because it reads "
+            f"{', '.join(found)} as a third-party import.",
+            file=sys.stderr,
+        )
+    if failures:
+        print(
+            "\nIf the specifier is inside a comment, quote it with backticks "
+            "instead. If it is real code, see this script's docstring.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

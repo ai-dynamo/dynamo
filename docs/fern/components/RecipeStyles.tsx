@@ -14,7 +14,15 @@
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
  * fern/ root and is rewritten to a relative path at publish time:
- *   import { RecipeStyles } from "@/components/RecipeStyles";
+ *
+ *   import { RecipeStyles } from `@/components/RecipeStyles`;
+ *
+ * The backticks above stand in for the double quotes the real page uses. Fern's
+ * mdx-components bundler regex-scans this file for imports without skipping
+ * comments, so a quoted non-relative specifier — even inside a comment — makes
+ * it shell out to `npx rolldown` for a per-build network fetch that flakes CI.
+ * scripts/check_component_imports.py enforces this; see its docstring.
+ *
  * Then place <RecipeStyles /> once, right after the frontmatter, on every
  * recipe/benchmark page (and the two landing READMEs).
  */

@@ -20,7 +20,14 @@
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
  * fern/ root and is rewritten to a relative path at publish time:
- *   import { ReferenceStyles } from "@/components/ReferenceStyles";
+ *
+ *   import { ReferenceStyles } from `@/components/ReferenceStyles`;
+ *
+ * The backticks above stand in for the double quotes the real page uses, for
+ * the reason spelled out in RecipeStyles.tsx: Fern's mdx-components bundler
+ * regex-scans this file for imports without skipping comments, and a quoted
+ * non-relative specifier makes it shell out to `npx rolldown` on every build.
+ *
  * Then place <ReferenceStyles /> once, right after the frontmatter, on every
  * Reference page that uses these components.
  */
