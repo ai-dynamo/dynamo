@@ -3,7 +3,7 @@
 #
 # Minimal image for the TensorRT-LLM Rust sidecar (`dynamo-trtllm-sidecar`).
 #
-# The sidecar is a pure gRPC connector + tokenizer; it needs no GPU and no
+# The sidecar is a pure gRPC connector; it needs no GPU and no
 # TensorRT-LLM runtime, so it ships in a slim Debian image separate from the
 # heavy TRT-LLM engine container. The two run side by side in one pod and talk
 # over loopback (see deploy/agg.yaml).
