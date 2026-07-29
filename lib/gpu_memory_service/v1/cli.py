@@ -50,10 +50,13 @@ def run_servers(
                 server.shutdown()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="GMS V1 rank-local sidecar")
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="GMS V1 rank-local sidecar",
+        allow_abbrev=False,
+    )
     parser.add_argument("--device", type=int, default=0)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     vmm = get_vmm()
     gpu_uuid = _gpu_uuid(args.device)

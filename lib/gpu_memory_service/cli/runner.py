@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 from collections.abc import Sequence
@@ -24,6 +25,7 @@ from collections.abc import Sequence
 import uvloop
 from gpu_memory_service.common.vmm import init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.v1.cli import main as v1_main
 
 from .args import Config, parse_args
 
@@ -82,10 +84,17 @@ async def serve_configs(configs: Sequence[Config]) -> None:
     await run_servers(servers)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point for GPU Memory Service server."""
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        v1_main(remaining)
+        return
+
     uvloop.install()
-    asyncio.run(serve_configs(parse_args()))
+    asyncio.run(serve_configs(parse_args(remaining)))
 
 
 if __name__ == "__main__":
