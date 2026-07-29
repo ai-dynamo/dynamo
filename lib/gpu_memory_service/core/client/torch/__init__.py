@@ -3,7 +3,7 @@
 
 """Torch storage rebinding primitives used by GMS integrations."""
 
-from .storage_rebinding import (
+from gpu_memory_service.core.client.torch.storage_rebinding import (
     clone_storage_spans_and_rebind_tensors,
     tensor_storage_byte_bounds,
 )

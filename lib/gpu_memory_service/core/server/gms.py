@@ -10,8 +10,7 @@ from uuid import uuid4
 
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
-
-from ..protocol import (
+from gpu_memory_service.core.protocol import (
     AbortRequest,
     AllocateRequest,
     CommitRequest,
@@ -21,8 +20,8 @@ from ..protocol import (
     Request,
     SuccessResponse,
 )
-from .allocations import GMSAllocationManager
-from .sessions import GMSSessionManager, ServerSession
+from gpu_memory_service.core.server.allocations import GMSAllocationManager
+from gpu_memory_service.core.server.sessions import GMSSessionManager, ServerSession
 
 
 class GMSServerMemoryManager:
