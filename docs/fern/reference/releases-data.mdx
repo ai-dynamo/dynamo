@@ -136,7 +136,9 @@ Release highlights (stable releases):
 | LoRA | Not supported | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
 | Tool Calling | Supported | Supported | Supported |
 | Speculative Decoding | Experimental (Code hooks exist; no examples or docs yet) | Supported | Supported (Eagle3) |
-| Dynamo Snapshot | Supported | Not supported | Supported |
+| GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
+| Shadow Engine Failover | Experimental (No KV-cache reuse or hardware fault tolerance) | Experimental (No KV-cache reuse or hardware fault tolerance) | Supported with caveat (Software-process failover only; no KV-cache reuse or hardware fault tolerance) |
+| Dynamo Snapshot | Supported with caveat (Single-GPU supported; multi-GPU and multinode remain in progress) | Experimental (Single-GPU aggregated text-worker path only) | Supported with caveat (Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress) |
 
 ## Artifact inventory (v1.3.0)
 
