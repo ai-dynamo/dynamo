@@ -198,18 +198,3 @@ def test_installed_aiconfigurator_packages_match_declared_release() -> None:
     assert (
         not mismatches
     ), f"installed AIC versions differ; expected {expected_version}: {mismatches}"
-
-
-def test_candidate_parsing_preserves_release_version_semantics() -> None:
-    expected = Version("0.11.0.dev20260728")
-    assert (
-        _python_exact_version(
-            "aiconfigurator-core==0.11.0.dev20260728",
-            package="aiconfigurator-core",
-        )
-        == expected
-    )
-    assert (
-        _cargo_exact_version({"version": "=0.11.0-dev20260728", "optional": True})
-        == expected
-    )

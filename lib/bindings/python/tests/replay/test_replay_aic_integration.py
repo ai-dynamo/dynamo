@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 pytestmark = [
-    pytest.mark.aic_full,
     pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     pytest.mark.integration,

@@ -19,7 +19,6 @@ from dynamo.planner.core.perf_model.rust_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
 pytestmark = [
-    pytest.mark.aic_full,
     pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     pytest.mark.integration,

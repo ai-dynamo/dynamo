@@ -10,7 +10,6 @@ from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
 from aiconfigurator.sdk.task_v2 import Task
 
 pytestmark = [
-    pytest.mark.aic_full,
     pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     pytest.mark.integration,

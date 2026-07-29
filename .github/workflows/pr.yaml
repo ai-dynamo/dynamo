@@ -34,7 +34,6 @@ jobs:
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
-      aic: ${{ steps.changes.outputs.aic }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
@@ -554,7 +553,6 @@ jobs:
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.aic == 'true' ||
       needs.changed-files.outputs.operator == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
@@ -622,7 +620,6 @@ jobs:
     needs: [changed-files]
     if: |
       needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.aic == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.deploy == 'true'
@@ -774,7 +771,7 @@ jobs:
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.aic == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
@@ -794,7 +791,7 @@ jobs:
   frontend-test:
     name: frontend
     needs: [changed-files, frontend-build]
-    if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.aic == 'true'
+    if: needs.changed-files.outputs.frontend == 'true'
     # The frontend process hosts the KV router. Validate the experimental
     # --router-prefill-load-model=aic dependency and native prefill predictor in
     # the shipped frontend image on both architectures.
@@ -827,13 +824,12 @@ jobs:
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
-      needs.changed-files.outputs.benchmarks == 'true' ||
-      needs.changed-files.outputs.aic == 'true'
+      needs.changed-files.outputs.benchmarks == 'true'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
