@@ -24,6 +24,18 @@ on:
         required: false
         type: string
         default: ''
+      runtime_versioned_target_tag:
+        description: 'Use a SemVer-compatible target tag for operator-managed workloads'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      runtime_version:
+        description: 'Dynamo runtime compatibility version from Cargo.toml'
+        value: ${{ jobs.copy-to-acr.outputs.runtime_version }}
+      target_tag:
+        description: 'Image tag published to ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag }}
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -38,6 +50,9 @@ on:
 
 jobs:
   copy-to-acr:
+    outputs:
+      runtime_version: ${{ steps.calculate-target-tag.outputs.runtime_version }}
+      target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +82,23 @@ jobs:
             fi
           fi
 
+          TARGET_TAG="${IMAGE_TAG}"
+          DYNAMO_VERSION=""
+          if [[ "${{ inputs.runtime_versioned_target_tag }}" == "true" ]]; then
+            DYNAMO_VERSION=$(sed -n \
+              '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+              Cargo.toml)
+            DYNAMO_VERSION=${DYNAMO_VERSION%%[-+]*}
+            if [[ ! "${DYNAMO_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::Invalid Dynamo workspace version: ${DYNAMO_VERSION}"
+              exit 1
+            fi
+            TARGET_TAG="${DYNAMO_VERSION}-ci-${IMAGE_TAG}"
+          fi
+
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "runtime_version=${DYNAMO_VERSION}" >> $GITHUB_OUTPUT
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}
         uses: ./.github/actions/skopeo-copy
@@ -77,7 +108,7 @@ jobs:
           source_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}

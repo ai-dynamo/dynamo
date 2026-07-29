@@ -8,7 +8,6 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
-from functools import cache
 from typing import Any, List, Literal, Optional
 
 import kr8s
@@ -36,35 +35,6 @@ def _get_workspace_dir() -> str:
 
     # Fallback: assume workspace is 3 levels up from tests/utils/
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-_CARGO_PACKAGE_VERSION_RE = re.compile(
-    r"^\[package\]$.*?^version\s*=\s*\"(?P<version>[^\"]+)\"\s*$",
-    re.MULTILINE | re.DOTALL,
-)
-_SEMVER_CORE_RE = re.compile(
-    r"^(?P<core>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))(?:[-+].*)?$"
-)
-
-
-@cache
-def dynamo_runtime_compatibility_version() -> str:
-    """Return the Dynamo runtime version accepted by runtimeVersionOverride."""
-    cargo_toml = os.path.join(
-        _get_workspace_dir(), "lib", "bindings", "python", "Cargo.toml"
-    )
-    with open(cargo_toml, encoding="utf-8") as cargo_file:
-        cargo_toml_contents = cargo_file.read()
-
-    package_version = _CARGO_PACKAGE_VERSION_RE.search(cargo_toml_contents)
-    if package_version is None:
-        raise ValueError(f"missing package version in {cargo_toml}")
-
-    version = package_version.group("version")
-    semver_core = _SEMVER_CORE_RE.fullmatch(version)
-    if semver_core is None:
-        raise ValueError(f"invalid package version in {cargo_toml}: {version}")
-    return semver_core.group("core")
 
 
 # Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
@@ -171,15 +141,6 @@ class ServiceSpec:
         if "mainContainer" not in self._spec["extraPodSpec"]:
             self._spec["extraPodSpec"]["mainContainer"] = {}
         self._spec["extraPodSpec"]["mainContainer"]["image"] = value
-
-    @property
-    def runtime_version_override(self) -> Optional[str]:
-        """Explicit Dynamo runtime compatibility version for the component."""
-        return self._spec.get("runtimeVersionOverride")
-
-    @runtime_version_override.setter
-    def runtime_version_override(self, value: str):
-        self._spec["runtimeVersionOverride"] = value
 
     @property
     def frontend_sidecar_image(self) -> Optional[str]:
@@ -549,17 +510,6 @@ class DeploymentSpec:
             envs.append({"name": "HF_HOME", "value": mount_point})
         for service in self.services:
             service.add_pvc_mount(pvc_name, mount_point)
-
-    def set_runtime_version_override(
-        self, runtime_version: str, service_name: Optional[str] = None
-    ):
-        """Set the explicit Dynamo runtime version for one or all components."""
-        if service_name is None:
-            services = self.services
-        else:
-            services = [self[service_name]]
-        for service in services:
-            service.runtime_version_override = runtime_version
 
     def set_frontend_sidecar_image(
         self, image: str, service_name: Optional[str] = None

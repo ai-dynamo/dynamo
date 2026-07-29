@@ -14,11 +14,7 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from tests.utils.managed_deployment import (
-    DeploymentSpec,
-    _get_workspace_dir,
-    dynamo_runtime_compatibility_version,
-)
+from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
@@ -361,9 +357,6 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
-        # CI-built images use SHA tags, from which the operator cannot derive
-        # the Dynamo runtime compatibility version.
-        spec.set_runtime_version_override(dynamo_runtime_compatibility_version())
 
     # Mount the shared model cache onto workers when a PVC is provided (CI on
     # clusters that provision it); otherwise workers download from HuggingFace.
