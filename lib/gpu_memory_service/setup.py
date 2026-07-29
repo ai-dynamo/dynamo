@@ -134,7 +134,6 @@ setup(
         "console_scripts": [
             "gpu-memory-service=gpu_memory_service.cli.runner:main",
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
-            "gms-v1-server=gpu_memory_service.v1.cli:main",
         ]
     },
     ext_modules=_create_ext_modules(),

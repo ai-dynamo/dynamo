@@ -142,10 +142,13 @@ raw mappings, validate model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one two-domain sidecar per rank:
+Start one dedicated server process/container per engine rank, typically with
+one visible GPU. Run the normal executable once in each rank container; that
+process serves both rank-local V1 domains for its single `--device` and does
+not aggregate servers across ranks or devices:
 
 ```text
-gms-v1-server --device 0
+gpu-memory-service --use-v1 --device 0
 ```
 
 Select the worker while retaining vLLM's normal load format:
