@@ -34,7 +34,7 @@ use tokio::sync::{RwLock, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use super::actor::{ActorFault, KvDcRelayHandle, KvDcRelayRecoveryTarget};
+use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
     DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
     KvDcRelayDiscoveryConfig, MaterializationConflict,
@@ -338,6 +338,124 @@ struct EndpointPoolRuntime {
 struct ActorBinding {
     domain: KvCacheDomainKey,
     kv_state_endpoint: EndpointId,
+}
+
+const MAX_PENDING_SOURCE_FAULTS: usize = DEFAULT_FAULT_CAPACITY;
+
+enum ProducerFenceTrigger {
+    Fault(ActorFault),
+    PendingOverflow(ActorFault),
+}
+
+enum PendingActorAction {
+    Fault(ActorFault),
+    ProducerFence(ProducerFenceTrigger),
+}
+
+#[derive(Default)]
+struct PendingActorFaults {
+    producer_fence: Option<ProducerFenceTrigger>,
+    source_faults: HashMap<(WorkerId, DpRank), ActorFault>,
+    source_order: VecDeque<(WorkerId, DpRank)>,
+}
+
+impl PendingActorFaults {
+    fn push(&mut self, fault: ActorFault) {
+        if self.producer_fence.is_some() {
+            return;
+        }
+
+        match fault.disposition.action {
+            CkfFailureAction::ContinueCapacityOmission => {}
+            CkfFailureAction::ReportResourceFailure | CkfFailureAction::RejectSource => {
+                self.push_source_fault(fault);
+            }
+            CkfFailureAction::FenceAndRebuildProducer => {
+                self.install_producer_fence(ProducerFenceTrigger::Fault(fault));
+            }
+            CkfFailureAction::DeactivateAndSnapshot | CkfFailureAction::RetrySnapshot => {
+                unreachable!("consumer-lane disposition cannot originate from Relay actor")
+            }
+        }
+    }
+
+    fn push_source_fault(&mut self, fault: ActorFault) {
+        let key = (fault.worker_id, fault.dp_rank);
+        if let Some(current) = self.source_faults.get_mut(&key) {
+            let current_epoch = current.source_epoch.get();
+            let candidate_epoch = fault.source_epoch.get();
+            if candidate_epoch > current_epoch
+                || (candidate_epoch == current_epoch
+                    && is_stronger_source_fault(
+                        fault.disposition.action,
+                        current.disposition.action,
+                    ))
+            {
+                *current = fault;
+            }
+            return;
+        }
+
+        if self.source_faults.len() >= MAX_PENDING_SOURCE_FAULTS {
+            self.install_producer_fence(ProducerFenceTrigger::PendingOverflow(fault));
+            return;
+        }
+
+        self.source_order.push_back(key);
+        self.source_faults.insert(key, fault);
+    }
+
+    fn install_producer_fence(&mut self, trigger: ProducerFenceTrigger) {
+        self.source_faults.clear();
+        self.source_order.clear();
+        self.producer_fence = Some(trigger);
+    }
+
+    fn drain_ready(&mut self, receiver: &mut tokio::sync::mpsc::Receiver<ActorFault>) {
+        while self.producer_fence.is_none() {
+            let Ok(fault) = receiver.try_recv() else {
+                break;
+            };
+            self.push(fault);
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<PendingActorAction> {
+        if let Some(trigger) = self.producer_fence.take() {
+            return Some(PendingActorAction::ProducerFence(trigger));
+        }
+        while let Some(key) = self.source_order.pop_front() {
+            if let Some(fault) = self.source_faults.remove(&key) {
+                return Some(PendingActorAction::Fault(fault));
+            }
+        }
+        None
+    }
+
+    fn take_producer_fence(&mut self) -> Option<ProducerFenceTrigger> {
+        self.producer_fence.take()
+    }
+
+    fn clear(&mut self) {
+        self.producer_fence = None;
+        self.source_faults.clear();
+        self.source_order.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        usize::from(self.producer_fence.is_some()) + self.source_faults.len()
+    }
+}
+
+fn is_stronger_source_fault(candidate: CkfFailureAction, current: CkfFailureAction) -> bool {
+    matches!(
+        (current, candidate),
+        (
+            CkfFailureAction::ReportResourceFailure,
+            CkfFailureAction::RejectSource
+        )
+    )
 }
 
 /// DC-wide Relay host. It is intentionally not scoped to a model, namespace, or endpoint.
@@ -729,6 +847,36 @@ fn report_endpoint_slot_exit(slot_id: EndpointId, result: Result<(), tokio::task
     }
 }
 
+fn report_actor_fault(endpoint: &EndpointId, fault: &ActorFault) {
+    tracing::error!(
+        %endpoint,
+        worker_id = fault.worker_id,
+        dp_rank = fault.dp_rank,
+        event_id = ?fault.event_id,
+        category = ?fault.category,
+        error = %fault.message,
+        "KV DC Relay actor failed an admitted mutation"
+    );
+}
+
+fn report_producer_fence_trigger(endpoint: &EndpointId, trigger: &ProducerFenceTrigger) {
+    match trigger {
+        ProducerFenceTrigger::Fault(fault) => report_actor_fault(endpoint, fault),
+        ProducerFenceTrigger::PendingOverflow(fault) => tracing::error!(
+            %endpoint,
+            worker_id = fault.worker_id,
+            dp_rank = fault.dp_rank,
+            source_epoch = fault.source_epoch.get(),
+            event_id = ?fault.event_id,
+            category = ?fault.category,
+            action = ?fault.disposition.action,
+            error = %fault.message,
+            pending_capacity = MAX_PENDING_SOURCE_FAULTS,
+            "KV DC Relay pending source faults exceeded their bound; fencing producer"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_endpoint_slot(
     component: Component,
@@ -751,7 +899,7 @@ async fn run_endpoint_slot(
     let mut retry_delay = Duration::from_millis(100);
     let mut start_failures = 0u64;
     let mut registration_refresh_failures = 0u64;
-    let mut pending_faults = VecDeque::new();
+    let mut pending_faults = PendingActorFaults::default();
 
     loop {
         let membership = metadata_rx.borrow_and_update().clone();
@@ -947,11 +1095,14 @@ async fn run_endpoint_slot(
             Metadata,
             Source,
             SourceClosed,
-            Fault(ActorFault),
+            Fault(PendingActorAction),
             PoolUnavailable,
             Health,
             Retry,
             Cancelled,
+        }
+        if let Some(active) = runtime.as_mut() {
+            pending_faults.drain_ready(&mut active.attachment.faults);
         }
         let pool_cancel = runtime
             .as_ref()
@@ -976,7 +1127,12 @@ async fn run_endpoint_slot(
                 let Some(runtime) = runtime.as_mut() else {
                     return std::future::pending().await;
                 };
-                runtime.attachment.faults.recv().await
+                runtime
+                    .attachment
+                    .faults
+                    .recv()
+                    .await
+                    .map(PendingActorAction::Fault)
             } => {
                 match fault {
                     Some(fault) => SlotInput::Fault(fault),
@@ -1012,72 +1168,82 @@ async fn run_endpoint_slot(
                 let mut current = status.write().await;
                 current.actor = None;
             }
-            SlotInput::Fault(fault) => {
-                tracing::error!(
-                    %endpoint,
-                    worker_id = fault.worker_id,
-                    dp_rank = fault.dp_rank,
-                    event_id = ?fault.event_id,
-                    category = ?fault.category,
-                    error = %fault.message,
-                    "KV DC Relay actor failed an admitted mutation"
-                );
-                match fault.disposition.action {
-                    CkfFailureAction::ContinueCapacityOmission => {}
-                    CkfFailureAction::ReportResourceFailure => {
-                        let mut retirement_mode = None;
-                        if let Some(active) = runtime.as_mut() {
-                            let client = active.recovery.client().clone();
-                            let disposition = collect_pending_while(
-                                &mut active.attachment.faults,
-                                &mut pending_faults,
-                                client.handle_target_fault(
-                                    fault.worker_id,
-                                    fault.dp_rank,
-                                    fault.source_epoch,
-                                    false,
-                                ),
-                            )
-                            .await;
-                            retirement_mode = target_fault_retirement_mode(disposition);
-                        }
-                        if let Some(mode) = retirement_mode {
-                            status.write().await.lifecycle = SlotLifecycle::Fenced;
-                            if let Some(active) = runtime.take() {
-                                retire_endpoint_pool(active, &pools, mode).await;
+            SlotInput::Fault(action) => {
+                let mut retirement_mode = None;
+                match action {
+                    PendingActorAction::ProducerFence(trigger) => {
+                        report_producer_fence_trigger(&endpoint, &trigger);
+                        retirement_mode = Some(PoolRetirementMode::Fenced);
+                    }
+                    PendingActorAction::Fault(fault) => {
+                        report_actor_fault(&endpoint, &fault);
+                        match fault.disposition.action {
+                            CkfFailureAction::ContinueCapacityOmission => {}
+                            CkfFailureAction::ReportResourceFailure => {
+                                if let Some(active) = runtime.as_mut() {
+                                    let client = active.recovery.client().clone();
+                                    match collect_pending_while(
+                                        &mut active.attachment.faults,
+                                        &mut pending_faults,
+                                        client.handle_target_fault(
+                                            fault.worker_id,
+                                            fault.dp_rank,
+                                            fault.source_epoch,
+                                            false,
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        FaultCollection::Completed(disposition) => {
+                                            retirement_mode =
+                                                target_fault_retirement_mode(disposition);
+                                        }
+                                        FaultCollection::ProducerFence(trigger) => {
+                                            report_producer_fence_trigger(&endpoint, &trigger);
+                                            retirement_mode = Some(PoolRetirementMode::Fenced);
+                                        }
+                                    }
+                                }
                             }
-                            pending_faults.clear();
-                            status.write().await.actor = None;
+                            CkfFailureAction::RejectSource => {
+                                if let Some(active) = runtime.as_mut() {
+                                    let client = active.recovery.client().clone();
+                                    if let FaultCollection::ProducerFence(trigger) =
+                                        collect_pending_while(
+                                            &mut active.attachment.faults,
+                                            &mut pending_faults,
+                                            client.reject_source(
+                                                fault.worker_id,
+                                                fault.dp_rank,
+                                                fault.source_epoch,
+                                            ),
+                                        )
+                                        .await
+                                    {
+                                        report_producer_fence_trigger(&endpoint, &trigger);
+                                        retirement_mode = Some(PoolRetirementMode::Fenced);
+                                    }
+                                }
+                            }
+                            CkfFailureAction::FenceAndRebuildProducer => {
+                                retirement_mode = Some(PoolRetirementMode::Fenced);
+                            }
+                            CkfFailureAction::DeactivateAndSnapshot
+                            | CkfFailureAction::RetrySnapshot => {
+                                unreachable!(
+                                    "consumer-lane disposition cannot originate from Relay actor"
+                                )
+                            }
                         }
                     }
-                    CkfFailureAction::RejectSource => {
-                        if let Some(active) = runtime.as_mut() {
-                            let client = active.recovery.client().clone();
-                            collect_pending_while(
-                                &mut active.attachment.faults,
-                                &mut pending_faults,
-                                client.reject_source(
-                                    fault.worker_id,
-                                    fault.dp_rank,
-                                    fault.source_epoch,
-                                ),
-                            )
-                            .await;
-                        }
+                }
+                if let Some(mode) = retirement_mode {
+                    status.write().await.lifecycle = SlotLifecycle::Fenced;
+                    if let Some(active) = runtime.take() {
+                        retire_endpoint_pool(active, &pools, mode).await;
                     }
-                    CkfFailureAction::FenceAndRebuildProducer => {
-                        // The producer's exact state is suspect. Retire its publisher and source
-                        // bindings before the slot loop constructs a fresh layout generation.
-                        status.write().await.lifecycle = SlotLifecycle::Fenced;
-                        if let Some(active) = runtime.take() {
-                            fence_endpoint_pool(active, &pools).await;
-                        }
-                        pending_faults.clear();
-                        status.write().await.actor = None;
-                    }
-                    CkfFailureAction::DeactivateAndSnapshot | CkfFailureAction::RetrySnapshot => {
-                        unreachable!("consumer-lane disposition cannot originate from Relay actor")
-                    }
+                    pending_faults.clear();
+                    status.write().await.actor = None;
                 }
             }
             SlotInput::Cancelled => break,
@@ -1252,18 +1418,29 @@ async fn withdraw_drain_and_remove_pool<T>(
     result
 }
 
-async fn collect_pending_while<T, U>(
-    receiver: &mut tokio::sync::mpsc::Receiver<U>,
-    pending: &mut VecDeque<U>,
+enum FaultCollection<T> {
+    Completed(T),
+    /// The source-local future was dropped; the caller must retire the producer generation.
+    ProducerFence(ProducerFenceTrigger),
+}
+
+async fn collect_pending_while<T>(
+    receiver: &mut tokio::sync::mpsc::Receiver<ActorFault>,
+    pending: &mut PendingActorFaults,
     future: impl Future<Output = T>,
-) -> T {
+) -> FaultCollection<T> {
     tokio::pin!(future);
     loop {
         tokio::select! {
-            result = &mut future => return result,
+            result = &mut future => return FaultCollection::Completed(result),
             item = receiver.recv() => match item {
-                Some(item) => pending.push_back(item),
-                None => return future.await,
+                Some(fault) => {
+                    pending.push(fault);
+                    if let Some(trigger) = pending.take_producer_fence() {
+                        return FaultCollection::ProducerFence(trigger);
+                    }
+                }
+                None => return FaultCollection::Completed(future.await),
             },
         }
     }
@@ -1476,7 +1653,7 @@ fn actor_health(handle: &KvDcRelayHandle) -> KvDcRelayActorStats {
 mod tests {
     use dynamo_kv_router::{
         identity::{CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId},
-        indexer::cuckoo::CkfFailurePoint,
+        indexer::cuckoo::{CkfFailureDisposition, CkfFailurePoint},
         protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank},
     };
     use dynamo_runtime::{
@@ -1529,6 +1706,33 @@ mod tests {
                 publication_delay: Duration::from_millis(1),
             },
         )
+    }
+
+    fn actor_fault(
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        source_epoch: u64,
+        event_id: u64,
+        disposition: CkfFailureDisposition,
+    ) -> ActorFault {
+        let category = match disposition.action {
+            CkfFailureAction::ReportResourceFailure => ActorFaultCategory::Resource,
+            CkfFailureAction::RejectSource => ActorFaultCategory::SourceProtocol,
+            CkfFailureAction::ContinueCapacityOmission
+            | CkfFailureAction::FenceAndRebuildProducer => ActorFaultCategory::ProducerInvariant,
+            CkfFailureAction::DeactivateAndSnapshot | CkfFailureAction::RetrySnapshot => {
+                unreachable!("consumer fault cannot be used by Relay host tests")
+            }
+        };
+        ActorFault {
+            worker_id,
+            dp_rank,
+            source_epoch: SourceEpoch::new(source_epoch),
+            event_id: Some(event_id),
+            category,
+            disposition,
+            message: format!("fault {event_id}"),
+        }
     }
 
     async fn test_component(name: &str) -> Component {
@@ -2052,47 +2256,128 @@ mod tests {
         assert_eq!(registry.pool_count().await, 0);
     }
 
-    #[tokio::test]
-    async fn queued_non_fencing_fault_does_not_suppress_a_later_fence() {
-        let non_fencing = CkfFailurePoint::PrecommitAllocationFailure.disposition();
-        let fencing = CkfFailurePoint::PrewriteInvariantMismatch.disposition();
-        let fault = |event_id, category, disposition| ActorFault {
-            worker_id: 1,
-            dp_rank: 0,
-            source_epoch: SourceEpoch::new(1),
-            event_id: Some(event_id),
-            category,
-            disposition,
-            message: format!("fault {event_id}"),
+    #[test]
+    fn pending_faults_coalesce_duplicate_and_stronger_source_actions() {
+        let resource = CkfFailurePoint::PrecommitAllocationFailure.disposition();
+        let reject = CkfFailurePoint::SourceProtocolFailure.disposition();
+        let mut pending = PendingActorFaults::default();
+
+        for event_id in 0..1_000 {
+            pending.push(actor_fault(1, 0, 1, event_id, resource));
+        }
+        pending.push(actor_fault(1, 0, 1, 1_000, reject));
+        pending.push(actor_fault(1, 0, 1, 1_001, resource));
+
+        assert_eq!(pending.len(), 1);
+        let Some(PendingActorAction::Fault(fault)) = pending.pop_front() else {
+            panic!("strongest source fault was not retained");
         };
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        sender
-            .send(fault(1, ActorFaultCategory::Resource, non_fencing))
-            .await
-            .unwrap();
-        let mut pending = VecDeque::new();
+        assert_eq!(fault.disposition.action, CkfFailureAction::RejectSource);
+        assert!(pending.pop_front().is_none());
 
-        let send_result = collect_pending_while(
-            &mut receiver,
-            &mut pending,
-            sender.send(fault(2, ActorFaultCategory::ProducerInvariant, fencing)),
-        )
-        .await;
-        send_result.unwrap();
-
-        let first = pending.pop_front().unwrap();
-        let second = match pending.pop_front() {
-            Some(fault) => fault,
-            None => receiver.recv().await.unwrap(),
+        pending.push(actor_fault(1, 0, 1, 1_002, reject));
+        pending.push(actor_fault(1, 0, 2, 1_003, resource));
+        let Some(PendingActorAction::Fault(fault)) = pending.pop_front() else {
+            panic!("newer source epoch was not retained");
         };
-
+        assert_eq!(fault.source_epoch, SourceEpoch::new(2));
         assert_eq!(
-            [first.disposition.action, second.disposition.action],
-            [
-                CkfFailureAction::ReportResourceFailure,
-                CkfFailureAction::FenceAndRebuildProducer,
-            ]
+            fault.disposition.action,
+            CkfFailureAction::ReportResourceFailure
         );
+    }
+
+    #[test]
+    fn pending_fault_overflow_fails_safe_with_a_producer_fence() {
+        let resource = CkfFailurePoint::PrecommitAllocationFailure.disposition();
+        let mut pending = PendingActorFaults::default();
+
+        for worker_id in 0..MAX_PENDING_SOURCE_FAULTS as u64 {
+            pending.push(actor_fault(worker_id, 0, 1, worker_id, resource));
+        }
+        assert_eq!(pending.len(), MAX_PENDING_SOURCE_FAULTS);
+
+        pending.push(actor_fault(
+            MAX_PENDING_SOURCE_FAULTS as u64,
+            0,
+            1,
+            MAX_PENDING_SOURCE_FAULTS as u64,
+            resource,
+        ));
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.pop_front(),
+            Some(PendingActorAction::ProducerFence(
+                ProducerFenceTrigger::PendingOverflow(_)
+            ))
+        ));
+        assert!(pending.pop_front().is_none());
+    }
+
+    #[test]
+    fn producer_fence_supersedes_varied_pending_source_faults() {
+        let resource = CkfFailurePoint::PrecommitAllocationFailure.disposition();
+        let reject = CkfFailurePoint::SourceProtocolFailure.disposition();
+        let fence = CkfFailurePoint::PrewriteInvariantMismatch.disposition();
+        let mut pending = PendingActorFaults::default();
+
+        pending.push(actor_fault(1, 0, 1, 1, resource));
+        pending.push(actor_fault(1, 0, 1, 2, resource));
+        pending.push(actor_fault(2, 0, 1, 3, reject));
+        pending.push(actor_fault(3, 0, 1, 4, resource));
+        pending.push(actor_fault(1, 0, 1, 5, fence));
+        pending.push(actor_fault(4, 0, 1, 6, resource));
+
+        assert_eq!(pending.len(), 1);
+        let Some(PendingActorAction::ProducerFence(ProducerFenceTrigger::Fault(fault))) =
+            pending.pop_front()
+        else {
+            panic!("producer fence did not supersede weaker source faults");
+        };
+        assert_eq!(
+            fault.disposition.action,
+            CkfFailureAction::FenceAndRebuildProducer
+        );
+        assert!(pending.pop_front().is_none());
+    }
+
+    #[tokio::test]
+    async fn producer_fence_interrupts_inflight_fault_recovery() {
+        let resource = CkfFailurePoint::PrecommitAllocationFailure.disposition();
+        let fence = CkfFailurePoint::PrewriteInvariantMismatch.disposition();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(DEFAULT_FAULT_CAPACITY);
+        let (recovery_started, recovery_started_rx) = tokio::sync::oneshot::channel();
+        let (release_recovery, release_recovery_rx) = tokio::sync::oneshot::channel::<()>();
+        let collection = tokio::spawn(async move {
+            let mut pending = PendingActorFaults::default();
+            let outcome = collect_pending_while(&mut receiver, &mut pending, async move {
+                let _ = recovery_started.send(());
+                let _ = release_recovery_rx.await;
+                TargetFaultDisposition::Recovering
+            })
+            .await;
+            (outcome, pending)
+        });
+
+        recovery_started_rx.await.unwrap();
+        for event_id in 0..100 {
+            sender
+                .send(actor_fault(1, 0, 1, event_id, resource))
+                .await
+                .unwrap();
+        }
+        sender.send(actor_fault(1, 0, 1, 100, fence)).await.unwrap();
+
+        let (outcome, pending) = tokio::time::timeout(Duration::from_secs(1), collection)
+            .await
+            .expect("producer fence did not interrupt fault recovery")
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            FaultCollection::ProducerFence(ProducerFenceTrigger::Fault(_))
+        ));
+        assert_eq!(pending.len(), 0);
+        assert!(release_recovery.send(()).is_err());
     }
 
     #[tokio::test]
