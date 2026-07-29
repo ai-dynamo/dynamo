@@ -83,10 +83,15 @@ def normalize_video_frames(images: list) -> list:
 
 
 def frames_to_numpy(images: list) -> np.ndarray:
-    """Convert a list of PIL Images to a numpy array suitable for video encoding.
+    """Convert a list of video frames to a numpy array suitable for encoding.
+
+    Accepts either PIL Images or numpy arrays. Diffusion video pipelines (e.g.
+    Wan2.1 T2V) emit numpy frames — float in ``[0, 1]`` by default — while other
+    stages hand back PIL Images; this normalizes both to ``uint8`` RGB, matching
+    the conversion ``diffusers.export_to_video`` performs internally.
 
     Args:
-        images: List of PIL Image objects (video frames).
+        images: List of PIL Image objects or ``np.ndarray`` frames (H, W, 3).
 
     Returns:
         Numpy array of shape ``(num_frames, height, width, 3)`` with dtype
@@ -100,7 +105,14 @@ def frames_to_numpy(images: list) -> np.ndarray:
 
     frames = []
     for img in images:
-        arr = np.array(img.convert("RGB"))
+        if isinstance(img, np.ndarray):
+            arr = img
+            if arr.dtype != np.uint8:
+                # Diffusers convention: numpy frames are float in [0, 1].
+                arr = (arr * 255.0).round().clip(0, 255).astype(np.uint8)
+        else:
+            # PIL Image.
+            arr = np.array(img.convert("RGB"))
         frames.append(arr)
 
     # Validate consistent sizes

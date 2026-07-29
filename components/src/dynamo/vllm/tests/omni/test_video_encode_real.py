@@ -44,6 +44,23 @@ def _synthetic_pil_frames(n: int = 8, size: int = 64) -> list:
     ]
 
 
+def _synthetic_numpy_frames(n: int = 8, size: int = 64) -> list:
+    """A single float32 [0, 1] video tensor, as diffusion pipelines emit it.
+
+    Wraps one ``(n, size, size, 3)`` array in a length-1 list so it flows through
+    ``normalize_video_frames`` exactly like ``stage_output.images`` does for the
+    Wan2.1 T2V serve path — the shape that regressed with 'numpy.ndarray' object
+    has no attribute 'convert'.
+    """
+    video = np.stack(
+        [
+            np.full((size, size, 3), (i * 24) % 256, dtype=np.float32) / 255.0
+            for i in range(n)
+        ]
+    )
+    return [video]
+
+
 def _probe_video_codec(video_bytes: bytes) -> str:
     """Return the video stream codec of encoded bytes, via the shipped ffmpeg."""
     exe = os.environ.get("IMAGEIO_FFMPEG_EXE")
@@ -81,6 +98,30 @@ async def test_omni_video_output_is_vp9_in_shipped_image():
     )
     # A missing ffmpeg or a regression to the H.264 default surfaces here as a
     # "failed" status rather than a raise (the handler catches encode errors).
+    assert result["status"] == "completed", result.get("error")
+    video_bytes = base64.b64decode(result["data"][0]["b64_json"])
+    assert video_bytes, "encoder produced no bytes"
+    codec = _probe_video_codec(video_bytes)
+    assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+
+
+@pytest.mark.asyncio
+async def test_omni_video_output_accepts_numpy_frames():
+    """Regression: real diffusion pipelines emit float numpy frames, not PIL.
+
+    The PIL-only ``frames_to_numpy`` crashed the Wan2.1 T2V serve path with
+    "'numpy.ndarray' object has no attribute 'convert'" — green in unit tests
+    that fed PIL frames. This drives the same numpy shape the pipeline produces.
+    """
+    formatter = DiffusionFormatter(
+        model_name="test", media_fs=None, media_http_url=None
+    )
+    result = await formatter._encode_video(
+        _synthetic_numpy_frames(),
+        "req-vp9-np",
+        fps=8,
+        response_format="b64_json",
+    )
     assert result["status"] == "completed", result.get("error")
     video_bytes = base64.b64decode(result["data"][0]["b64_json"])
     assert video_bytes, "encoder produced no bytes"
