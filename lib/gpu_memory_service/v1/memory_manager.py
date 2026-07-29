@@ -54,7 +54,6 @@ class GMSClientMemoryManager:
         self._device = device
         self._session_factory = session_factory
         self._session: _GMSClientSession | None = None
-        self._identity: tuple[str, str] | None = None
         self._mappings: dict[int, _InstalledMapping] = {}
         self._lock = threading.RLock()
         self._failure: RuntimeError | None = None
@@ -81,13 +80,11 @@ class GMSClientMemoryManager:
                 session = self._session_factory(
                     self._socket_path,
                     lock_type,
-                    self._identity,
+                    None,
                 )
                 if session.identity[1] != self._gpu_identity():
                     session.close()
                     raise RuntimeError("GMS sidecar is on another physical GPU")
-                if self._identity is None:
-                    self._identity = session.identity
                 self._session = session
             except Exception as exc:
                 raise self._latch("GMS connect failed", exc) from exc
