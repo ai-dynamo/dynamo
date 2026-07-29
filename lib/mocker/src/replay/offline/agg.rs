@@ -14,12 +14,14 @@ use super::core::{
 use super::events::{SimulationEvent, SimulationWorkerStage};
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
-use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_worker_completion,
-    pop_ready_worker_ready, push_planner_tick, push_worker_completion, push_worker_ready,
+    next_timestamp as choose_next_timestamp, pop_ready_scaling_tick, pop_ready_worker_completion,
+    pop_ready_worker_ready, push_scaling_tick, push_worker_completion, push_worker_ready,
 };
+#[cfg(test)]
+use super::scaling::ReplayScalingDecision;
+use super::scaling::{LatestFpmBuffer, ReplayScalingPolicy, ReplayScalingSnapshot};
 #[cfg(test)]
 use super::state::AggRequestPhase;
 #[cfg(test)]
@@ -36,7 +38,7 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::loadgen::{ReplayRequestPayload, WorkloadDriver};
 #[cfg(test)]
 use crate::replay::ReplayRouterMode;
-use crate::replay::{ReplayTerminalStatus, SlaThresholds, TraceCollector};
+use crate::replay::{ReplayTerminalStatus, TraceCollector};
 use anyhow::bail;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
@@ -120,18 +122,16 @@ where
     placement: PlacementPolicyImpl,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
-    /// Latest forward pass metric per worker/rank since the previous planner tick.
+    /// Latest forward pass metric per worker/rank since the previous scaling tick.
     fpm_buffer: LatestFpmBuffer,
-    /// Traffic statistics accumulated between planner ticks.
+    /// Traffic statistics accumulated between scaling ticks.
     traffic: TrafficAccumulator,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
     /// gracefully once the next scheduled timestamp exceeds this cap, leaving
     /// any in-flight requests as incomplete in the report.
     max_sim_time_ms: Option<f64>,
-    /// Planner hook. When set, `run()` seeds a recurring `PlannerTick` event and
-    /// calls back into the planner at each tick (the unified replacement for the
-    /// old Python-driven `advance_to` stepping loop).
-    planner_hook: Option<Box<dyn PlannerHook>>,
+    /// Optional scaling component. When set, `run()` seeds recurring `ScalingTick` events.
+    scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
     /// consumes them, so the plain `run()` path leaves this `false`.
     collect_fpm: bool,
@@ -224,7 +224,7 @@ where
             fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
-            planner_hook: None,
+            scaling_policy: None,
             collect_fpm: false,
             #[cfg(test)]
             worker_active_requests: vec![
@@ -263,21 +263,17 @@ where
         self
     }
 
-    /// Set the SLA thresholds used to classify goodput in the final report.
-    pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
-        self.collector.set_sla_thresholds(sla);
-        self
-    }
-
-    /// Attach a planner hook. Enables FPM collection and makes `run()` drive the
-    /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
-    pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
+    /// Attach a scaling policy and enable tick-scoped FPM collection.
+    pub(in crate::replay) fn with_scaling_policy(
+        mut self,
+        policy: Box<dyn ReplayScalingPolicy>,
+    ) -> Self {
         self.collect_fpm = true;
         for worker_id in self.engine.active_group_ids() {
             self.fpm_buffer
                 .activate_worker(worker_id, self.dp_size, self.now_ms);
         }
-        self.planner_hook = Some(hook);
+        self.scaling_policy = Some(policy);
         self
     }
 
@@ -326,7 +322,7 @@ where
     }
 
     /// Preserve the live `(worker_id, dp_rank)` identity when forwarding a
-    /// rank-local scheduler snapshot to the planner bridge.
+    /// rank-local scheduler snapshot to the scaling policy.
     fn record_fpm(
         &mut self,
         rank_id: usize,
@@ -438,8 +434,8 @@ where
         Ok(uuid)
     }
 
-    /// Return true once no request work remains. Lingering `WorkerReady`/`PlannerTick`
-    /// events (worker startup, a re-armed planner heartbeat) carry no work and do not
+    /// Return true once no request work remains. Lingering `WorkerReady`/`ScalingTick`
+    /// events carry no work and do not
     /// keep the run alive — otherwise a recurring tick would never let `run()` exit.
     fn is_done(&self) -> bool {
         self.only_idle_events_remain()
@@ -449,7 +445,7 @@ where
     }
 
     /// Return true once the request workload is complete, even if `WorkerReady`
-    /// or `PlannerTick` events remain in the queue. Lingering startup events for
+    /// or `ScalingTick` events remain in the queue. Lingering startup events for
     /// workers that will never receive requests should not block completion.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
@@ -460,13 +456,13 @@ where
 
     /// True if the event heap is empty or contains only "idle" events that carry no
     /// pending request work: `WorkerReady` (a worker still starting up) or
-    /// `PlannerTick` (a re-armed planner heartbeat).
+    /// `ScalingTick` (a re-armed scaling heartbeat).
     fn only_idle_events_remain(&self) -> bool {
         use super::events::SimulationEventKind;
         self.events.iter().all(|e| {
             matches!(
                 e.kind,
-                SimulationEventKind::WorkerReady { .. } | SimulationEventKind::PlannerTick
+                SimulationEventKind::WorkerReady { .. } | SimulationEventKind::ScalingTick
             )
         })
     }
@@ -773,10 +769,9 @@ where
                 )?;
             }
             changed |= !removed.is_empty();
-            // Planner ticks fire LAST so the planner observes a fully settled
-            // timestamp; any scaling it applies is picked up by the next iteration.
-            if self.planner_hook.is_some() {
-                changed |= self.apply_planner_ticks()?;
+            // Scaling ticks fire last so the policy observes a settled timestamp.
+            if self.scaling_policy.is_some() {
+                changed |= self.apply_scaling_ticks()?;
             }
 
             if !changed {
@@ -787,18 +782,18 @@ where
         Ok(())
     }
 
-    /// Seed the first `PlannerTick` from the hook's requested start time (a
+    /// Seed the first `ScalingTick` from the policy's requested start time (a
     /// non-finite time means "no tick" and is skipped).
-    fn seed_first_planner_tick(&mut self) -> anyhow::Result<()> {
-        let Some(mut hook) = self.planner_hook.take() else {
+    fn seed_first_scaling_tick(&mut self) -> anyhow::Result<()> {
+        let Some(mut policy) = self.scaling_policy.take() else {
             return Ok(());
         };
-        let first_ms = hook.initial_tick_ms();
-        self.planner_hook = Some(hook);
+        let first_ms = policy.initial_tick_ms();
+        self.scaling_policy = Some(policy);
         let first_ms = first_ms?;
         if first_ms.is_finite() {
             let at_ms = first_ms.max(self.now_ms);
-            push_planner_tick(&mut self.events, &mut self.next_event_seq, at_ms);
+            push_scaling_tick(&mut self.events, &mut self.next_event_seq, at_ms);
         } else {
             // No tick will ever fire to drain the FPM buffer; stop collecting it.
             self.collect_fpm = false;
@@ -806,40 +801,39 @@ where
         Ok(())
     }
 
-    /// Fire every `PlannerTick` scheduled for the current timestamp: gather the
-    /// drained metrics, call the planner, apply its scaling decision, and re-arm.
+    /// Fire every `ScalingTick`: gather a settled snapshot, call the policy,
+    /// apply its decision, and re-arm.
     /// Agg routes all FPM through `decode_fpm` and ignores the prefill target.
-    fn apply_planner_ticks(&mut self) -> anyhow::Result<bool> {
+    fn apply_scaling_ticks(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
-        while pop_ready_planner_tick(&mut self.events, self.now_ms) {
+        while pop_ready_scaling_tick(&mut self.events, self.now_ms) {
             if self.is_workload_done() {
                 continue;
             }
             let active_decode_ids = self.engine.active_group_ids();
             self.fpm_buffer
                 .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
-            let metrics = PlannerTickMetrics {
+            let snapshot = ReplayScalingSnapshot {
                 now_ms: self.now_ms,
                 prefill_fpm: Vec::new(),
                 decode_fpm: self.fpm_buffer.take(),
                 traffic: self.traffic.drain(self.now_ms),
                 active_prefill_ids: Vec::new(),
                 active_decode_ids,
-                total_prefill: 0,
-                total_decode: self.total_worker_count(),
+                starting_prefill_ids: Vec::new(),
+                starting_decode_ids: self.engine.starting_group_ids(),
+                draining_prefill_ids: Vec::new(),
+                draining_decode_ids: self.engine.draining_group_ids(),
             };
-            let mut hook = self
-                .planner_hook
+            let mut policy = self
+                .scaling_policy
                 .take()
-                .expect("planner tick fired without a hook");
-            let decision = hook.on_tick(metrics);
-            self.planner_hook = Some(hook);
+                .expect("scaling tick fired without a policy");
+            let decision = policy.on_tick(snapshot);
+            self.scaling_policy = Some(policy);
             let decision = decision?;
 
-            if decision.target_decode.is_some() {
-                let target = decision
-                    .target_decode
-                    .unwrap_or_else(|| self.total_worker_count());
+            if let Some(target) = decision.target_decode {
                 self.apply_scaling(target)?;
             }
 
@@ -852,7 +846,7 @@ where
             if let Some(next_ms) = next_tick
                 && !self.is_workload_done()
             {
-                push_planner_tick(&mut self.events, &mut self.next_event_seq, next_ms);
+                push_scaling_tick(&mut self.events, &mut self.next_event_seq, next_ms);
             } else {
                 self.collect_fpm = false;
             }
@@ -862,8 +856,7 @@ where
     }
 
     // ------------------------------------------------------------------
-    // Planner integration: scaling + worker-count accessors used by the
-    // in-loop `PlannerTick` handler (apply_planner_ticks).
+    // Scaling integration used by the in-loop `ScalingTick` handler.
     // ------------------------------------------------------------------
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
@@ -888,6 +881,7 @@ where
     }
 
     /// Total worker count including pending-removal.
+    #[cfg(test)]
     pub(in crate::replay) fn total_worker_count(&self) -> usize {
         self.engine.worker_count()
     }
@@ -902,6 +896,9 @@ where
     /// Scale-down: the worker is removed from the router immediately (so no
     /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
+        if target_workers != self.engine.non_draining_group_count() {
+            self.collector.clear_static_worker_count();
+        }
         let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
         if !added.is_empty() {
@@ -1028,8 +1025,8 @@ where
         }
         self.drain_current_timestamp()?;
         // With a planner attached, seed the recurring heartbeat; ticks then fire as
-        // events inside drain_current_timestamp (see apply_planner_ticks).
-        self.seed_first_planner_tick()?;
+        // events inside drain_current_timestamp.
+        self.seed_first_scaling_tick()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
@@ -1128,22 +1125,90 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    struct CaptureOnceHook {
+    struct CaptureOncePolicy {
         at_ms: f64,
-        captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+        captured: Rc<RefCell<Option<ReplayScalingSnapshot>>>,
     }
 
-    impl PlannerHook for CaptureOnceHook {
+    impl ReplayScalingPolicy for CaptureOncePolicy {
         fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
             Ok(self.at_ms)
         }
 
         fn on_tick(
             &mut self,
-            metrics: PlannerTickMetrics,
-        ) -> anyhow::Result<super::super::planner_hook::PlannerTickDecision> {
-            *self.captured.borrow_mut() = Some(metrics);
-            Ok(super::super::planner_hook::PlannerTickDecision::default())
+            snapshot: ReplayScalingSnapshot,
+        ) -> anyhow::Result<ReplayScalingDecision> {
+            *self.captured.borrow_mut() = Some(snapshot);
+            Ok(ReplayScalingDecision::default())
+        }
+    }
+
+    struct ScriptedPolicy {
+        initial_ms: f64,
+        next_ticks: VecDeque<Option<f64>>,
+        snapshots: Rc<RefCell<Vec<ReplayScalingSnapshot>>>,
+    }
+
+    impl ReplayScalingPolicy for ScriptedPolicy {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(self.initial_ms)
+        }
+
+        fn on_tick(
+            &mut self,
+            snapshot: ReplayScalingSnapshot,
+        ) -> anyhow::Result<ReplayScalingDecision> {
+            self.snapshots.borrow_mut().push(snapshot);
+            Ok(ReplayScalingDecision {
+                next_tick_ms: self.next_ticks.pop_front().flatten(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct DisabledPolicy {
+        calls: Rc<RefCell<usize>>,
+    }
+
+    impl ReplayScalingPolicy for DisabledPolicy {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(f64::INFINITY)
+        }
+
+        fn on_tick(
+            &mut self,
+            _snapshot: ReplayScalingSnapshot,
+        ) -> anyhow::Result<ReplayScalingDecision> {
+            *self.calls.borrow_mut() += 1;
+            Ok(ReplayScalingDecision::default())
+        }
+    }
+
+    struct ScaleAtStartPolicy {
+        snapshots: Rc<RefCell<Vec<ReplayScalingSnapshot>>>,
+    }
+
+    impl ReplayScalingPolicy for ScaleAtStartPolicy {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(0.0)
+        }
+
+        fn on_tick(
+            &mut self,
+            snapshot: ReplayScalingSnapshot,
+        ) -> anyhow::Result<ReplayScalingDecision> {
+            let first = self.snapshots.borrow().is_empty();
+            self.snapshots.borrow_mut().push(snapshot);
+            Ok(if first {
+                ReplayScalingDecision {
+                    target_decode: Some(2),
+                    next_tick_ms: Some(5_000.0),
+                    ..Default::default()
+                }
+            } else {
+                ReplayScalingDecision::default()
+            })
         }
     }
 
@@ -1543,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_tick_emits_idle_fpm_after_simulated_second() {
+    fn scaling_tick_emits_idle_fpm_after_simulated_second() {
         let mut args = sglang_replay_args();
         args.dp_size = 2;
         let pending = normalize_trace_requests(
@@ -1567,7 +1632,7 @@ mod tests {
         )
         .unwrap();
         let captured = Rc::new(RefCell::new(None));
-        let hook = CaptureOnceHook {
+        let policy = CaptureOncePolicy {
             at_ms: 2_000.0,
             captured: Rc::clone(&captured),
         };
@@ -1582,7 +1647,7 @@ mod tests {
             ReplayRouterMode::RoundRobin,
         )
         .unwrap()
-        .with_planner_hook(Box::new(hook))
+        .with_scaling_policy(Box::new(policy))
         .run()
         .unwrap();
 
@@ -1608,6 +1673,99 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn scaling_tick_clamps_recurs_settles_and_stops_on_nonfuture_time() {
+        let pending =
+            normalize_trace_requests(simple_requests(2, 1_000.0).into_iter().collect(), 1.0)
+                .unwrap();
+        let snapshots = Rc::new(RefCell::new(Vec::new()));
+        let policy = ScriptedPolicy {
+            initial_ms: -5.0,
+            next_ticks: VecDeque::from([Some(100.0), Some(200.0), Some(200.0)]),
+            snapshots: Rc::clone(&snapshots),
+        };
+
+        AggRuntime::new(
+            &startup_args(0.0),
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_scaling_policy(Box::new(policy))
+        .run()
+        .unwrap();
+
+        let snapshots = snapshots.borrow();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.now_ms)
+                .collect::<Vec<_>>(),
+            vec![0.0, 100.0, 200.0]
+        );
+        assert_eq!(snapshots[0].active_decode_ids, vec![0]);
+    }
+
+    #[test]
+    fn scaling_tick_observes_worker_ready_at_same_timestamp() {
+        let pending =
+            normalize_trace_requests(simple_requests(2, 10_000.0).into_iter().collect(), 1.0)
+                .unwrap();
+        let snapshots = Rc::new(RefCell::new(Vec::new()));
+
+        AggRuntime::new(
+            &startup_args(5.0),
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_scaling_policy(Box::new(ScaleAtStartPolicy {
+            snapshots: Rc::clone(&snapshots),
+        }))
+        .run()
+        .unwrap();
+
+        let snapshots = snapshots.borrow();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[1].now_ms, 5_000.0);
+        assert_eq!(snapshots[1].active_decode_ids, vec![0, 1]);
+        assert!(snapshots[1].starting_decode_ids.is_empty());
+    }
+
+    #[test]
+    fn nonfinite_initial_scaling_tick_disables_callback() {
+        let pending =
+            normalize_trace_requests(simple_requests(2, 1_000.0).into_iter().collect(), 1.0)
+                .unwrap();
+        let calls = Rc::new(RefCell::new(0));
+
+        AggRuntime::new(
+            &startup_args(0.0),
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_scaling_policy(Box::new(DisabledPolicy {
+            calls: Rc::clone(&calls),
+        }))
+        .run()
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), 0);
     }
 
     #[test]
@@ -3240,8 +3398,8 @@ mod tests {
         // avg_accept_length == 3.0 alongside the requested output length
         // (osl == 12). This is the end-to-end accept-length path the planner
         // observes per tick via the drained traffic stats. (Ported from the
-        // Python `test_planner_bridge_drains_mtp_accept_length` that drove the
-        // now-removed bridge stepping API directly.)
+        // Python scaling-policy coverage that drove the
+        // now-removed planner stepping API directly.)
         let args = MockEngineArgs::builder()
             .block_size(64)
             .num_gpu_blocks(512)
