@@ -19,6 +19,7 @@ package validation_test
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
@@ -56,12 +57,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		checkpointOff   bool                             // disables checkpoint creation and restore
 		username        string                           // supplies the admission request identity
 
-		wantSchemaErr     string
-		wantCELErr        string
-		wantAdmissionErrs []string
-		wantWebhookErrs   []string
-		wantWarnings      []string
-		notWantErr        string
+		wantSchemaErr      string
+		wantCELErr         string
+		wantAdmissionErrs  []string
+		wantWebhookErrs    []string
+		wantWarnings       []string
+		notWantErr         string
+		wantPodAnnotations map[string]string
 	}{
 		// Baseline create-path rules.
 		{
@@ -295,15 +297,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
-			name: "v1beta1 valid pod template backend annotation reaches the webhook",
+			// Component pod metadata must survive structural pruning.
+			name: "v1beta1 discovery annotation survives the component pod template API server round trip",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
+						consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
 					}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
 				}
 			}),
+			wantPodAnnotations: map[string]string{
+				consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
+				consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
+			},
 		},
 		{
 			name: "v1alpha1 converted extraPodMetadata annotation does not receive v1beta1 CEL validation",
@@ -1658,7 +1666,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					test.seedGates = &seedGates
 				}
 			}
-			runAdmissionTest(t, test)
+			actual := runAdmissionTest(t, test)
+			if tt.wantPodAnnotations != nil {
+				t.Log("Verify the API server preserved embedded component pod-template annotations")
+				var actualDGD nvidiacomv1beta1.DynamoGraphDeployment
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDGD); err != nil {
+					t.Fatalf("convert admitted DGD: %v", err)
+				}
+				component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+				if component == nil || component.PodTemplate == nil {
+					t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
+				}
+				if got := component.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
+					t.Fatalf(
+						"spec.components[%q].podTemplate.metadata.annotations = %v, want %v",
+						dgdAdmissionWorkerName,
+						got,
+						tt.wantPodAnnotations,
+					)
+				}
+			}
 		})
 	}
 }

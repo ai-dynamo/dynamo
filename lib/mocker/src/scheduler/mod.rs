@@ -11,7 +11,7 @@ mod source_holds;
 pub mod vllm;
 
 pub use crate::common::protocols::ForwardPassSnapshot;
-use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
+use crate::common::protocols::{DirectRequest, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{CapturedRouterEventBuffer, capture_router_event_sink};
 pub(crate) use live_boundary::{
@@ -25,7 +25,6 @@ pub use source_holds::{
     SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult, SchedulerLifecycleEvent,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(feature = "kvbm-offload")]
@@ -336,96 +335,6 @@ impl EngineCore {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum EngineScheduler {
-    Vllm(Scheduler),
-    Sglang(SglangScheduler),
-}
-
-impl EngineScheduler {
-    pub(crate) fn new_with_admission(
-        args: crate::common::protocols::MockEngineArgs,
-        dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
-        kv_event_publishers: KvEventPublishers,
-        cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        fpm_publisher: FpmPublisher,
-    ) -> Self {
-        match args.engine_type {
-            // TRT-LLM reuses the vLLM scheduler; the GUARANTEED_NO_EVICT
-            // policy is carried in `args` and read by `VllmCore` per pass.
-            crate::common::protocols::EngineType::Vllm
-            | crate::common::protocols::EngineType::Trtllm => {
-                Self::Vllm(Scheduler::new_with_admission(
-                    args,
-                    dp_rank,
-                    output_tx,
-                    kv_event_publishers,
-                    cancellation_token,
-                    admission_tx,
-                    fpm_publisher,
-                ))
-            }
-            crate::common::protocols::EngineType::Sglang => {
-                Self::Sglang(SglangScheduler::new_with_admission(
-                    args,
-                    dp_rank,
-                    output_tx,
-                    kv_event_publishers,
-                    cancellation_token,
-                    admission_tx,
-                    fpm_publisher,
-                ))
-            }
-        }
-    }
-}
-
-impl SchedulerHandle for EngineScheduler {
-    fn receive(&self, request: DirectRequest) {
-        match self {
-            Self::Vllm(scheduler) => scheduler.receive(request),
-            Self::Sglang(scheduler) => scheduler.receive(request),
-        }
-    }
-
-    fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.request_sender(),
-            Self::Sglang(scheduler) => scheduler.request_sender(),
-        }
-    }
-
-    fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.metrics_receiver(),
-            Self::Sglang(scheduler) => scheduler.metrics_receiver(),
-        }
-    }
-
-    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.command_sender(),
-            Self::Sglang(scheduler) => scheduler.command_sender(),
-        }
-    }
-
-    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.cancellation_sender(),
-            Self::Sglang(scheduler) => scheduler.cancellation_sender(),
-        }
-    }
-
-    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
-        match self {
-            Self::Vllm(scheduler) => scheduler.take_lifecycle_receiver(),
-            Self::Sglang(scheduler) => scheduler.take_lifecycle_receiver(),
-        }
-    }
-}
-
 pub struct SchedulerCommandEnvelope {
     pub command: SchedulerCommand,
     pub reply: oneshot::Sender<anyhow::Result<SchedulerCommandEffects>>,
@@ -433,21 +342,15 @@ pub struct SchedulerCommandEnvelope {
 
 /// Output channel used by a live scheduler.
 ///
-/// Existing replay callers use the unbounded variant. Network-facing adapters
-/// use the bounded variant to cap scheduler-to-dispatcher accumulation. The
-/// live adapter also uses fixed-capacity request streams and cancels consumers
-/// that cannot keep up.
 #[derive(Clone)]
 pub(crate) enum SchedulerOutputSender {
     Unbounded(mpsc::UnboundedSender<Vec<OutputSignal>>),
-    Bounded(mpsc::Sender<Vec<OutputSignal>>),
 }
 
 impl SchedulerOutputSender {
     pub(crate) async fn send(&self, signals: Vec<OutputSignal>) -> Result<(), Vec<OutputSignal>> {
         match self {
             Self::Unbounded(tx) => tx.send(signals).map_err(|error| error.0),
-            Self::Bounded(tx) => tx.send(signals).await.map_err(|error| error.0),
         }
     }
 }
@@ -455,6 +358,66 @@ impl SchedulerOutputSender {
 impl From<mpsc::UnboundedSender<Vec<OutputSignal>>> for SchedulerOutputSender {
     fn from(tx: mpsc::UnboundedSender<Vec<OutputSignal>>) -> Self {
         Self::Unbounded(tx)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LiveEngineEvent {
+    Admissions(Vec<AdmissionEvent>),
+    Outputs(Vec<OutputSignal>),
+}
+
+#[derive(Clone)]
+pub(crate) enum SchedulerEventSender {
+    Outputs(SchedulerOutputSender),
+    Ordered(mpsc::Sender<LiveEngineEvent>),
+}
+
+pub(crate) enum SchedulerEventSendError {
+    OutputClosed(Vec<OutputSignal>),
+    OrderedLaneClosed,
+}
+
+impl SchedulerEventSender {
+    pub(crate) async fn send_admissions(
+        &self,
+        admissions: &[AdmissionEvent],
+    ) -> Result<(), SchedulerEventSendError> {
+        if admissions.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Outputs(_) => {
+                // Legacy output-only consumers do not have an admission event sink.
+                Ok(())
+            }
+            Self::Ordered(tx) => tx
+                .send(LiveEngineEvent::Admissions(admissions.to_vec()))
+                .await
+                .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
+        }
+    }
+
+    pub(crate) async fn send_outputs(
+        &self,
+        signals: Vec<OutputSignal>,
+    ) -> Result<(), SchedulerEventSendError> {
+        match self {
+            Self::Outputs(tx) => tx
+                .send(signals)
+                .await
+                .map_err(SchedulerEventSendError::OutputClosed),
+            Self::Ordered(tx) => tx
+                .send(LiveEngineEvent::Outputs(signals))
+                .await
+                .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
+        }
+    }
+}
+
+impl From<SchedulerOutputSender> for SchedulerEventSender {
+    fn from(tx: SchedulerOutputSender) -> Self {
+        Self::Outputs(tx)
     }
 }
 

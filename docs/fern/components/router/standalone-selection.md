@@ -144,11 +144,14 @@ globally unique `selection_id`, or allow the service to generate one:
 }
 ```
 
-Both endpoints return the same selection shape:
+`select_and_reserve` returns the selected worker and the normalized booking inputs:
 
 ```json
 {
   "selection_id": "select-123",
+  "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
+  "isl_tokens": 512,
+  "track_prefill_tokens": true,
   "model_name": "model",
   "routing_group": "default",
   "worker_id": 1,
@@ -166,7 +169,8 @@ Both endpoints return the same selection shape:
 }
 ```
 
-`selection_id` is omitted when absent. All `overlap`
+`select` returns the same selection fields but omits `sequence_hashes`, `isl_tokens`, and
+`track_prefill_tokens`. `selection_id` is omitted when absent. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -263,13 +267,15 @@ Content-Type: application/json
   "dp_rank": 0,
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512,
-  "effective_prefill_tokens": 384
+  "effective_prefill_tokens": 384,
+  "track_prefill_tokens": true
 }
 ```
 
 When supplied, `effective_prefill_tokens` is authoritative and directly enables
-prefill-load tracking. It must not exceed the normalized input sequence length.
-When omitted, existing router configuration controls prefill tracking. The
+prefill-load tracking unless `track_prefill_tokens` is `false`. It must not exceed the normalized
+input sequence length. When `track_prefill_tokens` is omitted, existing behavior applies:
+`effective_prefill_tokens` enables tracking, otherwise router configuration controls it. The
 reservation API does not accept or derive accounting from overlap fields.
 
 ## Reservation Lifecycle

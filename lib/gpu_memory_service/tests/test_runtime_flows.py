@@ -914,7 +914,7 @@ def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
 
 
 @pytest.mark.asyncio
-async def test_allocation_manager_caches_exported_fd(monkeypatch):
+async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
     export_calls = 0
 
     class _CountingVMM(FakeVMM):
@@ -935,14 +935,13 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
     allocations = GMSAllocationManager(device=0)
     info = await allocations.allocate(size=4096, tag="weights")
 
+    assert export_calls == 0
+
     first_fd = allocations.export_allocation(info.allocation_id)
     second_fd = allocations.export_allocation(info.allocation_id)
 
     try:
-        assert export_calls == 1
-        assert info.export_fd >= 0
-        assert first_fd != info.export_fd
-        assert second_fd != info.export_fd
+        assert export_calls == 2
         assert first_fd != second_fd
         os.fstat(first_fd)
         os.fstat(second_fd)

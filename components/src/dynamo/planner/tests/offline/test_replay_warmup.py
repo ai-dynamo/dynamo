@@ -4,11 +4,9 @@
 """Regression tests for planner replay warmup wiring."""
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
-import dynamo.mocker as mocker_module
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
 import dynamo.replay.main as replay_main
 
@@ -47,54 +45,30 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         "\n".join(json.dumps(record) for record in records) + "\n",
         encoding="utf-8",
     )
-    trace_path = tmp_path / "trace.jsonl"
-    trace_path.write_text(
-        '{"timestamp":0,"input_length":64,"output_length":2,"hash_ids":[101]}\n',
-        encoding="utf-8",
-    )
-
     captured = {}
 
-    class FakeBridge:
-        @staticmethod
-        def from_trace_files(**kwargs):
-            captured["trace_files"] = kwargs["trace_files"]
-            return FakeBridge()
-
-        def run(self, _adapter):
-            return {}
-
     class FakeAdapter:
-        def __init__(self, *, warmup_observations, **_kwargs):
-            captured["warmup_observations"] = warmup_observations
-
         def _is_easy_mode(self):
             return True
 
-        def finalize(self, trace_report):
-            return SimpleNamespace(trace_report=trace_report)
+    adapter = FakeAdapter()
 
-        def close(self):
-            pass
+    def fake_create_replay_planner_adapter(*, warmup_observations, **_kwargs):
+        captured["warmup_observations"] = warmup_observations
+        return adapter
 
-    monkeypatch.setattr(mocker_module, "PlannerReplayBridge", FakeBridge)
-    monkeypatch.setattr(replay_adapter_module, "ReplayPlannerAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        replay_adapter_module,
+        "create_replay_planner_adapter",
+        fake_create_replay_planner_adapter,
+    )
 
-    replay_main._run_planner_replay(
-        trace_files=[trace_path],
-        trace_format="mooncake",
+    result = replay_main._prepare_planner_replay(
         extra_engine_args=replay_main.MockEngineArgs(
             block_size=64, speedup_ratio=1000.0
         ),
         prefill_engine_args=None,
         decode_engine_args=None,
-        router_config=None,
-        num_workers=1,
-        num_prefill_workers=1,
-        num_decode_workers=1,
-        router_mode="round_robin",
-        arrival_speedup_ratio=1.0,
-        trace_block_size=64,
         planner_config_arg=json.dumps(
             {
                 "mode": "agg",
@@ -107,8 +81,8 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         ),
     )
 
+    assert result is adapter
     observations = captured["warmup_observations"]
-    assert captured["trace_files"] == [trace_path]
     assert [(item.num_req, item.isl, item.osl) for item in observations] == [
         (1.0, 64.0, 4.0),
         (1.0, 128.0, 5.0),
