@@ -418,7 +418,7 @@ def _prepare_planner_replay(
     """
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
-    from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
+    from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
@@ -440,7 +440,7 @@ def _prepare_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
-    adapter = ReplayPlannerAdapter(
+    adapter = create_replay_planner_adapter(
         planner_config=planner_config,
         capabilities=capabilities,
     )

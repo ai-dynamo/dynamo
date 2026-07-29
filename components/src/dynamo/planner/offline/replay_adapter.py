@@ -191,27 +191,22 @@ def _merge_traffic(
 
 
 class ReplayPlannerAdapter:
-    """Context-managed scaling component for aggregated and disaggregated replay."""
+    """Context-managed planner scaling policy for offline replay."""
 
     def __init__(
         self,
         planner_config: PlannerConfig,
+        engine: EngineProtocol,
         capabilities: Optional[WorkerCapabilities] = None,
         warmup_observations: Optional[list[TrafficObservation]] = None,
-        engine: Optional[EngineProtocol] = None,
     ) -> None:
         self._config = planner_config
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
 
-        self._engine: EngineProtocol
+        self._engine = engine
         self._warmup_observations = list(warmup_observations or [])
         self._orchestrator_bootstrapped = False
-        # Inject a ``VirtualClock`` so plugin scheduler / circuit breaker /
-        # HOLD_LAST cache see trace time, not real wall-clock.
-        self._engine = engine or OrchestratorEngineAdapter(
-            planner_config, capabilities or WorkerCapabilities(), clock=VirtualClock()
-        )
         # Replay's ``run()`` is synchronous; we own a scoped event loop to
         # drive the async engine calls without forcing callers to use
         # ``asyncio.run``.
@@ -637,3 +632,22 @@ class ReplayPlannerAdapter:
             worker_counts=worker_counts,
             fpm_observations=fpm_observations,
         )
+
+
+def create_replay_planner_adapter(
+    planner_config: PlannerConfig,
+    capabilities: Optional[WorkerCapabilities] = None,
+    warmup_observations: Optional[list[TrafficObservation]] = None,
+) -> ReplayPlannerAdapter:
+    """Create a replay adapter backed by the builtin planner orchestrator."""
+    engine = OrchestratorEngineAdapter(
+        planner_config,
+        capabilities or WorkerCapabilities(),
+        clock=VirtualClock(),
+    )
+    return ReplayPlannerAdapter(
+        planner_config=planner_config,
+        engine=engine,
+        capabilities=capabilities,
+        warmup_observations=warmup_observations,
+    )
