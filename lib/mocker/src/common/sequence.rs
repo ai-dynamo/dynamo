@@ -59,10 +59,6 @@ impl FlatTokens {
         self.retained.push(token);
     }
 
-    fn pop(&mut self) -> Option<u32> {
-        self.retained.pop()
-    }
-
     fn complete_block(&self, position: usize, block_size: usize) -> Option<&[u32]> {
         let start = position.checked_mul(block_size)?;
         debug_assert!(
@@ -237,23 +233,15 @@ impl RequestSequence {
         (token, opened_partial)
     }
 
-    pub(crate) fn pop_generated_token(&mut self) -> bool {
-        assert!(
-            self.generated_tokens > 0,
-            "sequence rollback requires a freshly generated token"
-        );
-        self.tokens
-            .pop()
-            .expect("native sequence rollback requires a retained token");
-        self.generated_tokens -= 1;
-        self.len().is_multiple_of(self.block_size)
-    }
-
     pub(crate) fn complete_block_identity(
         &self,
         position: usize,
         parent_hash: Option<SequenceHash>,
     ) -> NativeBlockIdentity {
+        // Validate that the retained tail still contains the complete block
+        // even when prefix caching is disabled. Finalization discards that
+        // tail immediately afterward, so skipping this lookup would hide
+        // request/lease progress drift.
         let tokens = self
             .tokens
             .complete_block(position, self.block_size)
@@ -313,6 +301,8 @@ impl RequestSequence {
         &self,
         _identities: impl ExactSizeIterator<Item = NativeBlockIdentity>,
     ) {
+        // The underscore keeps release builds warning-free; debug builds use
+        // the iterator for the full logical-identity consistency check.
         #[cfg(debug_assertions)]
         {
             let identity_count = _identities.len();

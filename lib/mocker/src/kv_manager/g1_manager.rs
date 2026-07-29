@@ -6,6 +6,10 @@
 //! This module is not a third KV manager. It forwards each operation to either
 //! KVBM G1 or vLLM G1, selected when the manager is constructed. Remove this
 //! facade when the KVBM G1 implementation is removed.
+//!
+//! Tracking issue: <https://github.com/ai-dynamo/dynamo/issues/12340> splits
+//! the native lease API from the legacy KVBM signal/offload API so backend
+//! mismatches become unrepresentable instead of panicking at runtime.
 
 #[cfg(feature = "kvbm-offload")]
 use std::sync::{Arc, Mutex};

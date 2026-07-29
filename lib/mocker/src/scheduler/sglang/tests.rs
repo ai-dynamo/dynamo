@@ -66,6 +66,81 @@ fn direct_request(tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
     }
 }
 
+#[test]
+fn request_storage_reservation_is_bounded_for_submit_and_destination() {
+    const BLOCK_SIZE: usize = 4;
+    const MAX_OUTPUT_TOKENS: usize = 1_000_000;
+    const CLIP_MAX_NEW_TOKENS: usize = 7;
+    let args = MockEngineArgs::builder()
+        .engine_type(EngineType::Sglang)
+        .num_gpu_blocks(4)
+        .block_size(BLOCK_SIZE)
+        .speedup_ratio(0.0)
+        .sglang(Some(SglangArgs {
+            page_size: Some(BLOCK_SIZE),
+            chunked_prefill_size: Some(16),
+            clip_max_new_tokens: Some(CLIP_MAX_NEW_TOKENS),
+            ..Default::default()
+        }))
+        .build()
+        .unwrap();
+    let mut core = SglangCore::new(args);
+    let prompt = (0..8).collect::<Vec<_>>();
+    let bounded_tokens = prompt.len() + CLIP_MAX_NEW_TOKENS;
+    let bounded_pages = bounded_tokens / BLOCK_SIZE;
+
+    let submitted = Uuid::from_u128(80_001);
+    core.receive(DirectRequest {
+        tokens: prompt.clone(),
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        uuid: Some(submitted),
+        ..Default::default()
+    });
+    let (token_capacity, hash_capacity) = core.request_storage_capacities(submitted).unwrap();
+    assert!(token_capacity >= bounded_tokens);
+    assert!(token_capacity < prompt.len() + MAX_OUTPUT_TOKENS);
+    assert!(hash_capacity >= bounded_pages);
+    assert!(hash_capacity < (prompt.len() + MAX_OUTPUT_TOKENS) / BLOCK_SIZE);
+
+    let destination = Uuid::from_u128(80_002);
+    core.apply_command_effects(
+        SchedulerCommand::ReserveDestination {
+            handoff_id: HandoffId::from(Uuid::from_u128(80_003)),
+            request: DirectRequest {
+                tokens: prompt.clone(),
+                max_output_tokens: MAX_OUTPUT_TOKENS,
+                uuid: Some(destination),
+                ..Default::default()
+            },
+        },
+        false,
+    )
+    .unwrap();
+    let (token_capacity, hash_capacity) = core.request_storage_capacities(destination).unwrap();
+    assert!(token_capacity >= bounded_tokens);
+    assert!(token_capacity < prompt.len() + MAX_OUTPUT_TOKENS);
+    assert!(hash_capacity >= bounded_pages);
+    assert!(hash_capacity < (prompt.len() + MAX_OUTPUT_TOKENS) / BLOCK_SIZE);
+
+    let planned = Uuid::from_u128(80_004);
+    let planned_output = (100..109).collect::<Vec<_>>();
+    core.receive(DirectRequest {
+        tokens: prompt.clone(),
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        output_token_ids: Some(planned_output.clone()),
+        uuid: Some(planned),
+        ..Default::default()
+    });
+    let (token_capacity, hash_capacity) = core.request_storage_capacities(planned).unwrap();
+    let realizable_planned = 8;
+    assert!(token_capacity >= prompt.len() + realizable_planned);
+    assert!(hash_capacity >= (prompt.len() + realizable_planned) / BLOCK_SIZE);
+    assert!(
+        planned_output.len() > CLIP_MAX_NEW_TOKENS,
+        "planned-output coverage must exceed the online storage clip"
+    );
+}
+
 fn make_decoded_request(
     kv_manager: &mut SglangKvManager,
     config: &SglangConfig,
@@ -874,7 +949,7 @@ mod destination_lifecycle {
             .build()
             .unwrap();
         let mut core = SglangCore::new(args);
-        let blocker = core.kv_manager.allocate_decode_token(None).unwrap();
+        let blocker = core.kv_manager.reserve_decode_pages(1).unwrap();
         let owner_handoff = HandoffId::from(Uuid::from_u128(20_201));
         let follower_handoff = HandoffId::from(Uuid::from_u128(20_202));
         let follower_request = Uuid::from_u128(20_203);
@@ -928,7 +1003,7 @@ mod destination_lifecycle {
             .unwrap(),
             SchedulerCommandResult::Applied
         );
-        core.kv_manager.cache_mut().page_pool.free(&[blocker]);
+        core.kv_manager.release_decode_reservation(blocker);
     }
 }
 

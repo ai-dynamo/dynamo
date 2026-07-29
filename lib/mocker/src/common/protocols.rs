@@ -1014,8 +1014,8 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "native_g1_block_size_too_small",
             format!(
-                "native G1 requires block_size to be at least 2 for engine_type={:?}, got block_size={}",
-                args.engine_type, args.block_size
+                "native G1 requires block_size to be at least 2 for engine_type={:?}, got block_size={}; set g1_backend=kvbm to keep block_size=1",
+                args.engine_type, args.block_size,
             ),
         ));
     }
@@ -2181,21 +2181,27 @@ mod tests {
     #[test]
     fn test_normalized_native_g1_rejects_block_size_one() {
         for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
-            let error = MockEngineArgs::builder()
+            let explicit = MockEngineArgs::builder()
                 .engine_type(engine_type)
                 .g1_backend(G1Backend::Native)
                 .block_size(1)
                 .build()
-                .unwrap()
-                .normalized()
-                .unwrap_err();
+                .unwrap();
+            let mut unset = explicit.clone();
+            unset.g1_backend = None;
 
-            assert!(
-                error
-                    .to_string()
-                    .contains("native G1 requires block_size to be at least 2"),
-                "engine_type={engine_type:?}, error={error:#}"
-            );
+            for args in [explicit, unset] {
+                let error = args.normalized().unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains("native G1 requires block_size to be at least 2"),
+                    "engine_type={engine_type:?}, error={error:#}"
+                );
+                assert!(
+                    message.contains("set g1_backend=kvbm to keep block_size=1"),
+                    "engine_type={engine_type:?}, error={error:#}"
+                );
+            }
         }
     }
 

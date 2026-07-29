@@ -43,17 +43,12 @@ pub(super) fn apply_schedule_policy(
                     && {
                         let duplicate_prefix =
                             &req.kv_lease.page_hashes()[..duplicate_prefix_len / page_size];
-                        !waiting_prefixes.insert(
-                            duplicate_prefix
-                                .iter()
-                                .copied()
-                                .reduce(|parent, local| {
-                                    dynamo_kv_router::protocols::LocalBlockHash(
-                                        compute_next_seq_hash(parent.0, local),
-                                    )
-                                })
-                                .expect("duplicate-prefix threshold must cover at least one page"),
-                        )
+                        let mut local_hashes = duplicate_prefix.iter().copied();
+                        let first = local_hashes
+                            .next()
+                            .expect("duplicate-prefix threshold must cover at least one page");
+                        let sequence_hash = local_hashes.fold(first.0, compute_next_seq_hash);
+                        !waiting_prefixes.insert(sequence_hash)
                     };
 
                 scored.push((prefix_len, deprioritized, req));

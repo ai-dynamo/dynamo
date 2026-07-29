@@ -691,6 +691,25 @@ mod tests {
     }
 
     #[test]
+    fn resident_prefix_stops_at_first_miss_and_reserves_fresh_suffix() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut seed = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(id, 7));
+        pool.release(id);
+
+        let outcome = pool
+            .reserve_resident_prefix([7, 9], 2)
+            .expect("one resident prefix plus one fresh block should fit");
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.reservation.len(), 2);
+        assert_eq!(outcome.reservation.fresh_len(), 1);
+        pool.cancel(outcome.reservation);
+        assert_eq!(pool.num_inactive(), 1);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
     fn removal_is_reported_only_for_the_last_physical_copy() {
         let mut pool = VllmBlockPool::new(2);
         let mut first = reserve(&mut pool, &[], 1).reservation;
