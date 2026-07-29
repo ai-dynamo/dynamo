@@ -3104,10 +3104,10 @@ impl OpenAIPreprocessor {
                 vec![]
             };
 
-            // Pass 2 (mutable): when the jail already released the tail, strip
-            // it from the finish chunk's content so the client sees only the
-            // recovery chunk — matching the non-streaming path which uses rfind
-            // and produces marker-only content (no post-call prose).
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
             for pr in &recoveries {
                 if !pr.tail_already_emitted {
                     continue;
@@ -3119,18 +3119,12 @@ impl OpenAIPreprocessor {
                         .iter_mut()
                         .filter(|c| c.index == pr.choice_idx)
                     {
-                        if let Some(ChatCompletionMessageContent::Text(ref mut t)) =
-                            rc.delta.content
-                        {
-                            // Strip from the marker onwards (and any post-call
-                            // prose that precedes it in this chunk).
-                            if let Some(marker_pos) = t.find(pr.tail.as_str()) {
-                                t.truncate(marker_pos);
-                            }
-                            if t.is_empty() {
-                                rc.delta.content = None;
-                            }
-                        }
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
                     }
                 }
             }
