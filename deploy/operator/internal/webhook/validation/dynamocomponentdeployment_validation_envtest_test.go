@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"maps"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -59,6 +60,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantCELErr         string
 		wantWebhookErrs    []string
 		wantWarnings       []string
+		wantPodAnnotations map[string]string
 	}{
 		// Baseline schema and webhook behavior.
 		{
@@ -871,15 +873,21 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
-			name: "v1beta1 valid pod template backend annotation reaches the webhook",
+			// Generated DCD pod metadata must survive structural pruning.
+			name: "v1beta1 discovery annotation survives the generated DCD API server round trip",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
+						consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
 					}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
 				}
 			}),
+			wantPodAnnotations: map[string]string{
+				consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
+				consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
+			},
 		},
 		{
 			name: "v1alpha1 invalid extra pod metadata annotation reaches the webhook",
@@ -1016,7 +1024,20 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				seedGates.Checkpoint = true
 				test.seedGates = &seedGates
 			}
-			runAdmissionTest(t, test)
+			actual := runAdmissionTest(t, test)
+			if tt.wantPodAnnotations != nil {
+				t.Log("Verify the API server preserved embedded pod-template annotations")
+				var actualDCD nvidiacomv1beta1.DynamoComponentDeployment
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDCD); err != nil {
+					t.Fatalf("convert admitted DCD: %v", err)
+				}
+				if actualDCD.Spec.PodTemplate == nil {
+					t.Fatal("admitted DCD has no spec.podTemplate")
+				}
+				if got := actualDCD.Spec.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
+					t.Fatalf("spec.podTemplate.metadata.annotations = %v, want %v", got, tt.wantPodAnnotations)
+				}
+			}
 		})
 	}
 }
