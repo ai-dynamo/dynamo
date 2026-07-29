@@ -327,7 +327,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -354,7 +354,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
     secrets: inherit
 
   sglang-build:
@@ -378,7 +378,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -405,7 +405,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
     secrets: inherit
 
   trtllm-build:
@@ -473,7 +473,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -502,7 +502,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr

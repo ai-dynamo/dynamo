@@ -223,7 +223,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-dev' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-dev-{0}', github.sha) || '' }}
@@ -288,7 +288,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
-      build_timeout_minutes: 90  # TEMP: raised for BuildKit pool scale-up; reduce back once caching stabilizes
+      build_timeout_minutes: 60
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-dev' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
