@@ -1260,19 +1260,6 @@ a.fern-card:hover{
   stroke: #76b900 !important;
 }
 
-.node--k8s {
-  top: 3%;
-  left: 50%;
-  transform: translateX(-50%);
-}
-.node--slurm {
-  right: -2%;
-  bottom: 19%;
-}
-.node--local {
-  bottom: 19%;
-  left: -2%;
-}
 
 /* ===================== Community page ===================== */
 

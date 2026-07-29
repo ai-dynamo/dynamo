@@ -951,6 +951,24 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-story-core,
+/* Orbit node positions. These modifiers are unprefixed in the markup
+   (`node node--k8s`), so they must travel with the orbit rules -- left in
+   main.css they are dropped by the production theme and the three labels
+   collapse to the container's static position. */
+.node--k8s {
+  top: 3%;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.node--slurm {
+  right: -2%;
+  bottom: 19%;
+}
+.node--local {
+  bottom: 19%;
+  left: -2%;
+}
+
 .dynamo-story-orbit .node {
   position: absolute;
   display: grid;
