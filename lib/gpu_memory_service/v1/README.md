@@ -142,10 +142,14 @@ raw mappings, validate model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one dedicated server process/container per engine rank, typically with
-one visible GPU. Run the normal executable once in each rank container; that
-process serves both rank-local V1 domains for its single `--device` and does
-not aggregate servers across ranks or devices:
+Start one V1 child per visible device:
+
+```text
+python3 -m gpu_memory_service.cli.server --use-v1
+```
+
+The supervisor discovers the visible devices and monitors the children. To
+start one rank-local child directly:
 
 ```text
 gpu-memory-service --use-v1 --device 0
