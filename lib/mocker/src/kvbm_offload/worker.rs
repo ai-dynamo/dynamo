@@ -260,6 +260,15 @@ impl TransferState {
     /// Advance both models to `now_ms` under PS and notify any completion
     /// sinks registered for drained `TransferId`s.
     pub(crate) fn drain_completions(&mut self, now_ms: f64, scope: &'static str) -> DrainResult {
+        self.drain_completions_with(now_ms, scope, |_| {})
+    }
+
+    pub(crate) fn drain_completions_with(
+        &mut self,
+        now_ms: f64,
+        scope: &'static str,
+        mut after_pipeline_completion: impl FnMut(CompletedTransfer),
+    ) -> DrainResult {
         let offload_before = self.offload_bw.active_count();
         let onboard_before = self.onboard_bw.active_count();
         let offload_drained = self.offload_bw.advance_to(now_ms);
@@ -311,13 +320,15 @@ impl TransferState {
                     .entry(awaiter.owner_id)
                     .or_default()
                     .add_transfer(awaiter.direction, awaiter.num_blocks);
-                result.completed.push(CompletedTransfer {
+                let completed = CompletedTransfer {
                     id,
                     direction: awaiter.direction,
-                });
+                };
+                result.completed.push(completed);
                 // Ignore trigger errors — the velo event system may be
                 // shut down during cleanup.
                 let _ = awaiter.event.trigger();
+                after_pipeline_completion(completed);
                 awaiter_fired += 1;
             }
             if let Some(status) = self.swap_in_status.remove(&id) {
@@ -482,8 +493,18 @@ impl MockWorker {
     }
 
     pub(crate) fn drain_completions_summary(&self, now_ms: f64) -> DrainSummary {
+        self.drain_completions_summary_with_local(now_ms, |_| {})
+    }
+
+    pub(crate) fn drain_completions_summary_with_local(
+        &self,
+        now_ms: f64,
+        after_local_pipeline_completion: impl FnMut(CompletedTransfer),
+    ) -> DrainSummary {
         let mut state = self.state.lock().expect("TransferState mutex poisoned");
-        let local = state.drain_completions(now_ms, "worker").total;
+        let local = state
+            .drain_completions_with(now_ms, "worker", after_local_pipeline_completion)
+            .total;
         drop(state);
         let shared_g3 = self
             .shared_g3
@@ -1385,6 +1406,25 @@ mod tests {
             awaiter_id, swap_id,
             "offload and swap-in must draw distinct TransferIds"
         );
+    }
+
+    #[tokio::test]
+    async fn local_completion_hook_follows_processor_sharing_completion_order() {
+        let worker = make_worker();
+        let (long_id, _long) = worker
+            .reserve_transfer_with(TransferDirection::G1ToG2, 0.0, 2, |_| {})
+            .unwrap();
+        let (short_id, _short) = worker
+            .reserve_transfer_with(TransferDirection::G1ToG2, 0.0, 1, |_| {})
+            .unwrap();
+        let mut observed = Vec::new();
+
+        let drained = worker.drain_completions_summary_with_local(3.0, |completed| {
+            observed.push(completed.id);
+        });
+
+        assert_eq!(drained.local.offload_transfers, 2);
+        assert_eq!(observed, vec![short_id, long_id]);
     }
 
     #[tokio::test]

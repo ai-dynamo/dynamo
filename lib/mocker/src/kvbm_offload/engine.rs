@@ -60,7 +60,7 @@ use super::coordinator::{
 };
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
-use super::worker::MockWorker;
+use super::worker::{MockWorker, TransferDirection};
 
 // Successful offline barriers wake via watch channels. The timeout is only a
 // hang guard for pipeline bugs.
@@ -1052,7 +1052,28 @@ impl MockOffloadEngine {
         self.worker.set_now_ms(now_ms);
         let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
         let local_token = self.engine.settlement_token();
-        let drained = self.worker.drain_completions_summary(now_ms);
+        let mut ordered_offload_completions = 0u64;
+        let drained = self.worker.drain_completions_summary_with_local(
+            now_ms,
+            |completion| {
+                // Settle destination registration before publishing the next
+                // deterministic model completion.
+                if !cfg!(feature = "replay-bench")
+                    || completion.direction != TransferDirection::G1ToG2
+                {
+                    return;
+                }
+
+                ordered_offload_completions = ordered_offload_completions
+                    .checked_add(1)
+                    .expect("G1→G2 completion count overflow");
+                let mut target = SettlementTarget::new();
+                target
+                    .add_completed_batches(PipelineLane::G1ToG2, ordered_offload_completions)
+                    .expect("G1→G2 settlement target overflow");
+                self.settle_or_panic(local_token.clone(), target);
+            },
+        );
         let offload_drained = drained.local.offload_transfers;
         let offload_drained_blocks = drained.local.offload_blocks;
         let shared_g3 = drained.shared_g3.counts;
