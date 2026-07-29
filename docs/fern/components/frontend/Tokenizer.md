@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Tokenizer
-subtitle: Selects between the default HuggingFace and fastokens tokenizer backends for BPE models served through the Dynamo Frontend.
+subtitle: Selects between the default HuggingFace, fastokens, and Baseten tokenizer backends for BPE models served through the Dynamo Frontend.
 ---
 
-The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: both the default HuggingFace path and the `fastokens` path can serve these models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
+The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: the default HuggingFace path, the `fastokens` path, and the `basetenkenizer` path can all serve these models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
 
 ## Tokenizer Backends
 
@@ -21,6 +21,13 @@ It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to
 
 Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
 
+#### `basetenkenizer` Baseten Tokenizer
+
+The `basetenkenizer` backend uses the Baseten tokenizer from the [`dynamo-tokenizers`](https://crates.io/crates/dynamo-tokenizers) crate.
+Unlike `fastokens`, it merges the special tokens declared in `tokenizer_config.json` before encoding, and it supports segmented encoding, which preserves the trust boundary between renderer-produced control tokens and user content.
+
+It accepts a narrower set of `tokenizer.json` files than the default backend. Files using an unsupported normalizer or model type are rejected at load time and fall back to HuggingFace in the same way as `fastokens`.
+
 #### Compatibility notes:
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
@@ -33,7 +40,7 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
-| `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens` | `default` |
+| `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens`, `basetenkenizer` | `default` |
 
 **Examples:**
 

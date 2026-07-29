@@ -19,6 +19,7 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::local_model::runtime_config::TokenizerBackend;
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
@@ -1185,10 +1186,7 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        let backend = self.runtime_config.effective_tokenizer_backend();
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1259,31 +1257,64 @@ impl ModelDeploymentCard {
                 let wrap_hf =
                     |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
-                // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                Arc::new(fast)
+                // Pick the inner backend. Every alternative backend loads from
+                // `tokenizer.json` by path and falls back to HuggingFace if that
+                // fails, so they share one flow.
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match backend {
+                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                    TokenizerBackend::Fastokens | TokenizerBackend::Basetenkenizer => {
+                        match p.to_str() {
+                            Some(path_str) => {
+                                let loaded = match backend {
+                                    TokenizerBackend::Fastokens => {
+                                        crate::tokenizers::FastTokenizer::from_file(path_str).map(
+                                            |t| {
+                                                Arc::new(t)
+                                                    as Arc<dyn crate::tokenizers::traits::Tokenizer>
+                                            },
+                                        )
+                                    }
+                                    TokenizerBackend::Basetenkenizer => {
+                                        crate::tokenizers::BasetenTokenizer::from_file(path_str)
+                                            .map(|t| {
+                                                Arc::new(t)
+                                                    as Arc<dyn crate::tokenizers::traits::Tokenizer>
+                                            })
+                                    }
+                                    TokenizerBackend::Default => {
+                                        unreachable!("guarded by the outer match")
+                                    }
+                                };
+                                match loaded {
+                                    Ok(t) => {
+                                        // Keep the historical wording: operators and the
+                                        // docs grep for "Using fastokens tokenizer backend".
+                                        tracing::info!(
+                                            "Using {} tokenizer backend",
+                                            backend.as_str()
+                                        );
+                                        t
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            %e,
+                                            "Failed to load {}, falling back to HuggingFace",
+                                            backend.as_str()
+                                        );
+                                        Arc::new(wrap_hf(hf))
+                                    }
+                                }
                             }
-                            Err(e) => {
+                            None => {
                                 tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
+                                    path = %p.display(),
+                                    "Tokenizer path contains non-UTF-8 characters, skipping {}; falling back to HuggingFace",
+                                    backend.as_str()
                                 );
                                 Arc::new(wrap_hf(hf))
                             }
                         }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                        Arc::new(wrap_hf(hf))
                     }
-                } else {
-                    Arc::new(wrap_hf(hf))
                 };
 
                 if cache_enabled {

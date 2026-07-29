@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
-use dynamo_llm::tokenizers::{TikTokenTokenizer, traits::Encoder};
+use dynamo_llm::tokenizers::{BasetenTokenizer, EncodeSegment, TikTokenTokenizer, traits::Encoder};
 use tempfile::tempdir;
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
@@ -140,5 +141,162 @@ async fn test_chat_template_json_fallback() {
             );
         }
         other => panic!("Expected HfChatTemplateJson, got {:?}", other),
+    }
+}
+
+/// A minimal BPE `tokenizer.json` with no normalizer, pre-tokenizer or decoder.
+/// `BasetenTokenizer` rejects the Llama-style tokenizers used by the other
+/// fixtures (see `test_basetenkenizer_falls_back_when_unsupported`), so this is
+/// the fixture that exercises the backend rather than its fallback.
+const MINIMAL_BPE_PATH: &str = "tests/data/sample-models/mock-minimal-bpe";
+
+fn tokenizer_for(
+    path: &str,
+    name: &str,
+    backend: TokenizerBackend,
+) -> dynamo_llm::tokenizers::Tokenizer {
+    let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+    mdc.set_name(name);
+    mdc.runtime_config.tokenizer_backend = Some(backend);
+    mdc.tokenizer().unwrap()
+}
+
+/// Selecting `basetenkenizer` must actually route `tokenizer()` to
+/// `BasetenTokenizer`.
+///
+/// Token IDs cannot prove this: on this fixture Baseten and HuggingFace agree
+/// exactly (see `test_basetenkenizer_token_parity_with_huggingface`), so a
+/// regression that silently kept HuggingFace would still compare equal.
+/// `encode_segments` is the discriminator. `BasetenTokenizer` implements it,
+/// HuggingFace and fastokens inherit the trait default that returns an error,
+/// and the L1 prefix cache forwards it to the inner tokenizer. So it succeeding
+/// through the production path means Baseten really is underneath.
+#[test]
+fn test_basetenkenizer_backend_is_selected() {
+    let production = tokenizer_for(
+        MINIMAL_BPE_PATH,
+        "model-card-basetenkenizer-selection",
+        TokenizerBackend::Basetenkenizer,
+    );
+    let direct =
+        BasetenTokenizer::from_file(&format!("{MINIMAL_BPE_PATH}/tokenizer.json")).unwrap();
+
+    for prompt in ["Hello, world!", "Hello", " world", "He llo", ""] {
+        assert_eq!(
+            production.encode(prompt).unwrap().token_ids().to_vec(),
+            direct.encode(prompt).unwrap().token_ids().to_vec(),
+            "production path must match a directly constructed BasetenTokenizer for {prompt:?}"
+        );
+    }
+
+    let segments = [
+        EncodeSegment::new("Hello", true),
+        EncodeSegment::new(", world!", false),
+    ];
+    assert!(
+        production.encode_segments(&segments).is_ok(),
+        "segmented encoding must reach BasetenTokenizer, so the backend was selected"
+    );
+
+    let default_backend = tokenizer_for(
+        MINIMAL_BPE_PATH,
+        "model-card-basetenkenizer-selection-default",
+        TokenizerBackend::Default,
+    );
+    assert!(
+        default_backend.encode_segments(&segments).is_err(),
+        "the default backend does not support segmented encoding, which is what \
+         makes the assertion above a real discriminator"
+    );
+}
+
+/// Token parity with the default HuggingFace backend on a tokenizer both can
+/// load. A new backend that silently changed token IDs would corrupt KV-cache
+/// reuse and prompt accounting, so this is the assertion that matters most.
+#[test]
+fn test_basetenkenizer_token_parity_with_huggingface() {
+    let baseten = tokenizer_for(
+        MINIMAL_BPE_PATH,
+        "model-card-basetenkenizer-parity",
+        TokenizerBackend::Basetenkenizer,
+    );
+    let hf = tokenizer_for(
+        MINIMAL_BPE_PATH,
+        "model-card-basetenkenizer-parity-hf",
+        TokenizerBackend::Default,
+    );
+
+    for prompt in ["Hello, world!", "Hello", " world", "He llo", "the sailor"] {
+        assert_eq!(
+            baseten.encode(prompt).unwrap().token_ids().to_vec(),
+            hf.encode(prompt).unwrap().token_ids().to_vec(),
+            "basetenkenizer and HuggingFace must agree on token IDs for {prompt:?}"
+        );
+    }
+}
+
+/// `BasetenTokenizer` does not support every `tokenizer.json`; TinyLlama uses a
+/// `Prepend` normalizer it rejects. Selecting the backend must then degrade to
+/// HuggingFace rather than failing the model, matching fastokens' behavior.
+/// Asserting equality with the default backend proves it fell back rather than
+/// producing something else.
+#[test]
+fn test_basetenkenizer_falls_back_when_unsupported() {
+    assert!(
+        BasetenTokenizer::from_file(&format!("{HF_PATH}/tokenizer.json")).is_err(),
+        "fixture is only meaningful while BasetenTokenizer rejects it"
+    );
+
+    let requested = tokenizer_for(
+        HF_PATH,
+        "model-card-basetenkenizer-fallback",
+        TokenizerBackend::Basetenkenizer,
+    );
+    let hf = tokenizer_for(
+        HF_PATH,
+        "model-card-basetenkenizer-fallback-hf",
+        TokenizerBackend::Default,
+    );
+
+    for prompt in ["Explain prefix caching.", "Now include Unicode: 北京 😀."] {
+        let ids = requested.encode(prompt).unwrap().token_ids().to_vec();
+        assert!(!ids.is_empty(), "fallback must still tokenize {prompt:?}");
+        assert_eq!(
+            ids,
+            hf.encode(prompt).unwrap().token_ids().to_vec(),
+            "unsupported backend must fall back to HuggingFace for {prompt:?}"
+        );
+    }
+}
+
+/// `tokenizer()` wraps whichever backend it selected in the L1 prefix cache, so
+/// the new backend has to survive that wrapping and stay token-exact across
+/// repeated and shared-prefix requests. Cache *accounting* is already covered by
+/// `test_tiktoken_model_card_cache_matches_direct_tokenizer_and_records_tokens`;
+/// this fixture declares no special tokens, so there are no prefix boundaries to
+/// drive those counters and asserting on them here would test the cache's
+/// heuristics rather than this backend.
+#[test]
+fn test_basetenkenizer_cached_path_is_token_exact() {
+    let cached = tokenizer_for(
+        MINIMAL_BPE_PATH,
+        "model-card-basetenkenizer-cache",
+        TokenizerBackend::Basetenkenizer,
+    );
+    let direct =
+        BasetenTokenizer::from_file(&format!("{MINIMAL_BPE_PATH}/tokenizer.json")).unwrap();
+
+    // Repeat the first prompt and share its prefix with the second, so any
+    // caching in play is actually exercised.
+    for prompt in [
+        "the sailor the sailor",
+        "the sailor the sailor",
+        "the sailor the world",
+    ] {
+        assert_eq!(
+            cached.encode(prompt).unwrap().token_ids().to_vec(),
+            direct.encode(prompt).unwrap().token_ids().to_vec(),
+            "cached path must remain token-exact for {prompt:?}"
+        );
     }
 }

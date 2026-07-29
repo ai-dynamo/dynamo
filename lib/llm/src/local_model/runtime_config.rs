@@ -62,6 +62,7 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 pub enum TokenizerBackend {
     Default,
     Fastokens,
+    Basetenkenizer,
 }
 
 impl TokenizerBackend {
@@ -69,6 +70,7 @@ impl TokenizerBackend {
         match self {
             Self::Default => "default",
             Self::Fastokens => "fastokens",
+            Self::Basetenkenizer => "basetenkenizer",
         }
     }
 
@@ -78,15 +80,12 @@ impl TokenizerBackend {
 
     pub fn from_env_or_default() -> Self {
         match std::env::var(ENV_TOKENIZER_BACKEND) {
-            Ok(v) if v == "fastokens" => Self::Fastokens,
-            Ok(v) if v == "default" || v.is_empty() => Self::Default,
-            Ok(v) => {
-                tracing::warn!(
-                    value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
-                );
+            Ok(v) if v.is_empty() => Self::Default,
+            // Parse through `FromStr` so the accepted values are listed once.
+            Ok(v) => v.parse().unwrap_or_else(|err| {
+                tracing::warn!(%err, "Unrecognized DYN_TOKENIZER value; falling back to default");
                 Self::Default
-            }
+            }),
             Err(_) => Self::Default,
         }
     }
@@ -99,8 +98,9 @@ impl FromStr for TokenizerBackend {
         match value {
             "default" => Ok(Self::Default),
             "fastokens" => Ok(Self::Fastokens),
+            "basetenkenizer" => Ok(Self::Basetenkenizer),
             _ => Err(format!(
-                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+                "invalid tokenizer backend '{value}' (expected 'default', 'fastokens', or 'basetenkenizer')"
             )),
         }
     }
@@ -688,10 +688,49 @@ mod tests {
             assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
         });
 
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("basetenkenizer"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Basetenkenizer
+            );
+        });
+
         temp_env::with_vars_unset([ENV_TOKENIZER_BACKEND], || {
             let cfg = ModelRuntimeConfig::default();
             assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
         });
+
+        // An empty or unrecognized value must degrade to `Default`, not error.
+        for value in ["", "baseten", "basetenkenizer2", "BASETENKENIZER"] {
+            temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some(value))], || {
+                let cfg = ModelRuntimeConfig::default();
+                assert_eq!(
+                    cfg.effective_tokenizer_backend(),
+                    TokenizerBackend::Default,
+                    "DYN_TOKENIZER={value:?} should fall back to default"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn tokenizer_backend_parses_and_displays_every_variant() {
+        for (text, backend) in [
+            ("default", TokenizerBackend::Default),
+            ("fastokens", TokenizerBackend::Fastokens),
+            ("basetenkenizer", TokenizerBackend::Basetenkenizer),
+        ] {
+            assert_eq!(text.parse::<TokenizerBackend>().unwrap(), backend);
+            assert_eq!(backend.as_str(), text);
+        }
+
+        // The parse error names every accepted value, and `from_env_or_default`
+        // surfaces it, so operators can see what they should have typed.
+        let err = "nope".parse::<TokenizerBackend>().unwrap_err();
+        for value in ["default", "fastokens", "basetenkenizer"] {
+            assert!(err.contains(value), "{err:?} should mention {value}");
+        }
     }
 
     #[test]
@@ -719,14 +758,19 @@ mod tests {
 
     #[test]
     fn tokenizer_backend_roundtrips_through_serde_json() {
-        let cfg = ModelRuntimeConfig {
-            tokenizer_backend: Some(TokenizerBackend::Fastokens),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
-        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+        for (backend, wire) in [
+            (TokenizerBackend::Fastokens, "fastokens"),
+            (TokenizerBackend::Basetenkenizer, "basetenkenizer"),
+        ] {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(backend),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&cfg).unwrap();
+            assert!(json.contains(&format!("\"tokenizer_backend\":\"{wire}\"")));
+            let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.tokenizer_backend, Some(backend));
+        }
     }
 
     #[test]

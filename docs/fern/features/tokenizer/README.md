@@ -156,7 +156,7 @@ For any new model, validate on representative prompts before rolling out broadly
   </Accordion>
 
   <Accordion title="Why do the logs show an unrecognized DYN_TOKENIZER value?">
-    Use only `fastokens` or `default` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable.
+    Use only `default`, `fastokens`, or `basetenkenizer` for `DYN_TOKENIZER`. Values such as `fast`, `hf`, or `huggingface` are benchmark-runner aliases, not valid values for the frontend environment variable. See [Tokenizer](/components/frontend/Tokenizer) for what each backend does.
   </Accordion>
 
   <Accordion title="What happens when the model uses .model or .tiktoken files?">

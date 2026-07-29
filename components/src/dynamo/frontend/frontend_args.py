@@ -505,11 +505,12 @@ class FrontendArgGroup(ArgGroup):
             default="default",
             dest="tokenizer_backend",
             help=(
-                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
-                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
+                "'fastokens' (fastokens crate for high-performance BPE encoding), "
+                "or 'basetenkenizer' (Baseten tokenizer). "
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
-            choices=["default", "fastokens"],
+            choices=["default", "fastokens", "basetenkenizer"],
         )
 
         add_negatable_bool_argument(
