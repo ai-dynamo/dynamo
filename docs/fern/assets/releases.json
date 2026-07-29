@@ -1025,11 +1025,11 @@
       "name": "Shadow Engine Failover",
       "sglang": {
         "status": "wip",
-        "note": "Experimental; no KV-cache reuse or hardware fault tolerance"
+        "note": "No KV-cache reuse or hardware fault tolerance"
       },
       "trtllm": {
         "status": "wip",
-        "note": "Experimental; no KV-cache reuse or hardware fault tolerance"
+        "note": "No KV-cache reuse or hardware fault tolerance"
       },
       "vllm": {
         "status": "caveat",
@@ -1044,7 +1044,7 @@
       },
       "trtllm": {
         "status": "wip",
-        "note": "Experimental single-GPU aggregated text-worker path only"
+        "note": "Single-GPU aggregated text-worker path only"
       },
       "vllm": {
         "status": "caveat",

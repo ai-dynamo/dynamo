@@ -508,14 +508,14 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "Shadow Engine Failover",
-    sglang: { status: "wip", note: "Experimental; no KV-cache reuse or hardware fault tolerance" },
-    trtllm: { status: "wip", note: "Experimental; no KV-cache reuse or hardware fault tolerance" },
+    sglang: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
+    trtllm: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
     vllm: { status: "caveat", note: "Software-process failover only; no KV-cache reuse or hardware fault tolerance" },
   },
   {
     name: "Dynamo Snapshot",
     sglang: { status: "caveat", note: "Single-GPU supported; multi-GPU and multinode remain in progress" },
-    trtllm: { status: "wip", note: "Experimental single-GPU aggregated text-worker path only" },
+    trtllm: { status: "wip", note: "Single-GPU aggregated text-worker path only" },
     vllm: { status: "caveat", note: "Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress" },
   },
 ];
