@@ -18,7 +18,14 @@
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported -- renders "Unsupported JSX tag"); the @/ prefix resolves to the
  * fern/ root and is rewritten to a relative path at publish time:
- *   import { BlogStyles } from "@/components/BlogStyles";
+ *
+ *   import { BlogStyles } from `@/components/BlogStyles`;
+ *
+ * The backticks above stand in for the double quotes the real page uses, for
+ * the reason spelled out in RecipeStyles.tsx: Fern's mdx-components bundler
+ * regex-scans this file for imports without skipping comments, and a quoted
+ * non-relative specifier makes it shell out to `npx rolldown` on every build.
+ *
  * Then place <BlogStyles /> once, right after the imports, on the digest
  * landing page and every article page.
  */
