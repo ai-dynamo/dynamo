@@ -21,6 +21,7 @@ from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.frontend.sglang_prepost import (
     _SGLANG_REASONING_MODES,
+    _force_reasoning_from_sglang_default,
     _sglang_reasoning_default,
     resolve_request_force_reasoning,
 )
@@ -111,6 +112,87 @@ class TestExistingBehaviourUnchanged:
     )
     def test_mistral_keeps_explicit_handling(self, request_body, expected):
         assert _resolve("mistral", request=request_body) is expected
+
+    @pytest.mark.parametrize(
+        "effort, expected",
+        [
+            (None, False),
+            ("none", False),
+            ("no_think", False),
+            ("low", True),
+            ("high", True),
+        ],
+    )
+    def test_hunyuan_gates_on_reasoning_effort(self, effort, expected):
+        """hunyuan declares reasoning_default='always' but must not honour it.
+
+        The Hy3-preview template emits no <think> unless reasoning_effort asks
+        for it, so taking 'always' at face value would route the whole response
+        into reasoning_content. SGLang special-cases this ahead of its own
+        reasoning_default dispatch; we mirror that.
+        """
+        body = {} if effort is None else {"reasoning_effort": effort}
+        assert _resolve("hunyuan", request=body) is expected
+
+    def test_hunyuan_reasoning_default_is_always(self):
+        """Documents why the branch above is needed, not redundant."""
+        _skip_if_parser_absent("hunyuan")
+        assert _sglang_reasoning_default("hunyuan") == "always"
+
+
+class TestDispatchHelper:
+    """Direct coverage of every mode branch, independent of any real parser."""
+
+    @pytest.mark.parametrize(
+        "mode, kwargs, request_body, expected",
+        [
+            # always: unconditional
+            ("always", {}, {}, True),
+            ("always", {"enable_thinking": False}, {}, True),
+            # mistral: gated on reasoning_effort, top-level or nested
+            ("mistral", {}, {}, False),
+            ("mistral", {}, {"reasoning_effort": "none"}, False),
+            ("mistral", {}, {"reasoning_effort": "low"}, True),
+            ("mistral", {"reasoning_effort": "low"}, {}, True),
+            # top-level wins over the nested value
+            (
+                "mistral",
+                {"reasoning_effort": "low"},
+                {"reasoning_effort": "none"},
+                False,
+            ),
+            (
+                "mistral",
+                {"reasoning_effort": "none"},
+                {"reasoning_effort": "low"},
+                True,
+            ),
+            # opt-out modes: on unless the matching kwarg is exactly False
+            ("thinking", {}, {}, True),
+            ("thinking", {"thinking": False}, {}, False),
+            ("thinking", {"thinking": True}, {}, True),
+            ("enable_thinking", {}, {}, True),
+            ("enable_thinking", {"enable_thinking": False}, {}, False),
+            # opt-in modes: off unless the toggle is exactly True
+            ("explicit_thinking", {}, {}, False),
+            ("explicit_thinking", {"thinking": True}, {}, True),
+            ("explicit_thinking", {"thinking": "yes"}, {}, False),
+            ("explicit_enable_thinking", {}, {}, False),
+            ("explicit_enable_thinking", {"enable_thinking": True}, {}, True),
+            # no mode: not applicable, caller falls back
+            (None, {}, {}, None),
+        ],
+    )
+    def test_mode_dispatch(self, mode, kwargs, request_body, expected):
+        assert _force_reasoning_from_sglang_default(mode, kwargs, request_body) is (
+            expected
+        )
+
+    def test_every_implemented_mode_has_a_branch(self):
+        """No member of the set may fall through to the AssertionError."""
+        for mode in _SGLANG_REASONING_MODES:
+            result = _force_reasoning_from_sglang_default(mode, {}, {})
+            assert isinstance(result, bool), f"mode {mode!r} returned {result!r}"
 
 
 class TestFallback:

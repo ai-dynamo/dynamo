@@ -184,6 +184,21 @@ def _sglang_reasoning_default(parser_name: str) -> str | None:
     return mode
 
 
+def _request_reasoning_effort(
+    request: dict[str, Any], kwargs: dict[str, Any]
+) -> str | None:
+    """``reasoning_effort`` for this request, top-level winning over kwargs.
+
+    SGLang reads only the top-level field; the ``chat_template_kwargs`` fallback
+    is pre-existing frontend behaviour, kept so the ``mistral`` and ``hunyuan``
+    gates agree on where the value comes from.
+    """
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        reasoning_effort = kwargs.get("reasoning_effort")
+    return reasoning_effort
+
+
 def _force_reasoning_from_sglang_default(
     mode: str | None, kwargs: dict[str, Any], request: dict[str, Any]
 ) -> bool | None:
@@ -199,9 +214,7 @@ def _force_reasoning_from_sglang_default(
     if mode == "always":
         return True
     if mode == "mistral":
-        reasoning_effort = request.get("reasoning_effort")
-        if reasoning_effort is None:
-            reasoning_effort = kwargs.get("reasoning_effort")
+        reasoning_effort = _request_reasoning_effort(request, kwargs)
         return reasoning_effort is not None and reasoning_effort != "none"
     if mode in ("thinking", "enable_thinking"):
         # on by default; the matching kwarg set to False opts out
@@ -256,10 +269,17 @@ def resolve_request_force_reasoning(
         return kwargs.get("thinking_mode") != "disabled"
 
     if reasoning_parser_name == "mistral":
-        reasoning_effort = request.get("reasoning_effort")
-        if reasoning_effort is None:
-            reasoning_effort = kwargs.get("reasoning_effort")
+        reasoning_effort = _request_reasoning_effort(request, kwargs)
         return reasoning_effort is not None and reasoning_effort != "none"
+
+    if reasoning_parser_name == "hunyuan":
+        # SGLang special-cases hunyuan ahead of its own reasoning_default
+        # dispatch, and must be mirrored here for the same reason: the detector
+        # declares reasoning_default="always", but the Hy3-preview template
+        # emits no <think> unless reasoning_effort asks for it, so honouring
+        # "always" would route the entire response into reasoning_content.
+        reasoning_effort = _request_reasoning_effort(request, kwargs)
+        return reasoning_effort not in (None, "none", "no_think")
 
     resolved = _force_reasoning_from_sglang_default(
         _sglang_reasoning_default(reasoning_parser_name), kwargs, request
