@@ -1341,10 +1341,10 @@ where
             )
         };
 
-        self.check_workers_available(instance_id, &request_id)?;
-
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
+        self.check_workers_available(instance_id, &request_id)?;
+
         let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
@@ -1407,8 +1407,8 @@ where
 
     /// Resolve `(instance_id, address, transport_kind_label, Instance)` for
     /// the selected worker. If that worker has disappeared, apply the caller's
-    /// fallback policy; exact dispatch returns typed worker-unavailability
-    /// instead of silently changing the selected worker.
+    /// fallback policy. Return `CannotConnect` when fallback is forbidden or no
+    /// eligible fallback worker can be resolved.
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1462,19 +1462,26 @@ where
                     "Instance disappeared during routing, reselecting"
                 );
                 let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
-                        self.client.endpoint.id()
-                    )
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Fallback instance {} also not found for endpoint {}",
+                            id,
+                            self.client.endpoint.id()
+                        ))
+                        .build()
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1616,9 +1623,9 @@ where
             router_mode = ?self.router_mode,
         );
 
-        self.check_workers_available(instance_id, &request_id)?;
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, TransportFallback::Allow)?;
+        self.check_workers_available(instance_id, &request_id)?;
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1766,6 +1773,17 @@ mod tests {
         fn err(&self) -> Option<DynamoError> {
             self.error.clone()
         }
+    }
+
+    fn assert_cannot_connect(error: &anyhow::Error) {
+        assert!(
+            match_error_chain(error.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "expected CannotConnect error, got: {error}"
+        );
+        assert!(
+            !match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]),
+            "CannotConnect failure must not be masked as ResourceExhausted: {error}"
+        );
     }
 
     struct StaticMultimodalCacheIndex {
@@ -2154,6 +2172,43 @@ mod tests {
             0,
             "validation failure must release the selected worker"
         );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn transport_resolution_precedes_stale_overload_check() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_transport_precedes_stale_overload".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let stale_id = 99999;
+        client.override_instance_avail(vec![stale_id]);
+        client.set_overloaded_instances(&[stale_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let unary_error = router
+            .direct(SingleIn::new(42), stale_id)
+            .await
+            .unwrap_err();
+        assert_cannot_connect(&unary_error);
+
+        let input: ManyIn<u64> =
+            Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
+        let bidirectional_error = router
+            .bidirectional_dispatch(stale_id, input)
+            .await
+            .unwrap_err();
+        assert_cannot_connect(&bidirectional_error);
+
         rt.shutdown();
     }
 
@@ -2584,32 +2639,18 @@ mod tests {
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
-        // Build a router and call direct() targeting the *real* instance to
-        // verify the router can still resolve transport for known instances.
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Round robin should succeed — even if it picks stale_id first, the
-        // fallback logic should resolve transport via real_id.
-        // We cannot fully test the network send without a worker, but we can
-        // verify it doesn't fail at the transport resolution stage by checking
-        // that the error (if any) is a transport/network error, not
-        // "Instance not found".
-        let request = SingleIn::new(42u64);
-        let result = router.generate(request).await;
-
-        // The request may fail at the network level (no actual worker), but it
-        // must NOT fail with "Instance X not found" — that would mean the
-        // fallback did not work.
-        if let Err(err) = &result {
-            let msg = format!("{err}");
-            assert!(
-                !msg.contains("not found"),
-                "Transport resolution should have fallen back, but got: {msg}"
-            );
-        }
+        // Exercise transport resolution directly. Sending a request to this
+        // registration would wait forever because the test intentionally has
+        // no worker handler.
+        let (resolved_id, _, _, _) = router
+            .resolve_transport(stale_id, TransportFallback::Allow)
+            .expect("normal routing should fall back from a stale worker");
+        assert_eq!(resolved_id, real_id);
 
         rt.shutdown();
     }
@@ -2690,7 +2731,9 @@ mod tests {
         let result = router.generate(request).await;
 
         assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
+        let error = result.unwrap_err();
+        assert_cannot_connect(&error);
+        let msg = error.to_string();
         assert!(
             msg.contains("not found") && msg.contains("no other instances available"),
             "Expected clear error about missing instance with no fallback, got: {msg}"
@@ -2736,23 +2779,27 @@ mod tests {
             "constrained dispatch should fall back within the allowed worker set"
         );
         let disallowed = HashSet::new();
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
-                .is_err(),
-            "constrained dispatch must not fall back outside the allowed worker set"
-        );
-        let error = router
+        let disallowed_error = router
+            .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+            .unwrap_err();
+        assert_cannot_connect(&disallowed_error);
+
+        let exact_error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
             .unwrap_err();
-        let error_ref: &(dyn std::error::Error + 'static) = error.as_ref();
-        let dynamo_error = error_ref
-            .downcast_ref::<DynamoError>()
-            .expect("exact dispatch should return typed worker-unavailability");
-        assert_eq!(dynamo_error.error_type(), ErrorType::CannotConnect);
+        assert_cannot_connect(&exact_error);
+
+        let second_stale_id = stale_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, second_stale_id]);
+        let stale_fallback_error = router
+            .resolve_transport(stale_id, TransportFallback::Allow)
+            .unwrap_err();
+        assert_cannot_connect(&stale_fallback_error);
         assert!(
-            match_error_chain(error_ref, &[ErrorType::CannotConnect], &[]),
-            "exact-dispatch missing-worker failure should be migration-classifiable: {error}"
+            stale_fallback_error
+                .to_string()
+                .contains("Fallback instance"),
+            "expected fallback lookup failure, got: {stale_fallback_error}"
         );
 
         rt.shutdown();
