@@ -3,20 +3,18 @@
 #
 # Minimal image for the SGLang Rust sidecar (`dynamo-sglang-sidecar`).
 #
-# The sidecar is a pure gRPC connector; it needs no GPU and no
-# SGLang runtime, so it ships in a slim Debian image separate from the heavy
-# SGLang engine container. The two run side by side in one pod and talk over
-# loopback (see deploy/agg.yaml).
+# A pure gRPC connector: no GPU, no SGLang runtime, so it ships in a slim Debian
+# image and runs beside the engine container over loopback (deploy/agg.yaml).
 #
-# Build from the repository root (the workspace is needed to compile the crate):
+# Build from the repository root:
 #   docker build -f lib/sidecar/sglang/Dockerfile -t dynamo-sglang-sidecar:1.3.0 .
 
 # ---- builder ----------------------------------------------------------------
-# Pinned to the workspace toolchain (rust-toolchain.toml: 1.96.1).
+# Workspace toolchain (rust-toolchain.toml: 1.96.1).
 FROM rust:1.96.1-bookworm AS builder
 
-# aws-lc-sys/ring need cmake + a C toolchain (+perl); bindgen needs libclang;
-# tonic-build (build.rs) needs protoc. gcc/make/git come with the rust image.
+# aws-lc-sys/ring: cmake + C toolchain (+perl); bindgen: libclang; tonic-build:
+# protoc. gcc/make/git ship with the rust image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         clang \
@@ -29,17 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# Build only the sidecar binary; --locked pins the checked-in Cargo.lock. There
-# is no dependency-cache layer, so a source change recompiles deps — acceptable
-# for this occasional image build.
+# --locked pins the checked-in Cargo.lock. No dep-cache layer, so a source change
+# recompiles deps — fine for this occasional build.
 RUN cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar
 
 # ---- runtime (minimal) ------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# ca-certificates: HTTPS to Hugging Face for the tokenizer, and rustls TLS to
-# etcd/NATS. TLS crypto (aws-lc-rs) is statically linked, so no libssl needed.
+# ca-certificates: HTTPS to Hugging Face for the tokenizer + rustls TLS to
+# etcd/NATS. TLS crypto (aws-lc-rs) is static, so no libssl.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -47,9 +44,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /src/target/release/dynamo-sglang-sidecar /usr/local/bin/dynamo-sglang-sidecar
 
-# Numeric UID (not the name) so Kubernetes runAsNonRoot can verify it; the home
-# dir created above holds the Hugging Face tokenizer cache.
+# Numeric UID so Kubernetes runAsNonRoot can verify it; the home dir holds the
+# Hugging Face tokenizer cache.
 USER 1000
-# Dynamo system endpoints (/live, /health) — the operator sets DYN_SYSTEM_PORT=9090.
+# Dynamo system endpoints (/live, /health); operator sets DYN_SYSTEM_PORT=9090.
 EXPOSE 9090
 ENTRYPOINT ["/usr/local/bin/dynamo-sglang-sidecar"]

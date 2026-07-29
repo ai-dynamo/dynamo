@@ -3,30 +3,27 @@
 #
 # EXPERIMENTAL. Disaggregated SGLang deployment using the Rust sidecar.
 #
-# Prefill and decode run as separate worker pods. Each pod has two containers:
-#   - main: the Dynamo worker (dynamo-sglang-sidecar). No GPU. It auto-discovers
-#     its prefill/decode role from the engine's gRPC metadata. Must be named
-#     "main" (operator injects discovery env + probes).
-#   - sglang-engine: the stock SGLang image running its native gRPC server in
-#     --disaggregation-mode prefill|decode with the NIXL transfer backend. Holds
-#     the GPU. KV cache moves prefill -> decode over NIXL/RDMA. Native sidecar.
+# Prefill and decode run as separate worker pods, each with two containers:
+#   - main: Dynamo worker (dynamo-sglang-sidecar), no GPU; auto-discovers its
+#     prefill/decode role from the engine. Must be named "main".
+#   - sglang-engine: stock SGLang image in --disaggregation-mode prefill|decode
+#     with the NIXL backend, holds the GPU. KV moves prefill -> decode over
+#     NIXL/RDMA. Native sidecar.
 #
-# Unlike aggregated, the engine binds 0.0.0.0 so its disaggregation bootstrap
-# server (port 8998) is reachable across pods; the decode worker connects to the
-# prefill worker's advertised bootstrap. The prefill sidecar advertises its pod
-# IP as the bootstrap host (SGLANG_DISAGGREGATION_BOOTSTRAP_HOST). SGLang's single
-# --host binds ALL its listeners, so the unauthenticated native gRPC (30001), not
-# just the bootstrap server, is exposed on the pod network here — rely on
-# NetworkPolicy / a trusted pod network rather than loopback isolation.
+# Unlike aggregated, the engine binds 0.0.0.0 so its bootstrap server (8998) is
+# reachable across pods; the decode worker dials the prefill worker's advertised
+# bootstrap (SGLANG_DISAGGREGATION_BOOTSTRAP_HOST = pod IP). SGLang's single
+# --host binds ALL listeners, so the unauthenticated native gRPC (30001) is also
+# exposed on the pod network — rely on NetworkPolicy, not loopback isolation.
 #
-# PREREQUISITES / CAVEATS (authored from the SGLang disagg recipes + the sidecar
-# contract; NOT validated here — needs a multi-GPU RDMA cluster and an SGLang
-# build with the experimental gRPC + --sidecar + disaggregation support):
+# PREREQUISITES / CAVEATS (from the SGLang disagg recipes + sidecar contract; NOT
+# validated here — needs a multi-GPU RDMA cluster and an SGLang build with the
+# experimental gRPC + --sidecar + disaggregation support):
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
 #     for your fabric (UCX_NET_DEVICES etc.). NIXL/UCX ship in sglang-runtime.
 #   - Model / served-model-name / TP must match between prefill and decode.
-#   - `main` runs the standalone dynamo-sglang-sidecar image (no GPU); build it
-#     from lib/sidecar/sglang/Dockerfile (see README).
+#   - `main` runs the standalone dynamo-sglang-sidecar image (no GPU); build from
+#     lib/sidecar/sglang/Dockerfile (see README).
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
