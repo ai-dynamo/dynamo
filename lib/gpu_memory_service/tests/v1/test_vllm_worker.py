@@ -83,6 +83,13 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
 
     backend = object.__new__(backend_module.GMSV1SleepModeBackend)
     backend_module.SleepModeBackend.__init__(backend)
+    backend._device = 0
+    info_messages = []
+    monkeypatch.setattr(
+        backend_module.logger,
+        "info",
+        lambda message, *_args: info_messages.append(message),
+    )
     monkeypatch.setattr(backend_module.gc, "collect", lambda: events.append("gc"))
     monkeypatch.setattr(
         backend_module.torch.cuda,
@@ -130,3 +137,10 @@ def test_worker_routes_managed_scopes_and_backend_orders_lifecycle(
         "weights_remap",
     ]
     assert backend.state() == "RUNNING"
+    assert info_messages == [
+        "GMS V1 KV wake device=%d connect_elapsed=%.3fs "
+        "reallocate_elapsed=%.3fs remap_elapsed=%.3fs total_elapsed=%.3fs",
+        "GMS V1 weights wake device=%d connect_elapsed=%.3fs "
+        "remap_elapsed=%.3fs total_elapsed=%.3fs",
+        "GMS V1 wake complete device=%d total_elapsed=%.3fs",
+    ]
