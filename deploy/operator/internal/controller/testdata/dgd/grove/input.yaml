@@ -10,6 +10,7 @@ spec:
   components:
     - name: frontend
       type: frontend
+      runtimeVersionOverride: "1.4.0"
       podTemplate:
         spec:
           containers:
@@ -17,6 +18,7 @@ spec:
               image: registry.example/dynamo-frontend:test
     - name: decode
       type: decode
+      runtimeVersionOverride: "1.4.0"
       multinode:
         nodeCount: 2
       podTemplate:

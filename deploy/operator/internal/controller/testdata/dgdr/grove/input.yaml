@@ -9,6 +9,7 @@ spec:
   model: Qwen/Qwen3-0.6B
   backend: vllm
   image: test.invalid/profiler:replaced-by-test
+  runtimeVersionOverride: "1.4.0"
   searchStrategy: rapid
   autoApply: true
   hardware:
