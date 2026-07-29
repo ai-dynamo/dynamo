@@ -284,7 +284,6 @@ pub fn engine_error_to_dynamo(error: &pb::EngineError) -> DynamoError {
         | pb::ErrorCode::RequestNotFound
         | pb::ErrorCode::DuplicateRequest => BackendError::InvalidArgument,
         pb::ErrorCode::Cancelled => BackendError::Cancelled,
-        pb::ErrorCode::Draining => BackendError::EngineShutdown,
         pb::ErrorCode::KvTransferFailed => BackendError::Disconnected,
         pb::ErrorCode::Overloaded | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified => {
             BackendError::Unknown

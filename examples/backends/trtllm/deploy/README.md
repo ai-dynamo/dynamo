@@ -91,7 +91,7 @@ Replace both placeholder images with builds containing the sidecar and the
 local TRT-LLM fork. The TRT-LLM image must also contain this repository's
 `/workspace/examples/backends/trtllm/engine_configs` directory. Every engine is
 started with the PyTorch backend and immutable OpenEngine schema release
-`57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0`.
+`d09a7313b3af2fbcd9b17aa4d31c509207ab51db`.
 
 LoRA manifests expect a PVC named `trtllm-openengine-lora-cache`. For 1P1D it
 must support `ReadWriteMany`, because context and generation are different pods

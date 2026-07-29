@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const OPENENGINE_COMMIT: &str = "57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0";
+const OPENENGINE_COMMIT: &str = "d09a7313b3af2fbcd9b17aa4d31c509207ab51db";
 const OPENENGINE_BSR_MODULE_PREFIX: &str = "buf.build/openengine/openengine:";
 
 fn main() {

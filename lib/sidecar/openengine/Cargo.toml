@@ -13,7 +13,7 @@ description = "Engine-neutral Dynamo backend for out-of-process OpenEngine serve
 build = "build.rs"
 
 [package.metadata.openengine]
-commit = "57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0"
+commit = "d09a7313b3af2fbcd9b17aa4d31c509207ab51db"
 
 [[bin]]
 name = "dynamo-openengine-sidecar"

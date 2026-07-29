@@ -1,6 +1,6 @@
 # Dynamo OpenEngine sidecar
 
-This crate generates its Rust client and server bindings from the OpenEngine schema at immutable source commit `57cd5033554cd22ab9645ae6c17f34d7fa9f5bb0`. It does not consume a language-specific OpenEngine package or check generated bindings into Dynamo.
+This crate generates its Rust client and server bindings from the OpenEngine schema at immutable source commit `d09a7313b3af2fbcd9b17aa4d31c509207ab51db`. It does not consume a language-specific OpenEngine package or check generated bindings into Dynamo.
 
 The `dynamo-openengine-sidecar` binary is intentionally engine-neutral. The same artifact discovers and serves TRT-LLM, vLLM, and SGLang endpoints without engine-name dispatch. `--expected-engine` and `--expected-schema-release` are optional deployment assertions; compatible schema revision ranges are negotiated independently of the release assertion.
 
