@@ -861,7 +861,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         """
         configured_routes = resolve_configured_engine_routes(
             self.engine,
-            getattr(getattr(self.config, "dynamo_args", None), "engine_routes", None),
+            self.config.dynamo_args.engine_routes,
         )
         built_in_routes = {
             "control/start_profile": self.start_profile,

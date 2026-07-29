@@ -262,6 +262,7 @@ async def test_arbitrary_route_is_allowlisted_and_body_cannot_select_method():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_cancelled_sync_engine_route_keeps_engine_routes_serialized():
     owner_loop = asyncio.get_running_loop()
     sync_started = threading.Event()

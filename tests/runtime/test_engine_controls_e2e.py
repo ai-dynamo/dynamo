@@ -51,12 +51,15 @@ async def test_engine_routes_http_contract(
     monkeypatch.setenv("DYN_SYSTEM_PORT", str(system_port))
 
     control_calls: list[dict[str, Any]] = []
+    configured_call_count = 0
 
     async def sleep_control(body: dict[str, Any]) -> dict[str, Any]:
         control_calls.append(body)
         return {"status": "ok", "control": "sleep", "body": body}
 
     async def configured_route(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal configured_call_count
+        configured_call_count += 1
         return {"body": body}
 
     def get_server_info() -> dict[str, Any]:
@@ -111,8 +114,10 @@ async def test_engine_routes_http_contract(
                 "HEAD",
                 "TRACE",
             ):
+                call_count_before_request = configured_call_count
                 response = await request(method, "configured")
                 assert response.status_code == 200
+                assert configured_call_count == call_count_before_request + 1
                 if method != "HEAD":
                     assert response.json() == {"body": {}}
 
