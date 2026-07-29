@@ -20,8 +20,8 @@ COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dyna
 COPY --chmod=775 lib /workspace_src/lib
 COPY --chmod=664 LICENSE /workspace_src/
 
-# Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
-# because upstream is usrmerged and cross-stage COPY chokes on the symlink.
+# Transport stage for dynamo_base artifacts. nats-server goes to /usr/bin (not
+# /bin) because upstream is usrmerged and cross-stage COPY chokes on the symlink.
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
