@@ -246,12 +246,21 @@ For each row:
 3. Collect all 60 measured pairs. Keep the two invocations in each pair adjacent and
    compute `r_i = candidate_replay_execution_ms / baseline_replay_execution_ms` regardless
    of run order.
-4. Sort the 60 ratios. Use the 24th order statistic as the exact distribution-free
-   one-sided 95% lower confidence bound for the population median ratio and the 37th order
-   statistic as the corresponding upper bound. Do not use a Wald interval.
-5. Pass when the upper bound is at most `1.05`.
-6. Fail when the lower bound is greater than `1.05`.
-7. Otherwise report `INCONCLUSIVE`; do not add samples adaptively and claim the original
+4. Treat the ratios as independent and identically distributed, or otherwise exchangeable,
+   only when the campaign can justify that sampling assumption; pair adjacency does not
+   establish it. Predeclare thresholds for serial-dependence diagnostics, including lag
+   autocorrelation and pair-order trends against elapsed time and available temperature or
+   frequency telemetry, and record their results.
+5. If the diagnostics breach their thresholds or exchangeability cannot be justified,
+   report `INCONCLUSIVE` or use a predeclared dependence-aware method. Do not apply the
+   order-statistic gate.
+6. Otherwise sort the 60 ratios. Conditional on the sampling assumption, use the 24th order
+   statistic as the exact distribution-free one-sided 95% lower confidence bound for the
+   population median ratio and the 37th order statistic as the corresponding upper bound.
+   Do not use a Wald interval.
+7. Pass when the upper bound is at most `1.05`.
+8. Fail when the lower bound is greater than `1.05`.
+9. Otherwise report `INCONCLUSIVE`; do not add samples adaptively and claim the original
    confidence level.
 
 Never remove an observation because its value looks like an outlier. Retain every attempted
@@ -308,7 +317,8 @@ The final report must include:
 - the exact canonical exclusion allowlist;
 - every semantic exception record;
 - performance timing scopes, persisted arm-order schedule, all attempted samples and
-  invalidations, paired ratios, and exact order-statistic confidence bounds;
+  invalidations, paired ratios, sampling assumption, dependence diagnostics, and conditional
+  order-statistic confidence bounds;
 - binary and `.text` sizes;
 - profiler findings for any investigated regression; and
 - skipped or unsupported coverage without overstating the result.
