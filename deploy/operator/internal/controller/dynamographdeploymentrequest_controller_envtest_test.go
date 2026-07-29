@@ -1371,11 +1371,11 @@ spec:
 		})
 	})
 
-	Context("When observing admitted spec repairs", func() {
-		It("Should continue reconciliation after a runtime version override repair", func() {
+	Context("When enabling autoApply after manual review", func() {
+		It("Should apply a newly added runtime version override only to the created DGD", func() {
 			t := GinkgoT()
 			ctx := context.Background()
-			dgdrName := "test-dgdr-runtime-version-repair"
+			dgdrName := "test-dgdr-ready-auto-apply"
 			namespace := envtestNamespace
 
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
@@ -1384,9 +1384,10 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-					Image:   "test-profiler:custom",
+					Model:     "test-model",
+					Backend:   "vllm",
+					Image:     "test-profiler:custom",
+					AutoApply: ptr.To(false),
 					Hardware: &nvidiacomv1beta1.HardwareSpec{
 						NumGPUsPerNode: ptr.To[int32](8),
 						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
@@ -1442,6 +1443,7 @@ spec:
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
+			current.Status.DGDName = generatedDGD.Name
 			current.Status.ObservedGeneration = current.Generation
 			lastTransitionTime := metav1.Now()
 			current.Status.Conditions = []metav1.Condition{
@@ -1467,152 +1469,54 @@ spec:
 			}
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
-			t.Log("Repair the missing runtime version override")
+			t.Log("Set the missing runtime version while autoApply remains disabled")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			current.Spec.RuntimeVersionOverride = "1.0.0"
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
+
+			t.Log("Change the deferred runtime version before deployment")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Spec.RuntimeVersionOverride = "1.1.0"
 			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
-			t.Log("Observe the admitted repair")
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+			t.Log("Enable autoApply after selecting the runtime version")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
+			current.Spec.AutoApply = ptr.To(true)
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
+
+			t.Log("Transition the reviewed request to deploying")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.IsZero()).Should(BeFalse())
 
-			t.Log("Verify that reconciliation advances the observed generation")
+			t.Log("Verify that the generated snapshots remain immutable")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
-			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
-			for _, condition := range current.Status.Conditions {
-				Expect(condition.ObservedGeneration).Should(Equal(current.Generation))
-			}
-
-			t.Log("Verify that both persisted generated manifests contain the repaired override")
+			Expect(current.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
 			selectedDGD, err := reconciler.extractDGDFromYAML(current.Status.ProfilingResults.SelectedConfig.Raw)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(selectedDGD.Spec.Components).Should(HaveLen(2))
-			Expect(selectedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(selectedDGD.Spec.Components[0].RuntimeVersionOverride).Should(BeEmpty())
 			Expect(selectedDGD.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.2.0"))
 			annotatedDGD, err := reconciler.extractDGDFromYAML([]byte(current.Annotations[AnnotationGeneratedDGDSpec]))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(annotatedDGD.Spec.Components).Should(HaveLen(2))
-			Expect(annotatedDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(annotatedDGD.Spec.Components[0].RuntimeVersionOverride).Should(BeEmpty())
 			Expect(annotatedDGD.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.2.0"))
 
-			t.Log("Apply the repaired selected config through admission")
-			Expect(k8sClient.Create(ctx, selectedDGD)).Should(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, selectedDGD) }()
-		})
-
-		It("Should repair a missing runtime version override on an existing managed DGD", func() {
-			ctx := context.Background()
-			dgdrName := "test-dgdr-live-dgd-runtime-version-repair"
-			dgdName := dgdrName + "-dgd"
-			namespace := envtestNamespace
-
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dgdrName,
-					Namespace: namespace,
-				},
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-					Image:   "test-profiler:custom",
-					Hardware: &nvidiacomv1beta1.HardwareSpec{
-						NumGPUsPerNode: ptr.To[int32](8),
-						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
-						VRAMMB:         ptr.To(81920.0),
-						TotalGPUs:      ptr.To[int32](128),
-					},
-					SLA: &nvidiacomv1beta1.SLASpec{
-						TTFT: ptr.To(100.0),
-						ITL:  ptr.To(1500.0),
-					},
-					AutoApply: ptr.To(true),
-				},
-			}
-
-			Expect(admissionBypassClient.Create(ctx, dgdr)).Should(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
-			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
-			current.Status.DGDName = dgdName
-			current.Status.ObservedGeneration = current.Generation
-			lastTransitionTime := metav1.Now()
-			current.Status.Conditions = []metav1.Condition{
-				{
-					Type:               nvidiacomv1beta1.ConditionTypeSpecGenerated,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: current.Generation,
-					LastTransitionTime: lastTransitionTime,
-					Reason:             "SpecGenerated",
-					Message:            "Spec generated",
-				},
-				{
-					Type:               nvidiacomv1beta1.ConditionTypeDeploymentReady,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: current.Generation,
-					LastTransitionTime: lastTransitionTime,
-					Reason:             "DeploymentReady",
-					Message:            "Deployment is ready",
-				},
-				{
-					Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: current.Generation,
-					LastTransitionTime: lastTransitionTime,
-					Reason:             "Deployed",
-					Message:            "Deployment is healthy",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
-
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dgdName,
-					Namespace: namespace,
-					Labels: map[string]string{
-						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
-						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
-						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
-					},
-				},
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-					BackendFramework: "vllm",
-					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
-						ComponentName: "worker",
-						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-						Replicas:      ptr.To[int32](1),
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:custom"}},
-						}},
-					}},
-				},
-			}
-			Expect(admissionBypassClient.Create(ctx, dgd)).Should(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			current.Spec.RuntimeVersionOverride = "1.1.0"
-			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
-
-			result, err := reconciler.Reconcile(ctx, reconcile.Request{
+			t.Log("Create the DGD with the runtime version applied lazily")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.IsZero()).Should(BeFalse())
-
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, dgd)).Should(Succeed())
-			Expect(dgd.Spec.Components).Should(HaveLen(1))
-			Expect(dgd.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
-			Expect(current.Status.ObservedGeneration).Should(Equal(current.Generation))
-			for _, condition := range current.Status.Conditions {
-				Expect(condition.ObservedGeneration).Should(Equal(current.Generation))
-			}
+			var createdDGD nvidiacomv1beta1.DynamoGraphDeployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: generatedDGD.Name, Namespace: namespace}, &createdDGD)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, &createdDGD) }()
+			Expect(createdDGD.Spec.Components).Should(HaveLen(2))
+			Expect(createdDGD.Spec.Components[0].RuntimeVersionOverride).Should(Equal("1.1.0"))
+			Expect(createdDGD.Spec.Components[1].RuntimeVersionOverride).Should(Equal("1.2.0"))
 		})
 
 		It("Should fill only missing DGD runtime version overrides", func() {

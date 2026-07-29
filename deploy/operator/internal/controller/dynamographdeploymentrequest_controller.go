@@ -127,6 +127,7 @@ const (
 	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
 	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
 	MessageInvalidState              = "Invalid state"
+	MessageSpecChangeRejected        = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
 	MessageJobCreationFailed         = "JobCreationFailed"
 	MessageDeploymentCreationFailed  = "DeploymentCreationFailed"
 	MessageResultsRetrievalFailed    = "ResultsRetrievalFailed"
@@ -461,32 +462,35 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Admission is authoritative for immutable-phase spec updates. The only
-	// admitted generation change is a runtimeVersionOverride repair.
-	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
-		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
-			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			logger.Info("Observing admitted runtime version override repair in immutable phase",
-				"phase", dgdr.Status.Phase,
-				"observedGeneration", dgdr.Status.ObservedGeneration,
-				"currentGeneration", dgdr.Generation)
+	// Admission permits deferred requests to select a runtime version while
+	// autoApply is disabled and Ready requests to enable autoApply.
+	immutablePhase := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed
+	autoApplyDisabled := dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply
+	deferredRuntimeVersionUpdate := autoApplyDisabled &&
+		(dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady)
+	readyAutoApplyActivation := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady &&
+		(dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply)
 
-			// Repair generated manifests before acknowledging the new generation.
-			if err := r.repairGeneratedDGDArtifacts(ctx, dgdr); err != nil {
-				return ctrl.Result{}, err
-			}
+	// Reject unexpected generation changes after profiling starts.
+	if dgdr.Status.ObservedGeneration > 0 &&
+		dgdr.Status.ObservedGeneration != dgdr.Generation &&
+		immutablePhase &&
+		!deferredRuntimeVersionUpdate &&
+		!readyAutoApplyActivation {
+		logger.Info("Spec change detected in immutable phase",
+			"phase", dgdr.Status.Phase,
+			"observedGeneration", dgdr.Status.ObservedGeneration,
+			"currentGeneration", dgdr.Generation)
 
-			// The repair preserves the lifecycle state while reaffirming each existing condition for this generation.
-			for i := range dgdr.Status.Conditions {
-				dgdr.Status.Conditions[i].ObservedGeneration = dgdr.Generation
-			}
-			dgdr.Status.ObservedGeneration = dgdr.Generation
-			if err := r.Status().Update(ctx, dgdr); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to observe DGDR runtime version override repair: %w", err)
-			}
-			return ctrl.Result{Requeue: true}, nil
-		}
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
+			fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
+		return ctrl.Result{}, nil
 	}
+
 	// Phase machine: handle different phases
 	switch dgdr.Status.Phase {
 	case nvidiacomv1beta1.DGDRPhasePending, "":
@@ -522,6 +526,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonValidationFailed, err.Error())
 			return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeValidation, metav1.ConditionFalse, nvidiacomv1beta1.EventReasonValidationFailed, err.Error())
 		}
+
+		// Set observedGeneration to track the spec we're processing
+		dgdr.Status.ObservedGeneration = dgdr.Generation
 
 		dgdr.AddStatusCondition(metav1.Condition{
 			Type:               nvidiacomv1beta1.ConditionTypeValidation,
@@ -782,6 +789,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 func (r *DynamoGraphDeploymentRequestReconciler) handleReadyPhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is ready", "name", dgdr.Name)
+
+	// Start deployment when autoApply is enabled after manual review.
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
+		logger.Info("AutoApply enabled, transitioning to Deploying phase")
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
+	}
 
 	// Nothing to monitor in Ready phase - spec is available for manual application
 	return ctrl.Result{}, nil
@@ -2130,108 +2143,6 @@ func applyDGDRRuntimeVersionOverride(
 	return changed
 }
 
-// repairGeneratedDGDArtifacts applies a repaired override to persisted manifests and the managed live DGD.
-func (r *DynamoGraphDeploymentRequestReconciler) repairGeneratedDGDArtifacts(
-	ctx context.Context,
-	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
-	// Repair the manifest exposed for manual application.
-	if dgdr.Status.ProfilingResults != nil &&
-		dgdr.Status.ProfilingResults.SelectedConfig != nil &&
-		len(dgdr.Status.ProfilingResults.SelectedConfig.Raw) > 0 {
-		dgd, err := r.extractDGDFromYAML(dgdr.Status.ProfilingResults.SelectedConfig.Raw)
-		if err != nil {
-			return fmt.Errorf("failed to decode selected DGD config for runtime version repair: %w", err)
-		}
-		applyDGDRRuntimeVersionOverride(dgdr, dgd)
-		dgdJSON, _, err := r.encodeBetaDGDManifest(dgd)
-		if err != nil {
-			return fmt.Errorf("failed to encode selected DGD config after runtime version repair: %w", err)
-		}
-		dgdr.Status.ProfilingResults.SelectedConfig.Raw = dgdJSON
-	}
-
-	// Repair the manifest retained for automatic DGD creation.
-	generatedDGDYAML := dgdr.Annotations[AnnotationGeneratedDGDSpec]
-	if generatedDGDYAML == "" {
-		return r.repairLiveDGDRDGD(ctx, dgdr)
-	}
-
-	dgd, err := r.extractDGDFromYAML([]byte(generatedDGDYAML))
-	if err != nil {
-		return fmt.Errorf("failed to decode generated DGD annotation for runtime version repair: %w", err)
-	}
-	applyDGDRRuntimeVersionOverride(dgdr, dgd)
-	_, dgdYAML, err := r.encodeBetaDGDManifest(dgd)
-	if err != nil {
-		return fmt.Errorf("failed to encode generated DGD annotation after runtime version repair: %w", err)
-	}
-
-	// Persist the repaired annotation without taking ownership of unrelated metadata.
-	annotations := map[string]any{AnnotationGeneratedDGDSpec: string(dgdYAML)}
-	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
-		annotations[AnnotationAdditionalResources] = additionalResources
-	}
-	apply := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
-		"kind":       "DynamoGraphDeploymentRequest",
-		"metadata": map[string]any{
-			"name":            dgdr.Name,
-			"namespace":       dgdr.Namespace,
-			"resourceVersion": dgdr.ResourceVersion,
-			"annotations":     annotations,
-		},
-	}}
-	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
-		return fmt.Errorf("failed to persist repaired generated DGD annotation: %w", err)
-	}
-	dgdr.Annotations[AnnotationGeneratedDGDSpec] = string(dgdYAML)
-	dgdr.ResourceVersion = apply.GetResourceVersion()
-	return r.repairLiveDGDRDGD(ctx, dgdr)
-}
-
-// repairLiveDGDRDGD fills a missing override on the DGD created by this DGDR.
-func (r *DynamoGraphDeploymentRequestReconciler) repairLiveDGDRDGD(
-	ctx context.Context,
-	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
-	if dgdr.Status.DGDName == "" {
-		return nil
-	}
-
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	if err := reader.Get(ctx, types.NamespacedName{
-		Name:      dgdr.Status.DGDName,
-		Namespace: dgdr.Namespace,
-	}, dgd); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read live DGD %s for runtime version repair: %w", dgdr.Status.DGDName, err)
-	}
-
-	labels := dgd.GetLabels()
-	if labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
-		labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
-		labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
-		return nil
-	}
-
-	original := dgd.DeepCopy()
-	changed := applyDGDRRuntimeVersionOverride(dgdr, dgd)
-	if !changed {
-		return nil
-	}
-	if err := r.Patch(ctx, dgd, client.MergeFrom(original)); err != nil {
-		return fmt.Errorf("failed to persist live DGD %s runtime version repair: %w", dgd.Name, err)
-	}
-	return nil
-}
-
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.
 // The Kubernetes versioning encoder temporarily supplies apiVersion/kind from
 // the scheme during serialization and restores the typed object's TypeMeta after.
@@ -2450,8 +2361,8 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 func (r *DynamoGraphDeploymentRequestReconciler) updatePhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
-	dgdr.Status.ObservedGeneration = dgdr.Generation
 	dgdr.Status.Phase = phase
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 	setSucceededCondition(dgdr, phase)
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
@@ -2469,8 +2380,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	reason string,
 	message string,
 ) (ctrl.Result, error) {
-	dgdr.Status.ObservedGeneration = dgdr.Generation
 	dgdr.Status.Phase = phase
+	dgdr.Status.ObservedGeneration = dgdr.Generation
 
 	// Set the specific condition first so setSucceededCondition can surface it.
 	dgdr.AddStatusCondition(metav1.Condition{

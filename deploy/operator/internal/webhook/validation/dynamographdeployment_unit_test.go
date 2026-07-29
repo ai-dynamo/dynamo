@@ -38,7 +38,7 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
 	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
-	_, err := validator.Validate(ctx, dgd)
+	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
 	}

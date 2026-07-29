@@ -149,8 +149,13 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		))
 	}
 
+	// Revalidate legacy image compatibility when autoApply creates a DGD.
+	autoApplyActivated := oldSpec.AutoApply != nil && !*oldSpec.AutoApply &&
+		(newSpec.AutoApply == nil || *newSpec.AutoApply)
 	if dgdrRuntimeVersionOverrideRequired(newSpec) &&
-		(newSpec.Image != oldSpec.Image || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
+		(newSpec.Image != oldSpec.Image ||
+			newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride ||
+			autoApplyActivated) {
 		allErrs = append(allErrs, field.Required(
 			fldPath.Child("runtimeVersionOverride"),
 			"is required when spec.image has no parseable semantic-version tag",
@@ -159,7 +164,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 
 	if isImmutableDGDRPhase(oldPhase) &&
 		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) &&
-		!isDGDRRuntimeVersionOverrideRepair(newSpec, oldSpec) {
+		!isDGDRDeferredRuntimeVersionUpdate(newSpec, oldSpec, oldPhase) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			fmt.Sprintf("updates are forbidden while the resource is in phase %q; delete and recreate the resource to change its spec", oldPhase),
@@ -177,18 +182,27 @@ func dgdrRuntimeVersionOverrideRequired(spec *nvidiacomv1beta1.DynamoGraphDeploy
 	return err != nil
 }
 
-// isDGDRRuntimeVersionOverrideRepair reports whether an update only repairs a missing required override.
-func isDGDRRuntimeVersionOverrideRepair(
+// isDGDRDeferredRuntimeVersionUpdate permits choosing the runtime version before deferred DGD creation.
+func isDGDRDeferredRuntimeVersionUpdate(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
+	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) bool {
-	if !dgdrRuntimeVersionOverrideRequired(oldSpec) ||
-		newSpec.RuntimeVersionOverride == oldSpec.RuntimeVersionOverride ||
-		dgdrRuntimeVersionOverrideRequired(newSpec) {
+	if oldSpec.AutoApply == nil || *oldSpec.AutoApply ||
+		(oldPhase != nvidiacomv1beta1.DGDRPhaseProfiling &&
+			oldPhase != nvidiacomv1beta1.DGDRPhaseReady) {
 		return false
 	}
 
-	newWithoutRepair := newSpec.DeepCopy()
-	newWithoutRepair.RuntimeVersionOverride = oldSpec.RuntimeVersionOverride
-	return apiequality.Semantic.DeepEqual(newWithoutRepair, oldSpec)
+	// autoApply may only be activated once the generated snapshot is Ready.
+	autoApplyActivated := newSpec.AutoApply == nil || *newSpec.AutoApply
+	if autoApplyActivated && oldPhase != nvidiacomv1beta1.DGDRPhaseReady {
+		return false
+	}
+
+	// Require every other field to remain unchanged.
+	newWithoutDeferredFields := newSpec.DeepCopy()
+	newWithoutDeferredFields.AutoApply = oldSpec.AutoApply
+	newWithoutDeferredFields.RuntimeVersionOverride = oldSpec.RuntimeVersionOverride
+	return apiequality.Semantic.DeepEqual(newWithoutDeferredFields, oldSpec)
 }

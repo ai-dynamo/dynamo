@@ -63,6 +63,14 @@ intended Dynamo runtime version. The DGDR value also covers images replaced
 through `spec.overrides.dgd` when that component does not set its own
 `runtimeVersionOverride`. An explicit component-level value takes precedence.
 
+While a DGDR has `autoApply: false`, you may set or change
+`runtimeVersionOverride` during `Profiling` or `Ready`. After it reaches
+`Ready`, you may enable `autoApply`, either separately or while changing the
+override. The operator applies the current value while creating the new DGD.
+These updates do not modify `status.profilingResults.selectedConfig` or the
+`nvidia.com/generated-dgd-spec` annotation. Other spec updates remain
+forbidden after profiling starts.
+
 When the DGDR-level field is unset, each effective generated DGD component
 follows the DGD component rules independently. An overridden image without a
 parseable semantic-version tag requires `runtimeVersionOverride` on that
@@ -883,7 +891,7 @@ When you create a DGDR, it progresses through these phases (`status.phase`):
 |---|---|
 | `Pending` | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
 | `Profiling` | Profiling job running — sub-phases in `status.profilingPhase`: `Initializing`, `SweepingPrefill`, `SweepingDecode`, `SelectingConfig`, `BuildingCurves`, `GeneratingDGD`, `Done` |
-| `Ready` | Profiling complete; optimal config stored in `status.profilingResults.selectedConfig`. Terminal state when `autoApply: false`. |
+| `Ready` | Profiling complete; optimal config stored in `status.profilingResults.selectedConfig`. Waits for manual application or for `autoApply` to be enabled. |
 | `Deploying` | Creating the DGD (only when `autoApply: true`) |
 | `Deployed` | DGD is running and healthy |
 | `Failed` | Unrecoverable error — profiling failures are not retried (`backoffLimit: 0`); check events and conditions for details |
