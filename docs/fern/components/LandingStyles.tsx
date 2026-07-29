@@ -16,6 +16,12 @@
  * pattern as ReferenceStyles.tsx and RecipeStyles.tsx, which are unaffected
  * for exactly this reason.
  *
+ * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
+ * child like ReferenceStyles.tsx. A text child is escaped on render, which
+ * turns every `>` child combinator into `&gt;` and silently drops the rule.
+ * ReferenceStyles gets away with it because it has no child combinators;
+ * this bundle has dozens.
+ *
  * Server component (no "use client"); registered via docs.yml
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported -- renders "Unsupported JSX tag"); the @/ prefix resolves to the
@@ -2120,5 +2126,5 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
 `;
 
 export function LandingStyles() {
-  return <style>{LANDING_CSS}</style>;
+  return <style dangerouslySetInnerHTML={{ __html: LANDING_CSS }} />;
 }

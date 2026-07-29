@@ -14,6 +14,12 @@
  * SITE_CSS block in CustomFooter.tsx does not reach these pages either.
  * Same pattern as ReferenceStyles.tsx, RecipeStyles.tsx and LandingStyles.tsx.
  *
+ * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
+ * child like ReferenceStyles.tsx. A text child is escaped on render, which
+ * turns every `>` child combinator into `&gt;` and silently drops the rule.
+ * ReferenceStyles gets away with it because it has no child combinators;
+ * this bundle has dozens.
+ *
  * Server component (no "use client"); registered via docs.yml
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported -- renders "Unsupported JSX tag"); the @/ prefix resolves to the
@@ -995,5 +1001,5 @@ body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"] .fern-sidebar-l
 `;
 
 export function BlogStyles() {
-  return <style>{BLOG_CSS}</style>;
+  return <style dangerouslySetInnerHTML={{ __html: BLOG_CSS }} />;
 }
