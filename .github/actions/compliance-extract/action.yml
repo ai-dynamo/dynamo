@@ -138,6 +138,9 @@ runs:
         #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
         #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
         #     cache key lines up and the warm layers cache-hit.
+        #   - ENABLE_SOURCE_ARCHIVAL: gates the cargo-vendor RUN in
+        #     runtime_wheel_builder, so falling back to the Dockerfile default
+        #     rebuilds that layer and everything downstream of it.
         # The warm cache is best-effort though: the shared buildkit pods GC under
         # concurrent load, so a stage can legitimately re-run here (seen post-merge
         # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
@@ -173,6 +176,7 @@ runs:
             --build-arg USE_SCCACHE=true \
             --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
             --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }} \
             $EPP_IMAGE_ARG \
             --output type=local,dest=/tmp/compliance \
             --progress=plain \

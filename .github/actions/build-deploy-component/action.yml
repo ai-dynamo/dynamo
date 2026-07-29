@@ -240,9 +240,12 @@ runs:
         # Single FROM-scratch compliance_artifact stage → the unified /legal tree
         # (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json). Runs on one
         # platform, so buildx exports directly into dest. Keep BASELINE_SBOM_FILE
-        # in sync with the build-and-push step above.
+        # and ENABLE_SOURCE_ARCHIVAL in sync with the build-and-push step above:
+        # the latter gates the go-mod-vendor RUN in the builder stage, so a
+        # mismatch rebuilds that layer and everything downstream of it.
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
         BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=${{ steps.settings.outputs.baseline_stem }}")
+        BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}")
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
             BUILD_ARGS+=("--build-arg" "${build_arg}")
