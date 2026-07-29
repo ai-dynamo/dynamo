@@ -309,19 +309,44 @@ impl RequestSequence {
             let aligned = self.len().is_multiple_of(self.block_size);
             debug_assert_eq!(identity_count, self.current_known_blocks());
             debug_assert!(
-                _identities
-                    .enumerate()
-                    .all(
-                        |(position, identity)| position + 1 == identity_count && !aligned
-                            || identity.sequence_hash.is_some()
-                    ),
+                _identities.enumerate().all(|(position, identity)| {
+                    identity.sequence_hash.is_some() || (position + 1 == identity_count && !aligned)
+                }),
                 "only the final native block may be partial"
             );
-            if self.emit_token_ids {
-                debug_assert_eq!(self.tokens.retained_start, 0);
-            } else {
-                debug_assert!(self.tokens.retained.len() <= self.block_size + 1);
-            }
+            self.debug_assert_storage_invariants();
+        }
+    }
+
+    /// Check only identities changed by one finalization plus the final tail.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_finalized_range(
+        &self,
+        identity_count: usize,
+        finalized: impl IntoIterator<Item = NativeBlockIdentity>,
+        final_identity: Option<NativeBlockIdentity>,
+    ) {
+        debug_assert_eq!(identity_count, self.current_known_blocks());
+        debug_assert!(
+            finalized
+                .into_iter()
+                .all(|identity| identity.sequence_hash.is_some()),
+            "finalized native blocks must have sequence hashes"
+        );
+        let aligned = self.len().is_multiple_of(self.block_size);
+        debug_assert!(
+            final_identity.is_none_or(|identity| identity.sequence_hash.is_some() || !aligned),
+            "only an unaligned final native block may be partial"
+        );
+        self.debug_assert_storage_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_storage_invariants(&self) {
+        if self.emit_token_ids {
+            debug_assert_eq!(self.tokens.retained_start, 0);
+        } else {
+            debug_assert!(self.tokens.retained.len() <= self.block_size + 1);
         }
     }
 
