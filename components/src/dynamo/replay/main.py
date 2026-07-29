@@ -30,7 +30,6 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
-from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -444,6 +443,9 @@ def _run_planner_replay(
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
     from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
+    from dynamo.planner.offline.trace_data import (
+        extract_traffic_observations_from_trace,
+    )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
@@ -483,7 +485,7 @@ def _run_planner_replay(
             if trace_files is None:  # guaranteed by the trace/synthetic check above
                 raise ValueError("planner replay needs trace_files in trace mode")
             bridge = PlannerReplayBridge.from_trace_files(
-                trace_files=trace_files,
+                trace_files=list(trace_files),
                 trace_format=trace_format,
                 extra_engine_args=extra_engine_args,
                 num_workers=num_workers,
@@ -533,7 +535,7 @@ def _run_planner_replay(
             if trace_files is None:  # guaranteed by the trace/synthetic check above
                 raise ValueError("planner replay needs trace_files in trace mode")
             bridge = PlannerReplayBridge.from_trace_files_disagg(
-                trace_files=trace_files,
+                trace_files=list(trace_files),
                 trace_format=trace_format,
                 prefill_engine_args=prefill_engine_args,
                 decode_engine_args=decode_engine_args,
