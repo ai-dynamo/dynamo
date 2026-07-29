@@ -41,6 +41,12 @@ ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+# oneAPI env for XPU detection: the base bakes none of it, so device_count() is 0
+# without this. ENV not setvars.sh in ENTRYPOINT, which a k8s `command:` discards.
+ENV ONEAPI_ROOT=/opt/intel/oneapi
+ENV CMPLR_ROOT=/opt/intel/oneapi/compiler/2025.3
+ENV LD_LIBRARY_PATH=/opt/intel/oneapi/umf/1.0/lib:/opt/intel/oneapi/tcm/1.4/lib:/opt/intel/oneapi/tbb/2022.3/lib:/opt/intel/oneapi/mkl/2025.3/lib:/opt/intel/oneapi/dnnl/2025.3/lib:/opt/intel/oneapi/compiler/2025.3/opt/compiler/lib:${LD_LIBRARY_PATH:-}
+ENV PATH=${PATH}:/opt/intel/oneapi/compiler/2025.3/bin:/opt/intel/oneapi/mpi/2021.15/bin
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
@@ -332,11 +338,7 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.
-{% if device == "xpu" %}
-ENTRYPOINT ["/bin/bash", "-lc", "source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true; exec \"$0\" \"$@\"", "--"]
-{% else %}
 ENTRYPOINT []
-{% endif %}
 
 
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
