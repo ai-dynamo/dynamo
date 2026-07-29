@@ -380,7 +380,8 @@ def normalize_engine_route_result(result: Any) -> dict[str, Any]:
     if isinstance(result, tuple) and len(result) in {2, 3}:
         keys = ("success", "message", "num_paused_requests")
         return {
-            key: normalize_engine_route_value(value) for key, value in zip(keys, result)
+            key: normalize_engine_route_value(value)
+            for key, value in zip(keys, result, strict=False)
         }
     normalized = normalize_engine_route_value(result)
     if isinstance(normalized, dict):
