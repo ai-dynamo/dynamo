@@ -61,6 +61,18 @@ async fn generate_rejects_invalid_requests() {
         tonic::Code::InvalidArgument
     );
 
+    let mut excessive_top_logprobs = request("excessive-top-logprobs");
+    excessive_top_logprobs.top_logprobs_num = Some(21);
+    assert_eq!(
+        service
+            .generate(Request::new(excessive_top_logprobs))
+            .await
+            .err()
+            .expect("unbounded top logprobs should be rejected")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
     let short_context = SglangMockerService::new(
         MockerServerConfig {
             context_length: 4,
@@ -96,6 +108,30 @@ async fn generate_rejects_invalid_requests() {
             .code(),
         tonic::Code::FailedPrecondition
     );
+}
+
+#[tokio::test]
+async fn zero_top_logprobs_omits_top_logprob_metadata() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let mut selected_only = request("selected-only-logprobs");
+    selected_only.top_logprobs_num = Some(0);
+    let mut stream = service
+        .generate(Request::new(selected_only))
+        .await
+        .unwrap()
+        .into_inner();
+
+    while let Some(response) = stream.next().await {
+        let response = response.unwrap();
+        assert!(response.meta_info.contains_key("output_token_logprobs"));
+        assert!(!response.meta_info.contains_key("output_top_logprobs"));
+        if response.finished {
+            assert!(response.meta_info.contains_key("input_token_logprobs"));
+            assert!(!response.meta_info.contains_key("input_top_logprobs"));
+            return;
+        }
+    }
+    panic!("stream ended without a terminal response");
 }
 
 #[tokio::test]

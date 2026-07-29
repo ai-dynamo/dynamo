@@ -184,11 +184,7 @@ impl SglangMockerService {
             .submit(prepared.direct_request())
             .await
             .map_err(|error| {
-                if error.to_string().contains("already active") {
-                    Status::already_exists(error.to_string())
-                } else {
-                    Status::internal(format!("Mocker request submission failed: {error}"))
-                }
+                Status::internal(format!("Mocker request submission failed: {error}"))
             })?;
         Ok((prepared, live, permit))
     }

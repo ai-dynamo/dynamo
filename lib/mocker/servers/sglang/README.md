@@ -81,4 +81,7 @@ bootstrap socket, NIXL connection, or KV data movement is created.
 - One output sequence with deterministic synthetic tokens and logprobs.
 - Length termination only; sampling, stops, EOS, and structured decoding are
   not simulated.
+- `Abort` releases Mocker scheduler state but does not synthesize SGLang's
+  `finish_reason: {"type": "abort"}` terminal; a caller still polling that
+  gRPC stream receives `Internal` when its output channel closes.
 - One Mocker data-parallel rank per server process.

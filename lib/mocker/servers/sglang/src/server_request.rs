@@ -14,7 +14,7 @@ use super::{BoxedStatusResult, DP_RANK, MockerServerConfig, ServerMode};
 
 const DEFAULT_MAX_NEW_TOKENS: i32 = 20;
 const MAX_NEW_TOKENS: i32 = 1_000_000;
-const MAX_TOP_LOGPROBS: usize = 20;
+const MAX_TOP_LOGPROBS: i32 = 20;
 
 #[derive(Debug)]
 pub(super) struct PreparedRequest {
@@ -86,8 +86,11 @@ impl PreparedRequest {
         validate_role(config, request.disaggregated_params.as_ref())?;
 
         let top_logprobs_num = request.top_logprobs_num.unwrap_or(0);
-        if top_logprobs_num < 0 {
-            return Err(Status::invalid_argument("top_logprobs_num must not be negative").into());
+        if !(0..=MAX_TOP_LOGPROBS).contains(&top_logprobs_num) {
+            return Err(Status::invalid_argument(format!(
+                "top_logprobs_num must be between 0 and {MAX_TOP_LOGPROBS}"
+            ))
+            .into());
         }
         let logprob_start_len = request.logprob_start_len.unwrap_or(-1);
         if logprob_start_len < -1 {
@@ -108,7 +111,7 @@ impl PreparedRequest {
             max_output_tokens,
             output_token_ids,
             return_logprob: request.return_logprob.unwrap_or(false),
-            top_logprobs_num: (top_logprobs_num as usize).min(MAX_TOP_LOGPROBS),
+            top_logprobs_num: top_logprobs_num as usize,
             logprob_start_len,
         })
     }
@@ -150,16 +153,18 @@ impl PreparedRequest {
                         .collect(),
                 ),
             );
-            insert_json(
-                &mut meta,
-                "output_top_logprobs",
-                Value::Array(
-                    output_tokens
-                        .iter()
-                        .map(|token| top_logprob_entries(*token, self.top_logprobs_num))
-                        .collect(),
-                ),
-            );
+            if self.top_logprobs_num > 0 {
+                insert_json(
+                    &mut meta,
+                    "output_top_logprobs",
+                    Value::Array(
+                        output_tokens
+                            .iter()
+                            .map(|token| top_logprob_entries(*token, self.top_logprobs_num))
+                            .collect(),
+                    ),
+                );
+            }
         }
         if terminal {
             insert_json(&mut meta, "finish_reason", json!({"type": "length"}));
@@ -172,25 +177,29 @@ impl PreparedRequest {
                     // Native SGLang retains the first token ID but uses a null
                     // logprob because no preceding token predicts it.
                     input_token_logprobs.push(json!([null, first, null]));
-                    input_top_logprobs.push(Value::Null);
                     input_token_logprobs
                         .extend(remaining.iter().map(|token| logprob_entry(*token)));
-                    input_top_logprobs.extend(
-                        remaining
-                            .iter()
-                            .map(|token| top_logprob_entries(*token, self.top_logprobs_num)),
-                    );
+                    if self.top_logprobs_num > 0 {
+                        input_top_logprobs.push(Value::Null);
+                        input_top_logprobs.extend(
+                            remaining
+                                .iter()
+                                .map(|token| top_logprob_entries(*token, self.top_logprobs_num)),
+                        );
+                    }
                 }
                 insert_json(
                     &mut meta,
                     "input_token_logprobs",
                     Value::Array(input_token_logprobs),
                 );
-                insert_json(
-                    &mut meta,
-                    "input_top_logprobs",
-                    Value::Array(input_top_logprobs),
-                );
+                if self.top_logprobs_num > 0 {
+                    insert_json(
+                        &mut meta,
+                        "input_top_logprobs",
+                        Value::Array(input_top_logprobs),
+                    );
+                }
             }
         }
         meta
