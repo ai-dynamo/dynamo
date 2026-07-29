@@ -169,6 +169,8 @@ impl SharedG3Pool {
         let result = fire_completion_actions_with(pending.actions, after_pipeline_completion);
         SharedDrainCounts {
             counts: result.by_owner.get(&owner_id).copied().unwrap_or_default(),
+            // Ordered actions fire only at this owner's boundary, so onboard
+            // blocks are current rather than already-published deferred work.
             deferred_onboard_blocks: 0,
             offload_registration_baseline: pending.offload_registration_baseline,
         }

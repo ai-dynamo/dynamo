@@ -371,6 +371,8 @@ impl MockOffloadEngine {
             config.block_size_tokens,
             &registry,
         ));
+        // The Option keeps offline subscription after registry/G2 initialization;
+        // startup lifecycle events must not consume the bounded loss-aware channel.
         let g2_event_stream = g2_event_stream.unwrap_or_else(|| {
             G2EventStream::LossAware(Box::pin(
                 g2_events_manager
