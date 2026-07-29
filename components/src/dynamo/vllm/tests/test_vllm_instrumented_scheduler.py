@@ -3128,6 +3128,7 @@ def test_save_admission_only_fpm_becomes_validation_skip():
     ]
 
 
+@pytest.mark.timeout(60)
 def test_two_step_group_skip_traverses_barrier_without_deadlock():
     """One rank misses its steady FPM while the other has both: the short
     rank must still enter collect_result so the whole group leaves the
