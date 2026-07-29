@@ -311,8 +311,9 @@ RUN set -eu; \
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
-        --requirement /tmp/requirements.vllm.txt
+    uv pip install {{ pip_target }} \
+        --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
+        --no-deps --requirement /tmp/requirements.vllm.txt
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
@@ -348,11 +349,14 @@ RUN set -eux; \
     ! python3 -c "import decord" 2>/dev/null; \
     ! python3 -c "import torchcodec" 2>/dev/null
 
-# PyNvVideoCodec is intentionally KEPT (removed from the purge above): it ships no
-# software codec -- NVDEC hardware decode via libnvcuvid -- and provides the
-# built-in H.264/H.265 video-input path (common/multimodal/nvdec_decoder.py). It
-# requires the driver "video" capability at runtime or it cannot import; set it in
-# the image and ensure the K8s pod/runtimeClass does not drop it.
+# PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
+# the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
+# libavcodec) that the codec gate rejects, while 2.2.0 bundles only libavutil +
+# libavformat (container demux, no software codec). It provides the built-in
+# H.264/H.265 video-input path (NVDEC hardware decode via libnvcuvid;
+# common/multimodal/nvdec_decoder.py) and requires the driver "video" capability
+# at runtime or it cannot import; set it in the image and ensure the K8s
+# pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
 USER dynamo
