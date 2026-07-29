@@ -85,6 +85,42 @@ def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     return _normalize_eos_token_ids(getattr(tokenizer, "eos_token_id", None))
 
 
+def _model_eos_token_ids(tokenizer: Any, source_path: str) -> list[int]:
+    """Merge tokenizer EOS IDs with the model generation configuration.
+
+    SGLang mode detokenizes in the frontend, bypassing both Dynamo's Rust EOS
+    resolution and SGLang's own ``trim_matched_stop``, so the merge is redone here.
+    For most models the tokenizer's EOS is already the real terminal token and this
+    is a no-op. Kimi-K3 splits them: it closes messages with the XTML protocol token
+    163586 ``<|end_of_msg|>``, declared only in generation config, while the
+    tokenizer reports a different token, 163585 ``[EOS]``.
+    Strips the trailing token only; splitting reasoning is ``force_reasoning``'s job.
+    """
+    token_ids = _tokenizer_eos_token_ids(tokenizer)
+    generation_config_path = os.path.join(source_path, "generation_config.json")
+    try:
+        with open(generation_config_path, encoding="utf-8") as config_file:
+            generation_config = json.load(config_file)
+    except FileNotFoundError:
+        return token_ids
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read EOS IDs from %s: %s",
+            generation_config_path,
+            exc,
+        )
+        return token_ids
+
+    configured_ids = _normalize_eos_token_ids(
+        generation_config.get("eos_token_id")
+        if isinstance(generation_config, dict)
+        else None
+    )
+    seen = set(token_ids)
+    token_ids.extend(token_id for token_id in configured_ids if token_id not in seen)
+    return token_ids
+
+
 def _load_tokenizer(source_path: str, trust_remote_code: bool):
     """Load the SGLang tokenizer, falling back to an on-disk chat template
     (e.g. chat_template.json) when the tokenizer defines none."""
@@ -781,7 +817,7 @@ class SglangEngineFactory:
             logger.info("Using custom chat template override")
             tokenizer.chat_template = chat_template
 
-        eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
+        eos_token_ids = _model_eos_token_ids(tokenizer, local_dir)
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
