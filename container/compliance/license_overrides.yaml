@@ -188,6 +188,15 @@ overrides:
     license: LicenseRef-Intel-ISSL
     source: "Intel Simplified Software License — https://www.intel.com/content/www/us/en/developer/articles/license/end-user-license-agreement.html"
 
+  # --- Intel XPU Manager dpkg ---
+  # The upstream xpu-smi deb does not install a Debian copyright file that the
+  # dpkg generator can parse, but the Intel xpumanager project and package
+  # sources are MIT licensed.
+  - ecosystem: dpkg
+    name: xpu-smi
+    license: MIT
+    source: "Intel XPU Manager upstream LICENSE — https://github.com/intel/xpumanager/blob/master/LICENSE"
+
   # --- NVIDIA CUDA Toolkit dpkgs ---
   # Apt-installed CUDA components from the NVIDIA repo. Their copyright files
   # reference /usr/share/common-licenses/GPL-3 because some bundled GDB-related

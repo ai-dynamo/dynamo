@@ -63,9 +63,9 @@ const CHANNELS = [
     icon: "discord",
   },
   {
-    name: "CNCF Slack",
-    label: "Find us in #ai-dynamo",
-    href: "https://slack.cncf.io",
+    name: "AI Dynamo Slack",
+    label: "Join the dedicated Dynamo workspace",
+    href: "http://ai-dynamo.org/slack",
     tone: "slack",
     icon: "slack",
   },
@@ -118,6 +118,14 @@ function FontAwesomeIcon({ name }: { name: keyof typeof FONT_AWESOME_ICONS }) {
   return (
     <svg viewBox={icon.viewBox} aria-hidden="true">
       <path d={icon.path} />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
     </svg>
   );
 }
@@ -319,8 +327,8 @@ export function CommunityLanding() {
             <a className="dynamo-community-button" href={NOTES_URL} target="_blank" rel="noreferrer">
               Agenda and notes <Arrow diagonal />
             </a>
-            <a className="dynamo-community-text-link" href={INVITE_URL} target="_blank" rel="noreferrer">
-              Download calendar invite <Arrow diagonal />
+            <a className="dynamo-community-button is-outline" href={INVITE_URL} target="_blank" rel="noreferrer">
+              Download calendar invite <DownloadIcon />
             </a>
           </div>
         </div>
