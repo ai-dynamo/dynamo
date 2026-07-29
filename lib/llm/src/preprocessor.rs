@@ -177,6 +177,11 @@ struct ReasoningState {
     // TODO: Track this per choice.index for n > 1. The current bypass
     // decision and parser state are shared across all streamed choices.
     guided_json_bypass_decision: Option<bool>,
+    // Running total of completion tokens attributed to reasoning content. This
+    // is the only stage that knows where the reasoning/content boundary falls,
+    // and it sits downstream of the delta generator that builds the usage
+    // chunk, so the count is stamped onto usage as it passes through here.
+    reasoning_tokens: u32,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -2927,6 +2932,59 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Attribute one chunk's completion tokens to reasoning content.
+    ///
+    /// The split is decided on decoded text, so no exact token boundary is
+    /// available here. Chunks are attributed whole, except the single chunk
+    /// straddling the end of the reasoning block, which is divided by decoded
+    /// character share. The parser also buffers a few characters while it
+    /// decides whether a partial `</think>` is a real end tag, so the boundary
+    /// can land a token either side of the true split. That error is bounded to
+    /// the transition and does not accumulate over the stream.
+    ///
+    /// `chunk_tokens` covers the whole response, so as with the parser state
+    /// itself the attribution is approximate for `n > 1`.
+    fn accumulate_reasoning_tokens(
+        data: &NvCreateChatCompletionStreamResponse,
+        chunk_tokens: usize,
+        reasoning_tokens: &mut u32,
+    ) {
+        if chunk_tokens == 0 {
+            return;
+        }
+
+        let (reasoning_chars, normal_chars) =
+            data.inner
+                .choices
+                .iter()
+                .fold((0usize, 0usize), |(reasoning, normal), choice| {
+                    let choice_reasoning = choice
+                        .delta
+                        .reasoning_content
+                        .as_deref()
+                        .map_or(0, |text| text.chars().count());
+                    let choice_normal = match choice.delta.content.as_ref() {
+                        Some(ChatCompletionMessageContent::Text(text)) => text.chars().count(),
+                        _ => 0,
+                    };
+                    (reasoning + choice_reasoning, normal + choice_normal)
+                });
+
+        if reasoning_chars == 0 {
+            return;
+        }
+
+        let attributed = if normal_chars == 0 {
+            chunk_tokens
+        } else {
+            let share = reasoning_chars as f64 / (reasoning_chars + normal_chars) as f64;
+            (chunk_tokens as f64 * share).round() as usize
+        };
+
+        *reasoning_tokens =
+            reasoning_tokens.saturating_add(attributed.min(u32::MAX as usize) as u32);
+    }
+
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
     // Earlier reasoning parser logic was nested under delta generation logic in choice_from_postprocessor
     // Since we have tool calling parsing as separate step, it makes sense to have reasoning parser as separate step as well
@@ -2976,10 +3034,21 @@ impl OpenAIPreprocessor {
             reasoning_parser: Some(reasoning_parser),
             bypass_bare_guided_json,
             guided_json_bypass_decision: None,
+            reasoning_tokens: 0,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
+                // Read before parsing: the delta generator stamps this chunk's
+                // token count on `llm_metrics`, and the parse below rewrites
+                // only the text fields.
+                let chunk_tokens = response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.llm_metrics.as_ref())
+                    .map(|metrics| metrics.chunk_tokens)
+                    .unwrap_or(0);
+
                 let guided_json_bypass_decision = if state.bypass_bare_guided_json {
                     match state.guided_json_bypass_decision {
                         Some(decision) => Some(decision),
@@ -3010,7 +3079,7 @@ impl OpenAIPreprocessor {
                 };
 
                 // Process the response through reasoning parser if available
-                let processed_response = if guided_json_bypass_decision != Some(false) {
+                let mut processed_response = if guided_json_bypass_decision != Some(false) {
                     // Keep bare JSON and leading whitespace available to the tool jail.
                     response
                 } else if let Some(ref mut parser) = state.reasoning_parser {
@@ -3038,6 +3107,30 @@ impl OpenAIPreprocessor {
                     // No reasoning parser configured, pass through unchanged
                     response
                 };
+
+                if let Some(data) = processed_response.data.as_mut() {
+                    Self::accumulate_reasoning_tokens(
+                        data,
+                        chunk_tokens,
+                        &mut state.reasoning_tokens,
+                    );
+
+                    // Stamp the running total onto every usage-bearing chunk.
+                    // With `include_usage` that is the single trailing usage
+                    // chunk; with `continuous_usage_stats` it is every chunk,
+                    // and each one must carry the cumulative count rather than
+                    // an increment. The aggregator keeps the last usage it
+                    // sees, so non-streaming requests inherit this too.
+                    if let Some(usage) = data.inner.usage.as_mut() {
+                        let details = usage
+                            .completion_tokens_details
+                            .get_or_insert_with(Default::default);
+                        // Never clobber a count the backend already reported.
+                        if details.reasoning_tokens.is_none() {
+                            details.reasoning_tokens = Some(state.reasoning_tokens);
+                        }
+                    }
+                }
 
                 Some((processed_response, state))
             } else {

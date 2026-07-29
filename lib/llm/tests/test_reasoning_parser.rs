@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+    CompletionUsage, Role,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
@@ -903,5 +905,179 @@ mod tests {
         assert_eq!(reasoning, "Reasoning before the close tag.");
         assert_eq!(content, "Final answer here.");
         assert!(!content.contains("</think>"));
+    }
+
+    /// Attach a per-chunk token count, as the delta generator does upstream of
+    /// the reasoning transform.
+    fn with_chunk_tokens(
+        mut chunk: Annotated<NvCreateChatCompletionStreamResponse>,
+        chunk_tokens: usize,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        if let Some(data) = chunk.data.as_mut() {
+            data.llm_metrics = Some(LLMMetricAnnotation {
+                input_tokens: 0,
+                output_tokens: 0,
+                chunk_tokens,
+                cached_tokens: None,
+                prefill_worker_id: None,
+                prefill_dp_rank: None,
+                prefill_worker_type: None,
+                decode_worker_id: None,
+                decode_dp_rank: None,
+                decode_worker_type: None,
+                tokenize_latency: None,
+                detokenize_total_latency: None,
+                detokenize_count: None,
+            });
+        }
+        chunk
+    }
+
+    /// The trailing usage-only chunk the delta generator emits when
+    /// `stream_options.include_usage` is set: no choices, usage populated,
+    /// `completion_tokens_details` left empty.
+    fn usage_chunk(
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = create_mock_response_chunk(String::new(), None);
+        if let Some(data) = chunk.data.as_mut() {
+            data.inner.choices = vec![];
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
+            });
+        }
+        chunk
+    }
+
+    /// Run chunks through the reasoning transform and return the
+    /// `reasoning_tokens` reported on the last usage-bearing chunk.
+    async fn run_parser_reasoning_tokens(
+        chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+        parser: &str,
+    ) -> Option<u32> {
+        let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(chunks),
+            parser.to_string(),
+            false,
+        );
+        let mut output_stream = std::pin::pin!(output_stream);
+        let mut reported = None;
+        while let Some(item) = output_stream.next().await {
+            if let Some(usage) = item.data.as_ref().and_then(|d| d.inner.usage.as_ref()) {
+                reported = usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.reasoning_tokens);
+            }
+        }
+        reported
+    }
+
+    /// The reason this transform counts at all: the usage chunk is built
+    /// upstream with `completion_tokens_details: None`, and this is the only
+    /// stage that knows where the reasoning block ended.
+    #[tokio::test]
+    async fn test_reasoning_tokens_reported_in_usage() {
+        let chunks = vec![
+            with_chunk_tokens(chunk("<think>"), 1),
+            with_chunk_tokens(chunk("Let me think about this"), 5),
+            with_chunk_tokens(chunk(" carefully"), 2),
+            with_chunk_tokens(chunk("</think>"), 1),
+            with_chunk_tokens(chunk("The answer is 42."), 6),
+            usage_chunk(10, 15),
+        ];
+
+        let reasoning_tokens = run_parser_reasoning_tokens(chunks, "basic").await;
+
+        assert_eq!(
+            reasoning_tokens,
+            Some(7),
+            "only the chunks emitted as reasoning_content should be counted"
+        );
+    }
+
+    /// A request that reasons nothing still reports a count, so clients can
+    /// tell "no reasoning" from "not measured".
+    #[tokio::test]
+    async fn test_reasoning_tokens_zero_when_no_reasoning() {
+        let chunks = vec![
+            with_chunk_tokens(chunk("The answer is 42."), 6),
+            usage_chunk(10, 6),
+        ];
+
+        assert_eq!(run_parser_reasoning_tokens(chunks, "basic").await, Some(0));
+    }
+
+    /// `continuous_usage_stats` puts usage on every chunk; each must carry the
+    /// running total rather than the increment since the previous chunk.
+    #[tokio::test]
+    async fn test_reasoning_tokens_are_cumulative_across_usage_chunks() {
+        let mut first = with_chunk_tokens(chunk("<think>reasoning one"), 4);
+        if let Some(data) = first.data.as_mut() {
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 10,
+                completion_tokens: 4,
+                total_tokens: 14,
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
+            });
+        }
+        let mut second = with_chunk_tokens(chunk(" and reasoning two"), 4);
+        if let Some(data) = second.data.as_mut() {
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 10,
+                completion_tokens: 8,
+                total_tokens: 18,
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
+            });
+        }
+
+        let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(vec![first, second]),
+            "basic".to_string(),
+            false,
+        );
+        let mut output_stream = std::pin::pin!(output_stream);
+        let mut reported = Vec::new();
+        while let Some(item) = output_stream.next().await {
+            if let Some(usage) = item.data.as_ref().and_then(|d| d.inner.usage.as_ref()) {
+                reported.push(
+                    usage
+                        .completion_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.reasoning_tokens),
+                );
+            }
+        }
+
+        assert_eq!(reported, vec![Some(4), Some(8)]);
+    }
+
+    /// A count the backend already reported wins — the openai_backend worker
+    /// normalizes sglang's own count into this field, and this transform must
+    /// not overwrite it.
+    #[tokio::test]
+    async fn test_existing_reasoning_token_count_is_not_clobbered() {
+        let mut usage = usage_chunk(10, 15);
+        if let Some(data) = usage.data.as_mut() {
+            data.inner.usage.as_mut().unwrap().completion_tokens_details =
+                Some(dynamo_protocols::types::CompletionTokensDetails {
+                    reasoning_tokens: Some(99),
+                    ..Default::default()
+                });
+        }
+        let chunks = vec![
+            with_chunk_tokens(chunk("<think>Let me think</think>"), 5),
+            with_chunk_tokens(chunk("The answer is 42."), 6),
+            usage,
+        ];
+
+        assert_eq!(run_parser_reasoning_tokens(chunks, "basic").await, Some(99));
     }
 }
