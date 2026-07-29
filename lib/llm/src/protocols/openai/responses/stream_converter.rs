@@ -58,6 +58,7 @@ pub struct ResponseStreamConverter {
     reasoning_started: bool,
     reasoning_done: bool,
     reasoning_output_index: u32,
+    reasoning_output_status: Option<OutputStatus>,
     accumulated_reasoning: String,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
@@ -108,6 +109,7 @@ impl ResponseStreamConverter {
             reasoning_started: false,
             reasoning_done: false,
             reasoning_output_index: 0,
+            reasoning_output_status: None,
             accumulated_reasoning: String::new(),
             function_call_items: Vec::new(),
             next_output_index: 0,
@@ -527,6 +529,7 @@ impl ResponseStreamConverter {
             return;
         }
         let output_status = self.output_status();
+        self.reasoning_output_status = Some(output_status);
 
         let text_done = ResponseStreamEvent::ResponseReasoningSummaryTextDone(
             ResponseReasoningSummaryTextDoneEvent {
@@ -650,7 +653,7 @@ impl ResponseStreamConverter {
                     })],
                     content: None,
                     encrypted_content: None,
-                    status: Some(output_status),
+                    status: Some(self.reasoning_output_status.unwrap_or(output_status)),
                 }),
             ));
         }
@@ -1383,6 +1386,35 @@ mod tests {
             panic!("expected reasoning output");
         };
         assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
+    }
+
+    #[test]
+    fn test_completed_reasoning_stays_complete_when_text_is_truncated() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.process_chunk(&reasoning_chunk("complete reasoning"));
+        let _ = conv.process_chunk(&text_chunk("partial answer"));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
+        let _ = conv.emit_end_events();
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        let OutputItem::Reasoning(reasoning) = &response.output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Completed));
+        let OutputItem::Message(message) = &response.output[1] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
     }
 
     #[test]
