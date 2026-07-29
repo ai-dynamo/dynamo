@@ -64,6 +64,11 @@ on:
         required: false
         default: false
         type: boolean
+      themed_preview:
+        description: 'Apply the private NVIDIA global theme to this preview. Reproduces production, where the theme overrides the project css/js/footer. Needs an nvidia-org FERN_TOKEN.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -379,7 +384,10 @@ jobs:
           # stylesheet in hosted builds, so previews of any fern/main.css change
           # render unstyled. The repo main.css already carries the NVIDIA
           # branding rules, so unthemed previews stay visually faithful.
-          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ]; then
+          # A manual dispatch can opt in (themed_preview) to reproduce production
+          # locally-ish: this is the only way to see theme-dropped styling before
+          # merge, since the failure is invisible in an unthemed preview.
+          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ] || [ "${{ inputs.themed_preview }}" = "true" ]; then
             yq -i '.global-theme = "nvidia"' docs.yml
           else
             yq -i 'del(.global-theme)' docs.yml
@@ -475,6 +483,14 @@ jobs:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         working-directory: docs-checkout/fern
         run: fern generate --docs
+
+      # The global theme overrides the project `css:`/`js:` and the custom
+      # `footer:`, so any component relying on main.css publishes unstyled.
+      # Previews delete the theme, so this cannot be caught before merge --
+      # assert it against the live site instead. Retries cover CDN propagation.
+      - name: Verify published pages carry their component CSS
+        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
+        run: python3 source-checkout/docs/fern/scripts/check_published_styles.py
 
   #############################################################################
   # VERSION RELEASE - Run on new version tags (vX.Y.Z)
