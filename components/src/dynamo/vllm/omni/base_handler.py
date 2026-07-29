@@ -75,10 +75,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self.shutdown_event = shutdown_event
 
         self._lora_state = LoRAState()
-        # Keep historical attribute names for compatibility with existing code.
-        self.loaded_loras = self._lora_state.loaded_loras
-        self._lora_load_locks = self._lora_state.lora_load_locks
-        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
+        # Properties loaded_loras, _lora_load_locks, _lora_load_locks_guard are now
+        # available through LoRAState. No direct assignment needed since properties
+        # are backed by _lora_state after initialization.
         self._lora_capacity = self._resolve_lora_capacity(config)
         self._advertised_gpu_lora_capacity = self._resolve_advertised_gpu_lora_capacity(
             config

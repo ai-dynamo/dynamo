@@ -353,6 +353,9 @@ class OmniHandler(BaseOmniHandler):
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+            # Note: For diffusion paths, lora_request is embedded in sampling_params_list
+            # and will be refreshed in create_generator under the admission lock.
+            # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
         # Keep top-level LoRA only for paths that do not carry stage params.
         if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
@@ -374,14 +377,22 @@ class OmniHandler(BaseOmniHandler):
             nonlocal previous_text
 
             per_request_kwargs = dict(generate_kwargs)
-            # Preserve the contract above: diffusion paths carrying per-stage
-            # sampling params should source LoRA from stage params, not the
-            # top-level generate() argument.
-            if (
-                admitted_lora_request is not None
-                and inputs.sampling_params_list is None
-            ):
-                per_request_kwargs["lora_request"] = admitted_lora_request
+            # Critical: Apply the re-resolved adapter under the admission lock.
+            # This ensures that if a hot-swap occurred between build time and lock
+            # acquisition, the freshly loaded adapter is used for generation.
+            # For diffusion paths, the adapter must be embedded in sampling_params_list
+            # because AsyncOmni diffusion stages read LoRA from the params, not from
+            # the top-level generate() argument.
+            if admitted_lora_request is not None:
+                if inputs.sampling_params_list is not None:
+                    # Diffusion path: update embedded LoRA in sampling params
+                    # This must happen BEFORE generate() is called to take effect
+                    self._apply_lora_to_sampling_params(
+                        inputs.sampling_params_list, admitted_lora_request
+                    )
+                else:
+                    # LLM path: set top-level lora_request for text generation
+                    per_request_kwargs["lora_request"] = admitted_lora_request
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
                 chunk = await self.output_formatter.format(
