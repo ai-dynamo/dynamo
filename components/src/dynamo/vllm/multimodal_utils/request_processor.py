@@ -316,26 +316,41 @@ class VllmMultimodalRequestProcessor:
             return token_ids
         pad_id, native_ids = expansion
 
-        pad_count = token_ids.count(pad_id)
-        if pad_count == 0:
-            return token_ids  # already native form
+        # Prompts here reach 100k+ tokens while pads number in the single
+        # digits, so locate the rare token and splice around it rather than
+        # walking every id in Python. `list.index` short-circuits at the first
+        # pad, so the no-pad case (already-native prompt) costs one C-level
+        # scan and zero copies.
+        try:
+            first = token_ids.index(pad_id)
+        except ValueError:
+            return token_ids  # already in native form -- nothing to replace
+
+        pad_positions = [first]
+        while True:
+            try:
+                pad_positions.append(token_ids.index(pad_id, pad_positions[-1] + 1))
+            except ValueError:
+                break
 
         images = multi_modal_data.get("image")
         expected = len(images) if isinstance(images, (list, tuple)) else 1
-        if pad_count != expected:
+        if len(pad_positions) != expected:
             # Guessing here would silently misalign images against their
             # embedding slots, so refuse instead.
             raise ValueError(
-                f"Kimi-K3 prompt carries {pad_count} <|media_pad|> token(s) but "
-                f"{expected} image(s) were supplied; refusing to expand."
+                f"Kimi-K3 prompt carries {len(pad_positions)} <|media_pad|> "
+                f"token(s) but {expected} image(s) were supplied; refusing to "
+                f"expand."
             )
 
         expanded: list[int] = []
-        for token_id in token_ids:
-            if token_id == pad_id:
-                expanded.extend(native_ids)
-            else:
-                expanded.append(token_id)
+        prev = 0
+        for position in pad_positions:
+            expanded.extend(token_ids[prev:position])
+            expanded.extend(native_ids)
+            prev = position + 1
+        expanded.extend(token_ids[prev:])
         return expanded
 
     @staticmethod
