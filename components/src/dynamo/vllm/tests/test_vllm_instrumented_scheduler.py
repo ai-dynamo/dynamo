@@ -32,6 +32,7 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
+from dynamo.vllm.benchmark_points import BenchmarkPoints  # noqa: E402
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
@@ -622,6 +623,7 @@ def test_benchmark_synchronizer_close_flushes_after_cleanup():
     synchronizer._socket = MagicMock()
     synchronizer._timeout_ms = 1_000
     synchronizer._cleanup_complete = False
+    synchronizer._flush_on_close = False
 
     synchronizer.close()
     synchronizer._socket.close.assert_called_once_with(linger=0)
@@ -728,6 +730,43 @@ def test_benchmark_synchronizer_rejects_different_points():
         follower.join(timeout=2)
         assert not follower.is_alive()
         assert "point mismatch" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_propagates_rank_abort():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+
+    def abort_follower():
+        rank1.synchronize(point)
+        rank1.abort("decode[0]: output update failed")
+
+    follower = threading.Thread(target=abort_follower)
+    follower.start()
+    try:
+        rank0.synchronize(point)
+        with pytest.raises(RuntimeError, match=r"rank 1 aborted.*decode\[0\]"):
+            rank0.collect_result(point, [{"counter_id": 1, "dp_rank": 0}])
+        follower.join(timeout=2)
+        assert not follower.is_alive()
     finally:
         rank1.close()
         rank0.close()
@@ -1261,6 +1300,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
@@ -1287,6 +1327,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
@@ -1311,6 +1352,7 @@ def test_benchmark_grid_has_no_point_cap():
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
@@ -1330,6 +1372,119 @@ def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
 
     assert [point.benchmark_id for point in stub._bench_grid] == [1, 2]
     assert len(stub._bench_grid_digest) == 64
+
+
+def _explicit_grid_stub(mode="agg", points=None):
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=8)
+    stub._bench_config = BenchmarkConfig(mode=mode)
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_hash_block_size = 8
+    stub._bench_prefill_capture_sizes = [8, 16]
+    stub._bench_prefill_cudagraph_mode = "PIECEWISE"
+    stub.num_lookahead_tokens = 0
+    stub._bench_skipped_points = []
+    stub._bench_explicit_points = BenchmarkPoints.model_validate(
+        points
+        or {
+            "schema_version": 1,
+            "prefill": [
+                {
+                    "total_prefill_tokens": 8,
+                    "total_kv_read_tokens": 0,
+                    "batch_size": 1,
+                }
+            ],
+            "decode": [{"total_kv_read_tokens": 16, "batch_size": 1}],
+        }
+    )
+    return stub
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_points"),
+    [
+        ("prefill", [("prefill", 8, 0, 1)]),
+        ("decode", [("decode", 0, 16, 1)]),
+        ("agg", [("prefill", 8, 0, 1), ("decode", 0, 16, 1)]),
+    ],
+)
+def test_explicit_points_replace_generated_grid(mode, expected_points):
+    stub = _explicit_grid_stub(mode)
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert [
+        (
+            point.point_type,
+            point.total_prefill_tokens,
+            point.total_kv_read_tokens,
+            point.batch_size,
+        )
+        for point in stub._bench_grid
+    ] == expected_points
+    assert [point.benchmark_id for point in stub._bench_grid] == list(
+        range(1, len(expected_points) + 1)
+    )
+    assert all("explicit" in point.sample_reasons for point in stub._bench_grid)
+
+
+def test_empty_explicit_points_are_a_noop():
+    stub = _explicit_grid_stub(
+        "agg",
+        {"schema_version": 1, "prefill": [], "decode": []},
+    )
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert list(stub._bench_grid) == []
+    assert stub._bench_expected_points == 0
+    assert stub._bench_missing_phases == []
+
+
+def test_explicit_infeasible_point_reports_source_index():
+    stub = _explicit_grid_stub(
+        "prefill",
+        {
+            "schema_version": 1,
+            "prefill": [
+                {
+                    "total_prefill_tokens": 10_001,
+                    "total_kv_read_tokens": 0,
+                    "batch_size": 1,
+                }
+            ],
+            "decode": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"prefill\[0\].*infeasible"):
+        InstrumentedScheduler._bench_build_grid(stub)
+
+
+def test_explicit_decode_respects_scheduled_token_limit():
+    stub = _explicit_grid_stub(
+        "decode",
+        {
+            "schema_version": 1,
+            "prefill": [],
+            "decode": [{"total_kv_read_tokens": 2, "batch_size": 2}],
+        },
+    )
+    stub.max_num_scheduled_tokens = 1
+
+    with pytest.raises(ValueError, match=r"decode\[0\].*infeasible"):
+        InstrumentedScheduler._bench_build_grid(stub)
+
+
+def test_explicit_runtime_failure_is_not_silently_skipped():
+    stub = _explicit_grid_stub("decode")
+    InstrumentedScheduler._bench_build_grid(stub)
+    point = stub._bench_grid[0]
+
+    with pytest.raises(RuntimeError, match=r"benchmark_id=1.*injection_failed"):
+        InstrumentedScheduler._bench_skip_point(stub, point, "injection_failed")
 
 
 # ---------------------------------------------------------------------------
@@ -1722,6 +1877,7 @@ def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
     stub._bench_grid_error = None
     stub._bench_feasible_max_decode_batch_size = 0
     stub._bench_config.mode = "agg"
+    stub._bench_explicit_points = None
     stub._bench_decode_capture_sizes = [1, 2, 4, 8]
     stub._bench_decode_cudagraph_mode = "FULL"
 
@@ -2166,6 +2322,7 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
 
 def test_benchmark_abort_clears_synthetic_prefix_cache_before_deactivation():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_synchronizer = None
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_clear_prefix_cache = MagicMock()
     stub._bench_write_results = MagicMock()
@@ -2182,6 +2339,7 @@ def test_benchmark_abort_clears_synthetic_prefix_cache_before_deactivation():
 
 def test_benchmark_abort_is_fail_closed_when_prefix_cleanup_fails():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_synchronizer = None
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_clear_prefix_cache = MagicMock(
         side_effect=RuntimeError("cache still referenced")

@@ -9,7 +9,7 @@ import argparse
 import logging
 import os
 import warnings
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -19,6 +19,12 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .benchmark_points import (
+    BENCHMARK_MODES,
+    BenchmarkMode,
+    BenchmarkPoints,
+    load_benchmark_points_file,
+)
 from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
@@ -62,24 +68,6 @@ class DynamoVllmArgGroup(ArgGroup):
             "or 'encode' (multimodal encode worker).",
             choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
             + [m.value for m in DisaggregationMode],
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--is-prefill-worker",
-            env_var="DYN_VLLM_IS_PREFILL_WORKER",
-            default=False,
-            help="DEPRECATED: use --disaggregation-mode=prefill. "
-            "Enable prefill functionality for this worker.",
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--is-decode-worker",
-            env_var="DYN_VLLM_IS_DECODE_WORKER",
-            default=False,
-            help="DEPRECATED: use --disaggregation-mode=decode. "
-            "Mark this as a decode worker which does not publish KV events.",
         )
 
         add_negatable_bool_argument(
@@ -231,7 +219,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--benchmark-mode",
             env_var="DYN_BENCHMARK_MODE",
             default=None,
-            choices=["prefill", "decode", "agg"],
+            choices=BENCHMARK_MODES,
             help=(
                 "Run self-benchmark on startup before accepting requests. "
                 "Sweeps iteration-total prefill tokens/KV reads/batch size and/or "
@@ -240,6 +228,21 @@ class DynamoVllmArgGroup(ArgGroup):
                 "geometrically to the engine limit. KV-read axes use complete "
                 "power-of-two block ladders plus their exact feasible maxima, "
                 "then apply the configured per-axis sample limits."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-points-file",
+            env_var="DYN_BENCHMARK_POINTS_FILE",
+            default=None,
+            help=(
+                "JSON file containing explicit pure prefill/decode benchmark points "
+                "applied uniformly to every data-parallel rank. The file completely "
+                "replaces generated grid sampling for the phases selected by "
+                "--benchmark-mode; generated-grid sampling options, including legacy "
+                "granularity options, are ignored. It is read and normalized once "
+                "before vLLM workers start, then the same contents are forwarded to "
+                "every rank."
             ),
         )
         add_argument(
@@ -416,8 +419,6 @@ class DynamoVllmConfig(ConfigBase):
     disaggregation_mode: Union[
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
-    is_prefill_worker: bool
-    is_decode_worker: bool
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -447,8 +448,13 @@ class DynamoVllmConfig(ConfigBase):
     # GMS shadow mode
     gms_shadow_mode: bool = False
 
+    # Extra served names beyond the primary, parsed from --served-model-name.
+    # None (not []) since ConfigBase copies class defaults by reference.
+    served_model_aliases: Optional[List[str]] = None
+
     # Benchmark / self-profiling
-    benchmark_mode: Optional[str] = None
+    benchmark_mode: Optional[BenchmarkMode] = None
+    benchmark_points_file: Optional[str] = None
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
@@ -467,6 +473,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_prefill_batch_granularity: Optional[int] = None
     benchmark_decode_length_granularity: Optional[int] = None
     benchmark_decode_batch_granularity: Optional[int] = None
+    _benchmark_points: Optional[BenchmarkPoints] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
@@ -476,11 +483,21 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
+        self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
 
-    def _resolve_legacy_benchmark_sampling(self) -> None:
+    def _load_explicit_benchmark_points(self) -> None:
+        self._benchmark_points = None
+        if self.benchmark_points_file is None:
+            return
         if self.benchmark_mode is None:
+            raise ValueError("--benchmark-points-file requires --benchmark-mode")
+
+        self._benchmark_points = load_benchmark_points_file(self.benchmark_points_file)
+
+    def _resolve_legacy_benchmark_sampling(self) -> None:
+        if self.benchmark_mode is None or self._benchmark_points is not None:
             return
 
         mappings = (
@@ -550,17 +567,18 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_benchmark_sampling(self) -> None:
         if self.benchmark_mode is None:
             return
-        uniform_limits = (
-            "prefill_max_new_token_samples",
-            "prefill_max_kv_read_token_samples",
-            "decode_max_kv_read_token_samples",
-            "decode_max_batch_size_samples",
-        )
-        for name in uniform_limits:
-            if getattr(self, name) < 2:
-                raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
-        if self.prefix_max_batch_size_samples < 1:
-            raise ValueError("--prefix-max-batch-size-samples must be positive")
+        if self._benchmark_points is None:
+            uniform_limits = (
+                "prefill_max_new_token_samples",
+                "prefill_max_kv_read_token_samples",
+                "decode_max_kv_read_token_samples",
+                "decode_max_batch_size_samples",
+            )
+            for name in uniform_limits:
+                if getattr(self, name) < 2:
+                    raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
+            if self.prefix_max_batch_size_samples < 1:
+                raise ValueError("--prefix-max-batch-size-samples must be positive")
         if self.benchmark_warmup_iterations < 0:
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
@@ -574,55 +592,20 @@ class DynamoVllmConfig(ConfigBase):
             )
 
     def _resolve_disaggregation_mode(self) -> None:
-        """Resolve disaggregation_mode from new enum or legacy boolean flags.
+        """Resolve disaggregation_mode from its CLI value and legacy multimodal flags.
 
         Priority:
         1. If --disaggregation-mode was explicitly provided, use it.
-           Raise if legacy booleans are also set.
-        2. If legacy --is-prefill-worker or --is-decode-worker is set,
-           emit DeprecationWarning and translate to enum.
-        3. If legacy multimodal flags are set, translate to enum,
-           emit DeprecationWarning and translate to enum, raise if conflicting
-           with --disaggregation-mode.
+        2. If legacy multimodal flags are set, emit DeprecationWarning and
+           translate to enum, raising if they conflict with --disaggregation-mode.
         3. Apply default (AGGREGATED) if nothing was provided.
-        4. Sync boolean fields from the resolved enum value.
         """
-        # Convert string to enum (non-None means explicitly provided)
-        explicit_mode = self.disaggregation_mode is not None
+        # Convert string to enum
         if isinstance(self.disaggregation_mode, str):
             if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
             else:
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
-
-        # Check for legacy boolean flags
-        has_legacy = self.is_prefill_worker or self.is_decode_worker
-
-        if has_legacy and explicit_mode:
-            raise ValueError(
-                "Cannot combine --is-prefill-worker/--is-decode-worker with "
-                "--disaggregation-mode. Use only --disaggregation-mode."
-            )
-
-        if has_legacy:
-            if self.is_prefill_worker and self.is_decode_worker:
-                raise ValueError(
-                    "Cannot set both --is-prefill-worker and --is-decode-worker"
-                )
-            if self.is_prefill_worker:
-                warnings.warn(
-                    "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                self.disaggregation_mode = DisaggregationMode.PREFILL
-            elif self.is_decode_worker:
-                warnings.warn(
-                    "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                self.disaggregation_mode = DisaggregationMode.DECODE
 
         # Porting multimodal legacy flags
         if (
@@ -635,10 +618,6 @@ class DynamoVllmConfig(ConfigBase):
         # Apply default if neither new flag nor legacy flags were provided
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED
-
-        # Sync booleans from enum (canonical source of truth)
-        self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
-        self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
 
     def _resolve_disaggregation_model_from_legacy_multimodal_flags(self) -> None:
         """

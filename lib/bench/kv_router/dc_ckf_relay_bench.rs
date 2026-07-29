@@ -729,7 +729,7 @@ fn allowed_cpu_ids() -> anyhow::Result<Vec<usize>> {
         if cpus.is_empty() {
             bail!("process CPU affinity mask is empty");
         }
-        return Ok(cpus);
+        Ok(cpus)
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -17,12 +17,14 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_image_payload_cached_tokens
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    image_token_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -48,6 +50,7 @@ qwen3_vl_engine_config_dir = os.path.join(
 )
 qwen3_vl_engine_config_files = (
     "agg.yaml",
+    "agg_kv_router.yaml",
     "decode.yaml",
     "encode.yaml",
     "prefill.yaml",
@@ -283,22 +286,25 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_multimodal_router.sh",
         marks=[
-            pytest.mark.skip(
-                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2608"
-            ),
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(12.0),
+            pytest.mark.requested_trtllm_kv_tokens(32768),
+            pytest.mark.timeout(960),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
-            multimodal_payload_default(
-                text="Describe what you see in this image.",
-                expected_response=["mountain", "rock", "trees", "road"],
+            make_image_payload_cached_tokens(
+                ["green"],
+                repeat_count=2,
+                require_rust_processor_init=True,
+                min_avg_kv_hit_rate=0.5,
             )
         ],
     ),
@@ -595,7 +601,8 @@ trtllm_configs = {
             multimodal_payload_default(
                 text="Describe what you see in this image.",
                 expected_response=["mountain", "rock", "trees", "road"],
-            )
+            ),
+            image_token_metrics_payload(),
         ],
         env={
             "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
@@ -648,6 +655,7 @@ def test_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """
     Test dynamo deployments with different configurations.
