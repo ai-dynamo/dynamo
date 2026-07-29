@@ -242,19 +242,21 @@ impl RadixCache {
         (self.nodes[id].last_access_time, id)
     }
 
+    fn is_evictable_leaf(&self, id: NodeId) -> bool {
+        id != self.root && self.nodes[id].lock_ref == 0 && self.is_leaf(id)
+    }
+
     fn insert_evictable_leaf(&mut self, id: NodeId) {
-        debug_assert_ne!(id, self.root, "root must not enter the eviction index");
-        debug_assert!(self.is_leaf(id), "only leaves are directly evictable");
-        debug_assert_eq!(
-            self.nodes[id].lock_ref, 0,
-            "locked leaf must not enter the eviction index"
+        debug_assert!(
+            self.is_evictable_leaf(id),
+            "only unlocked non-root leaves are directly evictable"
         );
         let inserted = self.evictable_leaves.insert(self.evictable_key(id));
         debug_assert!(inserted, "evictable leaf was already indexed");
     }
 
     fn remove_evictable_leaf(&mut self, id: NodeId) -> bool {
-        if id == self.root {
+        if !self.is_evictable_leaf(id) {
             return false;
         }
         self.evictable_leaves.remove(&self.evictable_key(id))
