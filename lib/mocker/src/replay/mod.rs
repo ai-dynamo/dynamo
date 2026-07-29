@@ -6,7 +6,6 @@ mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
-mod planner_handle;
 mod router_shared;
 mod validate;
 
@@ -16,6 +15,9 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
@@ -67,9 +69,11 @@ pub use entrypoints::{
     simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
+    simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_policy,
     simulate_concurrency_file_with_router_mode,
-    simulate_concurrency_file_with_router_mode_and_format, simulate_concurrency_live_file,
-    simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_file_with_router_mode_and_format,
+    simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy,
+    simulate_concurrency_live_file, simulate_concurrency_live_file_with_router_mode,
     simulate_concurrency_live_file_with_router_mode_and_format,
     simulate_concurrency_live_file_with_router_mode_and_format_and_options,
     simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
@@ -77,18 +81,26 @@ pub use entrypoints::{
     simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
     simulate_concurrency_live_workload_with_router_mode_and_options, simulate_concurrency_requests,
     simulate_concurrency_requests_disagg_with_router_mode,
-    simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
-    simulate_concurrency_workload_disagg_with_router_mode,
+    simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_concurrency_requests_with_router_mode,
+    simulate_concurrency_requests_with_router_mode_and_scaling_policy,
+    simulate_concurrency_workload, simulate_concurrency_workload_disagg_with_router_mode,
     simulate_concurrency_workload_disagg_with_router_mode_and_options,
+    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_concurrency_workload_with_router_mode,
     simulate_concurrency_workload_with_router_mode_and_options,
+    simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
+    simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_loaded_trace_live_with_router_mode,
     simulate_loaded_trace_live_with_router_mode_and_options,
-    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
+    simulate_loaded_trace_with_router_mode_and_options,
+    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
-    simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
-    simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
+    simulate_trace_file_disagg_with_router_mode_and_format,
+    simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy,
+    simulate_trace_file_with_router_mode, simulate_trace_file_with_router_mode_and_format,
+    simulate_trace_file_with_router_mode_and_format_and_scaling_policy, simulate_trace_live_file,
     simulate_trace_live_file_with_router_mode,
     simulate_trace_live_file_with_router_mode_and_format,
     simulate_trace_live_file_with_router_mode_and_format_and_options, simulate_trace_live_requests,
@@ -96,17 +108,19 @@ pub use entrypoints::{
     simulate_trace_live_requests_with_router_mode_and_options, simulate_trace_live_workload,
     simulate_trace_live_workload_with_router_mode,
     simulate_trace_live_workload_with_router_mode_and_options, simulate_trace_requests,
-    simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
-    simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_requests_disagg_with_router_mode,
+    simulate_trace_requests_disagg_with_router_mode_and_scaling_policy,
+    simulate_trace_requests_with_router_mode,
+    simulate_trace_requests_with_router_mode_and_scaling_policy, simulate_trace_workload,
+    simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_policy,
     simulate_trace_workload_with_router_mode,
+    simulate_trace_workload_with_router_mode_and_options_and_scaling_policy,
 };
 pub use offline::components::TrafficStats;
-pub use offline::planner_hook::{
-    NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
-};
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
-pub use planner_handle::PlannerReplayHandle;
+pub use offline::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(

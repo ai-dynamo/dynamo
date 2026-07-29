@@ -745,6 +745,10 @@ impl TraceCollector {
         self.static_worker_count = Some((prefill, decode));
     }
 
+    pub(crate) fn clear_static_worker_count(&mut self) {
+        self.static_worker_count = None;
+    }
+
     /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
     /// in `finish()` to derive gpu_hours from the worker-seconds.
     pub(crate) fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
