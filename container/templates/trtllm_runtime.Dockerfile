@@ -40,20 +40,17 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
+ARG NIXL_REF
 
-# DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
-# $DYNAMO_HOME/examples/... resolve. LD_PRELOAD/NIXL_PLUGIN_DIR are a workaround
-# for ai-dynamo/nixl#1668: nixl-cu13's bundled UCX 1.20.0 hangs in
-# `uct_md_query_tl_resources` (md_resources realloc loop, >1 GiB) when two NIXL
-# agents init on the same host. Force-load TRT-LLM's bundled libnixl 0.9.0
-# (uses system UCX, no bug). LD_PRELOAD is the only lever: nixl-cu13's
-# _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH. Drop the two NIXL
-# vars when the upstream issue is fixed.
+# LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
+# (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
+# NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
 
 WORKDIR /workspace
 
@@ -126,9 +123,17 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \
-    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
-    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
-    # The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
+    # nixl/nixl-cu13 for KVBM's `import nixl` ABI; version from NIXL_REF, matching
+    # the nixl-sys wheel_builder links. LD_PRELOAD swaps the runtime .so (nixl#1668).
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
+    _nixl_ver="${NIXL_REF#v}" && \
+    uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
+    \
+    # Record effective NIXL versions (pip vs loaded .so) for diagnosis.
+    { uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)'; echo "loaded_libnixl: ${LD_PRELOAD##*:}"; } | tee /opt/dynamo/nixl-versions.txt && \
+    \
+    # Third-party deps Dynamo wheels declare but upstream lacks. The
+    # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
     # directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
     # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
@@ -203,7 +208,8 @@ ENV DYNAMO_HOME=/workspace \
     PATH=/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
@@ -211,7 +217,8 @@ ENV DYNAMO_HOME=/workspace \
     PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
 {% endif %}
 
 WORKDIR /workspace

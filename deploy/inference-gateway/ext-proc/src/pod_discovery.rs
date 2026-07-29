@@ -223,9 +223,21 @@ impl PodDiscovery {
             .collect()
     }
 
-    // Return the IDs of all currently `Ready`, pool-selected workers.
-    pub fn ready_worker_ids(&self) -> HashSet<u64> {
-        self.index.read().unwrap().keys().copied().collect()
+    /// Whether any `Ready`, pool-selected worker exists. O(1) — lets the hot path
+    /// test emptiness without materializing the id set.
+    pub fn has_ready_workers(&self) -> bool {
+        !self.index.read().unwrap().is_empty()
+    }
+
+    /// Resolve any `Ready` worker's `ip:port` endpoint, for body-less requests
+    /// that route to an arbitrary worker without building an id set.
+    pub fn resolve_any_endpoint(&self) -> Option<String> {
+        self.index
+            .read()
+            .unwrap()
+            .values()
+            .next()
+            .map(|entry| entry.endpoint.clone())
     }
 
     // Resolve a `worker_id` to its current `ip:port` HTTP endpoint.
@@ -237,24 +249,20 @@ impl PodDiscovery {
             .map(|entry| entry.endpoint.clone())
     }
 
-    /// Retain the `worker_ids` whose current `ip:port` endpoint satisfies `pred`,
-    /// under a **single** read lock and **without cloning** any endpoint (`pred`
-    /// borrows it). Used on the subset-routing path so membership testing doesn't
-    /// allocate a throwaway `String` per candidate. Unknown workers are dropped.
-    pub fn filter_workers_by_endpoint(
-        &self,
-        worker_ids: &HashSet<u64>,
-        pred: impl Fn(&str) -> bool,
-    ) -> HashSet<u64> {
+    /// Worker IDs of the currently `Ready`, pool-selected workers whose `ip:port`
+    /// endpoint satisfies `pred`, collected in a **single** index pass under one
+    /// read lock — no intermediate full-ready set, and `pred` borrows the endpoint
+    /// (no per-worker `String` clone). Used only on the subset-routing path.
+    ///
+    /// `pred` runs while the index read lock is held, so it must not re-enter
+    /// `PodDiscovery` (`resolve_endpoint`, another read, …): `std::sync::RwLock`
+    /// read locks are not guaranteed re-entrant and a nested acquire can deadlock.
+    pub fn ready_worker_ids_matching(&self, pred: impl Fn(&str) -> bool) -> HashSet<u64> {
         let index = self.index.read().unwrap();
-        worker_ids
+        index
             .iter()
-            .copied()
-            .filter(|worker_id| {
-                index
-                    .get(worker_id)
-                    .is_some_and(|entry| pred(entry.endpoint.as_str()))
-            })
+            .filter(|(_, entry)| pred(entry.endpoint.as_str()))
+            .map(|(worker_id, _)| *worker_id)
             .collect()
     }
 
@@ -865,22 +873,22 @@ mod tests {
     }
 
     #[test]
-    fn filter_workers_by_endpoint_matches_without_cloning() {
+    fn ready_worker_ids_matching_filters_without_cloning() {
         let discovery = discovery_with_endpoints(HashMap::from([
             (1u64, "10.0.0.1:8000".to_string()),
             (2u64, "10.0.0.2:8000".to_string()),
             (3u64, "10.0.0.3:8000".to_string()),
         ]));
-        let allowed: HashSet<u64> = [1, 2, 3].into_iter().collect();
 
         // Predicate borrows the endpoint; only worker 2 matches.
-        let filtered =
-            discovery.filter_workers_by_endpoint(&allowed, |endpoint| endpoint == "10.0.0.2:8000");
+        let filtered = discovery.ready_worker_ids_matching(|endpoint| endpoint == "10.0.0.2:8000");
         assert_eq!(filtered, HashSet::from([2]));
 
-        // A worker id with no endpoint in the snapshot is dropped.
-        let allowed_with_unknown: HashSet<u64> = [1, 99].into_iter().collect();
-        let filtered = discovery.filter_workers_by_endpoint(&allowed_with_unknown, |_| true);
-        assert_eq!(filtered, HashSet::from([1]));
+        // Match-all returns every ready worker (single pass, no input set).
+        let all = discovery.ready_worker_ids_matching(|_| true);
+        assert_eq!(all, HashSet::from([1, 2, 3]));
+
+        // No match -> empty.
+        assert!(discovery.ready_worker_ids_matching(|_| false).is_empty());
     }
 }

@@ -126,9 +126,9 @@ fn get_span_for_direct_context(
 
 // Helper to create request context with proper linking and cancellation handling
 fn create_request_context(
-    request: serde_json::Value,
+    request: rmpv::Value,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<serde_json::Value> {
+) -> RsContext<rmpv::Value> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -746,7 +746,7 @@ struct ModelCardInstanceId {
 #[pyclass]
 #[derive(Clone)]
 struct Client {
-    router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    router: rs::pipeline::PushRouter<rmpv::Value, RsAnnotated<rmpv::Value>>,
     endpoint: rs::component::Endpoint,
 }
 
@@ -1391,12 +1391,13 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router = rs::pipeline::PushRouter::<
-                serde_json::Value,
-                RsAnnotated<serde_json::Value>,
-            >::from_client(client, router_mode.into())
-            .await
-            .map_err(to_pyerr)?;
+            let push_router =
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                    client,
+                    router_mode.into(),
+                )
+                .await
+                .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
                 endpoint: inner,
@@ -1582,7 +1583,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1616,7 +1617,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1654,7 +1655,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1691,7 +1692,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1724,13 +1725,13 @@ impl Client {
 }
 
 async fn process_stream(
-    stream: EngineStream<RsAnnotated<serde_json::Value>>,
+    stream: EngineStream<RsAnnotated<rmpv::Value>>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
-        let annotated: RsAnnotated<serde_json::Value> = response;
+        let annotated: RsAnnotated<rmpv::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
             Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
