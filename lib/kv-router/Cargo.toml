@@ -78,3 +78,8 @@ tower = { version = "0.5", features = ["util"] }
 [[bench]]
 name = "policy_queue"
 harness = false
+
+[[bench]]
+name = "potential_loads"
+harness = false
+required-features = ["standalone-selection"]
