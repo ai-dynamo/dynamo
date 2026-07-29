@@ -323,6 +323,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             finish_reason.is_some(),
+            delta.custom_encoder_data,
             delta.engine_data,
             stop_reason,
             Some(completion_token_ids_slice),
@@ -478,6 +479,7 @@ mod tests {
             engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            custom_encoder_data: None,
             encoder_result: None,
             routing_data: None,
         }
@@ -564,6 +566,7 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -739,6 +742,32 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_encoder_data_is_included_without_opt_in() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-custom-encoder".to_string());
+        let mut backend_output = make_backend_output_with_engine_data();
+        backend_output.custom_encoder_data = Some(serde_json::json!({
+            "items": [{"score": 0.75}, null]
+        }));
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+        let nvext = response
+            .nvext
+            .expect("custom encoder data should create nvext");
+
+        assert_eq!(
+            nvext.get("custom_encoder"),
+            Some(&serde_json::json!({"items": [{"score": 0.75}, null]}))
+        );
+        assert!(
+            nvext.get("engine_data").is_none(),
+            "engine_data must remain opt-in"
+        );
+    }
+
+    #[test]
     fn test_engine_data_excluded_when_other_extra_fields_requested() {
         let request = create_test_request_with_extra_fields(vec!["timing".to_string()]);
         let mut generator = request.response_generator("req-engine-3".to_string());
@@ -776,6 +805,7 @@ mod tests {
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            custom_encoder_data: None,
             routing_data: None,
         };
 

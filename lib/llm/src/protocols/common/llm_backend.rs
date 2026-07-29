@@ -144,6 +144,11 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
 
+    /// JSON metadata emitted by an in-process custom encoder.
+    /// This is surfaced automatically as `nvext.custom_encoder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_encoder_data: Option<serde_json::Value>,
+
     /// Router-computed data handed back to the frontend (e.g. per-request timing from
     /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
     /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
@@ -231,6 +236,11 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
 
+    /// JSON metadata emitted by an in-process custom encoder.
+    /// Kept separate from opt-in `engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_encoder_data: Option<serde_json::Value>,
+
     /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
     /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,6 +267,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -280,6 +291,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -303,6 +315,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -326,6 +339,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -363,6 +377,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         }
     }
@@ -416,6 +431,17 @@ mod tests {
         assert!(format!("{}", output.err().unwrap()).contains("Test error"));
         assert!(!output.is_ok());
         assert!(output.is_err());
+    }
+
+    #[test]
+    fn custom_encoder_data_deserializes_from_engine_chunk_shape() {
+        let payload = serde_json::json!({"items": [{"score": 0.75}, null]});
+        let mut chunk = serde_json::to_value(LLMEngineOutput::default()).unwrap();
+        chunk["custom_encoder_data"] = payload.clone();
+
+        let output: LLMEngineOutput = serde_json::from_value(chunk).unwrap();
+
+        assert_eq!(output.custom_encoder_data, Some(payload));
     }
 
     /// `encode_terminal` produces an Encode-mode terminal chunk with the

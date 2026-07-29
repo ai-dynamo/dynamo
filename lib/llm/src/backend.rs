@@ -398,6 +398,7 @@ impl
                     encoder_result: data.encoder_result,
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
+                    custom_encoder_data: data.custom_encoder_data,
                     routing_data: data.routing_data,
                 })
             })

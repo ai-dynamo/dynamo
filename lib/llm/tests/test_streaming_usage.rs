@@ -113,6 +113,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         },
         BackendOutput {
@@ -130,6 +131,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         },
         BackendOutput {
@@ -156,6 +158,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         },
     ]

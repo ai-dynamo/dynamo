@@ -439,6 +439,7 @@ mod tests {
             worker_trace_link: None,
             completion_usage: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         })
     }

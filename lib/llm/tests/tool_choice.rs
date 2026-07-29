@@ -139,6 +139,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
+        custom_encoder_data: None,
         routing_data: None,
     }
 }
@@ -311,6 +312,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         };
 
@@ -382,6 +384,7 @@ async fn test_streaming_required_tool_parallel() {
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         };
 
@@ -455,6 +458,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
+        custom_encoder_data: None,
         routing_data: None,
     };
 

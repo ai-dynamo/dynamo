@@ -370,8 +370,10 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_deltas_merge_nvext_fields() {
         let mut annotated_delta1 = create_test_delta(0, "Hello,", None, None);
-        annotated_delta1.data.as_mut().expect("delta data").nvext =
-            Some(serde_json::json!({ "engine_data": { "trace_id": "abc" } }));
+        annotated_delta1.data.as_mut().expect("delta data").nvext = Some(serde_json::json!({
+            "custom_encoder": { "items": [{ "score": 0.75 }] },
+            "engine_data": { "trace_id": "abc" },
+        }));
         let mut annotated_delta2 = create_test_delta(0, " world!", Some("stop".to_string()), None);
         annotated_delta2.data.as_mut().expect("delta data").nvext =
             Some(serde_json::json!({ "stop_reason": 128001 }));
@@ -384,6 +386,7 @@ mod tests {
         assert_eq!(
             response.nvext,
             Some(serde_json::json!({
+                "custom_encoder": { "items": [{ "score": 0.75 }] },
                 "engine_data": { "trace_id": "abc" },
                 "stop_reason": 128001,
             }))
