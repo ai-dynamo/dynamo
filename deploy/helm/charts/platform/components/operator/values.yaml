@@ -121,6 +121,13 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Scrape interval for every PodMonitor this chart creates.
+      # Must stay above the collector's scrape timeout, or the collector rejects
+      # the generated scrape config outright and the PodMonitor silently collects
+      # nothing. Grafana Alloy defaults that timeout to 10s, so anything below it
+      # — the previous hardcoded 5s included — fails with "scrape timeout greater
+      # than scrape interval".
+      interval: 30s
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false

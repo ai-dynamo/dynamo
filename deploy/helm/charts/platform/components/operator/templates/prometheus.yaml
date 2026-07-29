@@ -22,6 +22,11 @@
 {{- else }}
   {{- $podMonitorsEnabled = .Values.dynamo.metrics.podMonitors.enabled }}
 {{- end }}
+# The scrape interval must stay above the collector's scrape timeout, or the
+# whole scrape config is rejected. Grafana Alloy defaults to a 10s timeout, so
+# the previous hardcoded 5s made every PodMonitor here invalid on a default
+# install: "scrape timeout greater than scrape interval".
+{{- $scrapeInterval := .Values.dynamo.metrics.podMonitors.interval | default "30s" }}
 {{- if $podMonitorsEnabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -37,7 +42,7 @@ spec:
     any: true
   {{- end }}
   podMetricsEndpoints:
-  - interval: 5s
+  - interval: {{ $scrapeInterval }}
     path: /metrics
     port: http
     # honorLabels ensures dynamo_namespace and other labels set by the dynamo
@@ -67,7 +72,7 @@ spec:
     any: true
   {{- end }}
   podMetricsEndpoints:
-  - interval: 5s
+  - interval: {{ $scrapeInterval }}
     path: /metrics
     port: system
     relabelings:
@@ -76,7 +81,7 @@ spec:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
-  - interval: 5s
+  - interval: {{ $scrapeInterval }}
     path: /metrics
     port: nixl
     relabelings:
@@ -112,7 +117,7 @@ spec:
     any: true
   {{- end }}
   podMetricsEndpoints:
-  - interval: 5s
+  - interval: {{ $scrapeInterval }}
     path: /metrics
     port: metrics
   selector:
@@ -140,7 +145,7 @@ spec:
     any: true
   {{- end }}
   podMetricsEndpoints:
-  - interval: 5s
+  - interval: {{ $scrapeInterval }}
     path: /metrics
     honorLabels: true
     relabelings:
