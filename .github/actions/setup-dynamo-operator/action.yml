@@ -498,59 +498,31 @@ runs:
         # propagation can lag in either direction. The READY column confirms
         # container readiness reported by each webhook-aware probe; the
         # admission smoke tests below are the authoritative end-to-end gate.
-        wait_for_containers() {
-          local pod_pattern="$1"
-          local display_name="$2"
-          local -a pod_statuses
-          local pod_status
-          local status
-          local ready
-          local total
-          local all_ready
-          local status_summary
-          local end=$((SECONDS + 1800))
-
-          while true; do
-            pod_statuses=()
-            mapfile -t pod_statuses < <(
-              kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-                | awk -v pattern="${pod_pattern}" '$1 ~ pattern {print $1 "=" $2}'
-            )
-            all_ready=false
-            if [ "${#pod_statuses[@]}" -gt 0 ]; then
-              all_ready=true
-              for pod_status in "${pod_statuses[@]}"; do
-                status="${pod_status#*=}"
-                if [[ ! "${status}" =~ ^[0-9]+/[0-9]+$ ]]; then
-                  all_ready=false
-                  break
-                fi
-                ready="${status%/*}"
-                total="${status#*/}"
-                if [ "${total}" -eq 0 ] || [ "${ready}" -ne "${total}" ]; then
-                  all_ready=false
-                  break
-                fi
-              done
-              if [ "${all_ready}" = "true" ]; then
-                echo "${display_name} containers ready (${pod_statuses[*]})"
-                return 0
-              fi
-            fi
-            status_summary="${pod_statuses[*]}"
-            if [ "${SECONDS}" -ge "${end}" ]; then
-              echo "::error::${display_name} containers not ready after 1800s (last status: ${status_summary:-not found})"
-              return 1
-            fi
-            echo "Waiting for ${display_name} containers... status=${status_summary:-not found}"
-            sleep 15
-          done
-        }
-
-        wait_for_containers \
-          '^dynamo-platform-dynamo-operator-controller-manager-' \
-          'Dynamo operator'
-        wait_for_containers '^grove-operator-' 'Grove operator'
+        end=$((SECONDS + 1800))
+        while true; do
+          POD_STATUSES=()
+          mapfile -t POD_STATUSES < <(
+            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+              | awk '
+                  $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
+                  $1 ~ /^grove-operator-/ {
+                    print $1 "=" $2
+                  }
+                '
+          )
+          if [ "${#POD_STATUSES[@]}" -eq 2 ] \
+            && [ "${POD_STATUSES[0]#*=}" = "1/1" ] \
+            && [ "${POD_STATUSES[1]#*=}" = "1/1" ]; then
+            echo "Dynamo and Grove operator containers ready (${POD_STATUSES[*]})"
+            break
+          fi
+          if [ "${SECONDS}" -ge "${end}" ]; then
+            echo "::error::Expected two ready 1/1 operator Pods after 1800s (last status: ${POD_STATUSES[*]:-not found})"
+            exit 1
+          fi
+          echo "Waiting for two ready 1/1 operator Pods... status=${POD_STATUSES[*]:-not found}"
+          sleep 15
+        done
         echo "::endgroup::"
 
     - name: Wait for CRDs to be established
