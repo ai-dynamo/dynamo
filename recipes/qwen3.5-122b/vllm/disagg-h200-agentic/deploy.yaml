@@ -9,7 +9,7 @@
 # NOTE — no MTP: speculative decoding is intentionally absent. Disaggregation
 # needs DS conv-state layout (NIXL's 3-read Mamba transfer), but MTP + prefix
 # caching forces mamba_cache_mode='align', which is unimplemented for DS
-# (vLLM issue #38898 / PR #40454; NVBug 6442165). MTP + disagg crashes the decode
+# (vLLM issue #38898 / PR #40454). MTP + disagg crashes the decode
 # EngineCore under real concurrent traffic — the two are mutually exclusive here.
 #
 # Requires GPU-local RDMA NICs exposed to pods (e.g. an `rdma/ib` device plugin

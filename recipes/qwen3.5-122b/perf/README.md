@@ -3,147 +3,104 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Benchmark — Qwen3.5-122B-A10B-FP8 (H200)
+# Qwen3.5-122B-A10B-FP8 Benchmark Recipe
 
-Benchmarks both profiles with AIPerf against the deployed DGD via the same agentic
-Mooncake trace-replay. Set `ENDPOINT` to the profile under test:
+An [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay against a deployed DGD. The
+benchmark is identical for both profiles; only `ENDPOINT` changes. The client waits for the
+model on the frontend, runs a short warmup, replays the configured trace at one
+`CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC.
 
-| Profile | DGD | `ENDPOINT` |
-| --- | --- | --- |
-| Aggregated (tp1 + MTP) | `qwen35-122b-agg-h200-agentic` | `qwen35-122b-agg-h200-agentic-frontend:8000` |
-| Disaggregated (1P2D)   | `qwen35-122b-disagg-h200-agentic` | `qwen35-122b-disagg-h200-agentic-frontend:8000` |
+## Targeting a variant
 
-Deploy from [`../vllm/agg-h200-agentic/deploy.yaml`](../vllm/agg-h200-agentic/deploy.yaml)
-or [`../vllm/disagg-h200-agentic/deploy.yaml`](../vllm/disagg-h200-agentic/deploy.yaml).
-Each worker exposes vLLM `/metrics` on port `9090`.
+| Profile | `ENDPOINT` |
+| --- | --- |
+| Aggregated (tp1 + MTP) | `qwen35-122b-agg-h200-agentic-frontend:8000` |
+| Disaggregated (1P2D)   | `qwen35-122b-disagg-h200-agentic-frontend:8000` |
 
-## Workload
+Both serve `Qwen/Qwen3.5-122B-A10B`. Deploy from
+[`../vllm/agg-h200-agentic/deploy.yaml`](../vllm/agg-h200-agentic/deploy.yaml) or
+[`../vllm/disagg-h200-agentic/deploy.yaml`](../vllm/disagg-h200-agentic/deploy.yaml) (see
+the recipe [README](../README.md)).
 
-Agentic Mooncake trace transformed to the PRD target (median ISL ~64k, OSL ~400,
-~90% token-weighted cache hit). Block size **512**, replayed **no-schedule** (timestamps
-zeroed) at fixed **concurrency 8** (closed-loop). SLA = ≥ 50 output tok/s/user. Use a 15%
-subset (~3,541 requests) for a quick comparison, or the full trace for PRD-scale numbers.
+## Dataset
 
-## 1. Stage the trace on the PVC
+The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace via
+`aiperf --custom-dataset-type mooncake_trace`. Each JSONL line describes one request
+(`input_length`, `output_length`, `hash_ids`; no `timestamp` for no-schedule replay). The
+agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, block size
+**512**, replayed **no-schedule** (timestamps zeroed) at fixed **concurrency 8**
+(closed-loop). The 15% subset is ~3,541 requests.
 
-Copy the Mooncake JSONL (fields `input_length`, `output_length`, `hash_ids`; no `timestamp`
-for no-schedule) onto the `model-cache` PVC via a helper pod that mounts it:
+## Workflow
+
+```bash
+export NAMESPACE=your-namespace
+```
+
+### 1. Deploy the variant
+
+See the deployment instructions in the recipe [README](../README.md).
+
+### 2. Stage the trace on the PVC
+
+Copy the Mooncake JSONL onto the `model-cache` PVC via a helper pod that mounts it:
 
 ```bash
 kubectl -n ${NAMESPACE} cp mooncake_trace.jsonl \
   ${NAMESPACE}/<pvc-helper-pod>:/model-cache/traces/mooncake_trace.jsonl
 ```
 
-## 2. Run AIPerf (per router mode)
-
-Run each router mode on a **cold** deployment for a fair comparison — either patch the
-frontend `DYN_ROUTER_MODE` and restart pods between runs, or deploy two mode-fixed DGDs
-(`round_robin` and `kv`). Dynamo ignores `cache_salt`, so reset by restarting the frontend
-and worker pods between independent runs.
+### 3. Run AIPerf
 
 An AIPerf client pod (image `nvcr.io/nvidia/ai-dynamo/aiperf`, mounts the PVC) run against
 the frontend service:
 
 ```bash
-aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8 \
+aiperf profile Qwen/Qwen3.5-122B-A10B --tokenizer Qwen/Qwen3.5-122B-A10B-FP8 \
   --url http://${ENDPOINT} --endpoint-type chat \
   --input-file ${TRACE_FILE} \
   --custom-dataset-type mooncake_trace --prompt-input-tokens-block-size 512 \
   --concurrency ${CONCURRENCY} --workers-max ${CONCURRENCY} \
   --extra-inputs ignore_eos:true --streaming --use-server-token-count \
-  --artifact-dir /model-cache/perf/<mode> --ui none
+  --artifact-dir /model-cache/perf/<run> --ui none
 ```
 
-| Variable      | Default                                                    |
-| ------------- | ---------------------------------------------------------- |
-| `ENDPOINT`    | per profile — see the table at the top                     |
-| `CONCURRENCY` | `8` (agentic SLA operating point)                          |
-| `TRACE_FILE`  | `/model-cache/traces/mooncake_trace.jsonl`                 |
+Metrics land in `profile_export_aiperf.{csv,json}`: `Output Token Throughput`,
+`Request Throughput`, `Time to First Token`, `Inter Token Latency`,
+`Output Token Throughput Per User`. KV-cache hit rate is on the frontend `/metrics`
+(`dynamo_component_router_kv_hit_rate_{sum,count}`).
 
-> In mooncake mode AIPerf replays the whole trace file (`--num-requests` is ignored); subset
-> the file to cap request count. Do not compare partial runs — account for successful,
-> errored, and unfinished requests before reporting aggregate throughput.
+> For representative **aggregated** numbers, force MTP to the SpeedBench-measured
+> acceptance length via the `speculative-config-synthetic` ConfigMap key in the agg deploy
+> (ship the real `speculative-config` key, benchmark with the synthetic one). The
+> disaggregated profile runs without MTP.
 
-## 3. Metrics
+## Running a concurrency sweep
 
-- **AIPerf** → `/model-cache/perf/<mode>/profile_export_aiperf.{csv,json}`:
-  `Output Token Throughput`, `Request Throughput`, `Time to First Token`,
-  `Inter Token Latency`, `Output Token Throughput Per User`.
-- **KV cache hit rate** from the frontend `/metrics`:
-  `dynamo_component_router_kv_hit_rate_{sum,count}` (kv mode) and
-  `dynamo_frontend_cached_tokens_{sum,count}`.
+Run one `CONCURRENCY` at a time; reset vLLM KV and Dynamo router state between independent
+runs by restarting the DGD pods:
 
-## Results — aggregated (tp1 + MTP)
+```bash
+DGD=qwen35-122b-agg-h200-agentic # or qwen35-122b-disagg-h200-agentic
+kubectl delete pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=${DGD}
+kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD} --timeout=7200s
+```
 
-Agentic 15% Mooncake trace (3,541 reqs / 3,411 completed / 130 errors each), concurrency 8,
-tp1 + MTP(nst=3) forced to the SpeedBench-measured AL=2.937 (`speculative-config-synthetic`).
+In mooncake mode AIPerf replays the whole trace file (`--num-requests` is ignored); subset
+the file to cap request count. Do not compare partial runs — account for successful,
+errored, and unfinished requests before reporting aggregate throughput.
 
-| Router       | Output tok/s | Req/s | TTFT mean (ms) | ITL (ms) | KV hit rate |
-| ------------ | ------------ | ----- | -------------- | -------- | ----------- |
-| round_robin  | 620.7        | 0.27  | 11,194         | 10.4     | ~0 (routing off) |
-| **kv**       | **759.5**    | 0.33  | **4,391**      | 9.2      | **59.0%**   |
-| **Δ (kv)**   | **+22.4%**   | +22%  | **−61% (2.6×)** | −11%    | —           |
+## Tunable environment variables
 
-KV-aware routing is the recommended configuration: +22.4% output throughput and 2.6× lower
-TTFT by landing shared-prefix requests on the replica holding the cache.
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENDPOINT` | per profile — see the table above | |
+| `CONCURRENCY` | `8` (agentic SLA operating point) | Single value; reset server state between values |
+| `TRACE_FILE` | `/model-cache/traces/mooncake_trace.jsonl` | 15% agentic trace = 3,541 requests |
+| `TARGET_MODEL` | `Qwen/Qwen3.5-122B-A10B` | Must match `--served-model-name` |
 
-## Results — disaggregated (1P2D)
+## Artifacts
 
-Same trace and concurrency 8, KV routing, **no MTP**. 1 prefill + 2 decode (3 GPUs):
-
-| Metric               | Value |
-| -------------------- | ----- |
-| Output tok/s (total) | 553   |
-| tok/s/GPU            | 184   |
-| TTFT (P50)           | 0.94 s |
-| User tok/s (P50)     | 87    |
-
-Best output tok/s per GPU across a topology sweep (1P1D–1P4D, 2P1D, 2P2D) at the agentic
-SLA: 2 decode workers are needed to meet the SLA, and one prefill keeps up with the
-90%-cache-hit prefill. KV routing beats `round_robin` here too (+8% tok/s, ~2.3x lower TTFT).
-
-## Speculative decoding — measuring the acceptance length (SpeedBench)
-
-> Applies to the **aggregated** profile only. MTP is not used in the disaggregated profile
-> (see the recipe [README](../README.md) Limitations).
-
-
-Spec-decode throughput on synthetic traces is unrepresentative unless the acceptance length
-(AL) is forced to the value **measured on SpeedBench** (real prompts). The recipe carries
-this as the `speculative-config-synthetic` ConfigMap key; set the worker's
-`SPECULATIVE_CONFIG` `configMapKeyRef.key` to it for benchmarking (never ship it).
-
-### Measure AL
-
-1. Serve with **real MTP** (ship the default `speculative-config` key), exposing `/metrics`.
-2. Drive with SpeedBench qualitative (agentic-representative):
-   ```bash
-   aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8 \
-     --url http://${ENDPOINT} --endpoint-type chat \
-     --public-dataset speed-bench-qualitative \
-     --concurrency 8 --workers-max 8 --request-count 150 --num-warmup-requests 5 \
-     --streaming --use-server-token-count \
-     --extra-inputs temperature:1.0 --extra-inputs max_tokens:4096 --ui none
-   ```
-   (No `ignore_eos` — natural EOS, or AL is skewed by junk tails.)
-3. Read `AL = 1 + accepted/draft_steps` from the worker's vLLM spec-decode counters. Use a
-   **freshly-started worker** (or the run right after a restart) so the cumulative counters
-   cover only this SpeedBench run:
-   ```bash
-   curl -s http://<worker>:9090/metrics | grep -E 'vllm:spec_decode_num_(accepted_tokens_total|drafts_total)\{'
-   # AL = 1 + spec_decode_num_accepted_tokens_total / spec_decode_num_drafts_total
-   ```
-
-### Measured (this recipe)
-
-| nst | measured AL | SpeedBench-qualitative tok/s |
-| --- | ----------- | ---------------------------- |
-| 1   | 1.825       | 681 |
-| **3 (recipe)** | **2.937** | 895 |
-| 5   | 3.518       | 910 |
-
-**Measured AL(nst=3)=2.937** (accepted 118,967 / drafts 61,422 → ~65% token acceptance).
-This exact value is forced in the router benchmark (`synthetic_acceptance_length:2.937`) —
-measured = forced; the live runtime confirmed mean acceptance length 2.94–2.95 during the
-run. nst=5 edges nst=3 by <2% on the short-ISL SpeedBench split but loses on the 64k-context
-(pool-bound) workload; nst=3 is the shipped depth.
+Results are written to `/model-cache/perf/<run>/profile_export_aiperf.{csv,json}`,
+`inputs.json`, and warmup/log files.

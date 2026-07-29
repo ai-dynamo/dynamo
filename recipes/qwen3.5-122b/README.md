@@ -140,14 +140,11 @@ KV-aware routing beats `round_robin` by ~19–22% output tok/s (and ~2.5x lower 
 both profiles, by landing each request on the worker that already holds its ~57k-token
 shared prefix.
 
-## Limitations
+## Known issues
 
-- **Speculative decoding (MTP) + disaggregation is not shipped on this arch.**
-  Disaggregation requires `VLLM_SSM_CONV_STATE_LAYOUT=DS` (for NIXL's 3-read Mamba
-  conv-state transfer), but MTP + prefix caching forces `mamba_cache_mode='align'`, whose
-  DS conv-state copy path is unimplemented (vLLM
-  [#38898](https://github.com/vllm-project/vllm/issues/38898) / PR
-  [#40454](https://github.com/vllm-project/vllm/pull/40454); NVBug 6442165) — the decode
-  `EngineCore` crashes under real concurrent long-context traffic. The **aggregated**
-  profile ships MTP (`num_speculative_tokens=3`); the **disaggregated** profile runs
-  without it.
+- **MTP + disaggregation is not supported on this arch.** Disaggregation needs
+  `VLLM_SSM_CONV_STATE_LAYOUT=DS` for NIXL's Mamba conv-state transfer, which conflicts
+  with the `mamba_cache_mode='align'` that MTP + prefix caching forces (vLLM
+  [#38898](https://github.com/vllm-project/vllm/issues/38898)) — the decode engine crashes
+  under concurrent long-context traffic. The **aggregated** profile ships MTP
+  (`num_speculative_tokens=3`); the **disaggregated** profile runs without it.
