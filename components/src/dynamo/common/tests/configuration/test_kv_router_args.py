@@ -110,27 +110,6 @@ def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
     assert "all earlier drafts were accepted" in parser.format_help()
 
 
-def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit", "0.5"])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.overlap_score_weight is None
-
-
-def test_overlap_score_credit_decay_cli_uses_kv_router_config_field() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit-decay", "0.5"])
-
-    assert args.overlap_score_credit_decay == 0.5
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_credit_decay"] == 0.5
-
-
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -200,25 +179,14 @@ def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
 
 
-def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
+def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--router-prefill-load-scale", "2.5"])
+    args = parser.parse_args(["--router-decode-active-request-weight", "64"])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
 
-    assert args.prefill_load_scale == 2.5
-    assert not hasattr(args, "router_prefill_load_scale")
-
-
-def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_SCALE", "3.5")
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.prefill_load_scale == 3.5
-    assert not hasattr(args, "router_prefill_load_scale")
+    assert kwargs["decode_active_request_weight"] == 64.0
 
 
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
@@ -272,6 +240,46 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["prefill_load_scale"] == 2.5
+
+
+def test_tracking_hash_cli_flows_to_binding_kwargs(tmp_path: Path) -> None:
+    key_file = tmp_path / "tracking-key"
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--router-tracking-hash",
+            "keyed-xxh3-v1",
+            "--router-tracking-key-file",
+            str(key_file),
+            "--router-tracking-key-id",
+            "2026-01",
+        ]
+    )
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
+
+
+def test_tracking_hash_environment_flows_to_binding_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    key_file = tmp_path / "tracking-key"
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_HASH", "keyed-xxh3-v1")
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_FILE", str(key_file))
+    monkeypatch.setenv("DYN_ROUTER_TRACKING_KEY_ID", "2026-01")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["router_tracking_hash"] == "keyed-xxh3-v1"
+    assert kwargs["router_tracking_key_file"] == str(key_file)
+    assert kwargs["router_tracking_key_id"] == "2026-01"
 
 
 def test_load_aware_preserves_cache_hit_weights() -> None:

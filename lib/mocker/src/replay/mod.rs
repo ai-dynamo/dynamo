@@ -16,6 +16,9 @@ use std::sync::Arc;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
@@ -63,15 +66,19 @@ impl OfflineDisaggReplayConfig {
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
+    simulate_agentic_trace_live_workload_with_router_mode_and_options,
     simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
     simulate_concurrency_file_with_router_mode,
     simulate_concurrency_file_with_router_mode_and_format, simulate_concurrency_live_file,
     simulate_concurrency_live_file_with_router_mode,
-    simulate_concurrency_live_file_with_router_mode_and_format, simulate_concurrency_live_requests,
-    simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
-    simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
+    simulate_concurrency_live_file_with_router_mode_and_format,
+    simulate_concurrency_live_file_with_router_mode_and_format_and_options,
+    simulate_concurrency_live_requests, simulate_concurrency_live_requests_with_router_mode,
+    simulate_concurrency_live_requests_with_router_mode_and_options,
+    simulate_concurrency_live_workload, simulate_concurrency_live_workload_with_router_mode,
+    simulate_concurrency_live_workload_with_router_mode_and_options, simulate_concurrency_requests,
     simulate_concurrency_requests_disagg_with_router_mode,
     simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
     simulate_concurrency_workload_disagg_with_router_mode,
@@ -80,14 +87,18 @@ pub use entrypoints::{
     simulate_concurrency_workload_with_router_mode_and_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
     simulate_loaded_trace_live_with_router_mode,
+    simulate_loaded_trace_live_with_router_mode_and_options,
     simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
     simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
     simulate_trace_live_file_with_router_mode,
-    simulate_trace_live_file_with_router_mode_and_format, simulate_trace_live_requests,
-    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
-    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
+    simulate_trace_live_file_with_router_mode_and_format,
+    simulate_trace_live_file_with_router_mode_and_format_and_options, simulate_trace_live_requests,
+    simulate_trace_live_requests_with_router_mode,
+    simulate_trace_live_requests_with_router_mode_and_options, simulate_trace_live_workload,
+    simulate_trace_live_workload_with_router_mode,
+    simulate_trace_live_workload_with_router_mode_and_options, simulate_trace_requests,
     simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
     simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
     simulate_trace_workload_with_router_mode,
@@ -149,6 +160,10 @@ mod tests {
 
     #[test]
     fn test_replay_itl_uses_per_token_gaps() {
+        fn assert_ddsketch_relative_error(actual: f64, expected: f64) {
+            assert!((actual - expected).abs() <= expected.abs() * 0.001 + f64::EPSILON);
+        }
+
         let mut collector = TraceCollector::default();
         let uuid = Uuid::from_u128(11);
 
@@ -158,15 +173,16 @@ mod tests {
         collector.on_token(uuid, 11.0);
         collector.on_token(uuid, 12.0);
         collector.on_token(uuid, 110.0);
+        collector.on_terminal(uuid, 110.0, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
 
         assert!((report.latency.tpot.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
         assert!((report.latency.itl.distribution.mean_ms - (100.0 / 3.0)).abs() < 1e-9);
-        assert_eq!(report.latency.itl.distribution.median_ms, 1.0);
-        assert_eq!(report.latency.itl.distribution.p75_ms, 98.0);
-        assert_eq!(report.latency.itl.distribution.p90_ms, 98.0);
-        assert_eq!(report.latency.itl.distribution.p95_ms, 98.0);
+        assert_ddsketch_relative_error(report.latency.itl.distribution.median_ms, 1.0);
+        assert_ddsketch_relative_error(report.latency.itl.distribution.p75_ms, 98.0);
+        assert_ddsketch_relative_error(report.latency.itl.distribution.p90_ms, 98.0);
+        assert_ddsketch_relative_error(report.latency.itl.distribution.p95_ms, 98.0);
         assert_eq!(report.latency.itl.max_ms, 98.0);
         assert_eq!(report.latency.ttst.min_ms, 1.0);
         assert_eq!(report.latency.ttst.max_ms, 1.0);

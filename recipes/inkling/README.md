@@ -33,8 +33,8 @@ Dynamo + SGLang deployment profile:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **Image pull secret** with access to `nvcr.io/nvidia/ai-dynamo` (NGC registry):
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+2. **Image pull secret** with access to `nvcr.io/nvstaging/nim` (staging registry):
    ```bash
    export NAMESPACE=your-namespace
    kubectl create secret docker-registry nvcr-imagepullsecret \

@@ -72,6 +72,8 @@ def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
 def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
     """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
     tokens = break_arguments(args)
+    # AIC may still emit the removed vLLM role flags. Normalize them at this
+    # ingestion boundary so they never reach the backend CLI.
     cleaned_args = [
         arg
         for arg in tokens
@@ -184,8 +186,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
 
-            # remove --disaggregation-mode and its value (or legacy --is-prefill-worker)
+            # Remove role selection when converting the prefill worker to aggregated.
             args = remove_valued_arguments(args, "--disaggregation-mode")
+            # AIC may still emit this removed vLLM role flag.
             if "--is-prefill-worker" in args:
                 args.remove("--is-prefill-worker")
 
