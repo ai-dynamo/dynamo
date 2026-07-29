@@ -6,8 +6,9 @@
 //! Reference: sglang/python/sglang/srt/mem_cache/radix_cache.py
 
 use dynamo_kv_router::protocols::{BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use slotmap::{SlotMap, new_key_type};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 new_key_type! {
@@ -192,8 +193,10 @@ pub struct RadixCache {
     root: NodeId,
     pub page_pool: PagePool,
     page_size: usize,
+    /// Unlocked leaves ordered by their last access time for O(log n) updates
+    /// and O(1) oldest-victim lookup.
+    evictable_leaves: BTreeSet<(Instant, NodeId)>,
     /// Total token count in evictable nodes.
-    pub evictable_leaves: FxHashSet<NodeId>,
     pub evictable_size: usize,
     /// Total token count in protected (locked) nodes.
     pub protected_size: usize,
@@ -216,7 +219,7 @@ impl RadixCache {
             root,
             page_pool: PagePool::new(total_tokens, page_size),
             page_size,
-            evictable_leaves: FxHashSet::default(),
+            evictable_leaves: BTreeSet::new(),
             evictable_size: 0,
             protected_size: 0,
         }
@@ -233,6 +236,55 @@ impl RadixCache {
     }
     pub fn num_nodes(&self) -> usize {
         self.nodes.len()
+    }
+
+    fn evictable_key(&self, id: NodeId) -> (Instant, NodeId) {
+        (self.nodes[id].last_access_time, id)
+    }
+
+    fn insert_evictable_leaf(&mut self, id: NodeId) {
+        debug_assert_ne!(id, self.root, "root must not enter the eviction index");
+        debug_assert!(self.is_leaf(id), "only leaves are directly evictable");
+        debug_assert_eq!(
+            self.nodes[id].lock_ref, 0,
+            "locked leaf must not enter the eviction index"
+        );
+        let inserted = self.evictable_leaves.insert(self.evictable_key(id));
+        debug_assert!(inserted, "evictable leaf was already indexed");
+    }
+
+    fn remove_evictable_leaf(&mut self, id: NodeId) -> bool {
+        if id == self.root {
+            return false;
+        }
+        self.evictable_leaves.remove(&self.evictable_key(id))
+    }
+
+    fn touch_node(&mut self, id: NodeId, now: Instant) {
+        let was_indexed = self.remove_evictable_leaf(id);
+        self.nodes[id].last_access_time = now;
+        if was_indexed {
+            self.insert_evictable_leaf(id);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_evictable_index(&self) {
+        let expected = self
+            .nodes
+            .iter()
+            .filter(|(id, node)| *id != self.root && node.lock_ref == 0 && node.children.is_empty())
+            .map(|(id, node)| (node.last_access_time, id))
+            .collect::<BTreeSet<_>>();
+        debug_assert_eq!(
+            self.evictable_leaves, expected,
+            "SGLang evictable-leaf index drifted from radix nodes"
+        );
+    }
+
+    #[cfg(test)]
+    fn evictable_leaf_is_indexed(&self, id: NodeId) -> bool {
+        self.evictable_leaves.contains(&self.evictable_key(id))
     }
 
     pub(crate) fn page_hashes(&self, tokens: &[u32]) -> Vec<LocalBlockHash> {
@@ -306,9 +358,11 @@ impl RadixCache {
 
             matched_pages += common_len;
             current = child_id;
-            self.nodes[current].last_access_time = now;
+            self.touch_node(current, now);
         }
 
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
         (matched_pages * self.page_size, current)
     }
 
@@ -359,7 +413,10 @@ impl RadixCache {
             value.len()
         );
         let page_ids = self.page_ids(&value[..aligned_len], aligned_len / self.page_size);
-        self.insert_page_suffix(self.root, 0, key, &page_ids, false)
+        let inserted = self.insert_page_suffix(self.root, 0, key, &page_ids, false);
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
+        inserted
     }
 
     /// Insert only the suffix after a retained, page-aligned prefix.
@@ -394,7 +451,10 @@ impl RadixCache {
             &value[prefix_len..aligned_len],
             (aligned_len - prefix_len) / self.page_size,
         );
-        self.insert_page_suffix(prefix_node, prefix_len, key, &page_ids, true)
+        let inserted = self.insert_page_suffix(prefix_node, prefix_len, key, &page_ids, true);
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
+        inserted
     }
 
     /// Insert page identities already materialized by the request lease.
@@ -422,12 +482,15 @@ impl RadixCache {
             "prefix pages {prefix_pages} exceed hashed pages {}",
             page_keys.len()
         );
-        self.insert_page_hash_suffix(
+        let inserted = self.insert_page_hash_suffix(
             prefix_node,
             &page_keys[prefix_pages..],
             &pages[prefix_pages..page_keys.len()],
             true,
-        )
+        );
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
+        inserted
     }
 
     #[cfg(test)]
@@ -525,7 +588,7 @@ impl RadixCache {
             if common_len == child_len {
                 key_offset += common_len;
                 current = child_id;
-                self.nodes[current].last_access_time = now;
+                self.touch_node(current, now);
             } else {
                 if common_len > 0 {
                     let intermediate = self.split_node(child_id, common_len);
@@ -549,8 +612,9 @@ impl RadixCache {
     fn touch_path(&mut self, node_id: NodeId, now: Instant) {
         let mut current = Some(node_id);
         while let Some(id) = current {
-            self.nodes[id].last_access_time = now;
-            current = self.nodes[id].parent;
+            let parent = self.nodes[id].parent;
+            self.touch_node(id, now);
+            current = parent;
         }
     }
 
@@ -561,12 +625,12 @@ impl RadixCache {
         value: &[KvPageId],
         now: Instant,
     ) -> NodeId {
+        self.touch_node(node_id, now);
         let node = &mut self.nodes[node_id];
         debug_assert!(node.children.is_empty());
         debug_assert!(node.lock_ref <= 1);
         node.key.extend_from_slice(key);
         node.value.extend_from_slice(value);
-        node.last_access_time = now;
         if node.lock_ref == 0 {
             self.evictable_size += key.len() * self.page_size;
         } else {
@@ -639,11 +703,11 @@ impl RadixCache {
         let ck = key[0];
         let new_id = self.nodes.insert(new_node);
 
-        self.evictable_leaves.remove(&parent_id);
+        self.remove_evictable_leaf(parent_id);
 
         self.nodes[parent_id].children.insert(ck, new_id);
 
-        self.evictable_leaves.insert(new_id);
+        self.insert_evictable_leaf(new_id);
         self.evictable_size += key.len() * self.page_size;
 
         new_id
@@ -659,16 +723,21 @@ impl RadixCache {
             if id == self.root {
                 break;
             }
+            let was_unlocked = self.nodes[id].lock_ref == 0;
+            if was_unlocked {
+                self.remove_evictable_leaf(id);
+            }
             let node = &mut self.nodes[id];
             let tokens = node.key.len() * self.page_size;
             node.lock_ref += 1;
-            if node.lock_ref == 1 {
-                self.evictable_leaves.remove(&id);
+            if was_unlocked {
                 self.evictable_size -= tokens;
                 self.protected_size += tokens;
             }
             current = self.nodes[id].parent;
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
     }
 
     pub fn dec_lock_ref(&mut self, node_id: NodeId) {
@@ -688,11 +757,13 @@ impl RadixCache {
                 self.protected_size -= tokens;
                 self.evictable_size += tokens;
                 if self.is_leaf(id) {
-                    self.evictable_leaves.insert(id);
+                    self.insert_evictable_leaf(id);
                 }
             }
             current = self.nodes[id].parent;
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
     }
 
     /// Evict tokens from the cache by LRU order, rounding partial leaves to full pages.
@@ -702,15 +773,13 @@ impl RadixCache {
         let mut evicted_indices =
             Vec::with_capacity(num_tokens.min(self.evictable_size).div_ceil(self.page_size));
         while evicted < num_tokens {
-            let victim = self
-                .evictable_leaves
-                .iter()
-                .min_by_key(|&&id| self.nodes[id].last_access_time)
-                .copied();
-
-            let Some(victim_id) = victim else {
+            let Some((last_access_time, victim_id)) = self.evictable_leaves.pop_first() else {
                 break;
             };
+            debug_assert_eq!(
+                last_access_time, self.nodes[victim_id].last_access_time,
+                "eviction index timestamp drifted from radix node"
+            );
 
             let victim_pages = self.nodes[victim_id].key.len();
             let victim_tokens = victim_pages * self.page_size;
@@ -732,6 +801,7 @@ impl RadixCache {
 
                 self.evictable_size -= eviction_len;
                 evicted += eviction_len;
+                self.insert_evictable_leaf(victim_id);
                 continue;
             }
 
@@ -742,7 +812,6 @@ impl RadixCache {
             let tokens = victim_node.key.len() * self.page_size;
             let parent_id = victim_node.parent;
 
-            self.evictable_leaves.remove(&victim_id);
             self.evictable_size -= tokens;
             evicted += tokens;
 
@@ -756,10 +825,12 @@ impl RadixCache {
                     && self.nodes[pid].children.is_empty()
                     && self.nodes[pid].lock_ref == 0
                 {
-                    self.evictable_leaves.insert(pid);
+                    self.insert_evictable_leaf(pid);
                 }
             }
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_evictable_index();
         (evicted, evicted_indices)
     }
 
@@ -978,7 +1049,7 @@ mod tests {
         assert_eq!(cache.protected_size, 7); // 2+2+3
 
         cache.dec_lock_ref(node_a);
-        assert!(cache.evictable_leaves.contains(&node_a));
+        assert!(cache.evictable_leaf_is_indexed(node_a));
         cache.dec_lock_ref(node_b);
         assert_eq!(cache.protected_size, 0);
     }
@@ -1031,6 +1102,64 @@ mod tests {
             "should evict unlocked [4,5,6] indices"
         );
         assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 3);
+    }
+
+    #[test]
+    fn touching_an_evictable_leaf_updates_order() {
+        let mut cache = RadixCache::new(100, 1);
+        cache.insert(&[1, 2, 3], &[0, 1, 2]);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        cache.insert(&[4, 5, 6], &[3, 4, 5]);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 3);
+
+        assert_eq!(cache.evict(3).0, 3);
+        assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 3);
+        assert_eq!(cache.match_prefix(&[4, 5, 6]).0, 0);
+    }
+
+    #[test]
+    fn unlocking_preserves_last_access_order() {
+        let mut cache = RadixCache::new(100, 1);
+        cache.insert(&[1, 2, 3], &[0, 1, 2]);
+        let (_, older) = cache.match_prefix(&[1, 2, 3]);
+        cache.inc_lock_ref(older);
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        cache.insert(&[4, 5, 6], &[3, 4, 5]);
+        let (_, newer) = cache.match_prefix(&[4, 5, 6]);
+        cache.inc_lock_ref(newer);
+        cache.dec_lock_ref(newer);
+        cache.dec_lock_ref(older);
+
+        assert_eq!(cache.evict(3).0, 3);
+        assert_eq!(cache.match_prefix(&[1, 2, 3]).0, 0);
+        assert_eq!(cache.match_prefix(&[4, 5, 6]).0, 3);
+    }
+
+    #[test]
+    fn partial_eviction_and_parent_promotion_keep_index_consistent() {
+        let mut cache = RadixCache::new(100, 1);
+        cache.insert(&[1, 2, 3, 4], &[0, 1, 2, 3]);
+        let (_, leaf) = cache.match_prefix(&[1, 2, 3, 4]);
+
+        assert_eq!(cache.evict(2).0, 2);
+        assert_eq!(cache.node(leaf).key.len(), 2);
+        assert!(cache.evictable_leaf_is_indexed(leaf));
+
+        let mut branched = RadixCache::new(100, 1);
+        branched.insert(&[10, 11, 12], &[0, 1, 2]);
+        branched.insert(&[10, 11, 13], &[0, 1, 3]);
+        let parent = *branched.nodes[branched.root]
+            .children
+            .values()
+            .next()
+            .unwrap();
+        assert!(!branched.is_leaf(parent));
+
+        assert_eq!(branched.evict(2).0, 2);
+        assert!(branched.is_leaf(parent));
+        assert!(branched.evictable_leaf_is_indexed(parent));
     }
 
     #[test]
