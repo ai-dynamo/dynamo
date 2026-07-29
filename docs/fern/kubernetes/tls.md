@@ -2,39 +2,44 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TCP TLS
-subtitle: Encrypt TCP response stream connections between frontend and workers
+subtitle: Encrypt TCP streaming connections between frontend and workers
 ---
 
-Dynamo supports opt-in TLS encryption on the TCP response stream transport
-(the call-home path between frontends and workers). When enabled, all TCP
-connections are upgraded to TLS using [rustls](https://github.com/rustls/rustls)
-with the `ring` cryptographic provider. When no TLS configuration is provided,
-the transport operates in plaintext exactly as before.
+Dynamo supports opt-in TLS encryption on the TCP call-home streaming transport
+(implemented by `TcpStreamServer` and `TcpClient`, handling both response
+streams and request streams between frontends and workers). When enabled, all TCP
+connections on this path are upgraded to TLS using
+[rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
+provider. When no TLS configuration is provided, the transport operates in
+plaintext exactly as before.
+
+> **Note:** The shared TCP request plane (`egress/tcp_client` and
+> `ingress/shared_tcp_endpoint`) is a separate transport path not yet covered
+> by this TLS implementation. This is planned for a future PR.
 
 ## Environment variables
 
 All TLS configuration is driven by environment variables. The Rust runtime
 reads these directly at first connection (lazy initialization).
 
-### Server side (frontend)
+Both frontends and workers act as TCP server and client depending on the
+stream direction (response streams: worker dials frontend; request streams:
+frontend dials worker). All TLS env vars should be set on every pod.
+
+### Server role (accepting connections)
 
 | Variable | Description |
 |---|---|
 | `DYN_TCP_TLS_CERT_PATH` | Path to the PEM certificate file. When set together with `DYN_TCP_TLS_KEY_PATH`, TLS is enabled on the TCP server. |
 | `DYN_TCP_TLS_KEY_PATH` | Path to the PEM private key for the server certificate. |
 
-### Client side (worker)
+### Client role (dialing connections)
 
 | Variable | Description |
 |---|---|
-| `DYN_TCP_TLS_CA_CERT_PATH` | Path to the PEM CA certificate used to verify the server. Required when the server uses a self-signed or internal CA. |
+| `DYN_TCP_TLS_CA_CERT_PATH` | Path to the PEM CA certificate used to verify the peer's server certificate. |
 | `DYN_TCP_TLS_INSECURE` | Set to `1` or `true` to skip certificate verification. For local development only. |
 | `DYN_TCP_TLS_SERVER_NAME` | Override the TLS SNI hostname. Useful when connecting by IP to a server whose certificate has a DNS SAN. |
-
-### Shared
-
-| Variable | Description |
-|---|---|
 | `DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS` | TLS handshake timeout in seconds (default: 3). |
 
 ## CLI flags
@@ -72,7 +77,7 @@ openssl x509 -req -in server-csr.pem -CA ca-cert.pem -CAkey ca-key.pem \
   -CAcreateserial -out server-cert.pem -days 365 -copy_extensions copyall
 ```
 
-Start the backend (worker) with TLS:
+Both frontend and worker need the same flags (both act as server and client):
 
 ```bash
 python -m dynamo.vllm \
@@ -81,15 +86,12 @@ python -m dynamo.vllm \
   --tcp-tls-ca-cert-path ca-cert.pem \
   --tcp-tls-server-name localhost \
   ...
-```
 
-Start the frontend with TLS:
-
-```bash
 python -m dynamo.frontend \
   --tcp-tls-cert-path server-cert.pem \
   --tcp-tls-key-path server-key.pem \
   --tcp-tls-ca-cert-path ca-cert.pem \
+  --tcp-tls-server-name localhost \
   ...
 ```
 
