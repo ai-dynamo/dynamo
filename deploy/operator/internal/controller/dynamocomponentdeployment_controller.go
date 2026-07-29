@@ -62,11 +62,8 @@ import (
 )
 
 const (
-	DefaultClusterName                                  = "default"
-	DefaultServiceAccountName                           = "default"
-	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
-	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
-	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
+	DefaultClusterName        = "default"
+	DefaultServiceAccountName = "default"
 	// Marks pre-native-scaling LWS/PodGroup objects: <dcd-name>-0, -1, ...
 	// Native-scaling LWS objects must not carry it.
 	legacyLWSInstanceIDLabel = "instance-id"
@@ -882,23 +879,9 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		},
 	}
 
-	resourceAnnotations := getResourceAnnotations(opt.dynamoComponentDeployment)
-	strategyStr := resourceAnnotations[KubeAnnotationDeploymentStrategy]
-	if strategyStr != "" {
-		strategyType := common.DeploymentStrategy(strategyStr)
-		switch strategyType {
-		case common.DeploymentStrategyRollingUpdate:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &maxSurge,
-					MaxUnavailable: &maxUnavailable,
-				},
-			}
-		case common.DeploymentStrategyRecreate:
-			strategy = appsv1.DeploymentStrategy{
-				Type: appsv1.RecreateDeploymentStrategyType,
-			}
+	if deploymentStrategyFromAnnotations(getResourceAnnotations(opt.dynamoComponentDeployment)) == common.DeploymentStrategyRecreate {
+		strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
 		}
 	}
 

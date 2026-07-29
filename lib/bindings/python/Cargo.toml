@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -31,6 +31,8 @@ ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
+# Stable request identities and deterministic replay tie-breaking for parity builds.
+replay-bench = ["dynamo-mocker/replay-bench"]
 aic-forward-pass = ["dynamo-mocker/aic-forward-pass", "dep:aiconfigurator-core"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing
@@ -51,7 +53,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "5.1.0" }
+dynamo-parsers = { version = "6.0.2" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 
@@ -62,6 +64,7 @@ bytes = { version = "1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
+rmpv = { version = "1", features = ["with-serde"] }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }

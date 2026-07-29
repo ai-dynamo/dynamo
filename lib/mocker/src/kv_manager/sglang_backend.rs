@@ -4,7 +4,7 @@
 //! SGLang KV manager — wraps [`RadixCache`] with request-level lifecycle
 //! operations and KV event publishing.
 
-use crate::cache::radix_cache::{NodeId, RadixCache};
+use crate::cache::radix_cache::{KvPageId, NodeId, RadixCache};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::KvEventPublishers;
 use dynamo_kv_router::protocols::{
@@ -86,45 +86,61 @@ pub struct SglangKvManager {
 }
 
 pub struct DecodeTokenReservation {
-    indices: Vec<usize>,
+    pages: Vec<KvPageId>,
     next: usize,
+    page_size: usize,
 }
 
 pub struct SglangDestinationReservation {
     pub(crate) prefix_len: usize,
     prefix_indices: Vec<usize>,
     last_node: NodeId,
-    unpublished_indices: Vec<usize>,
+    unpublished_pages: Vec<KvPageId>,
+    page_size: usize,
+    missing_tokens: usize,
     pub(crate) allocated_tokens: usize,
 }
 
 impl SglangDestinationReservation {
     pub(crate) fn transferable_prompt_tokens(&self) -> usize {
-        self.unpublished_indices.len()
+        self.unpublished_pages.len() * self.page_size
     }
 
     #[cfg(test)]
     pub(crate) fn indices(&self) -> Vec<usize> {
         self.prefix_indices
             .iter()
-            .chain(&self.unpublished_indices)
             .copied()
+            .chain(
+                self.unpublished_pages
+                    .iter()
+                    .flat_map(|page| {
+                        let start = page.first_token_index(self.page_size);
+                        start..start + self.page_size
+                    })
+                    .take(self.missing_tokens),
+            )
             .collect()
     }
 }
 
 impl DecodeTokenReservation {
-    fn take(&mut self) -> usize {
-        let idx = *self
-            .indices
+    fn take(&mut self, last_idx: Option<usize>) -> usize {
+        if let Some(last_idx) = last_idx
+            && (last_idx + 1) % self.page_size != 0
+        {
+            return last_idx + 1;
+        }
+        let page = *self
+            .pages
             .get(self.next)
-            .expect("reserved decode token allocation must be infallible");
+            .expect("reserved decode page allocation must be infallible");
         self.next += 1;
-        idx
+        page.first_token_index(self.page_size)
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.indices.len() - self.next
+        self.pages.len() - self.next
     }
 }
 
@@ -153,30 +169,46 @@ impl SglangKvManager {
         &mut self.cache
     }
 
-    /// Try to allocate KV cache for a new request.
-    /// Returns `None` if the pool doesn't have enough token slots (OOM).
+    /// Match and protect a reusable prefix, evict other cached pages if needed,
+    /// then allocate KV pages for a new request.
+    ///
+    /// Returns `None` if protected and free capacity cannot satisfy the request.
     pub(crate) fn allocate_for_request(&mut self, token_ids: &[u32]) -> Option<AllocResult> {
         let (prefix_len, last_node) = self.cache.match_prefix(token_ids);
-
         let new_tokens = token_ids.len() - prefix_len;
+        let required_tokens = new_tokens.div_ceil(self.cache.page_size()) * self.cache.page_size();
 
+        // Protect the matched path before making room. Otherwise an LRU
+        // eviction can remove the prefix used to size this allocation, and a
+        // second match would require more pages than were freed.
+        self.cache.inc_lock_ref(last_node);
+        let reservable = self.cache.available_tokens() + self.cache.evictable_size;
+        if required_tokens > reservable {
+            self.cache.dec_lock_ref(last_node);
+            return None;
+        }
+        let available = self.cache.available_tokens();
+        if required_tokens > available {
+            self.evict(required_tokens - available);
+        }
         let prefix_indices = self.collect_path_indices(last_node);
 
         let mut kv_indices = prefix_indices;
+        let available_before = self.cache.available_tokens();
         if !self
             .cache
-            .token_pool
-            .allocate_into(new_tokens, &mut kv_indices)
+            .page_pool
+            .allocate_indices_into(new_tokens, &mut kv_indices)
         {
+            self.cache.dec_lock_ref(last_node);
             return None;
         }
-
-        self.cache.inc_lock_ref(last_node);
+        let allocated_tokens = available_before - self.cache.available_tokens();
 
         // Router-visible KV events are complete-block only.
         self.publish_stored_event(token_ids, &kv_indices, prefix_len);
 
-        self.log_trace("allocation", new_tokens);
+        self.log_trace("allocation", allocated_tokens);
 
         Some(AllocResult {
             prefix_len,
@@ -206,16 +238,18 @@ impl SglangKvManager {
             token_ids.len()
         );
         let new_tokens = token_ids.len() - prefix_len;
+        let available_before = self.cache.available_tokens();
         if !self
             .cache
-            .token_pool
-            .allocate_into(new_tokens, &mut lease.kv_indices)
+            .page_pool
+            .allocate_indices_into(new_tokens, &mut lease.kv_indices)
         {
             return false;
         }
+        let allocated_tokens = available_before - self.cache.available_tokens();
 
         self.publish_stored_event(token_ids, &lease.kv_indices, prefix_len);
-        self.log_trace("allocation", new_tokens);
+        self.log_trace("allocation", allocated_tokens);
         true
     }
 
@@ -248,8 +282,7 @@ impl SglangKvManager {
         reservation: &mut DecodeTokenReservation,
     ) {
         debug_assert!(lease.is_active());
-        let new_idx = reservation.take();
-        self.publish_decode_token(new_idx, lease.last_index());
+        let new_idx = reservation.take(lease.last_index());
         lease.kv_indices.push(new_idx);
     }
 
@@ -366,20 +399,26 @@ impl SglangKvManager {
         new_last_node
     }
 
-    /// Allocate a single token slot for decode output.
+    /// Allocate a decode token, consuming a new page only at a page boundary.
     /// Router-visible BlockStored events are published once a full block exists.
     pub fn allocate_decode_token(&mut self, last_idx: Option<usize>) -> Option<usize> {
-        let indices = self.cache.token_pool.allocate(1)?;
-        let idx = indices[0];
-        self.publish_decode_token(idx, last_idx);
+        let mut reservation = self.reserve_decode_pages(usize::from(
+            last_idx.is_none_or(|idx| (idx + 1) % self.cache.page_size() == 0),
+        ))?;
+        let idx = reservation.take(last_idx);
         Some(idx)
     }
 
-    pub fn reserve_decode_tokens(&mut self, count: usize) -> Option<DecodeTokenReservation> {
-        self.cache
-            .token_pool
-            .allocate(count)
-            .map(|indices| DecodeTokenReservation { indices, next: 0 })
+    pub fn reserve_decode_pages(&mut self, count: usize) -> Option<DecodeTokenReservation> {
+        let pages = self.cache.page_pool.allocate_pages(count)?;
+        if !pages.is_empty() {
+            self.log_trace("allocation", pages.len() * self.cache.page_size());
+        }
+        Some(DecodeTokenReservation {
+            pages,
+            next: 0,
+            page_size: self.cache.page_size(),
+        })
     }
 
     pub(crate) fn reserve_destination(
@@ -397,16 +436,17 @@ impl SglangKvManager {
             token_ids.len().div_ceil(self.cache.page_size()) * self.cache.page_size()
         };
         let fresh_tokens = allocated_tokens.saturating_sub(prefix_len);
-        let reservable = self.cache.token_pool.available() + self.cache.evictable_size;
+        let fresh_pages = fresh_tokens / self.cache.page_size();
+        let reservable = self.cache.available_tokens() + self.cache.evictable_size;
         if fresh_tokens > reservable {
             self.cache.dec_lock_ref(last_node);
             return None;
         }
-        let available = self.cache.token_pool.available();
+        let available = self.cache.available_tokens();
         if fresh_tokens > available {
             self.evict(fresh_tokens - available);
         }
-        let Some(unpublished_indices) = self.cache.token_pool.allocate(fresh_tokens) else {
+        let Some(unpublished_pages) = self.cache.page_pool.allocate_pages(fresh_pages) else {
             self.cache.dec_lock_ref(last_node);
             return None;
         };
@@ -415,7 +455,9 @@ impl SglangKvManager {
             prefix_len,
             prefix_indices,
             last_node,
-            unpublished_indices,
+            unpublished_pages,
+            page_size: self.cache.page_size(),
+            missing_tokens: token_ids.len().saturating_sub(prefix_len),
             allocated_tokens,
         })
     }
@@ -429,12 +471,15 @@ impl SglangKvManager {
             prefix_len,
             mut prefix_indices,
             last_node,
-            mut unpublished_indices,
+            unpublished_pages,
+            page_size: _,
+            missing_tokens,
             allocated_tokens: _,
         } = reservation;
-        let missing_tokens = token_ids.len().saturating_sub(prefix_len);
-        let surplus = unpublished_indices.split_off(missing_tokens);
-        self.release_unpublished_indices(surplus);
+        let mut unpublished_indices = self
+            .cache
+            .page_pool
+            .expand_pages(&unpublished_pages, missing_tokens);
         prefix_indices.append(&mut unpublished_indices);
         let new_last_node =
             self.cache_unfinished_req(token_ids, &mut prefix_indices, last_node, prefix_len);
@@ -451,29 +496,24 @@ impl SglangKvManager {
 
     pub(crate) fn cancel_destination(&mut self, reservation: SglangDestinationReservation) {
         self.cache.dec_lock_ref(reservation.last_node);
-        self.release_unpublished_indices(reservation.unpublished_indices);
-    }
-
-    pub fn publish_decode_token(&mut self, idx: usize, last_idx: Option<usize>) {
-        let _ = (idx, last_idx);
-        self.log_trace("allocation", 1);
+        self.release_unpublished_pages(reservation.unpublished_pages);
     }
 
     pub fn release_decode_reservation(&mut self, reservation: DecodeTokenReservation) {
-        let indices = &reservation.indices[reservation.next..];
-        if indices.is_empty() {
+        let pages = &reservation.pages[reservation.next..];
+        if pages.is_empty() {
             return;
         }
-        self.cache.token_pool.free(indices);
-        self.log_trace("release_unpublished", indices.len());
+        self.cache.page_pool.free_pages(pages);
+        self.log_trace("release_unpublished", pages.len() * self.cache.page_size());
     }
 
-    fn release_unpublished_indices(&mut self, indices: Vec<usize>) {
-        if indices.is_empty() {
+    fn release_unpublished_pages(&mut self, pages: Vec<KvPageId>) {
+        if pages.is_empty() {
             return;
         }
-        self.cache.token_pool.free(&indices);
-        self.log_trace("release_unpublished", indices.len());
+        self.cache.page_pool.free_pages(&pages);
+        self.log_trace("release_unpublished", pages.len() * self.cache.page_size());
     }
 
     #[cfg(test)]
@@ -488,9 +528,9 @@ impl SglangKvManager {
             return;
         }
 
-        self.cache.token_pool.free(indices);
-        self.publish_removed_event(indices);
-        self.log_trace("free", indices.len());
+        let pages = self.cache.page_pool.free_indices(indices);
+        self.publish_removed_pages(&pages);
+        self.log_trace("free", pages.len() * self.cache.page_size());
     }
 
     fn release_active_lease(&mut self, mut lease: ActiveKvLease) -> bool {
@@ -531,10 +571,15 @@ impl SglangKvManager {
         }
         path.reverse();
 
-        // Collect token indices from each node's value
+        // Expand cached page IDs only for the bounded active request.
         let mut indices = Vec::new();
         for node_id in path {
-            indices.extend_from_slice(&self.cache.node(node_id).value);
+            let node = self.cache.node(node_id);
+            indices.extend(
+                self.cache
+                    .page_pool
+                    .expand_pages(&node.value, node.value.len() * self.cache.page_size()),
+            );
         }
         indices
     }
@@ -551,11 +596,12 @@ impl SglangKvManager {
             return;
         }
 
-        let mut unretained_indices = Vec::new();
+        let mut unretained_pages = Vec::new();
         let mut current = last_node;
-        let mut path_end = complete_len;
+        let first_new_page = first_new_token / block_size;
+        let mut path_end = complete_len / block_size;
 
-        while path_end > first_new_token {
+        while path_end > first_new_page {
             debug_assert_ne!(current, self.cache.root());
             if current == self.cache.root() {
                 tracing::error!(
@@ -580,14 +626,14 @@ impl SglangKvManager {
                 break;
             }
             let path_start = path_end - node_len;
-            let reconcile_start = path_start.max(first_new_token);
+            let reconcile_start = path_start.max(first_new_page);
 
-            for block_start in (reconcile_start..path_end).step_by(block_size) {
-                let block_end = block_start + block_size;
-                let node_start = block_start - path_start;
-                let node_end = node_start + block_size;
-                if kv_indices[block_start..block_end] != node.value[node_start..node_end] {
-                    unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
+            for page_idx in reconcile_start..path_end {
+                let token_start = page_idx * block_size;
+                let incoming_page = KvPageId::from_token_index(kv_indices[token_start], block_size);
+                let canonical_page = node.value[page_idx - path_start];
+                if incoming_page != canonical_page {
+                    unretained_pages.push(incoming_page);
                 }
             }
 
@@ -595,7 +641,7 @@ impl SglangKvManager {
             current = node.parent.unwrap_or(self.cache.root());
         }
 
-        self.free_indices(&unretained_indices);
+        self.free_pages(&unretained_pages);
     }
 
     fn canonicalize_unfinished_indices(
@@ -621,24 +667,29 @@ impl SglangKvManager {
             kv_indices.len()
         );
 
-        let mut unretained_indices = Vec::new();
+        let mut unretained_pages = Vec::new();
         let mut current = last_node;
-        let mut path_end = complete_len;
+        let first_new_page = first_new_token / block_size;
+        let mut path_end = complete_len / block_size;
 
-        while path_end > first_new_token {
+        while path_end > first_new_page {
             let node = self.cache.node(current);
             let node_len = node.value.len();
             let path_start = path_end - node_len;
-            let reconcile_start = path_start.max(first_new_token);
+            let reconcile_start = path_start.max(first_new_page);
 
-            for block_start in (reconcile_start..path_end).step_by(block_size) {
-                let block_end = block_start + block_size;
-                let node_start = block_start - path_start;
-                let node_end = node_start + block_size;
-                let canonical = &node.value[node_start..node_end];
-                if kv_indices[block_start..block_end] != *canonical {
-                    unretained_indices.extend_from_slice(&kv_indices[block_start..block_end]);
-                    kv_indices[block_start..block_end].copy_from_slice(canonical);
+            for page_idx in reconcile_start..path_end {
+                let token_start = page_idx * block_size;
+                let token_end = token_start + block_size;
+                let incoming_page = KvPageId::from_token_index(kv_indices[token_start], block_size);
+                let canonical_page = node.value[page_idx - path_start];
+                if incoming_page != canonical_page {
+                    unretained_pages.push(incoming_page);
+                    let canonical = self
+                        .cache
+                        .page_pool
+                        .expand_pages(&[canonical_page], block_size);
+                    kv_indices[token_start..token_end].copy_from_slice(&canonical);
                 }
             }
 
@@ -646,16 +697,19 @@ impl SglangKvManager {
             current = node.parent.unwrap_or_else(|| self.cache.root());
         }
 
-        self.free_indices(&unretained_indices);
+        self.free_pages(&unretained_pages);
     }
 
     fn radix_path_covers(
         &self,
         mut current: NodeId,
         first_new_token: usize,
-        mut path_end: usize,
+        path_end: usize,
     ) -> bool {
-        while path_end > first_new_token {
+        let page_size = self.cache.page_size();
+        let first_new_page = first_new_token / page_size;
+        let mut path_end = path_end / page_size;
+        while path_end > first_new_page {
             if current == self.cache.root() {
                 return false;
             }
@@ -671,11 +725,20 @@ impl SglangKvManager {
 
     /// Evict tokens from the cache, publish BlockRemoved events, and log a trace.
     pub fn evict(&mut self, num_tokens: usize) {
-        let (evicted, evicted_indices) = self.cache.evict(num_tokens);
-        if !evicted_indices.is_empty() {
-            self.publish_removed_event(&evicted_indices);
+        let (evicted, evicted_pages) = self.cache.evict(num_tokens);
+        if !evicted_pages.is_empty() {
+            self.publish_removed_pages(&evicted_pages);
         }
         self.log_trace("eviction", evicted);
+    }
+
+    fn free_pages(&mut self, pages: &[KvPageId]) {
+        if pages.is_empty() {
+            return;
+        }
+        self.cache.page_pool.free_pages(pages);
+        self.publish_removed_pages(pages);
+        self.log_trace("free", pages.len() * self.cache.page_size());
     }
 
     fn log_trace(&self, event: &str, num_tokens: usize) {
@@ -801,13 +864,14 @@ impl SglangKvManager {
         )
     }
 
-    fn publish_removed_event(&mut self, evicted_indices: &[usize]) {
+    fn publish_removed_pages(&mut self, evicted_pages: &[KvPageId]) {
         if self.kv_event_publishers.is_empty() {
             return;
         }
 
         let mut block_hashes = Vec::new();
-        for &idx in evicted_indices {
+        for &page in evicted_pages {
+            let idx = page.terminal_token_index(self.cache.page_size());
             let Some(block_hash) = self.idx_to_block_hash.remove(&idx) else {
                 continue;
             };
@@ -914,26 +978,86 @@ mod tests {
     }
 
     #[test]
+    fn active_partial_page_owns_full_capacity_and_extends_in_place() {
+        let mut mgr = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
+        let mut alloc = mgr.allocate_for_request(&[1]).unwrap();
+        assert_eq!(mgr.cache().available_tokens(), 8);
+
+        assert!(mgr.extend_allocation(&[1, 2, 3, 4], &mut alloc.lease));
+        assert_eq!(
+            mgr.cache().available_tokens(),
+            8,
+            "filling an owned partial page must not allocate another page"
+        );
+
+        assert!(mgr.extend_allocation(&[1, 2, 3, 4, 5], &mut alloc.lease));
+        assert_eq!(mgr.cache().available_tokens(), 4);
+        assert!(mgr.retract(alloc.lease));
+        assert_eq!(mgr.cache().available_tokens(), 12);
+    }
+
+    #[test]
+    fn fresh_allocation_protects_matched_prefix_before_eviction() {
+        let mut mgr = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
+        let prefix = [1, 2, 3, 4];
+        let other = [9, 10, 11, 12, 13, 14, 15, 16];
+
+        let prefix_alloc = mgr.allocate_for_request(&prefix).unwrap();
+        mgr.finish(&prefix, prefix_alloc.lease);
+        let other_alloc = mgr.allocate_for_request(&other).unwrap();
+        mgr.finish(&other, other_alloc.lease);
+        // Make `prefix` the LRU victim. The new request must protect it before
+        // evicting one of `other`'s pages to satisfy its suffix allocation.
+        assert_eq!(mgr.cache_mut().match_prefix(&other).0, other.len());
+        assert_eq!(mgr.cache().available_tokens(), 0);
+
+        let extended = [1, 2, 3, 4, 5, 6, 7, 8];
+        let alloc = mgr
+            .allocate_for_request(&extended)
+            .expect("protected prefix plus one evicted page should fit");
+
+        assert_eq!(alloc.prefix_len, prefix.len());
+        assert_eq!(mgr.cache().prefix_match_len(&prefix), prefix.len());
+        assert_eq!(mgr.cache().available_tokens(), 0);
+    }
+
+    #[test]
+    fn finish_drops_partial_tail_page_and_caches_compact_complete_page() {
+        let mut mgr = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
+        let tokens = [1, 2, 3, 4, 5];
+        let alloc = mgr.allocate_for_request(&tokens).unwrap();
+        assert_eq!(mgr.cache().available_tokens(), 4);
+
+        mgr.finish(&tokens, alloc.lease);
+
+        assert_eq!(mgr.cache().available_tokens(), 8);
+        let (matched, node) = mgr.cache_mut().match_prefix(&tokens);
+        assert_eq!(matched, 4);
+        assert_eq!(mgr.cache().node(node).key.len(), 1);
+        assert_eq!(mgr.cache().node(node).value.len(), 1);
+    }
+
+    #[test]
     fn partially_consumed_decode_reservation_releases_only_unused_slots() {
         let mut mgr = SglangKvManager::new(4, 1, KvEventPublishers::default(), 0);
-        let mut reservation = mgr.reserve_decode_tokens(3).unwrap();
-        let consumed = reservation.take();
+        let mut reservation = mgr.reserve_decode_pages(3).unwrap();
+        let consumed = reservation.take(None);
         assert_eq!(reservation.len(), 2);
-        let mut expected_unused = reservation.indices[reservation.next..].to_vec();
+        let mut expected_unused = reservation.pages[reservation.next..].to_vec();
 
         mgr.release_decode_reservation(reservation);
         assert_eq!(mgr.cache().available_tokens(), 3);
 
         let mut reallocated = mgr
             .cache_mut()
-            .token_pool
-            .allocate(expected_unused.len())
+            .page_pool
+            .allocate_pages(expected_unused.len())
             .unwrap();
         expected_unused.sort_unstable();
         reallocated.sort_unstable();
         assert_eq!(reallocated, expected_unused);
         assert!(reallocated.windows(2).all(|pair| pair[0] != pair[1]));
-        assert!(!reallocated.contains(&consumed));
+        assert!(!reallocated.contains(&KvPageId::from_token_index(consumed, 1)));
     }
 
     #[test]
@@ -947,7 +1071,7 @@ mod tests {
         assert_eq!(alloc.lease.len(), 6);
         assert!(mgr.retract(alloc.lease));
 
-        assert_eq!(mgr.cache().token_pool.available(), 12);
+        assert_eq!(mgr.cache().page_pool.available(), 12);
         assert_eq!(mgr.cache().protected_size, 0);
         assert_eq!(mgr.cache().evictable_size, 4);
         assert_eq!(mgr.cache().prefix_match_len(&[1, 2, 3, 4]), 4);
@@ -992,7 +1116,7 @@ mod tests {
         for event in buffer.drain() {
             indexer.apply_event(event).unwrap();
         }
-        assert_eq!(mgr.cache().token_pool.available(), 16);
+        assert_eq!(mgr.cache().page_pool.available(), 16);
         assert_eq!(mgr.cache().protected_size, 0);
         assert_eq!(mgr.cache().evictable_size, 0);
         assert_eq!(mgr.cache().num_nodes(), 1);
@@ -1005,7 +1129,7 @@ mod tests {
         let result = mgr.allocate_for_request(&[1, 2, 3, 4, 5]).unwrap();
         assert_eq!(result.prefix_len, 0);
         assert_eq!(result.lease.kv_indices.len(), 5);
-        assert_eq!(mgr.cache().token_pool.available(), 95);
+        assert_eq!(mgr.cache().page_pool.available(), 95);
     }
 
     #[test]
@@ -1026,7 +1150,7 @@ mod tests {
         let r2 = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6, 7]).unwrap();
         assert_eq!(r2.prefix_len, 5);
         assert_eq!(r2.lease.kv_indices.len(), 7); // 5 reused + 2 new pages
-        assert_eq!(mgr.cache().token_pool.available(), 93); // 100 - 5 - 2
+        assert_eq!(mgr.cache().page_pool.available(), 93); // 100 - 5 - 2
     }
 
     #[test]
@@ -1137,7 +1261,7 @@ mod tests {
         let mut mgr =
             SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
         let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
-        let indices = mgr.cache_mut().token_pool.allocate(tokens.len()).unwrap();
+        let indices = mgr.cache_mut().page_pool.allocate(tokens.len()).unwrap();
 
         assert_eq!(mgr.publish_stored_event(&tokens[..4], &indices[..4], 0), 1);
         assert_eq!(mgr.publish_stored_event(&tokens, &indices, 0), 1);
@@ -1172,7 +1296,7 @@ mod tests {
         );
 
         let mut kv_indices = alloc.lease.kv_indices;
-        kv_indices.extend_from_slice(&mgr.cache_mut().token_pool.allocate(4).unwrap());
+        kv_indices.extend_from_slice(&mgr.cache_mut().page_pool.allocate(4).unwrap());
         mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()), None);
 
         let last_after_first_cache =
@@ -1239,7 +1363,7 @@ mod tests {
         let req1 = mgr.allocate_for_request(&tokens).unwrap();
         let req2 = mgr.allocate_for_request(&tokens).unwrap();
         assert_eq!(
-            mgr.cache().token_pool.available(),
+            mgr.cache().page_pool.available(),
             94,
             "both identical requests should allocate before either is cached"
         );
@@ -1267,7 +1391,7 @@ mod tests {
             "canonical completion should not emit Removed blocks"
         );
         assert_eq!(
-            mgr.cache().token_pool.available(),
+            mgr.cache().page_pool.available(),
             94,
             "canonical completion should retain the first request's slots"
         );
@@ -1285,7 +1409,7 @@ mod tests {
             "duplicate completion should only decrement duplicate refcounts"
         );
         assert_eq!(
-            mgr.cache().token_pool.available(),
+            mgr.cache().page_pool.available(),
             97,
             "duplicate completion should return unretained request slots"
         );
@@ -1327,7 +1451,7 @@ mod tests {
         harness.apply_events(stored_events).await;
         assert_eq!(harness.overlap_for_hashes(query_hashes.clone()).await, 2);
         assert_eq!(mgr.cache().evictable_size, 8);
-        assert_eq!(mgr.cache().token_pool.available(), 0);
+        assert_eq!(mgr.cache().page_pool.available(), 0);
 
         mgr.evict(4);
         let eviction_events = buffer.drain();
@@ -1338,7 +1462,7 @@ mod tests {
         assert_eq!(mgr.cache().prefix_match_len(&tokens), 4);
         assert_eq!(mgr.cache().evictable_size, 4);
         assert_eq!(mgr.cache().protected_size, 0);
-        assert_eq!(mgr.cache().token_pool.available(), 4);
+        assert_eq!(mgr.cache().page_pool.available(), 4);
         assert_eq!(harness.overlap_for_hashes(query_hashes).await, 1);
         harness.shutdown();
     }
@@ -1379,7 +1503,7 @@ mod tests {
             "the active duplicate must switch to radix-owned canonical pages"
         );
         assert_eq!(
-            mgr.cache().token_pool.available(),
+            mgr.cache().page_pool.available(),
             24,
             "every duplicate slot in the four-token page must return to the pool"
         );
@@ -1440,7 +1564,7 @@ mod tests {
     #[should_panic(expected = "invalid SGLang canonicalization range or radix path")]
     fn invalid_canonical_path_is_fatal() {
         let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::default(), 0);
-        let mut indices = mgr.cache_mut().token_pool.allocate(4).unwrap();
+        let mut indices = mgr.cache_mut().page_pool.allocate(4).unwrap();
         let root = mgr.cache().root();
 
         mgr.canonicalize_unfinished_indices(&mut indices, root, 0, 4);

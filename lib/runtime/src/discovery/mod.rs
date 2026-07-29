@@ -25,6 +25,9 @@ pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
 
+/// Largest publisher ID exactly representable by float64-backed JSON metadata.
+pub(crate) const MAX_JSON_SAFE_PUBLISHER_ID: u64 = (1 << 53) - 1;
+
 /// Transport kind for event plane - used for configuration and env var selection.
 ///
 /// This enum represents the *type* of transport without connection details.

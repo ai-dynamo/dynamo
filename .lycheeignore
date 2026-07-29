@@ -33,3 +33,9 @@
 # canonical release/support-matrix links added by the version bump 404 from CI
 # until then. Remove this entry once the v1.3.0 release is published.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.3\.0$
+
+# Dev release pages and generated source land with this docs refactor; they are
+# not reachable on the public site or main branch until the PR is merged.
+^https://docs\.nvidia\.com/dynamo/dev/reference/releases/(release-history|v1-[0-9]+-[0-9]+)$
+^https://github\.com/ai-dynamo/dynamo/blob/main/docs/fern/components/releases\.data\.ts$
+
