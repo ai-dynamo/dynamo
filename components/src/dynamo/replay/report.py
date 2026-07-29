@@ -10,7 +10,7 @@ from typing import Any
 
 
 def _to_primitive(value: Any) -> Any:
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return _to_primitive(asdict(value))
     if isinstance(value, Enum):
         return _to_primitive(value.value)

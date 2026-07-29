@@ -573,7 +573,6 @@ pub fn canonicalize_json(value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::config::KvRouterConfig;
     use serde_json::json;
 
     use crate::common::protocols::MockEngineArgs;
@@ -585,7 +584,9 @@ mod tests {
         CanonicalSemanticFeatures, CanonicalSlaMetadata, CanonicalWorkloadMetadata,
         canonical_engine_pool_metadata, canonical_topology, canonicalize_json,
     };
-    use crate::replay::offline::extensions::kv_router::canonical_router_metadata;
+    use crate::replay::offline::extensions::kv_router::{
+        ReplayKvRouterConfig, canonical_router_metadata,
+    };
 
     fn metadata() -> CanonicalReplayMetadata {
         CanonicalReplayMetadata {
@@ -716,7 +717,7 @@ mod tests {
 
     #[test]
     fn canonical_router_identity_rejects_non_finite_configuration() {
-        let config = KvRouterConfig {
+        let config = ReplayKvRouterConfig {
             router_ttl_secs: f64::INFINITY,
             ..Default::default()
         };
