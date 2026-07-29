@@ -988,7 +988,7 @@ mod trtllm {
     #[test]
     fn native_g1_runs_under_trtllm_no_evict_policy() {
         let mut args = capacity_args();
-        args.g1_backend = G1Backend::Native;
+        args.g1_backend = Some(G1Backend::Native);
         let mut core = VllmCore::new(args);
         receive(&mut core, Uuid::from_u128(201), 0..4, 4);
         receive(&mut core, Uuid::from_u128(202), 100..104, 4);

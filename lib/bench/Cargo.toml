@@ -74,6 +74,7 @@ router-test-support = [
 satf = ["dep:dynamo-data-gen"]
 test-support = [
   "router-test-support",
+  "dynamo-mocker/test-support",
   "dep:flate2",
   "dep:tempfile",
   "dep:tracing",

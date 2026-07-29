@@ -177,9 +177,9 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 ## Disaggregation and multimodal
 
 <ParamField path="--disaggregation-mode" type="string" default="agg">
-  Worker disaggregation role. Use `agg` for a standard aggregated (prefill + decode) serving worker, `pd` for a combined prefill+decode disaggregated worker, or `prefill`, `decode`, or `encode` for individual disaggregated worker roles. The legacy value `prefill_and_decode` maps to `agg` and is accepted temporarily.
+  Worker disaggregation role. Use `agg` for a standard aggregated (prefill + decode) serving worker, `pd` for a combined prefill+decode disaggregated worker, or `prefill`, `decode`, or `encode` for individual disaggregated worker roles. The removed `prefill_and_decode` value is rejected; use `agg` or `pd`.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>pd</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>encode</Badge> <Badge intent="note" minimal>prefill_and_decode (deprecated)</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>pd</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>encode</Badge></span>
 
   Environment variable: `DYN_TRTLLM_DISAGGREGATION_MODE`
 </ParamField>
