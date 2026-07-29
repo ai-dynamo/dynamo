@@ -21,6 +21,7 @@ try:
     from dynamo._core import MockEngineArgs as MockEngineArgs
     from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
     from dynamo._core import ReasoningConfig as ReasoningConfig
+    from dynamo._core import ReplayWorldBridge as ReplayWorldBridge
     from dynamo._core import SglangArgs as SglangArgs
     from dynamo._core import TrtllmArgs as TrtllmArgs
     from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
@@ -33,6 +34,7 @@ else:
         [
             "MockEngineArgs",
             "PlannerReplayBridge",
+            "ReplayWorldBridge",
             "ReasoningConfig",
             "SglangArgs",
             "TrtllmArgs",
