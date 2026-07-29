@@ -438,7 +438,6 @@ runs:
         helm upgrade --install dynamo-platform . --namespace default \
           "${IMAGE_ARGS[@]}" \
           --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set dynamo-operator.webhook.service.publishNotReadyAddresses=true \
           "${CHECKPOINT_HELM_ARGS[@]}" \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
@@ -510,6 +509,10 @@ runs:
           wait --for=condition=established \
           crd/dynamographdeployments.nvidia.com \
           --timeout=120s
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          wait --for=condition=established \
+          crd/podcliquesets.grove.io \
+          --timeout=120s
 
     - name: Verify operator image and admission webhooks
       shell: bash
@@ -527,35 +530,12 @@ runs:
           exit 1
         fi
 
-        echo "::group::Webhook Service routing override"
-        VIRTUAL_PUBLISH_NOT_READY=$(kubectl --kubeconfig="${VKUBECONFIG}" \
-          get services -n default \
-          -l app.kubernetes.io/component=webhook \
-          -o jsonpath='{.items[0].spec.publishNotReadyAddresses}')
-        if [ "${VIRTUAL_PUBLISH_NOT_READY}" != "true" ]; then
-          echo "::error::vCluster webhook Service does not publish not-ready addresses"
-          exit 1
-        fi
-
-        HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
-          -l app.kubernetes.io/component=webhook \
-          -o jsonpath='{.items[0].metadata.name}')
-        HOST_PUBLISH_NOT_READY=$(kubectl get service "${HOST_WEBHOOK_SERVICE}" \
-          -n "${NAMESPACE}" \
-          -o jsonpath='{.spec.publishNotReadyAddresses}')
-        if [ "${HOST_PUBLISH_NOT_READY}" != "true" ]; then
-          echo "::error::vCluster did not preserve publishNotReadyAddresses on the host webhook Service"
-          exit 1
-        fi
-        echo "Webhook Service publishes not-ready addresses in both virtual and host clusters"
-        echo "::endgroup::"
-
         echo "::group::Resolved operator image identity"
         kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
           -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
         echo "::endgroup::"
 
-        echo "::group::DynamoGraphDeployment admission smoke tests"
+        echo "::group::Dynamo and Grove admission smoke tests"
         smoke_v1alpha1() {
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
             create --namespace=default --dry-run=server \
@@ -590,23 +570,65 @@ runs:
         EOF
         }
 
+        smoke_grove() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: grove.io/v1alpha1
+        kind: PodCliqueSet
+        metadata:
+          name: ci-webhook-smoke-grove
+        spec:
+          replicas: 0
+          template:
+            cliques:
+            - name: worker
+              spec:
+                roleName: worker
+                replicas: 1
+                minAvailable: 1
+                podSpec:
+                  containers:
+                  - name: worker
+                    image: busybox:latest
+        EOF
+        }
+
         run_admission_smoke_test() {
           local version="$1"
+          local operator="$2"
           local output
           local origin_version
           local deadline=$((SECONDS + 120))
           local attempt=1
-          shift
+          shift 2
 
           while true; do
             if output=$("$@" 2>&1); then
-              origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
-              if [ -z "${origin_version}" ]; then
-                echo "::error::${version} request succeeded without the operator origin-version mutation"
-                printf '%s\n' "${output}" >&2
-                return 1
-              fi
-              echo "${version} admission succeeded (operator origin version: ${origin_version})"
+              case "${operator}" in
+                dynamo)
+                  origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
+                  if [ -z "${origin_version}" ]; then
+                    echo "::error::${version} request succeeded without the operator origin-version mutation"
+                    printf '%s\n' "${output}" >&2
+                    return 1
+                  fi
+                  echo "${version} admission succeeded (operator origin version: ${origin_version})"
+                  ;;
+                grove)
+                  if ! grep -q '"headlessServiceConfig"' <<<"${output}"; then
+                    echo "::error::${version} request succeeded without the Grove defaulting mutation"
+                    printf '%s\n' "${output}" >&2
+                    return 1
+                  fi
+                  echo "${version} admission succeeded"
+                  ;;
+                *)
+                  echo "::error::unknown admission operator: ${operator}"
+                  return 1
+                  ;;
+              esac
               return 0
             fi
 
@@ -629,8 +651,9 @@ runs:
           done
         }
 
-        run_admission_smoke_test v1alpha1 smoke_v1alpha1
-        run_admission_smoke_test v1beta1 smoke_v1beta1
+        run_admission_smoke_test v1alpha1 dynamo smoke_v1alpha1
+        run_admission_smoke_test v1beta1 dynamo smoke_v1beta1
+        run_admission_smoke_test PodCliqueSet grove smoke_grove
         echo "::endgroup::"
 
     - name: Debug deployment failure
