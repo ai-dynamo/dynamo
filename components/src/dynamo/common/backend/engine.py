@@ -104,6 +104,9 @@ class GenerateChunk(TypedDict, total=False):
     # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a
     # JSON object. Carries `prompt_logprobs` on the final chunk.
     engine_data: dict[str, Any]
+    # Internal custom-encoder metadata handoff from Python backends to the LLM
+    # frontend transport. Kept separate from the opt-in `engine_data` channel.
+    custom_encoder_data: dict[str, Any]
 
 
 @dataclass

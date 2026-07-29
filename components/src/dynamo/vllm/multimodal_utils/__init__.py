@@ -6,6 +6,7 @@ from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     ArtifactT,
     CustomEncoderAdapter,
+    EncoderResult,
     Preprocessed,
     VisionEncoderBackend,
     build_mixed_embeds,
@@ -40,6 +41,7 @@ __all__ = [
     "extract_user_text",
     "get_encoder_components",
     "ArtifactT",
+    "EncoderResult",
     "Preprocessed",
     "VisionEncoderBackend",
     "ImageLoader",

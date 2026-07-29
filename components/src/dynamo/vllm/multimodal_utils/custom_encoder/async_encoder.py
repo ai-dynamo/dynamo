@@ -5,7 +5,7 @@
 
 ``AsyncVisionEncoder`` is the **Dynamo-owned** layer the worker talks to. It
 turns the author's synchronous, thread-affine backend into an awaitable
-``encode(raws) -> list[artifact]`` by:
+``encode(raws) -> list[EncoderResult[artifact]]`` by:
 
 - running ``backend.preprocess`` **off the event loop** on a bounded
   ``ThreadPoolExecutor`` (CPU-heavy fetch / resize / patchify must not serialize
@@ -33,6 +33,7 @@ from typing import Generic, List
 
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     ArtifactT,
+    EncoderResult,
     ItemT,
     Preprocessed,
     RawT,
@@ -96,7 +97,9 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
         self._backend = backend
         self._preprocess_concurrency = conc
         self._name = name
-        self._batcher: ThreadedMicroBatcher[ItemT, ArtifactT] | None = None
+        self._batcher: ThreadedMicroBatcher[
+            ItemT, EncoderResult[ArtifactT]
+        ] | None = None
         self._pool: ThreadPoolExecutor | None = None
 
     # ---- lifecycle ---------------------------------------------------------
@@ -138,13 +141,13 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
 
     # ---- request path ------------------------------------------------------
 
-    async def encode(self, raws: List[RawT]) -> List[ArtifactT]:
+    async def encode(self, raws: List[RawT]) -> List[EncoderResult[ArtifactT]]:
         """Optionally preprocess (off-loop, with a request-atomicity barrier) then
         batched-encode.
 
         With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
         to the batcher (the backend folds any prep into ``forward_batch``). Returns
-        one backend-defined artifact per raw input, in order. Raises if any
+        one backend-defined result per raw input, in order. Raises if any
         image's preprocess fails (submitting nothing) or if the batched forward
         fails.
         """

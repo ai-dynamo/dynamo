@@ -5,8 +5,9 @@
 
 Hardcodes the Qwen ``<|image_pad|>`` placeholder id and loads the model tokenizer
 (handy for subclasses that tokenize text). A concrete Qwen-family encoder
-subclasses this and implements ``forward_batch`` — plus ``preprocess`` (and
-``preprocess_concurrency > 0``) only when it needs off-loop fetch/resize.
+subclasses this and implements ``forward_batch`` with one ``EncoderResult`` per
+input — plus ``preprocess`` (and ``preprocess_concurrency > 0``) only when it
+needs off-loop fetch/resize.
 
     class MyQwenEncoder(QwenVisionEncoderBackend):
         preprocess_concurrency = 4              # enable the off-loop pool
@@ -16,7 +17,7 @@ subclasses this and implements ``forward_batch`` — plus ``preprocess`` (and
         def preprocess(self, raw):
             ...                                 # off-thread, returns Preprocessed
         def forward_batch(self, items, target_bucket=None):
-            ...                                 # actor thread, batched forward (CPU out)
+            ...                                 # actor thread, EncoderResult (CPU artifact)
 """
 
 from __future__ import annotations

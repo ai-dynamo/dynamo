@@ -8,10 +8,13 @@ scalar cost, no bucket_key), generic forward artifacts, the no-device ``build``
 signature, and that the ABC cannot be instantiated without the required methods.
 """
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 import torch
 
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
+    EncoderResult,
     Preprocessed,
     VisionEncoderBackend,
 )
@@ -37,7 +40,7 @@ class _MinimalBackend(VisionEncoderBackend):
         return Preprocessed(item=raw, cost=1)
 
     def forward_batch(self, items, target_bucket=None):
-        return [torch.zeros(1, 1) for _ in items]
+        return [EncoderResult(torch.zeros(1, 1)) for _ in items]
 
 
 class _PassthroughBackend(VisionEncoderBackend):
@@ -50,7 +53,7 @@ class _PassthroughBackend(VisionEncoderBackend):
         ...
 
     def forward_batch(self, items, target_bucket=None):
-        return [torch.zeros(1, 1) for _ in items]
+        return [EncoderResult(torch.zeros(1, 1)) for _ in items]
 
 
 def test_preprocessed_is_frozen():
@@ -68,6 +71,14 @@ def test_preprocessed_cost_defaults_to_1():
 def test_preprocessed_has_no_bucket_key():
     # Batching is one-dimensional (scalar cost only) — there is no bucket_key.
     assert not hasattr(Preprocessed(item="x"), "bucket_key")
+
+
+def test_encoder_result_is_frozen_and_defaults_response_data_to_none():
+    result = EncoderResult(artifact="embedding")
+    assert result.artifact == "embedding"
+    assert result.response_data is None
+    with pytest.raises(FrozenInstanceError):
+        result.response_data = {"score": 1}  # type: ignore[misc]
 
 
 def test_abc_cannot_be_instantiated():

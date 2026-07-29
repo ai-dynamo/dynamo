@@ -31,11 +31,13 @@ Division of labour (author vs. Dynamo):
   there is no preprocess phase — ``preprocess`` is never called and raws go
   straight to ``forward_batch``. A mismatch (overridden ``preprocess`` with
   ``preprocess_concurrency`` left at ``0``) fails fast at startup.
-- ``forward_batch(items, target_bucket=None) -> list[ArtifactT]`` — **actor
+- ``forward_batch(items, target_bucket=None) -> list[EncoderResult[ArtifactT]]`` —
+  **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
   returning, so results are safe to consume from another thread. Returns one
-  artifact per item, in input order. ``target_bucket`` is reserved for CUDA-graph
+  result per item, in input order. The result carries the adapter artifact plus
+  optional JSON response metadata. ``target_bucket`` is reserved for CUDA-graph
   batching, once supported (the ladder rung to pad to); it is ``None`` until then.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
@@ -60,7 +62,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, List, Optional, Sequence, TypeVar
+from typing import Any, Generic, List, Optional, Sequence, TypeVar
 
 RawT = TypeVar("RawT")  # raw input the author preprocesses (e.g. an image URL)
 ItemT = TypeVar("ItemT")  # opaque payload preprocess() hands to forward_batch()
@@ -85,6 +87,21 @@ class Preprocessed(Generic[ItemT]):
 
     item: ItemT
     cost: int = 1
+
+
+@dataclass(frozen=True)
+class EncoderResult(Generic[ArtifactT]):
+    """One decoder artifact plus optional JSON metadata for the response.
+
+    ``artifact`` is interpreted only by the decoder-selected adapter.
+    ``response_data`` must be a JSON-serializable object when present. Dynamo
+    preserves input order in the internal ``items`` payload, including ``null``
+    entries, and omits the payload when every entry is ``None``. The combined
+    per-request payload is limited to 64 KiB.
+    """
+
+    artifact: ArtifactT
+    response_data: dict[str, Any] | None = None
 
 
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
@@ -146,13 +163,15 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
     @abstractmethod
     def forward_batch(
         self, items: List[ItemT], target_bucket: Optional[int] = None
-    ) -> List[ArtifactT]:
-        """Encode one cost-bounded batch; one artifact per item, in input order.
+    ) -> List[EncoderResult[ArtifactT]]:
+        """Encode a batch; return one result per item, in input order.
 
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
         so results are safe to consume from another thread. ``target_bucket`` is
         reserved for CUDA-graph batching, once supported (the ladder rung to pad
-        to), and is ``None`` until then.
+        to), and is ``None`` until then. Dynamo passes each result's ``artifact``
+        to the selected adapter and carries optional ``response_data`` across
+        the internal Python engine-chunk boundary without interpreting it.
         """
         ...
 

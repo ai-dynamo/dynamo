@@ -5,6 +5,7 @@
 
 from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
     ArtifactT,
+    EncoderResult,
     ItemT,
     Preprocessed,
     RawT,
@@ -13,6 +14,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
 
 __all__ = [
     "ArtifactT",
+    "EncoderResult",
     "ItemT",
     "Preprocessed",
     "RawT",

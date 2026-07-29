@@ -7,15 +7,16 @@ The unit tests cover each side with the other mocked out — the backend test ne
 touches the assembler, and the assembler test hand-builds tensors instead of a
 backend — so neither pins the seam. This walks the whole contract for one request
 (build -> preprocess -> forward_batch -> build_mixed_embeds) and doubles as a
-worked example of how the APIs fit: forward_batch emits one CPU
-(n_tokens, hidden) tensor per image, and build_mixed_embeds splices them at the
-one-placeholder-token-per-image positions.
+worked example of how the APIs fit: forward_batch emits one result containing a
+CPU (n_tokens, hidden) tensor per image, and build_mixed_embeds splices the
+artifacts at the one-placeholder-token-per-image positions.
 """
 
 import pytest
 import torch
 
 from dynamo.vllm.multimodal_utils.custom_encoder import (
+    EncoderResult,
     Preprocessed,
     VisionEncoderBackend,
     build_mixed_embeds,
@@ -49,7 +50,8 @@ class _ToyEncoder(VisionEncoderBackend):
         # Distinct non-zero fill per image (1.0, 2.0, ...) so the splice is
         # unambiguous against the zero-filled text rows. CPU, per the contract.
         return [
-            torch.full((n, _HIDDEN), float(i + 1)) for i, (_, n) in enumerate(items)
+            EncoderResult(torch.full((n, _HIDDEN), float(i + 1)))
+            for i, (_, n) in enumerate(items)
         ]
 
 
@@ -61,7 +63,8 @@ def test_backend_and_assembler_work_together():
     # Caller flow: preprocess each raw off-thread, then one batched forward.
     pre = [enc.preprocess(r) for r in ("ab", "cde")]
     assert [p.cost for p in pre] == [2, 3]
-    img_tensors = enc.forward_batch([p.item for p in pre])
+    results = enc.forward_batch([p.item for p in pre])
+    img_tensors = [result.artifact for result in results]
     assert [tuple(t.shape) for t in img_tensors] == [(2, _HIDDEN), (3, _HIDDEN)]
 
     # Prompt: 10 <img> 11 12 <img> — one placeholder token per image.

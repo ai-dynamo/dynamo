@@ -4,9 +4,9 @@
 """Unit tests for the custom encoder async driver.
 
 Pin the glue contract: build / forward / close run on one actor thread; encode
-returns one opaque artifact per raw; the preprocess barrier fails a request
-atomically (no GPU work) if any image's preprocess fails; load fails fast on a
-build error and reaps its thread.
+returns one result per raw; the preprocess barrier fails a request atomically
+(no GPU work) if any image's preprocess fails; load fails fast on a build error
+and reaps its thread.
 """
 
 import threading
@@ -16,6 +16,7 @@ import torch
 
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
+    EncoderResult,
     Preprocessed,
     VisionEncoderBackend,
 )
@@ -58,7 +59,7 @@ class _FakeBackend(VisionEncoderBackend):
 
     def forward_batch(self, items, target_bucket=None):
         self.forward_threads.append(threading.get_ident())
-        return [torch.full((2, 4), float(len(str(it)))) for it in items]
+        return [EncoderResult(torch.full((2, 4), float(len(str(it))))) for it in items]
 
     def close(self):
         self.close_thread = threading.get_ident()
@@ -72,7 +73,7 @@ async def test_encode_returns_one_tensor_per_raw():
     try:
         out = await enc.encode(["a", "bb", "ccc"])
         assert len(out) == 3
-        assert all(t.shape == (2, 4) for t in out)
+        assert all(result.artifact.shape == (2, 4) for result in out)
     finally:
         enc.shutdown()
 
@@ -175,14 +176,26 @@ async def test_encode_preserves_opaque_artifacts():
             pass
 
         def forward_batch(self, items, target_bucket=None):
-            return [{"source": item} for item in items]
+            return [
+                EncoderResult(
+                    artifact={"source": item},
+                    response_data={"position": index},
+                )
+                for index, item in enumerate(items)
+            ]
 
     enc = AsyncVisionEncoder(_ArtifactBackend())
     enc.load("m")
     try:
         assert await enc.encode(["first", "second"]) == [
-            {"source": "first"},
-            {"source": "second"},
+            EncoderResult(
+                artifact={"source": "first"},
+                response_data={"position": 0},
+            ),
+            EncoderResult(
+                artifact={"source": "second"},
+                response_data={"position": 1},
+            ),
         ]
     finally:
         enc.shutdown()
@@ -206,7 +219,7 @@ class _PassthroughBackend(VisionEncoderBackend):
 
     def forward_batch(self, items, target_bucket=None):
         self.forward_calls.append(list(items))
-        return [torch.zeros(2, 4) for _ in items]
+        return [EncoderResult(torch.zeros(2, 4)) for _ in items]
 
 
 async def test_passthrough_skips_preprocess_when_no_pool():
@@ -224,7 +237,7 @@ async def test_passthrough_skips_preprocess_when_no_pool():
         assert enc._pool is None  # no pool created
         out = await enc.encode(["a", "bb"])
         assert len(out) == 2
-        assert all(t.shape == (2, 4) for t in out)
+        assert all(result.artifact.shape == (2, 4) for result in out)
         # Passthrough must hand the raws themselves to forward_batch, unchanged
         # and in order. A single request may span multiple micro-batches, so
         # flatten the recorded calls rather than requiring one forward call.

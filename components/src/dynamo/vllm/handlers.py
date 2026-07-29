@@ -6,6 +6,7 @@ import base64
 import functools
 import importlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -93,6 +94,7 @@ from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     CustomEncoderAdapter,
+    EncoderResult,
     VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
@@ -116,6 +118,9 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+_CUSTOM_ENCODER_RESPONSE_MAX_BYTES = 64 * 1024
+_JSON_INTEGER_MIN = -(1 << 63)
+_JSON_INTEGER_MAX = (1 << 64) - 1
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -646,6 +651,90 @@ def _accumulate_engine_data(
     if request_prompt_token_ids:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
+
+
+def _prepare_custom_encoder_results(
+    results: list[Any],
+) -> tuple[list[Any], dict[str, Any] | None]:
+    """Split decoder artifacts from bounded, JSON-safe response metadata."""
+
+    artifacts: list[Any] = []
+    response_items: list[dict[str, Any] | None] = []
+    for index, result in enumerate(results):
+        if not isinstance(result, EncoderResult):
+            raise TypeError(
+                "CustomEncoder forward_batch must return EncoderResult values; "
+                f"result {index} is {type(result).__name__}"
+            )
+        response_data = result.response_data
+        if response_data is not None and not isinstance(response_data, dict):
+            raise TypeError(
+                "CustomEncoder response_data must be a JSON object or None; "
+                f"result {index} is {type(response_data).__name__}"
+            )
+        artifacts.append(result.artifact)
+        response_items.append(response_data)
+
+    if not any(item is not None for item in response_items):
+        return artifacts, None
+
+    payload = {"items": response_items}
+    _validate_custom_encoder_json_integers(payload)
+    try:
+        serialized = json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "CustomEncoder response_data must contain JSON-serializable values"
+        ) from exc
+    if len(serialized) > _CUSTOM_ENCODER_RESPONSE_MAX_BYTES:
+        raise ValueError(
+            "CustomEncoder response_data exceeds the 64 KiB response limit"
+        )
+    # Deserialize the exact validated bytes so later backend mutations cannot
+    # change the payload after validation or bypass the size limit.
+    return artifacts, json.loads(serialized)
+
+
+def _validate_custom_encoder_json_integers(value: Any) -> None:
+    """Reject integers that serde_json cannot represent across Pythonize."""
+
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not _JSON_INTEGER_MIN <= value <= _JSON_INTEGER_MAX:
+            raise ValueError(
+                "CustomEncoder response_data integers must fit serde_json's "
+                "i64/u64 range"
+            )
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _validate_custom_encoder_json_integers(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_custom_encoder_json_integers(item)
+
+
+def _attach_custom_encoder_data(
+    chunk: Dict[str, Any],
+    response_data: dict[str, Any] | None,
+    *,
+    already_sent: bool,
+) -> bool:
+    """Attach metadata once, to the first non-error generation chunk."""
+
+    if already_sent or response_data is None:
+        return already_sent
+    finish_reason = chunk.get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason.startswith("error"):
+        return False
+    chunk["custom_encoder_data"] = response_data
+    return True
 
 
 def _serialize_routed_experts(
@@ -3034,15 +3123,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         request: Dict[str, Any],
         request_id: str,
-    ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
+    ) -> tuple[
+        EmbedsPrompt | TokensPrompt | None,
+        dict[str, Any] | None,
+        Dict[str, Any] | None,
+    ]:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
-        ``(prepared_prompt, error)``:
-        - images present: ``(prepared_prompt, None)``,
-        - no image content: ``(None, None)`` — text-only request, nothing
+        The CustomEncoder consumes image URLs directly and emits results. Returns
+        ``(prepared_prompt, response_data, error)``:
+        - images present: ``(prepared_prompt, response_data, None)``,
+        - no image content: ``(None, None, None)`` — text-only request, nothing
           to assemble or extract (non-image modalities are rejected above),
-        - failure: ``(None, error_dict)`` for the caller to yield.
+        - failure: ``(None, None, error_dict)`` for the caller to yield.
         """
         # Internal invariant: callers guard on `self._custom_encoder is not None`
         # before reaching here. Use an explicit raise (not assert, which is
@@ -3065,7 +3158,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"unsupported multimodal data: {unsupported}"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
         image_items = mm_map.get(IMAGE_URL_KEY) or []
         image_urls = [
@@ -3083,12 +3176,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "'Url'; each item must be a dict with a 'Url' key"
             )
             logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
         if not image_urls:
             # No image items at all — and non-image modalities were already
             # rejected above — so there is nothing to assemble → text-only.
-            return None, None
+            return None, None, None
 
         token_ids: list[int] = request.get("token_ids") or []
         # Both encode() and adapter preparation run user/model-specific code, so
@@ -3097,7 +3190,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            artifacts = await self._custom_encoder.encode(image_urls)
+            results = await self._custom_encoder.encode(image_urls)
+            artifacts, response_data = await asyncio.to_thread(
+                _prepare_custom_encoder_results,
+                results,
+            )
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
                 artifacts,
@@ -3105,14 +3202,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
             logger.exception("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
         logger.debug(
             "Request %s: CustomEncoder prepared prompt for %d image(s)",
             request_id,
-            len(artifacts),
+            len(results),
         )
-        return prepared, None
+        return prepared, response_data, None
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
@@ -3141,6 +3238,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             mode = DisaggregationMode.AGGREGATED
         has_mm_data = request.get("multi_modal_data") is not None
         custom_prompt: EmbedsPrompt | TokensPrompt | None = None
+        custom_encoder_data: dict[str, Any] | None = None
 
         if (
             mode == DisaggregationMode.AGGREGATED
@@ -3150,10 +3248,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # A configured CustomEncoder owns the aggregated image path. Bypass
             # raw-media loading and let its decoder-selected adapter prepare the
             # final engine prompt.
-            custom_prompt, assemble_error = await self._assemble_custom_encoder_prompt(
-                request,
-                request_id,
-            )
+            (
+                custom_prompt,
+                custom_encoder_data,
+                assemble_error,
+            ) = await self._assemble_custom_encoder_prompt(request, request_id)
             if assemble_error is not None:
                 yield assemble_error
                 return
@@ -3287,6 +3386,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
+                custom_encoder_data_sent = False
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -3313,6 +3413,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 accumulated_token_ids,
                                 accumulated_log_probs,
                             )
+                        custom_encoder_data_sent = _attach_custom_encoder_data(
+                            tok,
+                            custom_encoder_data,
+                            already_sent=custom_encoder_data_sent,
+                        )
                         yield tok
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")

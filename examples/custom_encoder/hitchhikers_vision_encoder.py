@@ -3,8 +3,8 @@
 
 """Example ``VisionEncoderBackend`` that fakes an image as a known text phrase.
 
-Instead of a real vision encoder, ``forward_batch()`` returns the LM's
-``embed_tokens`` embeddings of a fixed phrase (default: *"the Ultimate Question
+Instead of a real vision encoder, ``forward_batch()`` returns results containing
+the LM's ``embed_tokens`` embeddings of a fixed phrase (default: *"the Ultimate Question
 of Life, the Universe, and Everything"*). Splicing those embeddings in at the
 image placeholder makes the assembled prompt read as one coherent sentence, so
 the mixed-embeds path can be checked for **semantic** correctness, not just
@@ -44,6 +44,7 @@ import torch
 from safetensors import safe_open
 from transformers.utils import cached_file
 
+from dynamo.vllm.multimodal_utils.custom_encoder import EncoderResult
 from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
 
     def forward_batch(
         self, items: List[str], target_bucket: Optional[int] = None
-    ) -> List[torch.Tensor]:
+    ) -> List[EncoderResult[torch.Tensor]]:
         """Return the ``embed_tokens`` embeddings of the phrase for each item.
 
         Synchronous batched forward — the AsyncVisionEncoder runs it on the
@@ -138,4 +139,4 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
             len(ids),
             tuple(phrase_embeds.shape),
         )
-        return [phrase_embeds.clone() for _ in items]
+        return [EncoderResult(artifact=phrase_embeds.clone()) for _ in items]

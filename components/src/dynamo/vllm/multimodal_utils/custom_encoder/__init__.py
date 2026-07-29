@@ -11,6 +11,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter import (
 from dynamo.vllm.multimodal_utils.custom_encoder.async_encoder import AsyncVisionEncoder
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     ArtifactT,
+    EncoderResult,
     ItemT,
     Preprocessed,
     RawT,
@@ -23,6 +24,7 @@ __all__ = [
     "build_mixed_embeds",
     "CustomEncoderAdapter",
     "create_custom_encoder_adapter",
+    "EncoderResult",
     "ItemT",
     "Preprocessed",
     "RawT",
