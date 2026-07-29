@@ -392,18 +392,18 @@ impl DeltaAggregator {
                 // truncated after a complete first one is not silently dropped.
                 // Token strings come from the parser config so this stays in sync
                 // with any override, and matches the streaming path in preprocessor.rs.
+                let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
                 let glm47_truncated_tail = if parser == "glm47"
                     && matches!(
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
                     ) {
-                    let cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
                     choice
                         .text
-                        .rfind(cfg.tool_call_start.as_str())
+                        .rfind(glm47_cfg.tool_call_start.as_str())
                         .and_then(|start| {
                             let tail = &choice.text[start..];
-                            if !tail.contains(cfg.tool_call_end.as_str()) {
+                            if !tail.contains(glm47_cfg.tool_call_end.as_str()) {
                                 Some(tail.to_string())
                             } else {
                                 None
@@ -449,7 +449,7 @@ impl DeltaAggregator {
                         choice.finish_reason,
                         Some(dynamo_protocols::types::FinishReason::Length)
                     )
-                    && choice.text.contains("<tool_call>")
+                    && choice.text.contains(glm47_cfg.tool_call_start.as_str())
                 {
                     tracing::warn!(
                         parser,
