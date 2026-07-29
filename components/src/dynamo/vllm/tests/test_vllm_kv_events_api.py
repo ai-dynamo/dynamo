@@ -60,6 +60,10 @@ def _has_kv_cache_spec_sliding_window(event_cls):
     return "kv_cache_spec_sliding_window" in event_cls.__struct_fields__
 
 
+def _has_locality(event_cls):
+    return "locality" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -97,6 +101,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_kind")
         if _has_kv_cache_spec_sliding_window(BlockStored):
             expected_fields.append("kv_cache_spec_sliding_window")
+        if _has_locality(BlockStored):
+            expected_fields.append("locality")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -122,6 +128,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_kind")
         if _has_kv_cache_spec_sliding_window(BlockRemoved):
             expected_fields.append("kv_cache_spec_sliding_window")
+        if _has_locality(BlockRemoved):
+            expected_fields.append("locality")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
