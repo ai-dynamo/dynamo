@@ -2128,7 +2128,6 @@ where
         effects: EngineEffects<Observation::Batch>,
     ) -> Result<()> {
         self.record_decode_admissions(effects.admissions)?;
-        self.apply_decode_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             if self.collect_fpm
