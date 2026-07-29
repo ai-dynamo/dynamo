@@ -31,6 +31,8 @@ ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
+# Stable request identities and deterministic replay tie-breaking for parity builds.
+replay-bench = ["dynamo-mocker/replay-bench"]
 aic-forward-pass = ["dynamo-mocker/aic-forward-pass", "dep:aiconfigurator-core"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing

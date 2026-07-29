@@ -186,16 +186,17 @@ jobs:
             source-checkout/docs/fern/components/ docs-checkout/fern/pages-dev/components/
 
           # Backend deploy manifests are embedded into templates/{vllm,sglang,
-          # trtllm}.mdx via build-time <Code src="../../../examples/backends/
-          # <engine>/deploy/*.yaml"> file reads. Those resolve to the repo-root
-          # examples/ tree in the source layout, which does not exist on
-          # docs-website — sync just the referenced deploy/ subtrees to the
-          # branch root so both ../../../examples (from pages-dev) and the
-          # versioned snapshots resolve.
-          echo "Syncing examples/backends/*/deploy/ to branch root..."
+          # trtllm}.mdx and DGDR manifests into templates/dgdr.mdx via build-time
+          # <Code src="../../../examples/..."> file reads. Those resolve to the
+          # repo-root examples/ tree in the source layout, which does not exist
+          # on docs-website — sync just the referenced subtrees to the branch
+          # root so both ../../../examples (from pages-dev) and the versioned
+          # snapshots resolve.
+          echo "Syncing examples/backends/*/deploy/ and examples/deployments/dgdr/ to branch root..."
           rsync -a \
             --include='*/' \
             --include='backends/*/deploy/**' \
+            --include='deployments/dgdr/**' \
             --exclude='*' \
             --prune-empty-dirs \
             source-checkout/examples/ docs-checkout/examples/
