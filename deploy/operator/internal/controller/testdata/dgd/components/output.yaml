@@ -21,6 +21,7 @@ spec:
                   name: main
     replicas: 2
     type: decode
+    runtimeVersionOverride: 1.4.0
 status:
     $ignore: true
 ---
@@ -42,6 +43,7 @@ spec:
                   name: main
     replicas: 1
     type: frontend
+    runtimeVersionOverride: 1.4.0
 status:
     $ignore: true
 ---
