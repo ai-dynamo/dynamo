@@ -102,6 +102,7 @@ from .multimodal_utils.request_processor import (
     URL_VARIANT_KEY,
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
+    get_mm_processor_kwargs,
 )
 
 configure_dynamo_logging()
@@ -3101,6 +3102,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
                 artifacts,
+                mm_processor_kwargs=get_mm_processor_kwargs(request),
             )
         except Exception as exc:
             msg = f"CustomEncoder failed: {exc}"
