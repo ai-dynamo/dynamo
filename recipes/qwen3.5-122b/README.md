@@ -3,34 +3,33 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Qwen3.5-122B-A10B-FP8 — tp1 + MTP, aggregated, KV-aware routing (H200)
+# Qwen3.5-122B-A10B-FP8 Recipes (H200)
 
-Recipe for [Qwen/Qwen3.5-122B-A10B-FP8](https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8),
+Recipes for [Qwen/Qwen3.5-122B-A10B-FP8](https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8),
 the FP8 checkpoint of [Qwen/Qwen3.5-122B-A10B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B)
 (122B total / 10B active hybrid MoE — Gated DeltaNet linear attention + MoE with full
 attention every 4th layer). The FP8 weights fit a single 143 GB H200 at the full
-262,144-token context, which is what this recipe exploits: **one TP1 engine per GPU,
-scaled horizontally behind a Dynamo KV-aware router**, with MTP speculative decoding.
+262,144-token context.
 
 ## Configurations
 
-Dynamo + vLLM aggregated profile for the agentic workload on **H200**.
+Dynamo + vLLM deployment profiles for the agentic workload on **H200**.
 
-|                          | H200 aggregated agentic (tp1 + MTP)              |
-| ------------------------ | ------------------------------------------------ |
-| **GPU**                  | 1x H200 per worker; scale via `replicas`         |
-| **Mode**                 | Aggregated                                       |
-| **Framework**            | vLLM (runtime `1.3.0`)                           |
-| **Precision**            | FP8 weights + BF16 KV                            |
-| **Parallelism**          | TP1                                              |
-| **MoE backend**          | `triton` (auto-selected on H200 FP8)             |
-| **KV cache manager**     | Hybrid (DeltaNet SSM + attention)                |
-| **Routing**              | KV-aware (`DYN_ROUTER_MODE=kv`) + worker KV events |
-| **Speculative decoding** | MTP, `num_speculative_tokens=3`                  |
-| **Context length**       | 262,144 (model default)                          |
-| **KV transfer**          | N/A (aggregated)                                 |
+|                          | H200 aggregated agentic (tp1 + MTP)                 | H200 disaggregated agentic (1P2D)                 |
+| ------------------------ | --------------------------------------------------- | ------------------------------------------------- |
+| **GPU**                  | 1x H200 per worker; scale via `replicas`            | 1x H200 prefill + 2x H200 decode (3x total)       |
+| **Mode**                 | Aggregated                                          | Prefill/decode disaggregated (1P2D)               |
+| **Framework**            | vLLM (runtime `1.3.0`)                              | vLLM (runtime `1.3.0`)                            |
+| **Precision**            | FP8 weights + FP8 KV                                | FP8 weights + FP8 KV                             |
+| **Parallelism**          | TP1                                                 | TP1 (per worker)                                 |
+| **MoE backend**          | `triton` (Hopper FP8)                               | `triton` (Hopper FP8)                            |
+| **KV cache manager**     | Hybrid (DeltaNet SSM + attention)                   | Hybrid (DeltaNet SSM + attention)                |
+| **Routing**              | KV-aware (`DYN_ROUTER_MODE=kv`) + worker KV events  | KV-aware + worker KV events                      |
+| **Speculative decoding** | MTP, `num_speculative_tokens=3`                     | None — see Limitations                           |
+| **Context length**       | 262,144 (model default)                             | 262,144 (model default)                          |
+| **KV transfer**          | N/A (aggregated)                                    | NIXL/UCX over InfiniBand                          |
 
-### Why TP1 + replicas + KV routing
+### Why TP1 + replicas + KV routing (aggregated)
 
 Every multi-GPU engine layout measured (TP2, TP4, TP8, DP+EP) delivered less output
 throughput **per GPU** than independent TP1 replicas at the agentic SLA. The winning
@@ -39,6 +38,16 @@ is load-bearing: the replicas are independent engines and agentic requests share
 ~57k-token prefixes, so the router must land each request on the replica that already
 holds its prefix. The DGD ships `replicas: 2` (minimal KV-router validation); a full 8x
 H200 node runs `replicas: 8`.
+
+### Why 1P2D (disaggregated)
+
+Disaggregation splits prefill and decode onto separate GPUs joined by NIXL KV transfer
+over InfiniBand. Across a topology sweep at the agentic SLA, **1 prefill : 2 decode**
+gave the best output tok/s per GPU: system throughput is set by the decode-worker count
+(2 decode workers are needed to meet the SLA — a single decode worker cannot hold the
+concurrent long-context KV), while one prefill worker keeps up with the ~90%-cache-hit
+prefill load. Adding more decode or prefill raises total throughput but lowers per-GPU
+throughput at this fixed operating point. MTP is not used (see Limitations).
 
 ## Supported features
 
@@ -49,11 +58,14 @@ H200 node runs `replicas: 8`.
 ## Prerequisites
 
 1. **Dynamo Platform installed** on the cluster with DGD CRDs served.
-2. **NGC/nvcr image pull access** for `nvcr.io/nvidia/ai-dynamo` — create `nvcr-secret`
-   and attach it (see Quick Start note).
+2. **NGC/nvcr image pull access** for `nvcr.io/nvidia/ai-dynamo` — the deploy manifests do
+   not set `imagePullSecrets`, so create `nvcr-secret` and attach it to the namespace's
+   default service account (see Quick Start note).
 3. **Hugging Face token** with access to `Qwen/Qwen3.5-122B-A10B-FP8` (public, Apache-2.0),
    stored as `hf-token-secret` — used by the model-download Job.
 4. **`model-cache` PVC** (ReadWriteMany), populated via `model-cache/`.
+5. **(disaggregated only)** GPU-local RDMA NICs exposed to pods (e.g. an `rdma/ib` device
+   plugin giving each worker its topology-local NIC) for NIXL KV transfer.
 
 ## Quick Start
 
@@ -69,6 +81,8 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-toke
 > kubectl create secret docker-registry nvcr-secret \
 >   --docker-server=nvcr.io --docker-username='$oauthtoken' \
 >   --docker-password="<your-NGC-API-key>" -n ${NAMESPACE}
+> kubectl patch serviceaccount default -n ${NAMESPACE} \
+>   -p '{"imagePullSecrets":[{"name":"nvcr-secret"}]}'
 > ```
 
 ### 2. Storage
@@ -86,24 +100,24 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ### 4. Deploy the DGD
 ```bash
-kubectl apply -f vllm/agg-h200/deploy.yaml -n ${NAMESPACE}
+MODE=agg # or disagg
+kubectl apply -f vllm/${MODE}-h200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
-Scale to a full node by editing `spec.components[agg].replicas` to `8`.
+Aggregated: scale to a full node by editing `spec.components[agg].replicas` to `8`.
 
 ### 5. Smoke test
 ```bash
 kubectl port-forward svc/$(kubectl get svc -o name -n ${NAMESPACE} | grep frontend | head -1 | cut -d/ -f2) 8000:8000 -n ${NAMESPACE} &
 curl http://localhost:8000/v1/models
 curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "Qwen/Qwen3.5-122B-A10B-FP8",
+  "model": "Qwen/Qwen3.5-122B-A10B",
   "messages": [{"role": "user", "content": "Hello"}],
   "max_tokens": 32
 }'
 ```
 
 ### 6. Benchmark
-See [perf/README.md](perf/README.md) — mooncake agentic trace replay, and the
-round_robin-vs-kv router comparison.
+See [perf/README.md](perf/README.md) — mooncake agentic trace replay for both profiles.
 
 ## Optimization targets
 
@@ -113,89 +127,27 @@ round_robin-vs-kv router comparison.
 
 ## Performance results
 
-**KV routing vs round_robin** — tp1 + MTP(nst=3), 2 workers, agentic 15% mooncake trace
-(3,541 reqs, block 512, concurrency 8), Dynamo `1.3.0` on H200. MTP forced to the
-**SpeedBench-measured AL=2.937** (see "Speculative decoding" below). Both runs identical
-except `DYN_ROUTER_MODE`. Each: 3,411 completed / 130 errors (long-context tail).
+Measured on H200 against the **real** 15% agentic mooncake trace (3,541 requests, block
+512, closed-loop concurrency 8; SLA = P50 TTFT < 5 s **and** ≥ 50 output tok/s/user).
+Headline metric is system output tok/s per GPU.
 
-| Router       | Output tok/s | Req/s | TTFT mean (ms) | ITL (ms) | KV hit rate |
-| ------------ | ------------ | ----- | -------------- | -------- | ----------- |
-| round_robin  | 620.7        | 0.27  | 11,194         | 10.4     | ~0 (routing off; workers still cache locally) |
-| **kv**       | **759.5**    | 0.33  | **4,391**      | 9.2      | **59.0%**   |
-| **Δ (kv)**   | **+22.4%**   | +22%  | **−61% (2.6× faster)** | −11% | — |
+| Recipe                       | GPUs | tok/s/GPU @ SLA | user tok/s (P50) | TTFT (P50) |
+| ---------------------------- | ---- | --------------- | ---------------- | ---------- |
+| Aggregated TP1 + MTP (kv)    | 2    | ~380            | 139              | 0.72 s     |
+| Disaggregated 1P2D (kv)      | 3    | ~184            | 87               | 0.94 s     |
 
-**KV-aware routing is the recommended configuration** — +22.4% throughput and 2.6× lower
-TTFT by landing shared-prefix requests on the replica holding the cache. (Per-user decode
-is ~7% lower under kv — it concentrates load on the cached replica — a small trade for the
-large system-throughput and first-token-latency wins.)
-
-## Speculative decoding (MTP) — measured, not assumed
-
-The MTP acceptance length was **measured on SpeedBench** (qualitative split, real prompts,
-real MTP heads), then forced into the throughput benchmark above via
-`synthetic_acceptance_length` — the correct methodology for benchmarking spec-decode on
-synthetic trace data.
-
-| nst (draft length) | measured AL | SpeedBench tok/s |
-| ------------------ | ----------- | ---------------- |
-| 1                  | 1.825       | 681              |
-| **3 (recipe)**     | **2.937**   | 895              |
-| 5                  | 3.518       | 910              |
-
-- **Measured AL(nst=3) = 2.937** on SpeedBench (accepted 118,967 / drafts 61,422 → overall
-  ~65% token acceptance). This exact value is what the router benchmark forces
-  (`synthetic_acceptance_length: 2.937`) — measured = forced. (The live runtime confirmed it:
-  worker SpecDecoding metrics reported mean acceptance length 2.94–2.95 during the run.)
-- **nst=3 is the chosen depth.** nst=5 has higher AL and edges nst=3 by <2% on the
-  short-ISL SpeedBench split, but its larger draft head costs more KV pool — on the
-  64k-context agentic workload (pool-bound) that reverses the thin gain. nst=1 is clearly
-  worse.
-- To reproduce the AL measurement, see [perf/README.md](perf/README.md).
-
-### Real vs synthetic spec-config (how to benchmark)
-
-Following the repo convention (see `recipes/nemotron-3-super/.../deploy.yaml`), the worker
-sources `--speculative-config` from a **ConfigMap** with two keys:
-
-| ConfigMap key | value | use |
-| --- | --- | --- |
-| `speculative-config` (shipped active) | `{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}` | **production** — real MTP |
-| `speculative-config-synthetic` | above + `"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.937` | **benchmark only** — forced measured AL for synthetic traces (mooncake) |
-
-To reproduce the throughput numbers, set the worker env `SPECULATIVE_CONFIG`
-`configMapKeyRef.key` to `speculative-config-synthetic`, then run the mooncake benchmark
-(perf/README.md). **Never ship the synthetic key** — production serves real traffic with
-real acceptance.
+KV-aware routing beats `round_robin` by ~19–22% output tok/s (and ~2.5x lower TTFT) on
+both profiles, by landing each request on the worker that already holds its ~57k-token
+shared prefix.
 
 ## Limitations
 
-- **`--max-num-seqs` must stay ≤ 228.** The Mamba/DeltaNet SSM cache is block-allocated
-  at TP1; the vLLM default (`1024`) crashes at startup. The recipe ships `128`.
-- **`--kv-cache-dtype auto` (BF16 KV) is intentional** — the FP8 checkpoint ships no KV
-  scales, and BF16 KV also measured best for this architecture.
-- **MTP needs `--gpu-memory-utilization 0.95`** at the full 262k context (the draft head
-  needs the headroom). For a non-speculative deploy, drop `--speculative-config` and set
-  utilization back to `0.92`.
-- **Benchmarking MTP on synthetic data:** spec-decode performance on synthetic AIPerf
-  traces is not representative — use the `speculative-config-synthetic` ConfigMap key
-  (measured `synthetic_acceptance_length:2.937`) for representative numbers, per "Real vs
-  synthetic spec-config" above. Do **not** ship the synthetic key.
-- **ConfigMap/`moe_backend` note.** The tp1+MTP serving config was verified end-to-end;
-  the ConfigMap-env indirection and `"moe_backend":"triton"` field follow the Nemotron-3-Super
-  reference recipe (TRITON is what tp1 FP8 auto-selects here anyway) — smoke-test on first deploy.
-- **Runtime version.** Manifest pins `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0`.
-
-## File layout
-
-```
-qwen3.5-122b/
-├── README.md                     # this file
-├── model-cache/
-│   ├── model-cache.yaml          # ReadWriteMany PVC for the model
-│   └── model-download.yaml       # Job: hf download the FP8 checkpoint
-├── vllm/
-│   └── agg-h200/
-│       └── deploy.yaml           # DGD + ConfigMap (real / synthetic spec-config)
-└── perf/
-    └── README.md                 # mooncake benchmark + SpeedBench AL measurement
-```
+- **Speculative decoding (MTP) + disaggregation is not shipped on this arch.**
+  Disaggregation requires `VLLM_SSM_CONV_STATE_LAYOUT=DS` (for NIXL's 3-read Mamba
+  conv-state transfer), but MTP + prefix caching forces `mamba_cache_mode='align'`, whose
+  DS conv-state copy path is unimplemented (vLLM
+  [#38898](https://github.com/vllm-project/vllm/issues/38898) / PR
+  [#40454](https://github.com/vllm-project/vllm/pull/40454); NVBug 6442165) — the decode
+  `EngineCore` crashes under real concurrent long-context traffic. The **aggregated**
+  profile ships MTP (`num_speculative_tokens=3`); the **disaggregated** profile runs
+  without it.

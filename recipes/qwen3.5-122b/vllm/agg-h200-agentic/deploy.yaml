@@ -14,9 +14,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: qwen35-122b-a10b-fp8-tp1mtp-config
+  name: qwen35-122b-agg-h200-agentic-config
   labels:
-    app.kubernetes.io/name: qwen35-122b-a10b-fp8-tp1mtp-agg-h200
+    app.kubernetes.io/name: qwen35-122b-agg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
   speculative-config: |-
@@ -37,9 +37,9 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen35-122b-a10b-fp8-tp1mtp-agg-h200
+  name: qwen35-122b-agg-h200-agentic
   labels:
-    app.kubernetes.io/name: qwen35-122b-a10b-fp8-tp1mtp-agg-h200
+    app.kubernetes.io/name: qwen35-122b-agg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
@@ -155,7 +155,7 @@ spec:
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: qwen35-122b-a10b-fp8-tp1mtp-config
+                      name: qwen35-122b-agg-h200-agentic-config
                       key: speculative-config
                 - name: HF_HOME
                   value: /model-cache

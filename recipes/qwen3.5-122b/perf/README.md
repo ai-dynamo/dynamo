@@ -3,13 +3,19 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Benchmark — Qwen3.5-122B-A10B-FP8 tp1 + MTP, KV routing
+# Benchmark — Qwen3.5-122B-A10B-FP8 (H200)
 
-Benchmarks the recipe with AIPerf against the deployed DGD: an agentic Mooncake
-trace-replay, and the round_robin-vs-KV-router comparison. All commands assume the DGD
-from [`../vllm/agg-h200/deploy.yaml`](../vllm/agg-h200/deploy.yaml) is deployed in
-`${NAMESPACE}`; the frontend is `qwen35-122b-a10b-fp8-tp1mtp-agg-h200-frontend:8000` and
-each worker exposes vLLM `/metrics` on `qwen35-122b-a10b-fp8-tp1mtp-agg-h200-agg:9090`.
+Benchmarks both profiles with AIPerf against the deployed DGD via the same agentic
+Mooncake trace-replay. Set `ENDPOINT` to the profile under test:
+
+| Profile | DGD | `ENDPOINT` |
+| --- | --- | --- |
+| Aggregated (tp1 + MTP) | `qwen35-122b-agg-h200-agentic` | `qwen35-122b-agg-h200-agentic-frontend:8000` |
+| Disaggregated (1P2D)   | `qwen35-122b-disagg-h200-agentic` | `qwen35-122b-disagg-h200-agentic-frontend:8000` |
+
+Deploy from [`../vllm/agg-h200-agentic/deploy.yaml`](../vllm/agg-h200-agentic/deploy.yaml)
+or [`../vllm/disagg-h200-agentic/deploy.yaml`](../vllm/disagg-h200-agentic/deploy.yaml).
+Each worker exposes vLLM `/metrics` on port `9090`.
 
 ## Workload
 
@@ -50,7 +56,7 @@ aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8
 
 | Variable      | Default                                                    |
 | ------------- | ---------------------------------------------------------- |
-| `ENDPOINT`    | `qwen35-122b-a10b-fp8-tp1mtp-agg-h200-frontend:8000`       |
+| `ENDPOINT`    | per profile — see the table at the top                     |
 | `CONCURRENCY` | `8` (agentic SLA operating point)                          |
 | `TRACE_FILE`  | `/model-cache/traces/mooncake_trace.jsonl`                 |
 
@@ -67,7 +73,7 @@ aiperf profile Qwen/Qwen3.5-122B-A10B-FP8 --tokenizer Qwen/Qwen3.5-122B-A10B-FP8
   `dynamo_component_router_kv_hit_rate_{sum,count}` (kv mode) and
   `dynamo_frontend_cached_tokens_{sum,count}`.
 
-## Results
+## Results — aggregated (tp1 + MTP)
 
 Agentic 15% Mooncake trace (3,541 reqs / 3,411 completed / 130 errors each), concurrency 8,
 tp1 + MTP(nst=3) forced to the SpeedBench-measured AL=2.937 (`speculative-config-synthetic`).
@@ -81,7 +87,26 @@ tp1 + MTP(nst=3) forced to the SpeedBench-measured AL=2.937 (`speculative-config
 KV-aware routing is the recommended configuration: +22.4% output throughput and 2.6× lower
 TTFT by landing shared-prefix requests on the replica holding the cache.
 
+## Results — disaggregated (1P2D)
+
+Same trace and concurrency 8, KV routing, **no MTP**. 1 prefill + 2 decode (3 GPUs):
+
+| Metric               | Value |
+| -------------------- | ----- |
+| Output tok/s (total) | 553   |
+| tok/s/GPU            | 184   |
+| TTFT (P50)           | 0.94 s |
+| User tok/s (P50)     | 87    |
+
+Best output tok/s per GPU across a topology sweep (1P1D–1P4D, 2P1D, 2P2D) at the agentic
+SLA: 2 decode workers are needed to meet the SLA, and one prefill keeps up with the
+90%-cache-hit prefill. KV routing beats `round_robin` here too (+8% tok/s, ~2.3x lower TTFT).
+
 ## Speculative decoding — measuring the acceptance length (SpeedBench)
+
+> Applies to the **aggregated** profile only. MTP is not used in the disaggregated profile
+> (see the recipe [README](../README.md) Limitations).
+
 
 Spec-decode throughput on synthetic traces is unrepresentative unless the acceptance length
 (AL) is forced to the value **measured on SpeedBench** (real prompts). The recipe carries
