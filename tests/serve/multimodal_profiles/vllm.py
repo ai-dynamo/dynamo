@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
@@ -25,6 +26,15 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     image_token_metrics_payload,
 )
+
+# NVDEC H.264/H.265 serve cases hardware-decode via libnvcuvid, which needs the
+# container's driver "video" capability (NVIDIA_DRIVER_CAPABILITIES=...,video).
+# Runners without it can't decode H.264/H.265 and the codec-compliant image
+# ships no software fallback, so skip rather than fail. Evaluated once at
+# collection; mirrors the guard in
+# components/src/dynamo/common/tests/multimodal/test_nvdec_decoder_gpu.py.
+# NVDEC is still validated on gpu-ts.
+_NVDEC_UNAVAILABLE = not nvdec_available()
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -125,10 +135,20 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
             # install, unlike the VP9 agg_video case above. Clips are served over
             # http so the NVDEC route triggers (file:// video is not
-            # hardware-decoded). post_merge until CI is confirmed to expose the
-            # driver "video" capability that libnvcuvid requires.
+            # hardware-decoded). Skips when the runner lacks the driver "video"
+            # capability that libnvcuvid requires (see _NVDEC_UNAVAILABLE); NVDEC
+            # is validated on gpu-ts.
             "agg_video_nvdec": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.post_merge,
+                    pytest.mark.skipif(
+                        _NVDEC_UNAVAILABLE,
+                        reason=(
+                            "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                            "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                        ),
+                    ),
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
