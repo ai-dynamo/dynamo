@@ -122,7 +122,7 @@ fn check_decode_mem_for_burst(
                     active_blocks: active_kv_blocks(kv_manager, config.block_size),
                 },
                 request.allocated_tokens.div_ceil(config.block_size),
-                logical_available.div_ceil(config.block_size),
+                logical_available / config.block_size,
                 page_growth_needed.div_ceil(config.block_size),
             )
         });
