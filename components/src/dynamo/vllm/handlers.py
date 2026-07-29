@@ -2198,6 +2198,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
             async with lock:
+                capacity_reserved = False
+                committed_lora_info = False
                 try:
                     old_info = self._lora_state.loaded_loras.get(lora_name)
                     hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
@@ -2219,7 +2221,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         return
 
                     lora_capacity = getattr(self, "_lora_capacity", None)
-                    capacity_reserved = False
                     # Guard capacity check: serialize new adapter loads to prevent two
                     # concurrent loads from both observing capacity below limit and proceeding.
                     if lora_capacity is not None and old_info is None:
@@ -2335,6 +2336,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._lora_state.loaded_loras[lora_name] = LoRAInfo(
                         id=lora_id, path=lora_path
                     )
+                    committed_lora_info = True
                     logger.info(
                         f"Successfully {'hot-swapped' if is_hot_swap else 'loaded'} "
                         f"LoRA adapter: {lora_name} with ID {lora_id}"
@@ -2452,9 +2454,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     logger.exception(f"Failed to load LoRA adapter: {e}")
                     yield {"status": "error", "message": str(e)}
                 finally:
-                    # Stripes are intentionally retained. Evicting a lock here
-                    # can separate a waiting request from a later lifecycle op.
-                    pass
+                    # Always release placeholder reservations even when the
+                    # coroutine exits via cancellation/BaseException.
+                    if capacity_reserved and not committed_lora_info:
+                        existing = self._lora_state.loaded_loras.get(lora_name)
+                        if existing is not None and existing.id == -1:
+                            self._lora_state.loaded_loras.pop(lora_name, None)
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}

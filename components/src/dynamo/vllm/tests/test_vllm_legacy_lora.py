@@ -8,6 +8,7 @@ the still-supported ``BaseWorkerHandler`` path used by release images.
 """
 
 import asyncio
+import gc
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -315,6 +316,58 @@ def test_resolve_lora_request_treats_served_alias_as_base_model_when_enabled():
     handler.config.engine_args.enable_lora = True
 
     assert handler._resolve_lora_request("llama2-7b-alias") is None
+
+
+def test_lora_lock_table_does_not_retain_transient_adapter_names():
+    handler = _make_prefill_handler()
+
+    # Create many distinct lock names without holding on to lock references.
+    for idx in range(200):
+        handler._get_lora_lock(f"transient-adapter-{idx}")
+
+    # Weak lock entries should be reclaimable once references drop.
+    gc.collect()
+    assert len(handler._lora_state.lora_load_locks) == 0
+
+
+@pytest.mark.asyncio
+async def test_load_lora_cancellation_releases_capacity_placeholder(monkeypatch):
+    handler = _make_prefill_handler()
+    handler._lora_capacity = 1
+    handler._lora_capacity_guard = asyncio.Lock()
+
+    gate = asyncio.Event()
+    download_started = asyncio.Event()
+
+    async def _blocked_download(_uri):
+        download_started.set()
+        await gate.wait()
+        return {"status": "success", "local_path": "/cache/adapter"}
+
+    manager = SimpleNamespace(download_lora=_blocked_download)
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    async def _run_load():
+        return [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterA", "source": {"uri": "file:///adapter"}}
+            )
+        ]
+
+    task = asyncio.create_task(_run_load())
+    await download_started.wait()
+
+    # Placeholder reservation is inserted while download is in flight.
+    assert handler._lora_state.loaded_loras["adapterA"].id == -1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Cancellation must not leave ghost placeholder capacity entries.
+    assert "adapterA" not in handler._lora_state.loaded_loras
 
 
 @pytest.mark.asyncio

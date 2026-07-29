@@ -3,6 +3,7 @@
 
 import asyncio
 import threading
+import weakref
 
 from vllm.lora.request import LoRARequest
 
@@ -16,7 +17,11 @@ class LoRAState:
         # name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA lock to serialize concurrent load/unload operations.
-        self.lora_load_locks: dict[str, asyncio.Lock] = {}
+        # Weak values ensure lock entries are reclaimed once no coroutine keeps
+        # a strong reference to that lock (held, queued, or local variable).
+        self.lora_load_locks: weakref.WeakValueDictionary[
+            str, asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
 
     def resolve_request(
@@ -59,13 +64,10 @@ class LoRAState:
     def get_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create per-LoRA lock without eagerly allocating locks.
 
-        Locks are retained indefinitely (never evicted) to ensure the invariant
-        that a given adapter name always maps to the same asyncio.Lock. This is
-        critical for serializing load, unload, and inference-admission operations
-        on the same adapter, preventing races where an unload deletes bookkeeping
-        during vLLM's lazy adapter activation.
-
-        This non-evicting design is analogous to the striped locks in llm_engine.py.
+        Lock objects are shared per adapter name while in active use, then
+        automatically reclaimed when no task still references them. This bounds
+        memory for long-lived workers that churn through many distinct adapter
+        names, while preserving per-name serialization for concurrent operations.
         """
         with self.lora_load_locks_guard:
             lock = self.lora_load_locks.get(lora_name)
