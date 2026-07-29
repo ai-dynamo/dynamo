@@ -13,7 +13,7 @@
 #
 # CACHE GROUPS (3 distinct groups, one cache domain per dynamo_base image tag):
 #   - Group 0 (frameworks): vLLM & SGLang                    (cuda13.0 base)
-#   - Group 1 (dynamo):     dynamo runtime, planner, frontend,
+#   - Group 1 (general):    dynamo runtime, planner, frontend,
 #                           operator, snapshot, power-agent  (cuda13.0 base)
 #   - Group 2 (trtllm):     TRT-LLM runtime / dev / efa      (cuda13.1 base)
 #
@@ -48,9 +48,9 @@
 # | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
 # | 5    | 2    | {4, 3}            | {2, 0}            | {1, 4}              |
 # | 6    | 2    | {5, 4}            | {2, 3}            | {1, 0}              |
-# | 7    | 3    | {5, 4, 0}         | {2, 3, 4}         | {1, 6, 4}           |
-# | 8    | 3    | {5, 4, 3}         | {2, 7, 0}         | {1, 6, 4}           |
-# | 9    | 3    | {5, 4, 3}         | {2, 7, 8}         | {1, 6, 0}           |
+# | 7    | 3    | {5, 4, 3}         | {6, 2, 3}         | {1, 0, 4}           |
+# | 8    | 3    | {5, 4, 3}         | {6, 2, 0}         | {1, 7, 4}           |
+# | 9    | 3    | {5, 4, 3}         | {6, 2, 8}         | {1, 7, 0}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -197,7 +197,7 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("frameworks" "dynamo" "trtllm")
+GROUP_KEYS=("frameworks" "general" "trtllm")
 
 # Map a flavor to a group index (0, 1, or 2). One cache domain per dynamo_base
 # image tag: TRT-LLM builds on cuda13.1 and gets its own group; the cuda13.0
