@@ -12,6 +12,7 @@ from dynamo._core import canonical_replay_available
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_native_synthetic_trace_replay,
 )
+from dynamo._core import run_mocker_trace_replay as _run_native_trace_replay
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker import MockEngineArgs, SglangArgs, run_mocker_trace_replay
 from dynamo.replay import ReplayReport, run_synthetic_trace_replay, run_trace_replay
@@ -718,6 +719,24 @@ def test_native_canonical_replay_rejects_unverified_scaling_policy():
         )
 
 
+@pytest.mark.parametrize(
+    "trace_format", ["agentic_mooncake", "applied_compute_agentic"]
+)
+def test_native_canonical_replay_rejects_unsupported_trace_formats(
+    tmp_path, trace_format
+):
+    if not canonical_replay_available():
+        pytest.skip("binding was not built with canonical-replay")
+
+    with pytest.raises(ValueError, match="does not support trace_format"):
+        _run_native_trace_replay(
+            [tmp_path / "unused.jsonl"],
+            extra_engine_args=_vllm_args(),
+            trace_format=trace_format,
+            canonical_capture=True,
+        )
+
+
 def test_online_replay_rejects_in_memory_per_request_capture(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     with pytest.raises(ValueError, match="capture_per_request only supports"):
@@ -912,6 +931,29 @@ def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
             replay_concurrency=2,
             trace_format="dynamo",
         )
+
+
+def test_direct_agentic_dynamo_trace_honors_per_request_capture():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        replay_mode="offline",
+        trace_format="dynamo",
+        capture_per_request=True,
+    )
+
+    assert report.per_request
+    assert report.coverage["capture_per_request"] is True
+    assert report.coverage["per_request_records"] == len(report.per_request)
+    assert report.summary["completed_requests"] == len(report.per_request)
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])

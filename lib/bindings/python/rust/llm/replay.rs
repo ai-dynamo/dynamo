@@ -38,7 +38,7 @@ const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
 #[derive(Debug)]
 pub struct OfflineReplayResult {
     report: dynamo_mocker::replay::TraceSimulationReport,
-    runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+    lifecycle_operations: Vec<dynamo_mocker::replay::LifecycleOperation>,
     capture_per_request: bool,
     coverage: dynamo_mocker::replay::CanonicalReplayCoverage,
     canonical_metadata: Option<dynamo_mocker::replay::CanonicalReplayMetadata>,
@@ -54,21 +54,22 @@ impl OfflineReplayResult {
         canonical_metadata: Option<dynamo_mocker::replay::CanonicalReplayMetadata>,
         runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
     ) -> Self {
+        let dynamo_mocker::replay::OfflineRuntimeEvidence {
+            lifecycle_operations,
+            pressure,
+            kv_ingest,
+        } = runtime_evidence;
         let coverage = dynamo_mocker::replay::CanonicalReplayCoverage {
             capture_per_request,
             capture_planner_details,
             capture_canonical_evidence: canonical_capture,
             per_request_records: report.per_request.len(),
-            pressure: canonical_capture
-                .then(|| runtime_evidence.pressure.clone())
-                .flatten(),
-            kv_ingest: canonical_capture
-                .then(|| runtime_evidence.kv_ingest.clone())
-                .flatten(),
+            pressure: if canonical_capture { pressure } else { None },
+            kv_ingest: if canonical_capture { kv_ingest } else { None },
         };
         Self {
             report,
-            runtime_evidence,
+            lifecycle_operations,
             capture_per_request,
             coverage,
             canonical_metadata,
@@ -105,7 +106,7 @@ impl OfflineReplayResult {
 
     #[getter]
     fn lifecycle_operations(&self, py: Python<'_>) -> PyResult<PyObject> {
-        pythonize(py, &self.runtime_evidence.lifecycle_operations)
+        pythonize(py, &self.lifecycle_operations)
             .map(Bound::unbind)
             .map_err(to_pyerr)
     }
@@ -158,9 +159,9 @@ impl OfflineReplayResult {
         dynamo_mocker::replay::CanonicalReplayRecord::build(
             &self.report,
             self.canonical_metadata
-                .clone()
-                .expect("canonical replay result must retain execution metadata"),
-            self.coverage.clone(),
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("canonical replay metadata is unavailable"))?,
+            &self.coverage,
             planner,
         )
         .map_err(to_pyerr)
@@ -1200,6 +1201,17 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    if canonical_capture
+        && matches!(
+            trace_format,
+            dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake
+                | dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
+        )
+    {
+        return Err(PyValueError::new_err(format!(
+            "canonical_capture does not support trace_format='{trace_format_name}'"
+        )));
+    }
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
     let (prefill_load_estimator, aic_perf_config) = load_replay_prefill_load_estimator(
         py,
@@ -1632,6 +1644,7 @@ fn run_loaded_dynamo_request_trace(
                     trace,
                     num_workers,
                     router_mode,
+                    record_per_request,
                     sla,
                 ),
                 "online" => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(

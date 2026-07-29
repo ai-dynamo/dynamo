@@ -482,6 +482,7 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
             sla,
         );
     }
@@ -2046,6 +2047,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -2057,6 +2059,7 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
         trace,
         num_workers,
         router_mode,
+        record_per_request,
         sla,
     )
 }

@@ -181,6 +181,7 @@ struct EvidenceCollector {
     options: ReplayCaptureOptions,
     evidence: OfflineRuntimeEvidence,
     pressure_records: Vec<PressureRecord>,
+    outstanding_pressure: BTreeMap<(Uuid, WorkerPool), Vec<u64>>,
     pending_pressure_references: Vec<(Uuid, u64)>,
     kv_ingest: Option<KvIngestAccumulator>,
     startup_origins: BTreeMap<(WorkerPool, usize), u64>,
@@ -193,6 +194,7 @@ impl EvidenceCollector {
             options,
             evidence: OfflineRuntimeEvidence::default(),
             pressure_records: Vec::new(),
+            outstanding_pressure: BTreeMap::new(),
             pending_pressure_references: Vec::new(),
             kv_ingest: options
                 .capture_canonical_evidence
@@ -365,6 +367,11 @@ pub(crate) fn record_pressure(
             readmitted_at_ms: None,
         });
         collector
+            .outstanding_pressure
+            .entry((request_uuid, context.pool))
+            .or_default()
+            .push(pressure_ordinal);
+        collector
             .pending_pressure_references
             .push((request_uuid, pressure_ordinal));
         Some(pressure_ordinal)
@@ -396,12 +403,26 @@ pub(crate) fn record_pressure_readmission(uuid: Uuid, pool: WorkerPool, at_ms: f
         let Some(collector) = active.as_mut() else {
             return;
         };
-        let uuid = uuid.to_string();
-        if let Some(record) = collector.pressure_records.iter_mut().rev().find(|record| {
-            record.request_uuid == uuid && record.pool == pool && record.readmitted_at_ms.is_none()
-        }) {
-            record.readmitted_at_ms = Some(at_ms);
+        let key = (uuid, pool);
+        let (pressure_ordinal, remove_key) = {
+            let Some(ordinals) = collector.outstanding_pressure.get_mut(&key) else {
+                return;
+            };
+            let pressure_ordinal = ordinals
+                .pop()
+                .expect("outstanding pressure index must not contain an empty stack");
+            (pressure_ordinal, ordinals.is_empty())
+        };
+        if remove_key {
+            collector.outstanding_pressure.remove(&key);
         }
+        let index = usize::try_from(pressure_ordinal)
+            .expect("pressure ordinal must fit the evidence record index");
+        let record = collector
+            .pressure_records
+            .get_mut(index)
+            .expect("pressure ordinal must reference an evidence record");
+        record.readmitted_at_ms = Some(at_ms);
     });
 }
 
@@ -714,6 +735,11 @@ mod tests {
 
     use crate::replay::ReplayCaptureOptions;
 
+    #[cfg(feature = "canonical-replay")]
+    use super::{
+        EnginePressureState, PressureKind, record_pressure, record_pressure_readmission,
+        with_engine_evidence_context,
+    };
     use super::{
         WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState,
         record_lifecycle_operation, startup_origin, with_runtime_evidence,
@@ -826,5 +852,39 @@ mod tests {
             release_only.topology_released_request_uuids,
             vec![released_uuid.to_string()]
         );
+    }
+
+    #[cfg(feature = "canonical-replay")]
+    #[test]
+    fn pressure_readmission_updates_latest_outstanding_record() {
+        let uuid = Uuid::from_u128(42);
+        let ((), evidence) = with_runtime_evidence(
+            ReplayCaptureOptions {
+                capture_canonical_evidence: true,
+                ..Default::default()
+            },
+            || {
+                for at_ms in [1.0, 2.0] {
+                    with_engine_evidence_context(at_ms, WorkerPool::Agg, 0, 0, || {
+                        record_pressure(
+                            PressureKind::VllmPreemption,
+                            uuid,
+                            EnginePressureState::default(),
+                            EnginePressureState::default(),
+                            0,
+                            None,
+                            None,
+                        )
+                    });
+                }
+                record_pressure_readmission(uuid, WorkerPool::Agg, 3.0);
+                record_pressure_readmission(uuid, WorkerPool::Agg, 4.0);
+            },
+        );
+
+        let records = evidence.pressure.unwrap().records;
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].readmitted_at_ms, Some(4.0));
+        assert_eq!(records[1].readmitted_at_ms, Some(3.0));
     }
 }

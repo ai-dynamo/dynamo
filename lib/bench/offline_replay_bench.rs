@@ -346,52 +346,49 @@ fn canonical_report(
         ServingModeArg::Disagg => ReplayArgsMode::Disagg,
     };
     let router_mode = ReplayRouterMode::from(args.router_mode);
-    CanonicalReplayRecord::build(
-        report,
-        CanonicalReplayMetadata {
-            replay_bench: true,
-            byte_identity_scope: "same_target_toolchain_semantic_features".to_string(),
-            workload: CanonicalWorkloadMetadata::Trace {
-                format: "mooncake".to_string(),
-                block_size: Some(args.trace_block_size),
-                digest: workload_digest.to_string(),
-            },
-            execution: CanonicalExecutionMetadata {
-                topology: canonical_topology(topology),
-                num_workers: args.num_workers,
-                num_prefill_workers: args.num_prefill_workers,
-                num_decode_workers: args.num_decode_workers,
-                replay_concurrency: None,
-                arrival_speedup_ratio: args.arrival_speedup_ratio,
-                max_sim_time_ms: None,
-                aic_prefill_load_estimator: None,
-                aic_performance_model_implementation: None,
-                aic_prefill_load_estimator_implementation: None,
-            },
-            engine_config,
-            router: canonical_router_metadata(router_mode, None)?,
-            sla: CanonicalSlaMetadata {
-                ttft_ms: None,
-                itl_ms: None,
-                e2e_ms: None,
-            },
-            determinism: CanonicalDeterminismMetadata::canonical_v1(),
-            semantic_features: CanonicalSemanticFeatures {
-                canonical_replay: true,
-                mocker_kvbm_offload: cfg!(feature = "mocker-kvbm-offload"),
-                aic_forward_pass: false,
-            },
+    let metadata = CanonicalReplayMetadata {
+        replay_bench: true,
+        byte_identity_scope: "same_target_toolchain_semantic_features".to_string(),
+        workload: CanonicalWorkloadMetadata::Trace {
+            format: "mooncake".to_string(),
+            block_size: Some(args.trace_block_size),
+            digest: workload_digest.to_string(),
         },
-        CanonicalReplayCoverage {
-            capture_per_request: true,
-            capture_planner_details: false,
-            capture_canonical_evidence: true,
-            per_request_records: report.per_request.len(),
-            pressure: evidence.pressure.clone(),
-            kv_ingest: evidence.kv_ingest.clone(),
+        execution: CanonicalExecutionMetadata {
+            topology: canonical_topology(topology),
+            num_workers: args.num_workers,
+            num_prefill_workers: args.num_prefill_workers,
+            num_decode_workers: args.num_decode_workers,
+            replay_concurrency: None,
+            arrival_speedup_ratio: args.arrival_speedup_ratio,
+            max_sim_time_ms: None,
+            aic_prefill_load_estimator: None,
+            aic_performance_model_implementation: None,
+            aic_prefill_load_estimator_implementation: None,
         },
-        Value::Null,
-    )
+        engine_config,
+        router: canonical_router_metadata(router_mode, None)?,
+        sla: CanonicalSlaMetadata {
+            ttft_ms: None,
+            itl_ms: None,
+            e2e_ms: None,
+        },
+        determinism: CanonicalDeterminismMetadata::canonical_v1(),
+        semantic_features: CanonicalSemanticFeatures {
+            canonical_replay: true,
+            mocker_kvbm_offload: cfg!(feature = "mocker-kvbm-offload"),
+            aic_forward_pass: false,
+        },
+    };
+    let coverage = CanonicalReplayCoverage {
+        capture_per_request: true,
+        capture_planner_details: false,
+        capture_canonical_evidence: true,
+        per_request_records: report.per_request.len(),
+        pressure: evidence.pressure.clone(),
+        kv_ingest: evidence.kv_ingest.clone(),
+    };
+    CanonicalReplayRecord::build(report, &metadata, &coverage, Value::Null)
 }
 
 fn main() -> Result<()> {

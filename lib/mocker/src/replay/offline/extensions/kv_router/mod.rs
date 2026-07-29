@@ -70,11 +70,60 @@ pub struct CanonicalRouterMetadata {
     pub config: Option<KvRouterConfig>,
 }
 
+pub(in crate::replay) fn validate_canonical_router_config(config: &KvRouterConfig) -> Result<()> {
+    for (field, value) in [
+        ("overlap_score_credit", Some(config.overlap_score_credit)),
+        (
+            "overlap_score_credit_decay",
+            Some(config.overlap_score_credit_decay),
+        ),
+        ("prefill_load_scale", Some(config.prefill_load_scale)),
+        (
+            "decode_active_request_weight",
+            Some(config.decode_active_request_weight),
+        ),
+        ("host_cache_hit_weight", Some(config.host_cache_hit_weight)),
+        ("disk_cache_hit_weight", Some(config.disk_cache_hit_weight)),
+        ("router_temperature", Some(config.router_temperature)),
+        ("router_ttl_secs", Some(config.router_ttl_secs)),
+        ("router_queue_threshold", config.router_queue_threshold),
+        (
+            "shared_cache_multiplier",
+            Some(config.shared_cache_multiplier),
+        ),
+        (
+            "router_predicted_ttl_secs",
+            config.router_predicted_ttl_secs,
+        ),
+        (
+            "conditional_disagg_eff_isl_ratio_threshold",
+            Some(config.conditional_disagg_eff_isl_ratio_threshold),
+        ),
+        (
+            "conditional_disagg_prefill_busy_threshold",
+            config.conditional_disagg_prefill_busy_threshold,
+        ),
+        (
+            "conditional_disagg_decode_busy_threshold",
+            config.conditional_disagg_decode_busy_threshold,
+        ),
+    ] {
+        if let Some(value) = value {
+            anyhow::ensure!(
+                value.is_finite(),
+                "canonical replay rejects non-finite number at /metadata/router/config/{field}"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn canonical_router_metadata(
     mode: ReplayRouterMode,
     config: Option<&KvRouterConfig>,
 ) -> Result<CanonicalRouterMetadata> {
     if let Some(config) = config {
+        validate_canonical_router_config(config)?;
         anyhow::ensure!(
             config.router_tracking_key_file.is_none(),
             "canonical replay does not support router_tracking_key_file"

@@ -170,6 +170,7 @@ pub struct CanonicalSlaMetadata {
 }
 
 pub fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
+    validate_mock_engine_args_finite(args)?;
     anyhow::ensure!(
         args.planner_profile_data.is_none(),
         "canonical replay does not support planner_profile_data"
@@ -265,11 +266,12 @@ pub struct CanonicalReplayRecord {
 impl CanonicalReplayRecord {
     pub fn build(
         report: &TraceSimulationReport,
-        metadata: CanonicalReplayMetadata,
-        coverage: CanonicalReplayCoverage,
+        metadata: &CanonicalReplayMetadata,
+        coverage: &CanonicalReplayCoverage,
         mut planner: Value,
     ) -> Result<Self> {
         validate_report_finite(report)?;
+        validate_metadata_finite(metadata)?;
         let mut metadata = serde_json::to_value(metadata)?;
         let metadata = metadata
             .as_object_mut()
@@ -333,6 +335,89 @@ impl CanonicalReplayRecord {
         line.push(b'\n');
         Ok(line)
     }
+}
+
+fn validate_metadata_finite(metadata: &CanonicalReplayMetadata) -> Result<()> {
+    if let CanonicalWorkloadMetadata::Synthetic { spec, .. } = &metadata.workload {
+        for (path, value) in [
+            ("/metadata/workload/spec/request_rate", spec.request_rate),
+            (
+                "/metadata/workload/spec/arrival_interval_ms",
+                spec.arrival_interval_ms,
+            ),
+            (
+                "/metadata/workload/spec/shared_prefix_ratio",
+                Some(spec.shared_prefix_ratio),
+            ),
+            (
+                "/metadata/workload/spec/inter_turn_delay_ms",
+                Some(spec.inter_turn_delay_ms),
+            ),
+        ] {
+            if let Some(value) = value {
+                ensure_finite(path, value)?;
+            }
+        }
+    }
+    ensure_finite(
+        "/metadata/execution/arrival_speedup_ratio",
+        metadata.execution.arrival_speedup_ratio,
+    )?;
+    if let Some(value) = metadata.execution.max_sim_time_ms {
+        ensure_finite("/metadata/execution/max_sim_time_ms", value)?;
+    }
+    for (path, value) in [
+        ("/metadata/sla/ttft_ms", metadata.sla.ttft_ms),
+        ("/metadata/sla/itl_ms", metadata.sla.itl_ms),
+        ("/metadata/sla/e2e_ms", metadata.sla.e2e_ms),
+    ] {
+        if let Some(value) = value {
+            ensure_finite(path, value)?;
+        }
+    }
+    if let Some(config) = &metadata.router.config {
+        super::extensions::kv_router::validate_canonical_router_config(config)?;
+    }
+    Ok(())
+}
+
+fn validate_mock_engine_args_finite(args: &MockEngineArgs) -> Result<()> {
+    for (field, value) in [
+        ("speedup_ratio", Some(args.speedup_ratio)),
+        ("decode_speedup_ratio", Some(args.decode_speedup_ratio)),
+        ("startup_time", args.startup_time),
+        ("gpu_memory_utilization", args.gpu_memory_utilization),
+        ("mem_fraction_static", args.mem_fraction_static),
+        ("free_gpu_memory_fraction", args.free_gpu_memory_fraction),
+        ("kv_transfer_bandwidth", args.kv_transfer_bandwidth),
+        ("bandwidth_g1_to_g2_gbps", args.bandwidth_g1_to_g2_gbps),
+        ("bandwidth_g2_to_g1_gbps", args.bandwidth_g2_to_g1_gbps),
+        ("bandwidth_g2_to_g3_gbps", args.bandwidth_g2_to_g3_gbps),
+        ("bandwidth_g3_to_g2_gbps", args.bandwidth_g3_to_g2_gbps),
+        ("bandwidth_g2_to_g4_gbps", args.bandwidth_g2_to_g4_gbps),
+        ("bandwidth_g4_to_g2_gbps", args.bandwidth_g4_to_g2_gbps),
+    ] {
+        if let Some(value) = value {
+            ensure_finite(&format!("/metadata/engine_config/{field}"), value)?;
+        }
+    }
+    if let Some(reasoning) = &args.reasoning {
+        ensure_finite(
+            "/metadata/engine_config/reasoning/thinking_ratio",
+            reasoning.thinking_ratio,
+        )?;
+    }
+    if let Some(value) = args
+        .sglang
+        .as_ref()
+        .and_then(|sglang| sglang.schedule_conservativeness)
+    {
+        ensure_finite(
+            "/metadata/engine_config/sglang/schedule_conservativeness",
+            value,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_report_finite(report: &TraceSimulationReport) -> Result<()> {
@@ -488,6 +573,7 @@ pub fn canonicalize_json(value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::config::KvRouterConfig;
     use serde_json::json;
 
     use crate::common::protocols::MockEngineArgs;
@@ -613,23 +699,76 @@ mod tests {
     }
 
     #[test]
+    fn canonical_engine_identity_rejects_non_finite_configuration() {
+        let mut args = MockEngineArgs::default();
+        args.speedup_ratio = f64::INFINITY;
+
+        let error = canonical_engine_pool_metadata(&args).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("/metadata/engine_config/speedup_ratio")
+        );
+    }
+
+    #[test]
+    fn canonical_router_identity_rejects_non_finite_configuration() {
+        let config = KvRouterConfig {
+            router_ttl_secs: f64::INFINITY,
+            ..Default::default()
+        };
+
+        let error =
+            canonical_router_metadata(ReplayRouterMode::KvRouter, Some(&config)).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("/metadata/router/config/router_ttl_secs")
+        );
+    }
+
+    #[test]
     fn canonical_record_rejects_non_finite_report_values() {
         let mut report = TraceCollector::default().finish();
         report.throughput.wall_time_ms = f64::NAN;
+        let metadata = metadata();
+        let coverage = coverage();
 
         let error =
-            CanonicalReplayRecord::build(&report, metadata(), coverage(), serde_json::Value::Null)
+            CanonicalReplayRecord::build(&report, &metadata, &coverage, serde_json::Value::Null)
                 .unwrap_err();
 
         assert!(error.to_string().contains("/summary/wall_time_ms"));
     }
 
     #[test]
+    fn canonical_record_rejects_non_finite_execution_metadata() {
+        let report = TraceCollector::default().finish();
+        let mut metadata = metadata();
+        metadata.execution.arrival_speedup_ratio = f64::NAN;
+        let coverage = coverage();
+
+        let error =
+            CanonicalReplayRecord::build(&report, &metadata, &coverage, serde_json::Value::Null)
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("/metadata/execution/arrival_speedup_ratio")
+        );
+    }
+
+    #[test]
     fn canonical_record_sorts_root_keys() {
+        let metadata = metadata();
+        let coverage = coverage();
         let record = CanonicalReplayRecord::build(
             &TraceCollector::default().finish(),
-            metadata(),
-            coverage(),
+            &metadata,
+            &coverage,
             serde_json::Value::Null,
         )
         .unwrap();

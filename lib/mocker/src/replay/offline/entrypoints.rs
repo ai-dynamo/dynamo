@@ -407,10 +407,11 @@ pub(crate) fn simulate_agentic_trace_workload(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     if use_single_runtime(num_workers, args.dp_size, router_mode) {
-        simulate_agentic_trace_workload_single(args, trace, sla)
+        simulate_agentic_trace_workload_single(args, trace, record_per_request, sla)
     } else {
         simulate_agentic_trace_workload_multi(
             args,
@@ -419,6 +420,7 @@ pub(crate) fn simulate_agentic_trace_workload(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
             sla,
         )
     }
@@ -1031,13 +1033,16 @@ pub(crate) fn simulate_trace_workload_single(
 pub(crate) fn simulate_agentic_trace_workload_single(
     args: MockEngineArgs,
     trace: AgenticTrace,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let driver = WorkloadDriver::new_agentic_trace_without_replay_hashes(trace, engine_block_size)?;
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -1313,6 +1318,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
     trace: AgenticTrace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
@@ -1325,6 +1331,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
             num_workers,
             AggReplayMode::Trace,
         )?
+        .with_per_request_records(record_per_request)
         .run()?,
         ReplayRouterMode::KvRouter => AggRuntime::new_workload(
             &args,
@@ -1335,6 +1342,7 @@ pub(crate) fn simulate_agentic_trace_workload_multi(
             AggReplayMode::Trace,
             router_mode,
         )?
+        .with_per_request_records(record_per_request)
         .run()?,
     };
     Ok(finish_with_replay_wall_time(collector, started_at, sla))

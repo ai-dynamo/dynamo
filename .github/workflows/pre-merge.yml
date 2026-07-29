@@ -197,8 +197,14 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run canonical replay digest tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-mocker --features canonical-replay --lib canonical_digest_tests
     - name: Build canonical replay Python binding
       if: matrix.dir == 'lib/bindings/python'
+      env:
+        VIRTUAL_ENV: ${{ github.workspace }}/.canonical-replay-venv
       working-directory: lib/bindings/python
       run: |
         uv venv ../../../.canonical-replay-venv --python 3.12
