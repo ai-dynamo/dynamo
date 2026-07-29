@@ -8,17 +8,13 @@ use anyhow::bail;
 use smallvec::SmallVec;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
-use super::super::events::SimulationWorkerStage;
-use super::super::runtime_utils::WorkerCompletionPayload;
+use super::super::events::{SimulationWorkerStage, WorkerCompletionPayload};
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
 #[cfg(feature = "kvbm-offload")]
 use super::ObservedOffloadEffects;
-use super::{
-    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
-    ScheduledWorkerCompletion,
-};
+use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
@@ -620,12 +616,7 @@ where
 
         if boundary.end_ms > boundary.start_ms {
             Self::required_worker_mut(workers, rank_id).mark_busy();
-            effects
-                .scheduled_completions
-                .push(ScheduledWorkerCompletion {
-                    at_ms: boundary.end_ms,
-                    payload,
-                });
+            effects.schedule_completion(boundary.end_ms, payload);
             return;
         }
 
@@ -764,6 +755,9 @@ where
                 start_ms: now_ms,
                 end_ms: group_end_ms,
             };
+            if group_end_ms > now_ms {
+                effects.prepare_scheduled_completion(group_end_ms, rank_ids.len());
+            }
 
             for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
                 let Some(executed) = executed else {
@@ -771,26 +765,24 @@ where
                         // Empty ranks still participate in the barrier so work
                         // arriving mid-epoch cannot start ahead of a sibling.
                         Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                        effects
-                            .scheduled_completions
-                            .push(ScheduledWorkerCompletion {
-                                at_ms: group_end_ms,
-                                payload: WorkerCompletionPayload {
-                                    stage: self.stage,
-                                    worker_idx: rank_id,
-                                    completed_requests: 0,
-                                    output_signals: Vec::new(),
-                                    lifecycle_events: Vec::new(),
-                                    engine_events: Observation::Batch::default(),
-                                    progress: EngineProgress::default(),
-                                    fpm: Some(ForwardPassSnapshot {
-                                        wall_time_secs: boundary.wall_time_secs(),
-                                        ..Default::default()
-                                    }),
-                                    accept_length_output_tokens: 0,
-                                    accept_length_decode_forwards: 0,
-                                },
-                            });
+                        effects.schedule_completion(
+                            group_end_ms,
+                            WorkerCompletionPayload {
+                                stage: self.stage,
+                                worker_idx: rank_id,
+                                completed_requests: 0,
+                                output_signals: Vec::new(),
+                                lifecycle_events: Vec::new(),
+                                engine_events: Observation::Batch::default(),
+                                progress: EngineProgress::default(),
+                                fpm: Some(ForwardPassSnapshot {
+                                    wall_time_secs: boundary.wall_time_secs(),
+                                    ..Default::default()
+                                }),
+                                accept_length_output_tokens: 0,
+                                accept_length_decode_forwards: 0,
+                            },
+                        );
                     }
                     continue;
                 };
@@ -970,11 +962,15 @@ mod tests {
         mut effects: EngineEffects<Events>,
     ) -> WorkerCompletionPayload<Events> {
         if let Some(payload) = effects.immediate_completions.pop() {
-            assert!(effects.scheduled_completions.is_empty());
+            assert!(effects.scheduled_completion.is_none());
             return payload;
         }
-        assert_eq!(effects.scheduled_completions.len(), 1);
-        effects.scheduled_completions.pop().unwrap().payload
+        let mut scheduled = effects
+            .scheduled_completion
+            .take()
+            .expect("one scheduled completion must be present");
+        assert_eq!(scheduled.payloads.len(), 1);
+        scheduled.payloads.pop().unwrap()
     }
 
     fn decode_engine_with_chunking(enable_chunked_prefill: bool) -> EngineComponent {
@@ -1060,15 +1056,22 @@ mod tests {
 
         let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
 
-        assert_eq!(effects.scheduled_completions.len(), 2);
+        let scheduled = effects.scheduled_completion.as_ref().unwrap();
+        assert_eq!(scheduled.payloads.len(), 2);
         assert!(
-            effects
-                .scheduled_completions
-                .iter()
-                .all(|completion| (completion.at_ms - 9.0).abs() < f64::EPSILON)
+            (scheduled.at_ms - 9.0).abs() < f64::EPSILON,
+            "batch must fire at the slowest-rank boundary"
         );
-        assert!(effects.scheduled_completions.iter().all(|completion| {
-            (completion.payload.fpm.as_ref().unwrap().wall_time_secs - 0.009).abs() < f64::EPSILON
+        assert_eq!(
+            scheduled
+                .payloads
+                .iter()
+                .map(|payload| payload.worker_idx)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(scheduled.payloads.iter().all(|payload| {
+            (payload.fpm.as_ref().unwrap().wall_time_secs - 0.009).abs() < f64::EPSILON
         }));
         assert_eq!(collector.request_latencies(fast).unwrap().0, 9.0);
         assert_eq!(collector.request_latencies(slow).unwrap().0, 9.0);
@@ -1082,15 +1085,15 @@ mod tests {
         let mut collector = TraceCollector::default();
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert_eq!(first_epoch.scheduled_completions.len(), 2);
+        let mut first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first_scheduled = first_epoch.scheduled_completion.as_ref().unwrap();
+        assert_eq!(first_scheduled.payloads.len(), 2);
         assert!(engine.debug_snapshots().iter().all(|rank| rank.busy));
-        let idle_fpm = first_epoch
-            .scheduled_completions
+        let idle_fpm = first_scheduled
+            .payloads
             .iter()
-            .find(|completion| completion.payload.worker_idx == 1)
+            .find(|payload| payload.worker_idx == 1)
             .unwrap()
-            .payload
             .fpm
             .as_ref()
             .expect("idle DP rank must emit an empty FPM");
@@ -1109,17 +1112,13 @@ mod tests {
                 .is_empty()
         );
 
-        for completion in first_epoch.scheduled_completions {
-            engine.on_scheduled_completion(completion.payload).unwrap();
+        for payload in first_epoch.scheduled_completion.take().unwrap().payloads {
+            engine.on_scheduled_completion(payload).unwrap();
         }
         let second_epoch = engine.drive_ready(9.0, Some(&mut collector)).unwrap();
-        assert_eq!(second_epoch.scheduled_completions.len(), 2);
-        assert!(
-            second_epoch
-                .scheduled_completions
-                .iter()
-                .all(|completion| (completion.at_ms - 14.0).abs() < f64::EPSILON)
-        );
+        let second_scheduled = second_epoch.scheduled_completion.as_ref().unwrap();
+        assert_eq!(second_scheduled.payloads.len(), 2);
+        assert!((second_scheduled.at_ms - 14.0).abs() < f64::EPSILON);
         assert_eq!(collector.request_latencies(mid_epoch).unwrap().0, 10.0);
     }
 
@@ -1137,16 +1136,11 @@ mod tests {
             while engine.in_flight() > 0 {
                 let effects = engine.drive_ready(now_ms, Some(&mut collector)).unwrap();
                 assert!(effects.immediate_completions.is_empty());
-                assert_eq!(effects.scheduled_completions.len(), dp_size as usize);
-                now_ms = effects.scheduled_completions[0].at_ms;
-                assert!(
-                    effects
-                        .scheduled_completions
-                        .iter()
-                        .all(|completion| completion.at_ms == now_ms)
-                );
-                for completion in effects.scheduled_completions {
-                    engine.on_scheduled_completion(completion.payload).unwrap();
+                let scheduled = effects.scheduled_completion.unwrap();
+                assert_eq!(scheduled.payloads.len(), dp_size as usize);
+                now_ms = scheduled.at_ms;
+                for payload in scheduled.payloads {
+                    engine.on_scheduled_completion(payload).unwrap();
                 }
             }
             collector.request_latencies(uuid).unwrap()
@@ -1413,7 +1407,7 @@ mod tests {
         let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(second.admissions.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
-        assert!(second.scheduled_completions.is_empty());
+        assert!(second.scheduled_completion.is_none());
         let second = take_only_completion(second);
         assert_eq!(second.fpm.as_ref().unwrap().num_prefill_requests, 1);
         assert_eq!(second.completed_requests, 0);
@@ -1527,7 +1521,10 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
         let mut pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert_eq!(pass.scheduled_completions.len(), 1);
+        assert_eq!(
+            pass.scheduled_completion.as_ref().unwrap().payloads.len(),
+            1
+        );
 
         let handoff_id = HandoffId::from(Uuid::from_u128(2));
         let effects = engine
@@ -1557,8 +1554,14 @@ mod tests {
         assert!(engine.active_worker_ids().is_empty());
         assert_eq!(engine.worker_count(), 1);
 
-        let completion = pass.scheduled_completions.pop().unwrap();
-        let payload = engine.on_scheduled_completion(completion.payload).unwrap();
+        let payload = pass
+            .scheduled_completion
+            .take()
+            .unwrap()
+            .payloads
+            .pop()
+            .unwrap();
+        let payload = engine.on_scheduled_completion(payload).unwrap();
         assert!(payload.lifecycle_events.iter().any(|event| matches!(
             event,
             SchedulerLifecycleEvent::DestinationReserved {
@@ -1625,15 +1628,17 @@ mod tests {
                 .any(|event| { event.storage_tier == StorageTier::Device })
         );
         assert_eq!(
-            seed.immediate_completions.len() + seed.scheduled_completions.len(),
+            seed.immediate_completions.len() + usize::from(seed.scheduled_completion.is_some()),
             1,
             "seed request should produce exactly one completion boundary"
         );
         let completion = seed.immediate_completions.pop().unwrap_or_else(|| {
-            seed.scheduled_completions
-                .pop()
+            seed.scheduled_completion
+                .take()
                 .expect("seed request completion must be present")
-                .payload
+                .payloads
+                .pop()
+                .expect("singleton completion batch must contain one payload")
         });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.

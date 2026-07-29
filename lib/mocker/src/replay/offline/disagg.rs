@@ -11,15 +11,14 @@ pub(super) use super::components::ReplayMode;
 use super::components::TrafficStats;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-    ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
-    TrafficAccumulator,
+    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator,
 };
 use super::core::round_robin::PoolRoundRobinPlacement;
 use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
 #[cfg(test)]
 use super::extensions::kv_router::{
     DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
@@ -27,9 +26,9 @@ use super::extensions::kv_router::{
 use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_transfer_complete,
-    pop_ready_worker_completion, pop_ready_worker_ready, push_planner_tick, push_transfer_complete,
-    push_worker_completion, push_worker_ready,
+    ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_planner_tick,
+    pop_ready_transfer_complete, pop_ready_worker_completions, pop_ready_worker_ready,
+    push_planner_tick, push_transfer_complete, push_worker_completions, push_worker_ready,
 };
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
@@ -1834,49 +1833,65 @@ where
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> Result<bool> {
         let mut changed = false;
-        while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
-            match payload.stage {
-                SimulationWorkerStage::Prefill => {
-                    let payload = self.prefill_engine.on_scheduled_completion(payload)?;
-                    self.wake_deferred_actions(SimulationWorkerStage::Prefill, payload.worker_idx);
-                    if self.collect_fpm
-                        && let Some(fpm) = payload.fpm
-                    {
-                        self.prefill_fpm_buffer
-                            .insert(payload.worker_idx, fpm, self.now_ms);
-                    }
-                    self.process_prefill_pass(
-                        payload.worker_idx,
-                        payload.completed_requests,
-                        payload.output_signals,
-                        payload.lifecycle_events,
-                        payload.engine_events,
-                    )?;
+        while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => {
+                    self.apply_worker_completion(payload)?;
                 }
-                SimulationWorkerStage::Decode => {
-                    let payload = self.decode_engine.on_scheduled_completion(payload)?;
-                    self.wake_deferred_actions(SimulationWorkerStage::Decode, payload.worker_idx);
-                    if self.collect_fpm
-                        && let Some(fpm) = payload.fpm
-                    {
-                        self.decode_fpm_buffer
-                            .insert(payload.worker_idx, fpm, self.now_ms);
+                ReadyWorkerCompletions::Batch(payloads) => {
+                    for payload in payloads {
+                        self.apply_worker_completion(payload)?;
                     }
-                    self.process_decode_pass(
-                        payload.output_signals,
-                        payload.lifecycle_events,
-                        payload.engine_events,
-                        payload.accept_length_output_tokens,
-                        payload.accept_length_decode_forwards,
-                    )?;
-                }
-                SimulationWorkerStage::Aggregated => {
-                    bail!("offline disagg replay received an aggregated completion event")
                 }
             }
             changed = true;
         }
         Ok(changed)
+    }
+
+    fn apply_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> Result<()> {
+        match payload.stage {
+            SimulationWorkerStage::Prefill => {
+                let payload = self.prefill_engine.on_scheduled_completion(payload)?;
+                self.wake_deferred_actions(SimulationWorkerStage::Prefill, payload.worker_idx);
+                if self.collect_fpm
+                    && let Some(fpm) = payload.fpm
+                {
+                    self.prefill_fpm_buffer
+                        .insert(payload.worker_idx, fpm, self.now_ms);
+                }
+                self.process_prefill_pass(
+                    payload.worker_idx,
+                    payload.completed_requests,
+                    payload.output_signals,
+                    payload.lifecycle_events,
+                    payload.engine_events,
+                )
+            }
+            SimulationWorkerStage::Decode => {
+                let payload = self.decode_engine.on_scheduled_completion(payload)?;
+                self.wake_deferred_actions(SimulationWorkerStage::Decode, payload.worker_idx);
+                if self.collect_fpm
+                    && let Some(fpm) = payload.fpm
+                {
+                    self.decode_fpm_buffer
+                        .insert(payload.worker_idx, fpm, self.now_ms);
+                }
+                self.process_decode_pass(
+                    payload.output_signals,
+                    payload.lifecycle_events,
+                    payload.engine_events,
+                    payload.accept_length_output_tokens,
+                    payload.accept_length_decode_forwards,
+                )
+            }
+            SimulationWorkerStage::Aggregated => {
+                bail!("offline disagg replay received an aggregated completion event")
+            }
+        }
     }
 
     /// Drain transfer completions scheduled for the current logical timestamp.
@@ -1976,8 +1991,8 @@ where
                 payload.engine_events,
             )?;
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
@@ -2040,8 +2055,8 @@ where
                 payload.accept_length_decode_forwards,
             )?;
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
