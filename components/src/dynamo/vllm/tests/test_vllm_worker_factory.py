@@ -18,6 +18,7 @@ from dynamo.vllm.worker_factory import (
     WorkerFactory,
     _wait_and_load_benchmark,
 )
+from tests.utils.device import detect_target_device
 
 pytestmark = [
     pytest.mark.unit,
@@ -43,7 +44,9 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
-        "gms_shadow_mode": False,
+        # Keep shadow mode default-on for non-XPU lanes, but disable it on XPU
+        # where the shadow-mode GMS path is not exercised in this test matrix.
+        "gms_shadow_mode": detect_target_device() != "xpu",
     }
     defaults.update(overrides)
     return Mock(**defaults)
