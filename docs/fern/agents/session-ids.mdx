@@ -39,7 +39,7 @@ Custom clients should send the canonical Dynamo headers. When `X-Dynamo-Session-
 
 ## Native Agent Headers
 
-Dynamo also recognizes the current stable identity headers emitted by the following coding agents. See [Agent Harnesses](agent-harnesses.mdx) for packaged setup.
+Dynamo also recognizes the current stable identity headers emitted by the following coding agents. The [frontend API surface compliance test](https://github.com/ai-dynamo/dynamo/blob/main/tests/frontend/test_frontend_api_surface_compliance.py) catches header changes as coding agents evolve. See [Agent Harnesses](agent-harnesses.mdx) for packaged setup.
 
 <Tabs>
   <Tab title="Claude Code">
@@ -55,7 +55,6 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
     - `thread-id` to `session_id`
     - `x-codex-parent-thread-id` to `parent_session_id` for child threads
 
-    Codex's `session-id` identifies the overall run and is not used as an agent session ID.
   </Tab>
   <Tab title="OpenCode">
     Dynamo maps:
