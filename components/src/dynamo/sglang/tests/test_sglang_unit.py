@@ -246,6 +246,31 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
     assert config.server_args.incremental_streaming_output is True
 
 
+@pytest.mark.asyncio
+async def test_parse_args_applies_dynamo_defaults_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm="dream",
+        enable_forward_pass_metrics=True,
+        kv_events_config=None,
+        max_running_requests=8,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is True
+        assert parsed_args.max_running_requests == 8
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
+
+    await parse_args(sys.argv[1:])
+
+
 def test_compat_filters_async_generate_kwargs_for_older_engines():
     class OldEngine:
         async def async_generate(self, input_ids=None, sampling_params=None):

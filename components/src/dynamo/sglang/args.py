@@ -517,6 +517,22 @@ async def parse_args(
     image_diffusion_worker = dynamo_config.image_diffusion_worker
     video_generation_worker = dynamo_config.video_generation_worker
 
+    # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    fpm_source = _forward_pass_metrics_source(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
+        parsed_args.enable_forward_pass_metrics = True
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
+
+    if (
+        parsed_args.dllm_algorithm
+        and getattr(parsed_args, "max_running_requests", None) is None
+    ):
+        parsed_args.max_running_requests = 8
+        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
+
     if image_diffusion_worker or video_generation_worker:
         worker_type = (
             "image diffusion" if image_diffusion_worker else "video generation"
@@ -542,6 +558,9 @@ async def parse_args(
         server_args.dllm_algorithm = False
         server_args.load_format = None
         server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
+        server_args.enable_forward_pass_metrics = getattr(
+            parsed_args, "enable_forward_pass_metrics", False
+        )
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
@@ -587,30 +606,8 @@ async def parse_args(
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
-    # Enable forward pass metrics from dynamo env var if configured
-    fpm_source = _forward_pass_metrics_source(
-        dynamo_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
-    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
-        server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
-
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
-
-    # SGLang's DLLM scheduler reads server_args.max_running_requests directly
-    # but the field stays None until the normal scheduler init sets it from
-    # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
-    # doesn't crash on `None - int`.
-    # Only applies to real DLLM workers (truthy algorithm string), not
-    # video/image diffusion stubs where dllm_algorithm=False.
-    if (
-        server_args.dllm_algorithm
-        and getattr(server_args, "max_running_requests", None) is None
-    ):
-        server_args.max_running_requests = 8
-        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name
