@@ -43,11 +43,8 @@ spec:
         - name: sglang-engine
           image: lmsysorg/sglang:v0.5.16
           restartPolicy: Always
-          # Both probes make a real gRPC HealthCheck RPC via exec — not tcpSocket
-          # or grpc:, which dial the pod IP and can't reach the loopback-bound
-          # engine (a bare TCP accept would also pass before the model loads).
-          # startupProbe gates `main` until the engine serves; readinessProbe
-          # drops the worker from rotation if it dies at runtime.
+          # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
+          # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
           startupProbe:
             exec:
               command:
