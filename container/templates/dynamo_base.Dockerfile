@@ -30,9 +30,10 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
     mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/ && \
     rm -rf sccache*
 
-# Install uv package manager
-# TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Install uv package manager. Targets /usr/local/bin so it takes precedence over
+# any uv a downstream base image bundles: every stage shares one uv cache mount,
+# and uv rejects cache entries written by a newer version.
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /usr/local/bin/
 
 # Install NATS server
 ARG NATS_VERSION

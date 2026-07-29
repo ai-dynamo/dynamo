@@ -25,8 +25,8 @@ COPY --chmod=664 LICENSE /workspace_src/
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /usr/bin/uv
-COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
+COPY --from=dynamo_base /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=dynamo_base /usr/local/bin/uvx /usr/local/bin/uvx
 
 {% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
@@ -101,7 +101,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh{% if target not in ("dev", "local-dev") %} \
     && python3 -m venv --system-site-packages /opt/dynamo/venv \
-    && ln -sf /usr/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
+    && ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
@@ -115,7 +115,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \

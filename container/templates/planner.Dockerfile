@@ -56,14 +56,14 @@ ENV HOME=/home/dynamo \
 
 WORKDIR /workspace
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /usr/local/bin/
 COPY --from=dynamo_base /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 USER dynamo
 
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
 
@@ -72,7 +72,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
@@ -102,7 +102,7 @@ FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh
-COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
+COPY --from=planner_builder /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
 COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
 COPY --from=planner_builder /usr/lib/*-linux-gnu/libgomp.so.1* /opt/dynamo/lib/

@@ -359,13 +359,13 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 # SGLang XPU: conda env from framework stage; install uv and maturin.
 # uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
 # --python to target the conda interpreter explicitly.
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     chmod +x ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
 # SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
@@ -414,7 +414,7 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     # Git LFS init (needed for requirements with lfs=true); folded in to save a layer.
     git lfs install && \

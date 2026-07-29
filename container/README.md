@@ -27,7 +27,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 | Stage/Filepath | Target |
 | --- | --- |
 | **STAGE dynamo_base** | **FROM ${BASE_IMAGE}** |
-| /bin/uv, /bin/uvx | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime) |
+| /usr/local/bin/uv, /usr/local/bin/uvx | COPY from ghcr.io/astral-sh/uv:${uv_version} (→ framework, runtime) |
 |  /usr/bin/nats-server | Downloaded from GitHub (→ runtime) |
 |  /usr/local/bin/etcd/ | Downloaded from GitHub (→ runtime) |
 |  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
