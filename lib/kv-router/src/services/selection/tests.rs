@@ -571,6 +571,9 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(body["overlap"]["dp"]["0"], 0);
     assert!(body.get("cached_tokens").is_none());
     assert!(body.get("effective_overlap_blocks").is_none());
+    assert!(body.get("sequence_hashes").is_none());
+    assert!(body.get("isl_tokens").is_none());
+    assert!(body.get("track_prefill_tokens").is_none());
 
     let loads_response = app
         .oneshot(
@@ -699,16 +702,8 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
 
 #[tokio::test]
 async fn explicit_replay_preserves_disabled_prefill_tracking() {
-    let config = crate::config::KvRouterConfig {
-        router_track_prefill_tokens: false,
-        ..test_config()
-    };
-    let source = create_router(Arc::new(AppState {
-        service: Arc::new(SelectionService::new_local_for_test(config.clone(), 1)),
-    }));
-    let peer = create_router(Arc::new(AppState {
-        service: Arc::new(SelectionService::new_local_for_test(config, 1)),
-    }));
+    let source = app();
+    let peer = app();
     for app in [source.clone(), peer.clone()] {
         assert_eq!(
             register_worker(app, None).await.status(),
@@ -719,7 +714,7 @@ async fn explicit_replay_preserves_disabled_prefill_tracking() {
     let response = post(
         source.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated","router_config_override":{"track_prefill_tokens":false}}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -741,6 +736,7 @@ async fn explicit_replay_preserves_disabled_prefill_tracking() {
 
     for app in [source, peer] {
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/loads")
@@ -752,6 +748,17 @@ async fn explicit_replay_preserves_disabled_prefill_tracking() {
         let loads = response_json(response).await;
         assert_eq!(loads[0]["loads"][0]["active_requests"], 1);
         assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+        assert_eq!(loads[0]["loads"][0]["potential_decode_blocks"], 1);
+
+        let response = post(
+            app,
+            "/potential_loads",
+            r#"{"model_name":"model","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":false}}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let potential = response_json(response).await;
+        assert_eq!(potential[0]["potential_decode_blocks"], 1);
     }
 }
 
