@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ class Component:
     version: str
     spdx: str  # SPDX expression, possibly compound; UNKNOWN if unresolved
     source_url: str | None = None  # registry URL, where applicable
+    purl: str | None = None  # complete Package URL when ecosystem metadata is known
     license_text: str | None = None  # full LICENSE text, where available
     # True when license_text is the canonical SPDX text (the dependency shipped
     # no license file of its own); render_notices prepends a disclaimer.
@@ -205,15 +207,17 @@ _PURL_TYPE = {
 }
 
 
-def _component_purl(c: "Component") -> str | None:
+def _component_purl(c: Component) -> str | None:
     """Best-effort Package-URL for a component (its own source_url if already a
     purl, else synthesized from ecosystem/name/version)."""
+    if c.purl:
+        return c.purl
     if c.source_url and c.source_url.startswith("pkg:"):
         return c.source_url
     ptype = _PURL_TYPE.get(c.ecosystem)
     if not ptype or not c.name or not c.version:
         return None
-    return f"pkg:{ptype}/{c.name}@{c.version}"
+    return f"pkg:{ptype}/{quote(c.name, safe='/')}@{quote(c.version, safe='')}"
 
 
 def _cdx_licenses(spdx: str) -> list[dict] | None:

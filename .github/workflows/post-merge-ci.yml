@@ -668,6 +668,75 @@ jobs:
       platform: '["amd64", "arm64"]'
     secrets: inherit
 
+  grype-reconcile:
+    name: Container vulnerability policy
+    needs:
+      - operator
+      - snapshot-agent
+      - vllm-build
+      - vllm-efa-build
+      - sglang-build
+      - sglang-efa-build
+      - trtllm-build
+      - trtllm-efa-build
+      - planner-build
+      - frontend-build
+    # Rollout safety: this repository variable defaults to false/absent. Set
+    # GRYPE_POST_MERGE_ENFORCEMENT_ENABLED=true only after the LINEAR_API_KEY
+    # Actions secret exists and can write to the configured private project.
+    # This gate applies only to post-merge reconciliation; PR scanning remains
+    # enforced independently in the compliance producer actions.
+    if: ${{ always() && github.event_name == 'push' && vars.GRYPE_POST_MERGE_ENFORCEMENT_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: 0.11.15
+          enable-cache: false
+
+      - name: Set up Grype
+        uses: ./.github/actions/setup-grype
+
+      - name: Download current compliance inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: compliance-${{ github.sha }}*
+          path: ${{ runner.temp }}/compliance-current
+          merge-multiple: false
+
+      # TODO: Upload full Grype JSON to a private Artifactory repository after
+      # the repository path and secret convention are approved. Never upload
+      # these reports through GitHub artifacts, SARIF, annotations, or summaries.
+      # TODO: Add the generic Slack notification from the governance tracking
+      # issue after the private channel and secret convention are approved; do
+      # not expose finding data.
+      - name: Reconcile private vulnerability issues
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          PYTHONPATH: container
+        shell: bash
+        run: |
+          # Eight uniquely named multiarch image artifacts contribute 16
+          # pairs; operator and snapshot each contribute one amd64 pair.
+          uv run --no-project python -m compliance.vulnerability_scan post-merge \
+            --root "${RUNNER_TEMP}/compliance-current" \
+            --branch-line "${GITHUB_REF_NAME}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --complete-scan "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" \
+            --expected-pairs 18 \
+            --linear-team "Operations" \
+            --linear-project "Governance Project" \
+            --honor-wont-fix "${{ vars.GRYPE_LINEAR_WONT_FIX_EXCEPTIONS == 'true' }}"
+
   # ============================================================================
   # IMAGE COPY JOBS
   # ============================================================================
