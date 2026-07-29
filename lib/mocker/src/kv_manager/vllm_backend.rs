@@ -370,7 +370,14 @@ impl VllmKvManager {
         if let Some(stores) = stores {
             self.publish_store_sequence(stores);
         }
-        sequence.debug_assert_invariants(lease.entries.iter().map(|entry| entry.identity));
+        #[cfg(debug_assertions)]
+        sequence.debug_assert_finalized_range(
+            lease.entries.len(),
+            lease.entries[first_new_block..completed_blocks]
+                .iter()
+                .map(|entry| entry.identity),
+            lease.entries.last().map(|entry| entry.identity),
+        );
     }
 
     pub(crate) fn reserve_destination_lease(
