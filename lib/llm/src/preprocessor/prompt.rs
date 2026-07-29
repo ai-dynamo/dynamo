@@ -192,7 +192,6 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
         &model_type_lower,
         &display_name_lower,
         mdc.runtime_config.exclude_tools_when_tool_choice_none,
-        mdc.runtime_config.image_placeholder_token.as_deref(),
     ) {
         return Ok(formatter);
     }

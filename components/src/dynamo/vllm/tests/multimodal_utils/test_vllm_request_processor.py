@@ -819,3 +819,82 @@ def test_qwen_handoff_accepts_encoder_embeddings():
         "image_grid_thw": [[1, 16, 16]],
         "embeddings_shape": [1, 256, 1024],
     }
+
+
+# --- Kimi-K3 structural-pad -> checkpoint-native expansion -------------------
+#
+# The frontend emits one <|media_pad|> per image for every engine. vLLM's K3
+# processor matches the checkpoint's <|kimi_image_placeholder|> instead, so the
+# worker converts. See VllmMultimodalRequestProcessor._expand_kimi_k3_pads.
+
+_K3_PAD_ID = 163605
+_K3_NATIVE_IDS = [27, 91, 74, 30223, 11947, 114136, 91, 29]
+
+
+def _k3_processor(model_type: str = "kimi_k3") -> mod.VllmMultimodalRequestProcessor:
+    engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    model_type=model_type,
+                    media_placeholder_token_id=_K3_PAD_ID,
+                    image_placeholder="<|kimi_image_placeholder|>",
+                    use_unified_vision_chunk=False,
+                )
+            )
+        ),
+        get_tokenizer=lambda: SimpleNamespace(
+            encode=lambda text, add_special_tokens=False: list(_K3_NATIVE_IDS)
+        ),
+    )
+    return mod.VllmMultimodalRequestProcessor(
+        model="moonshot-ai/Kimi-K3",
+        engine_client=engine_client,
+        enable_multimodal=True,
+    )
+
+
+def test_k3_pad_expands_to_the_checkpoint_native_sequence():
+    proc = _k3_processor()
+    out = proc._expand_kimi_k3_pads([1, _K3_PAD_ID, 2], {"image": ["img"]})
+
+    assert out == [1, *_K3_NATIVE_IDS, 2]
+
+
+def test_k3_expansion_is_one_per_image():
+    proc = _k3_processor()
+    out = proc._expand_kimi_k3_pads([_K3_PAD_ID, 7, _K3_PAD_ID], {"image": ["a", "b"]})
+
+    assert out.count(_K3_PAD_ID) == 0
+    assert out == [*_K3_NATIVE_IDS, 7, *_K3_NATIVE_IDS]
+
+
+def test_k3_mismatched_pad_count_is_rejected_not_guessed():
+    """Misaligning images against embedding slots is worse than failing."""
+    proc = _k3_processor()
+    with pytest.raises(ValueError, match="refusing to expand"):
+        proc._expand_kimi_k3_pads([_K3_PAD_ID], {"image": ["a", "b"]})
+
+
+def test_k3_already_native_prompt_is_untouched():
+    """Rollout compatibility: a frontend still emitting the native form has no
+    pads to replace, so it passes through."""
+    proc = _k3_processor()
+    native = [1, *_K3_NATIVE_IDS, 2]
+
+    assert proc._expand_kimi_k3_pads(native, {"image": ["img"]}) == native
+
+
+def test_non_k3_models_are_never_rewritten():
+    proc = _k3_processor(model_type="qwen3_vl")
+    tokens = [1, _K3_PAD_ID, 2]
+
+    assert proc._expand_kimi_k3_pads(tokens, {"image": ["img"]}) == tokens
+
+
+def test_k3_without_raw_media_is_untouched():
+    """Processed-input paths must not be rewritten."""
+    proc = _k3_processor()
+    tokens = [1, _K3_PAD_ID, 2]
+
+    assert proc._expand_kimi_k3_pads(tokens, None) == tokens

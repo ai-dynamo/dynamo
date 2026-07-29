@@ -158,11 +158,6 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_image_placeholder_token(&mut self, image_placeholder_token: Option<String>) {
-        self.inner.image_placeholder_token = image_placeholder_token;
-    }
-
-    #[setter]
     fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
         self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
     }
@@ -243,11 +238,6 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
-    }
-
-    #[getter]
-    fn image_placeholder_token(&self) -> Option<String> {
-        self.inner.image_placeholder_token.clone()
     }
 
     #[getter]

@@ -255,6 +255,89 @@ class VllmMultimodalRequestProcessor:
             )
         self.use_unified_vision_chunk = use_unified_vision_chunk
 
+    def _kimi_k3_pad_expansion(self) -> Optional[tuple[int, list[int]]]:
+        """``(pad_id, native_ids)`` for Kimi-K3, or None for every other model.
+
+        The frontend emits one ``<|media_pad|>`` per image for every engine.
+        vLLM's K3 processor instead matches the checkpoint's
+        ``<|kimi_image_placeholder|>`` and expands *that* into
+        ``<|media_begin|>image WxH<|media_content|>...<|media_end|>``, so the
+        two forms are converted here rather than diverging in the renderer.
+
+        Converting in this direction is what makes the contract reliable:
+        ``<|media_pad|>`` is a single vocabulary id, so locating it is exact.
+        ``<|kimi_image_placeholder|>`` is a plain string that is not in the
+        vocabulary -- its token boundaries shift with surrounding text -- so a
+        frontend emitting it would leave the worker nothing dependable to find.
+
+        Both values come from checkpoint metadata, so no registration field or
+        engine introspection is required.
+        """
+        if getattr(self, "_k3_expansion_resolved", False):
+            return self._k3_expansion
+        self._k3_expansion_resolved = True
+        self._k3_expansion = None
+        try:
+            model_config = getattr(
+                getattr(self.engine_client, "vllm_config", None), "model_config", None
+            )
+            hf_config = getattr(model_config, "hf_config", None)
+            if getattr(hf_config, "model_type", None) != "kimi_k3":
+                return None
+            pad_id = hf_config.media_placeholder_token_id
+            tokenizer = self.engine_client.get_tokenizer()
+            native_ids = list(
+                tokenizer.encode(hf_config.image_placeholder, add_special_tokens=False)
+            )
+            if not isinstance(pad_id, int) or not native_ids:
+                logger.warning(
+                    "Kimi-K3 placeholder metadata unusable (pad_id=%r, native_ids=%r); "
+                    "leaving prompt token ids untouched",
+                    pad_id,
+                    native_ids,
+                )
+                return None
+            self._k3_expansion = (pad_id, native_ids)
+        except Exception as e:
+            logger.warning("Could not resolve the Kimi-K3 placeholder mapping: %s", e)
+        return self._k3_expansion
+
+    def _expand_kimi_k3_pads(
+        self, token_ids: list[int], multi_modal_data: Optional[dict[str, Any]]
+    ) -> list[int]:
+        """Replace each structural pad id with the checkpoint-native sequence.
+
+        Raw-media path only -- inputs that already carry processed multimodal
+        state are left alone. During rollout a prompt may already be in the
+        native form, in which case there are no pads and this is a no-op.
+        """
+        expansion = self._kimi_k3_pad_expansion()
+        if expansion is None or not multi_modal_data:
+            return token_ids
+        pad_id, native_ids = expansion
+
+        pad_count = token_ids.count(pad_id)
+        if pad_count == 0:
+            return token_ids  # already native form
+
+        images = multi_modal_data.get("image")
+        expected = len(images) if isinstance(images, (list, tuple)) else 1
+        if pad_count != expected:
+            # Guessing here would silently misalign images against their
+            # embedding slots, so refuse instead.
+            raise ValueError(
+                f"Kimi-K3 prompt carries {pad_count} <|media_pad|> token(s) but "
+                f"{expected} image(s) were supplied; refusing to expand."
+            )
+
+        expanded: list[int] = []
+        for token_id in token_ids:
+            if token_id == pad_id:
+                expanded.extend(native_ids)
+            else:
+                expanded.append(token_id)
+        return expanded
+
     @staticmethod
     def _multimodal_disabled_error() -> ValueError:
         return ValueError(
@@ -562,7 +645,9 @@ class VllmMultimodalRequestProcessor:
                 )
 
         prompt_kwargs: dict[str, Any] = {
-            "prompt_token_ids": request["token_ids"],
+            "prompt_token_ids": self._expand_kimi_k3_pads(
+                request["token_ids"], multi_modal_data
+            ),
             "multi_modal_data": multi_modal_data,
         }
         if mm_uuids is not None:

@@ -171,19 +171,6 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_local_indexer")]
     pub enable_local_indexer: bool,
 
-    /// Literal token this worker's multimodal processor expects once per image,
-    /// read from the processor the worker actually loaded.
-    ///
-    /// Consumed only by native formatters that render images as discrete
-    /// segments (currently Kimi-K3, via `kimi_k3_formatter_for`). `None` leaves
-    /// the renderer on its own default.
-    ///
-    /// Only one worker's declaration takes effect per model: `mdcsum` does not
-    /// cover `runtime_config`, so a model served by workers that disagree gets
-    /// whichever card registered first.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_placeholder_token: Option<String>,
-
     /// Endpoint whose event sources describe this worker's KV state.
     ///
     /// When unset, consumers use the worker's serving endpoint. This keeps existing
@@ -288,7 +275,6 @@ impl Default for ModelRuntimeConfig {
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
-            image_placeholder_token: None,
             enable_local_indexer: true,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),

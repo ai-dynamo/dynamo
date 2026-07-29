@@ -37,12 +37,6 @@ from dynamo.sglang.capacity import (
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
-# `config.json` model_types whose per-image token the frontend has to be told,
-# because Dynamo renders them with a native Rust formatter instead of a chat
-# template. Everything else carries its per-image token in its own template and
-# needs no declaration -- see `_get_image_placeholder_token`.
-_NATIVE_IMAGE_TOKEN_MODEL_TYPES = frozenset({"kimi_k3"})
-
 
 def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
     """Pick the path passed to `register_model` for MDC construction.
@@ -350,76 +344,8 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
-def _get_image_placeholder_token(engine: Optional[sgl.Engine]) -> Optional[str]:
-    """Literal token this worker's multimodal processor expects, one per image.
-
-    The frontend renders whatever we report here rather than assuming a token
-    per engine, so this must come from the processor SGLang actually loaded.
-    ``TokenizerManager.mm_processor`` is None for text-only models, and each
-    multimodal processor builds an ``mm_tokens`` spec in its ``__init__`` (the
-    Kimi ones declare ``<|media_pad|>``).
-
-    Scoped to Kimi-K3 on purpose. It is the only family Dynamo renders with a
-    native Rust formatter that has to choose a per-image token; every other
-    model gets its per-image token from its own chat template, so the frontend
-    never reads a declaration for them.
-
-    The scope is also what makes reading ``mm_tokens.image_token`` sound.
-    That field is "the string this processor scans for", and its shape differs
-    per model -- one token for Kimi (``<|media_pad|>``), a three-token wrapper
-    for Qwen-VL (``<|vision_start|><|image_pad|><|vision_end|>``), a text
-    pattern for MiniCPM. Only for Kimi does it coincide with "the one token to
-    emit per image", so only for Kimi do we read it.
-
-    Reaches into SGLang internals (plain instance attributes, no properties),
-    which are pre-1.0 and move between releases -- so every miss returns None
-    and leaves the frontend on the formatter's own default.
-    """
-    try:
-        tokenizer_manager = getattr(engine, "tokenizer_manager", None)
-        if tokenizer_manager is None:
-            return None  # engine=None (EPD encode worker), or renamed upstream
-
-        model_type = getattr(
-            getattr(
-                getattr(tokenizer_manager, "model_config", None), "hf_config", None
-            ),
-            "model_type",
-            None,
-        )
-        if model_type not in _NATIVE_IMAGE_TOKEN_MODEL_TYPES:
-            return None
-
-        # MultimodalSpecialTokens.image_token is Optional[Union[str, List[str]]];
-        # `.build()` backfills the string form from image_token_id, so a plain
-        # str is the common case.
-        image_token = getattr(
-            getattr(
-                getattr(tokenizer_manager, "mm_processor", None), "mm_tokens", None
-            ),
-            "image_token",
-            None,
-        )
-        if isinstance(image_token, str) and image_token:
-            return image_token
-
-        logging.warning(
-            "Could not read an image placeholder token from the SGLang processor "
-            "for model_type=%r (got %r); the frontend will fall back to its "
-            "default, which this engine does not consume.",
-            model_type,
-            image_token,
-        )
-        return None
-    except Exception as e:
-        logging.warning(
-            "Could not derive the image placeholder token from SGLang: %s", e
-        )
-        return None
-
-
 async def _get_runtime_config(
-    engine: Optional[sgl.Engine], server_args: ServerArgs, dynamo_args: DynamoConfig
+    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -450,11 +376,6 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
-    # This worker's multimodal processor owns the literal token it expects to
-    # see once per image; the frontend renders that token directly instead of
-    # assuming one. None for text-only workers, and inert for models whose
-    # per-image token is fixed by their Jinja chat template.
-    runtime_config.image_placeholder_token = _get_image_placeholder_token(engine)
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

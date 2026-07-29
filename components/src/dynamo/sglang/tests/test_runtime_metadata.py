@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -191,76 +190,3 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
-
-
-# NOTE: import lazily, per the `_eagle_enabled_for` test above -- register.py does
-# `from sglang.srt.environ import envs`, absent in the `pytest-marker-report`
-# pre-commit hook's collection env.
-
-
-def _engine(model_type=None, mm_tokens=..., with_tm=True):
-    """Minimal stand-in for the attribute chain the probe walks."""
-    if not with_tm:
-        return SimpleNamespace()
-    mm_processor = None if mm_tokens is ... else SimpleNamespace(mm_tokens=mm_tokens)
-    return SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(
-            model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(model_type=model_type)
-            ),
-            mm_processor=mm_processor,
-        )
-    )
-
-
-@pytest.mark.parametrize(
-    "engine",
-    [
-        None,
-        _engine(with_tm=False),
-        _engine(
-            model_type="qwen3_vl",
-            mm_tokens=SimpleNamespace(
-                image_token="<|vision_start|><|image_pad|><|vision_end|>"
-            ),
-        ),
-        _engine(
-            model_type="qwen2_audio",
-            mm_tokens=SimpleNamespace(image_token=None, audio_token="<|audio|>"),
-        ),
-        _engine(model_type="llama"),
-    ],
-    ids=["no-engine", "no-tokenizer-manager", "qwen-vl", "audio-only", "text-only"],
-)
-def test_no_declaration_and_no_probe_for_non_k3_models(engine, caplog):
-    """The frontend only reads this for Kimi-K3, so nothing else is probed.
-
-    Qwen-VL is the case that matters: its processor DOES expose an image_token,
-    but it is a three-token wrapper meaning something different, and its chat
-    template already emits it. Reading it would publish a value nobody consumes.
-    """
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    assert _get_image_placeholder_token(engine) is None
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-
-
-def test_image_placeholder_token_comes_from_the_loaded_processor():
-    """For K3 the declaration is read from the processor, never hardcoded."""
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    engine = _engine(
-        model_type="kimi_k3", mm_tokens=SimpleNamespace(image_token="<|media_pad|>")
-    )
-
-    assert _get_image_placeholder_token(engine) == "<|media_pad|>"
-
-
-def test_unreadable_k3_processor_warns():
-    """Now that the probe only runs for K3, a miss IS actionable -- the engine
-    will not consume the formatter's default, so say so."""
-    from dynamo.sglang.register import _get_image_placeholder_token
-
-    engine = _engine(model_type="kimi_k3", mm_tokens=SimpleNamespace(image_token=None))
-
-    assert _get_image_placeholder_token(engine) is None
