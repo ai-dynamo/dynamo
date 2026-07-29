@@ -50,7 +50,7 @@ def _agg_config_sla() -> PlannerConfig:
 
 
 def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
-    """A bridge FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
+    """A replay FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
         "worker_id": worker_id,
         "dp_rank": dp_rank,
@@ -108,6 +108,33 @@ def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
 
 def _orch_agg_config_sla() -> PlannerConfig:
     return _agg_config_sla()
+
+
+def test_replay_adapter_uses_injected_engine_protocol_and_owns_cleanup():
+    class _Engine:
+        def __init__(self):
+            self.closed = False
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 5.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("tick is not needed by this ownership test")
+
+        async def shutdown(self):
+            self.closed = True
+
+    engine = _Engine()
+    adapter = ReplayPlannerAdapter(
+        PlannerConfig(mode="agg"),
+        capabilities=_agg_caps(),
+        engine=engine,
+    )
+
+    with adapter:
+        assert adapter.initial_tick_ms() == 5_000.0
+
+    assert engine.closed
 
 
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():

@@ -218,6 +218,12 @@ dynamo-operator:
 
   # Webhook configuration for admission control and validation
   webhook:
+    service:
+      # -- Publish the webhook Service endpoint before the Pod Ready condition is true.
+      # Keep false for production; short-lived vCluster CI may enable this to tolerate
+      # stale host Pod readiness while admission smoke tests verify the webhook itself.
+      publishNotReadyAddresses: false
+
     # Certificate configuration for webhook TLS
     certificateSecret:
       # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).

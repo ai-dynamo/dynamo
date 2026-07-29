@@ -51,19 +51,19 @@ RUN useradd -m -s /bin/bash -g 0 dynamo \
 
 ENV HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:/usr/local/bin/etcd:/usr/local/bin:/bin" \
+    PATH="/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:/usr/local/bin:/bin" \
     PYTHONPATH="/workspace"
 
 WORKDIR /workspace
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
 COPY --from=dynamo_base /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 USER dynamo
 
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
 
@@ -72,20 +72,23 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisimulate*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
-# startup and the component-local planner-family test suites.
+# startup and the component-local planner-family test suites. AI Simulate
+# runtime code comes from the wheel installed above; copy only its tests.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
+COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
@@ -99,7 +102,7 @@ FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/
 COPY --from=planner_builder /bin/dash /bin/sh
-COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
+COPY --from=planner_builder /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
 COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
 COPY --from=planner_builder /usr/lib/*-linux-gnu/libgomp.so.1* /opt/dynamo/lib/
@@ -113,7 +116,7 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA} \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
     LD_LIBRARY_PATH="/opt/dynamo/lib" \
-    PATH="/opt/dynamo/venv/bin:/usr/local/bin/etcd:/usr/local/bin:/bin" \
+    PATH="/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:/usr/local/bin:/bin" \
     PYTHONPATH="/workspace/components/src:/workspace"
 
 WORKDIR /workspace

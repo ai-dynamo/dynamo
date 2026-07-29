@@ -927,6 +927,15 @@ pub struct ResponseParams {
     pub safety_identifier: Option<String>,
 }
 
+impl ResponseParams {
+    fn reasoning_summary_requested(&self) -> bool {
+        self.reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.summary)
+            .is_some()
+    }
+}
+
 /// Normalize tools so that `FunctionTool.strict` is always set.
 /// The upstream type uses `skip_serializing_if = "Option::is_none"` on `strict`,
 /// so `None` causes the field to be omitted during JSON serialization.
@@ -1007,6 +1016,7 @@ pub fn chat_completion_to_response(
         // Map reasoning_content to a Reasoning output item
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
+            && params.reasoning_summary_requested()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
@@ -2895,6 +2905,57 @@ thinking
             },
             nvext: None,
         }
+    }
+
+    fn make_chat_resp_with_reasoning(reasoning: &str) -> NvCreateChatCompletionResponse {
+        let mut response = make_chat_resp_with_text("answer");
+        response.inner.choices[0].message.reasoning_content = Some(reasoning.into());
+        response
+    }
+
+    #[test]
+    fn test_reasoning_summary_requires_explicit_request() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let unrequested = chat_completion_to_response(
+            make_chat_resp_with_reasoning("private reasoning"),
+            &ResponseParams::default(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            unrequested
+                .inner
+                .output
+                .iter()
+                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
+        );
+
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..Default::default()
+        };
+        let requested =
+            chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params, None)
+                .unwrap();
+        let reasoning = requested
+            .inner
+            .output
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("requested reasoning summary output");
+        assert_eq!(
+            reasoning.summary,
+            vec![SummaryPart::SummaryText(SummaryTextContent {
+                text: "summary".into(),
+            })]
+        );
     }
 
     #[test]
