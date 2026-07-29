@@ -11,10 +11,20 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups, one cache domain per framework):
-#   - Group 0 (vllm):                 vLLM
-#   - Group 1 (sglang):               SGLang
-#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
+# CACHE GROUPS (3 distinct groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (frameworks): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (dynamo):     dynamo runtime, planner, frontend,
+#                           operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):     TRT-LLM runtime / dev / efa      (cuda13.1 base)
+#
+# Groups follow the dynamo_base image tag rather than the framework, because
+# that is where the rendered Dockerfiles diverge -- manylinux_${ARCH},
+# wheel_builder_base and runtime_wheel_builder are shared by every build kind.
+# TRT-LLM is the only build on a different base, so pairing it with the general
+# builds (as the previous general-trt-combined group did) put the two heaviest
+# and least cache-compatible sets on the same third of the fleet. vLLM and
+# SGLang share a group because their build filters differ, so a dedicated pool
+# for either would idle whenever only the other changed.
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -30,17 +40,17 @@
 #
 # LOAD DISTRIBUTION (cksum-based, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
+# | Pods | Pool | G0: vLLM/SGLang   | G1: General       | G2: TRT-LLM         |
 # +------+------+-------------------+-------------------+---------------------+
-# |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {1}                 |
-# |  3   |  1   | {0}               | {2}               | {1}                 |
-# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
-# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
-# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
-# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
-# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
-# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
+# | 1    | 1    | {0}               | {0}               | {0}                 |
+# | 2    | 1    | {0}               | {1}               | {1}                 |
+# | 3    | 1    | {2}               | {0}               | {1}                 |
+# | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
+# | 5    | 2    | {4, 3}            | {2, 0}            | {1, 4}              |
+# | 6    | 2    | {5, 4}            | {2, 3}            | {1, 0}              |
+# | 7    | 3    | {5, 4, 0}         | {2, 3, 4}         | {1, 6, 4}           |
+# | 8    | 3    | {5, 4, 3}         | {2, 7, 0}         | {1, 6, 4}           |
+# | 9    | 3    | {5, 4, 3}         | {2, 7, 8}         | {1, 6, 0}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -187,17 +197,18 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("vllm" "sglang" "general-trt-combined")
+GROUP_KEYS=("frameworks" "dynamo" "trtllm")
 
-# Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
-# vLLM and SGLang each get a dedicated group; TRT-LLM and general builds share
-# the third.
+# Map a flavor to a group index (0, 1, or 2). One cache domain per dynamo_base
+# image tag: TRT-LLM builds on cuda13.1 and gets its own group; the cuda13.0
+# family is split so the vLLM/SGLang bursts do not queue behind the dynamo /
+# planner / frontend builds.
 flavor_to_group() {
   local flavor=$1
   case "$flavor" in
-    vllm)  echo 0 ;;
-    sglang) echo 1 ;;
-    trtllm|general|*) echo 2 ;;
+    vllm|sglang) echo 0 ;;
+    trtllm) echo 2 ;;
+    general|*) echo 1 ;;
   esac
 }
 
