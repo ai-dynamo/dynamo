@@ -292,6 +292,12 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  config:
+    server:
+      healthProbes:
+        # -- Enable Grove's webhook-aware liveness and readiness probes.
+        # The readiness endpoint stays false until certificates and the webhook server are ready.
+        enable: true
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.
