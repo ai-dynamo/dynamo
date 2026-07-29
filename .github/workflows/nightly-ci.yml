@@ -400,6 +400,7 @@ jobs:
         uses: ./.github/actions/setup-dynamo-operator
         with:
           vcluster_name: nightly-ci-${{ github.run_id }}
+          vcluster_namespace: nightly-ci-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
