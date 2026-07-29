@@ -888,7 +888,7 @@ impl VllmCore {
         // unchanged here. The waiting-admission policy owns terminal rejection
         // because that path can emit the lifecycle signal.
         let output_capacity_hint = self.output_capacity_hint(prompt_len, max_output_tokens);
-        let sequence = if self.args.g1_backend == G1Backend::Native {
+        let sequence = if self.args.resolved_g1_backend() == G1Backend::Native {
             ActiveSequence::new_flat_with_planned_output_ids(
                 request.tokens,
                 max_output_tokens,
@@ -1205,7 +1205,7 @@ impl VllmCore {
     #[cfg(feature = "kvbm-offload")]
     fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
         debug_assert_eq!(
-            self.args.g1_backend,
+            self.args.resolved_g1_backend(),
             G1Backend::Kvbm,
             "KVBM swap-in completion requires legacy sequence storage"
         );
