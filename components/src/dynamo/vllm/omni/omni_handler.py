@@ -342,7 +342,7 @@ class OmniHandler(BaseOmniHandler):
             inputs = await self.build_engine_inputs(
                 parsed_request, request_type, image=image
             )
-        except (ValueError, NotImplementedError) as e:
+        except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
             yield self._error_chunk(request_id, str(e), request_type)
             return
@@ -420,9 +420,9 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncIterator[Any]:
         """Yield engine outputs after atomically admitting a LoRA request.
 
-        For all adapter requests, holding the per-adapter lock through the first
-        result ensures that concurrent unload_lora cannot call remove_lora while
-        generation is in-flight. This is critical because:
+        Holds the per-adapter lock through retrieval of the first output to ensure
+        that concurrent unload_lora cannot call remove_lora while the adapter is
+        in use. This is critical because:
 
         - For lazy-activated adapters (PREFILL mode): Lock protects vLLM's lazy
           activation bookkeeping from being deleted during admission.
@@ -430,10 +430,19 @@ class OmniHandler(BaseOmniHandler):
           from removing an adapter while this request is actively using it, which
           could cause generation to fail or produce incorrect results.
 
+        **Performance Note**: For diffusion stages (image/video generation), the first
+        output is the complete result, so the lock is held for the entire generation
+        duration. This means concurrent image/video requests for the same adapter are
+        fully serialized, and unload_lora operations block until generation completes.
+        For LLM/text stages, the first output is one token, so the lock is released
+        much earlier and throughput is less impacted. This serialization is a
+        necessary trade-off to prevent undefined behavior when adapters are removed
+        during active generation.
+
         Pattern:
-        - Hold lock through first result to ensure safe admission
+        - Hold lock through first result to ensure safe admission and generation
         - Re-resolve adapter under lock in case it was unloaded while waiting
-        - Yield remaining results after lock is released
+        - Yield remaining results after lock is released (LLM only; diffusion completes first)
 
         Args:
             lora_request: Original LoRA request, or None for base model.
