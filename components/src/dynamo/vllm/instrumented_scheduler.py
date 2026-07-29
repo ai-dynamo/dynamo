@@ -3954,6 +3954,29 @@ class InstrumentedScheduler(AsyncScheduler):
                 if reason is not None and validation_failure is None:
                     validation_failure = (dp_rank, reason)
 
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                # Warmup replicas are best-effort scaffolding and must be
+                # discarded BEFORE the shape-validation skip: recording one
+                # as a skipped point would flip the published artifact to
+                # unusable/invalid (both gates require skipped_points == 0)
+                # even though every real measurement succeeded.
+                if validation_failure is not None:
+                    logger.warning(
+                        "Discarding eager-shape warmup result with mismatched "
+                        "shape on ADP rank %d: point=%s reason=%s",
+                        validation_failure[0],
+                        point,
+                        validation_failure[1],
+                    )
+                else:
+                    logger.debug("Discarding eager-shape warmup result: %s", point)
+                self._bench_current_point = None
+                self._bench_current_fpms = []
+                self._bench_point_deadline = 0.0
+                if group_result.stop_requested:
+                    self._bench_request_timeout_stop(point)
+                return
+
             if validation_failure is not None:
                 dp_rank, reason = validation_failure
                 logger.warning(
@@ -3964,15 +3987,6 @@ class InstrumentedScheduler(AsyncScheduler):
                     reason,
                 )
                 self._bench_skip_point(point, reason)
-                self._bench_current_point = None
-                self._bench_current_fpms = []
-                self._bench_point_deadline = 0.0
-                if group_result.stop_requested:
-                    self._bench_request_timeout_stop(point)
-                return
-
-            if EAGER_WARMUP_REASON in point.sample_reasons:
-                logger.debug("Discarding eager-shape warmup result: %s", point)
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0

@@ -3708,14 +3708,7 @@ def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
 
 
 def test_eager_warmup_points_dedupe_and_flag():
-    from types import SimpleNamespace
-
-    from dynamo.vllm.instrumented_scheduler import (
-        EAGER_WARMUP_REASON,
-        BenchmarkPoint,
-        InstrumentedScheduler,
-    )
-
+    EAGER_WARMUP_REASON = instrumented_scheduler_module.EAGER_WARMUP_REASON
     grid = [
         BenchmarkPoint(
             point_type="decode",
@@ -3767,3 +3760,33 @@ def test_eager_warmup_points_dedupe_and_flag():
     assert all(p.sample_reasons == [EAGER_WARMUP_REASON] for p in replicas)
     # originals untouched
     assert all(EAGER_WARMUP_REASON not in p.sample_reasons for p in grid)
+
+
+def test_warmup_replica_with_failed_validation_is_discarded_not_skipped():
+    """A warmup replica whose FPM fails shape validation must be discarded:
+    recording it in skipped_points would mark the whole artifact unusable
+    even though every real measurement succeeded."""
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=9,
+        total_kv_read_tokens=48,
+        batch_size=3,
+        sample_reasons=[instrumented_scheduler_module.EAGER_WARMUP_REASON],
+    )
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_decode_requests": 3,
+                    "sum_decode_kv_tokens": 47,  # mismatch -> validation failure
+                }
+            }
+        ],
+    )
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == []
+    assert stub._bench_current_point is None
