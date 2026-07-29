@@ -869,34 +869,15 @@ fn harvest_extra_files(
 mod self_host_metadata_default_tests {
     use super::*;
 
+    // parse_bool_opt owns the falsy/truthy vocabulary (tested in the `truthy`
+    // crate); here we only lock the default-on inversion this flag introduced:
+    // anything that isn't an explicit falsy token stays ON.
     #[test]
-    fn unset_defaults_on() {
-        // No env var -> feature is on by default.
-        assert!(self_host_metadata_default(None));
-    }
-
-    #[test]
-    fn explicit_falsy_opts_out() {
-        // Only the recognized falsy tokens (any case / surrounding whitespace)
-        // opt out.
-        for raw in ["0", "false", "no", "off", "FALSE", "Off", "  false  ", "NO"] {
-            assert!(
-                !self_host_metadata_default(Some(raw)),
-                "{raw:?} should disable self-hosting"
-            );
-        }
-    }
-
-    #[test]
-    fn truthy_and_unrecognized_stay_on() {
-        // Explicit truthy values and — by the inverted semantics — empty or
-        // unrecognized values keep the default-on behavior.
-        for raw in ["1", "true", "yes", "on", "", "  ", "garbage", "ture"] {
-            assert!(
-                self_host_metadata_default(Some(raw)),
-                "{raw:?} should keep self-hosting on"
-            );
-        }
+    fn defaults_on_unless_explicitly_falsy() {
+        assert!(self_host_metadata_default(None)); // unset
+        assert!(self_host_metadata_default(Some(""))); // empty
+        assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
+        assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
     }
 }
 
