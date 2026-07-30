@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_error_signal,
+    },
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -72,6 +75,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::ErrorObject;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -160,6 +164,14 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
+}
+
+fn responses_error_code(status_code: StatusCode) -> &'static str {
+    match status_code {
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
+        code if code.is_client_error() => "invalid_prompt",
+        _ => "server_error",
+    }
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -1554,6 +1566,8 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<(String, StatusCode)> {
+    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
+
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -1626,6 +1640,27 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 invalid_argument.message().to_string(),
                 StatusCode::BAD_REQUEST,
             ));
+        }
+
+        // Some adapter paths encode a typed backend error into the message of
+        // a generic DynamoError. Recover only the exact stable discriminator;
+        // unknown errors without it remain sanitized as 500s.
+        let serialized_invalid_argument = match event.error.as_ref() {
+            Some(error)
+                if matches!(
+                    error.error_type(),
+                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
+                ) =>
+            {
+                error
+                    .message()
+                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
+            }
+            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
+            _ => None,
+        };
+        if let Some(message) = serialized_invalid_argument {
+            return Some((message.to_string(), StatusCode::BAD_REQUEST));
         }
 
         return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
@@ -2664,6 +2699,8 @@ async fn responses(
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -2673,8 +2710,8 @@ async fn responses(
                 yield event.map_err(axum::Error::new);
             }
 
-            // Track whether the backend sent an error event during the stream.
-            let mut saw_error = false;
+            // Preserve the first backend error for the terminal Responses event.
+            let mut backend_error = None;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
                 process_chat_response_and_observe_metrics(
@@ -2683,8 +2720,16 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                if extract_backend_error_if_present(&annotated_chunk).is_some() {
-                    saw_error = true;
+                if let Some((error_msg, status_code)) =
+                    extract_backend_error_if_present(&annotated_chunk)
+                {
+                    let error_response = backend_error_response(error_msg, status_code);
+                    producer_error_signal
+                        .set(extract_error_type_from_response(&error_response));
+                    backend_error.get_or_insert_with(|| ErrorObject {
+                        code: responses_error_code(error_response.0).to_string(),
+                        message: error_response.1.message.clone(),
+                    });
                     continue;
                 }
 
@@ -2698,8 +2743,8 @@ async fn responses(
                 }
             }
 
-            if saw_error {
-                converter.append_error_events(&mut events);
+            if let Some(error) = backend_error {
+                converter.append_error_events(error, &mut events);
             } else {
                 converter.append_end_events(&mut events);
             }
@@ -2710,7 +2755,13 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_error_signal(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
