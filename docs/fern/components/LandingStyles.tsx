@@ -957,10 +957,23 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 }
 
 .dynamo-story-core,
+.dynamo-story-orbit .node {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(118, 185, 0, 0.4);
+  background: rgba(12, 18, 8, 0.94);
+  color: #d8f4aa;
+  box-shadow: 0 14px 30px rgba(18, 32, 0, 0.25);
+  font-family: RobotoMono, ui-monospace, monospace;
+}
+
 /* Orbit node positions. These modifiers are unprefixed in the markup
-   (`node node--k8s`), so they must travel with the orbit rules -- left in
+   (node node--k8s), so they must travel with the orbit rules -- left in
    main.css they are dropped by the production theme and the three labels
-   collapse to the container's static position. */
+   collapse to the container's static position. No backticks in here: this
+   comment sits inside the LANDING_CSS template literal, and a raw backtick
+   closes it. */
 .node--k8s {
   top: 3%;
   left: 50%;
@@ -973,17 +986,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 .node--local {
   bottom: 19%;
   left: -2%;
-}
-
-.dynamo-story-orbit .node {
-  position: absolute;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(118, 185, 0, 0.4);
-  background: rgba(12, 18, 8, 0.94);
-  color: #d8f4aa;
-  box-shadow: 0 14px 30px rgba(18, 32, 0, 0.25);
-  font-family: RobotoMono, ui-monospace, monospace;
 }
 
 .dynamo-story-core {
