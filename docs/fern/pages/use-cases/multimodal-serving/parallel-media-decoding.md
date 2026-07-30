@@ -18,12 +18,11 @@ vision encoding.
 
 | Input modality | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
-| Image | Agg | Agg | Agg, E/PD |
+| Image | Agg | Agg | Agg |
 | Video | Not supported | Not supported | Not supported |
 | Audio | Not supported | Not supported | Not supported |
 
-`Agg` refers to an aggregated worker. `E/PD` refers to a separate encode
-worker paired with a combined prefill and decode worker.
+`Agg` refers to an aggregated worker.
 
 This matrix describes parallel media decoding, not the overall multimodal
 support of each backend. A backend can support video or audio by decoding it on
