@@ -1,13 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import functools
 import logging
+import os
 import random
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
+from types import SimpleNamespace
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Optional,
+    Union,
+    cast,
+)
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -16,9 +29,22 @@ from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.utils.output_modalities import RequestType, parse_request_type
+from dynamo.common.rl import RLAdminValidationError
+from dynamo.common.utils.output_modalities import (
+    RequestType,
+    get_output_modalities,
+    parse_request_type,
+)
 from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.llm.exceptions import EngineShutdown
+from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
@@ -57,6 +83,7 @@ class EngineInputs:
     speed: float = 1.0
     response_format: str | None = None
     output_format: str | None = None
+    lora_request: LoRARequest | None = None
 
 
 class OmniHandler(BaseOmniHandler):
@@ -66,6 +93,86 @@ class OmniHandler(BaseOmniHandler):
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
+    @staticmethod
+    def _apply_lora_to_sampling_params(
+        sampling_params_list: list | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        """Attach LoRA to diffusion sampling params in-place.
+
+        AsyncOmni diffusion stages consume LoRA from OmniDiffusionSamplingParams.
+        The top-level generate(lora_request=...) argument is not sufficient for
+        diffusion-only paths.
+        """
+        if lora_request is None or sampling_params_list is None:
+            return
+
+        for sp in sampling_params_list:
+            if isinstance(sp, OmniDiffusionSamplingParams):
+                try:
+                    sp.lora_request = lora_request
+                except (AttributeError, TypeError) as exc:
+                    raise RuntimeError(
+                        "OmniDiffusionSamplingParams no longer exposes "
+                        "'lora_request'; cannot apply diffusion LoRA"
+                    ) from exc
+
+    def _resolve_and_apply_lora(
+        self,
+        model_name: str | None,
+        sampling_params_list: list | None,
+    ) -> LoRARequest | None:
+        lora_request = super()._resolve_lora_request(model_name)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        return lora_request
+
+    @staticmethod
+    def _extract_lora_name_from_request(request: Any) -> str | None:
+        """Best-effort LoRA name extraction for admin unload compatibility.
+
+        Accepts multiple request shapes used by compatibility aliases and
+        engine-update forwarding layers.
+
+        Note:
+            This is intentionally broader than the base helper
+            ``require_lora_unload_request`` (which expects canonical
+            ``lora_name``). Omni accepts common alias keys here to remain
+            compatible with multiple forwarding layers.
+        """
+        if not isinstance(request, dict):
+            return None
+
+        # Canonical body shape.
+        lora_name = request.get("lora_name")
+        if isinstance(lora_name, str) and lora_name:
+            return lora_name
+
+        # Compatibility shapes that may appear in alias forwarding.
+        for key in ("name", "adapter_name", "model"):
+            value = request.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+        return None
+
+    @staticmethod
+    def _local_path_from_uri(uri: str) -> str:
+        if uri.startswith("file://"):
+            return uri[len("file://") :]
+        return uri
+
+    @staticmethod
+    def _lora_error_payload(
+        lora_name: str, message: str, **extra: Any
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "status": "error",
+            "message": message,
+            "lora_name": lora_name,
+        }
+        payload.update(extra)
+        return payload
+
     def __init__(
         self,
         runtime,
@@ -74,6 +181,7 @@ class OmniHandler(BaseOmniHandler):
         shutdown_event: asyncio.Event | None = None,
         media_output_fs: Optional[DirFileSystem] = None,
         media_output_http_url: Optional[str] = None,
+        generate_endpoint=None,
     ):
         """Initialize the unified Omni handler.
 
@@ -95,6 +203,14 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self.generate_endpoint = generate_endpoint
+
+        # Keep parity with BaseWorkerHandler LoRA resolver contract.
+        self._served_model_name = config.served_model_name or config.model
+        self._served_model_aliases = tuple(
+            getattr(config, "served_model_aliases", ()) or ()
+        )
+        self.engine_args = SimpleNamespace(model=config.model)
 
         self.output_formatter = OutputFormatter(
             model_name=config.served_model_name or config.model,
@@ -109,6 +225,63 @@ class OmniHandler(BaseOmniHandler):
             engine_client=self.engine_client,
             media_output_fs=media_output_fs,
             media_output_http_url=media_output_http_url,
+        )
+
+    @functools.cached_property
+    def _lora_enabled(self) -> bool:
+        # Match non-Omni LoRA gating: engine must be started with LoRA support
+        # and the LoRA manager must be initialized.
+        return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
+            get_lora_manager() is not None
+        )
+
+    def _parse_lora_unload_request(self, request: Any) -> str:
+        # Keep broad key compatibility via _extract_lora_name_from_request,
+        # but preserve the shared validation contract by raising
+        # RLAdminValidationError when no valid LoRA name is provided.
+        lora_name = self._extract_lora_name_from_request(request)
+        if not lora_name:
+            raise RLAdminValidationError("'lora_name' is required in request")
+        return lora_name
+
+    async def _resolve_lora_source_path(self, lora_uri: str) -> tuple[bool, str]:
+        if lora_uri.startswith("file://"):
+            lora_path = self._local_path_from_uri(lora_uri)
+            if not os.path.exists(lora_path):
+                return False, f"Local LoRA path does not exist: {lora_path}"
+            return True, lora_path
+        return await super()._resolve_lora_source_path(lora_uri)
+
+    async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
+        if self.generate_endpoint is None:
+            logger.debug(
+                "Cannot publish LoRA '%s': generate_endpoint=%s",
+                lora_name,
+                self.generate_endpoint,
+            )
+            return
+
+        runtime_config = ModelRuntimeConfig()
+        model_type = get_output_modalities(
+            self.config.output_modalities,
+            self.config.model,
+        )
+        if model_type is None:
+            model_type = ModelType.Images
+
+        await register_model(
+            model_input=ModelInput.Text,
+            model_type=model_type,
+            endpoint=self.generate_endpoint,
+            model_path=self.config.model,
+            kv_cache_block_size=self.config.engine_args.block_size,
+            runtime_config=runtime_config,
+            user_data={"lora_adapter": True, "lora_id": lora_id},
+            lora_name=lora_name,
+            base_model_path=self.config.model,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+            max_gpu_lora_count=self._advertised_gpu_lora_capacity,
         )
 
     async def generate(
@@ -169,7 +342,7 @@ class OmniHandler(BaseOmniHandler):
             inputs = await self.build_engine_inputs(
                 parsed_request, request_type, image=image
             )
-        except (ValueError, NotImplementedError) as e:
+        except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
             yield self._error_chunk(request_id, str(e), request_type)
             return
@@ -180,32 +353,70 @@ class OmniHandler(BaseOmniHandler):
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+            # Note: For diffusion paths, lora_request is embedded in sampling_params_list
+            # and will be refreshed in create_generator under the admission lock.
+            # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
+        # Keep top-level LoRA only for paths that do not carry stage params.
+        if inputs.lora_request is not None and inputs.sampling_params_list is None:
+            generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
 
+        def update_previous_text(stage_output: Any, current: str) -> str:
+            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
+                stage_output, "request_output", None
+            ):
+                outputs = stage_output.request_output.outputs
+                if outputs:
+                    return outputs[0].text
+            return current
+
+        async def create_generator(
+            admitted_lora_request: LoRARequest | None,
+        ) -> AsyncIterator[Dict[str, Any]]:
+            nonlocal previous_text
+
+            per_request_kwargs = dict(generate_kwargs)
+            # Critical: Apply the re-resolved adapter under the admission lock.
+            # This ensures that if a hot-swap occurred between build time and lock
+            # acquisition, the freshly loaded adapter is used for generation.
+            # For diffusion paths, the adapter must be embedded in sampling_params_list
+            # because AsyncOmni diffusion stages read LoRA from the params, not from
+            # the top-level generate() argument.
+            if admitted_lora_request is not None:
+                if inputs.sampling_params_list is not None:
+                    # Diffusion path: update embedded LoRA in sampling params
+                    # This must happen BEFORE generate() is called to take effect
+                    self._apply_lora_to_sampling_params(
+                        inputs.sampling_params_list, admitted_lora_request
+                    )
+                else:
+                    # LLM path: set top-level lora_request for text generation
+                    per_request_kwargs["lora_request"] = admitted_lora_request
+
+            async for stage_output in self.engine_client.generate(**per_request_kwargs):
+                chunk = await self.output_formatter.format(
+                    stage_output,
+                    request_id,
+                    request_type=inputs.request_type,
+                    fps=inputs.fps,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    previous_text=previous_text,
+                    speed=inputs.speed,
+                )
+                previous_text = update_previous_text(stage_output, previous_text)
+                yield {"stage_output": stage_output, "formatted_chunk": chunk}
+
         async with self._abort_monitor(context, request_id):
             try:
-                async for stage_output in self.engine_client.generate(
-                    **generate_kwargs,
+                async for chunk in self._generate_with_lora_admission_lock(
+                    inputs.lora_request,
+                    create_generator,
+                    sampling_params_list=inputs.sampling_params_list,
                 ):
-                    chunk = await self.output_formatter.format(
-                        stage_output,
-                        request_id,
-                        request_type=inputs.request_type,
-                        fps=inputs.fps,
-                        response_format=inputs.response_format,
-                        output_format=inputs.output_format,
-                        previous_text=previous_text,
-                        speed=inputs.speed,
-                    )
-                    if chunk:
-                        # Track text state for streaming delta
-                        if (
-                            stage_output.final_output_type == "text"
-                            and stage_output.request_output
-                        ):
-                            previous_text = stage_output.request_output.outputs[0].text
-                        yield chunk
+                    if chunk and chunk.get("formatted_chunk"):
+                        yield chunk["formatted_chunk"]
 
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
@@ -213,6 +424,105 @@ class OmniHandler(BaseOmniHandler):
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e), inputs.request_type)
+
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
+        sampling_params_list: list | None = None,
+    ) -> AsyncIterator[Any]:
+        """Yield engine outputs after atomically admitting a LoRA request.
+
+        Lock behavior depends on the pipeline structure:
+
+        **Single-stage pipelines (pure LLM or pure diffusion)**:
+        - Hold lock through first output only
+        - Release lock, then stream remaining results (tokens) outside lock
+        - This optimization reduces lock contention for high-throughput text generation
+
+        **Multi-stage pipelines (e.g., image-via-chat with LLM + diffusion stages)**:
+        - Hold lock through entire generation
+        - All stages run inside the lock, ensuring the adapter is protected
+        - This is necessary because later stages (diffusion) still depend on the adapter
+          after the first stage (LLM) completes
+
+        This ensures that concurrent unload_lora cannot call remove_lora while the
+        adapter is in use. This is critical because:
+
+        - For lazy-activated adapters (PREFILL mode): Lock protects vLLM's lazy
+          activation bookkeeping from being deleted during admission.
+        - For preloaded adapters (AGGREGATED/DECODE mode): Lock prevents the engine
+          from removing an adapter while this request is actively using it, which
+          could cause generation to fail or produce incorrect results.
+
+        **Performance Note**: For single-stage diffusion (image/video generation),
+        the first output is the complete result, so the lock is held for the entire
+        generation duration. This means concurrent image/video requests for the same
+        adapter are fully serialized, and unload_lora operations block until
+        generation completes. For LLM/text stages, the first output is one token,
+        so (in single-stage LLM pipelines) the lock is released much earlier and
+        throughput is less impacted. For multi-stage pipelines with diffusion,
+        the lock must be held through all stages regardless of throughput impact,
+        to prevent undefined behavior.
+
+        Args:
+            lora_request: Original LoRA request, or None for base model.
+            create_generator: Factory that creates an async result iterator for
+                the admitted adapter.
+            sampling_params_list: The sampling params list from the request. Used to
+                detect multi-stage pipelines. If this list has multiple entries, the
+                entire generation is kept inside the lock. If None or single-entry,
+                the lock is released after the first output (optimization for LLM).
+        """
+        if lora_request is None:
+            # Base model: no lock needed
+            async for result in create_generator(lora_request):
+                yield result
+            return
+
+        # Hold lock through first result to prevent concurrent unload_lora from
+        # calling remove_lora while this request is in-flight. This applies to
+        # all adapter modes: lazy-activated (PREFILL) and preloaded (AGGREGATED).
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # Re-resolve adapter while holding lock; may have been unloaded/reloaded
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
+            if admitted_lora_request is None:
+                logger.warning(
+                    "LoRA adapter %s was unloaded before generation; "
+                    "rejecting the request",
+                    lora_request.lora_name,
+                )
+                raise ValueError(
+                    f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                )
+
+            generator = create_generator(admitted_lora_request)
+            try:
+                first_output = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+            yield first_output
+
+            # For multi-stage pipelines (e.g., LLM + diffusion), keep lock held
+            # for the entire generation. For single-stage, release lock for throughput.
+            is_multi_stage = (
+                sampling_params_list is not None and len(sampling_params_list) > 1
+            )
+            if is_multi_stage:
+                # Multi-stage: continue streaming inside the lock
+                async for result in generator:
+                    yield result
+                # Lock is released here when exiting the async with block
+            else:
+                # Single-stage: release lock early and stream remaining results outside
+                pass
+
+        # For single-stage pipelines, stream remaining results outside lock
+        if sampling_params_list is None or len(sampling_params_list) <= 1:
+            async for result in generator:
+                yield result
 
     async def build_engine_inputs(
         self,
@@ -281,11 +591,17 @@ class OmniHandler(BaseOmniHandler):
             prompt = OmniTextPrompt(prompt=text_prompt)
             sampling_params_list = None
 
+        lora_request = self._resolve_and_apply_lora(
+            request.get("model"),
+            sampling_params_list,
+        )
+
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
+            lora_request=lora_request,
         )
 
     @staticmethod
@@ -326,9 +642,6 @@ class OmniHandler(BaseOmniHandler):
             height=height,
             width=width,
         )
-
-        # TODO: Apply LoRA Request params here and move to shared utilities for disaggregated stages to use as well.
-
         self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
 
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
@@ -341,11 +654,15 @@ class OmniHandler(BaseOmniHandler):
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         )
 
+        sampling_params_list = self._build_sampling_params_list(sp)
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
+
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=self._build_sampling_params_list(sp),
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
+            lora_request=lora_request,
         )
 
     def _engine_inputs_from_video(
@@ -398,14 +715,22 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
 
+        sampling_params_list = self._build_sampling_params_list(sp)
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
+
         logger.info(
-            f"Video diffusion request: prompt='{req.prompt[:50]}...', "
-            f"size={width}x{height}, frames={num_frames}, fps={fps}"
+            "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
+            req.prompt[:50],
+            width,
+            height,
+            num_frames,
+            fps,
         )
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=self._build_sampling_params_list(sp),
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
+            lora_request=lora_request,
         )

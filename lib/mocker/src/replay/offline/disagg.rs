@@ -798,7 +798,7 @@ impl DisaggFlowState {
                 })?;
             debug_assert!(actual_output_tokens <= requested_output_tokens);
             let latencies = collector.request_latencies(signal.uuid);
-            traffic.on_request(input_tokens, actual_output_tokens, latencies);
+            traffic.on_completion(input_tokens, actual_output_tokens, latencies);
         }
         let terminal_status = if signal.rejected {
             ReplayTerminalStatus::Rejected
@@ -1629,13 +1629,15 @@ where
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<Uuid> {
-        self.flow.on_external_arrival(
+        let uuid = self.flow.on_external_arrival(
             request,
             arrival_time_ms,
             replay_hashes,
             session_id,
             &mut self.collector,
-        )
+        )?;
+        self.traffic.on_arrival();
+        Ok(uuid)
     }
 
     /// Return true once both stages, both routers, and all admissions are fully
