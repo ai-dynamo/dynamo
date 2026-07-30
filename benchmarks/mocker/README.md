@@ -55,7 +55,7 @@ process-global statics; the toggles are read once at session/callback build):
 - `python_opwalk`   — `+ DYNAMO_AIC_DISABLE_COMPILED_ENGINE=1`  → `PyAicCallback` + Python op-walk
 
 A discarded **warmup** replay amortises the one-time engine build
-(`build_aic_engine` → Python `compile_engine` + Rust parquet load) so the timed
+(`AicEngineBuilder::build` → Python `compile_engine` + Rust parquet load) so the timed
 runs isolate steady-state replay. Equivalence of replay metrics is asserted first
 (rel ≤ 1e-6); a divergence makes the speedup meaningless and fails the run.
 
