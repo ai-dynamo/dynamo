@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Fail on imports that make Fern shell out to rolldown during a docs build.
 
@@ -41,12 +41,15 @@ from pathlib import Path
 COMPONENTS = Path(__file__).resolve().parents[1] / "components"
 SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
-# Verbatim from fern-api's cli.cjs.
+# Verbatim from fern-api's cli.cjs. re.ASCII is not cosmetic: JavaScript's \w is
+# ASCII-only, Python's is Unicode-aware, so without it a Unicode letter sitting
+# directly against `import` is a word character here but not there — Fern would
+# bundle the file and this check would stay silent.
 SPECIFIER = re.compile(
     r"""(?:^|[^\w.])(?:import|export)\s+(?:[\w*\s{},$]*?from\s+)?["']([^"'\n]+)["']"""
     r"""|import\(\s*["']([^"'\n]+)["']\s*\)"""
     r"""|require\(\s*["']([^"'\n]+)["']\s*\)""",
-    re.MULTILINE,
+    re.MULTILINE | re.ASCII,
 )
 ALLOWLIST = {"react", "react-dom", "@mdx-js/react", "next"}
 
@@ -104,6 +107,14 @@ CASES: list[tuple[str, str, list[str]]] = [
     (
         "deduplicated",
         'import "@scope/pkg";\nimport { X } from "@scope/pkg";',
+        ["@scope/pkg"],
+    ),
+    # Pins re.ASCII. Without it Python treats the accented letter as a word
+    # character, [^\w.] fails to match, and the specifier is missed — while
+    # Fern, whose \w is ASCII-only, bundles the file.
+    (
+        "unicode letter against the import keyword",
+        'éimport { X } from "@scope/pkg";',
         ["@scope/pkg"],
     ),
 ]

@@ -94,13 +94,19 @@ jobs:
       # redefine this gate.
       run: |
         set -euo pipefail
-        COUNT=$(find components -type f \( -name '*.tsx' -o -name '*.ts' \) | wc -l)
+        # Same four suffixes Fern's bundler scans, and the same set
+        # docs/fern/scripts/check_component_imports.py covers. Keep them aligned.
+        find_components() {
+          find components -type f \
+            \( -name '*.tsx' -o -name '*.ts' -o -name '*.jsx' -o -name '*.js' \) "$@"
+        }
+        COUNT=$(find_components | wc -l)
         if [ "$COUNT" -eq 0 ]; then
           echo "::error::No component sources found under docs/fern/components"
           exit 1
         fi
         echo "Parsing $COUNT component sources"
-        find components -type f \( -name '*.tsx' -o -name '*.ts' \) -print0 \
+        find_components -print0 \
           | xargs -0 npx --yes esbuild@0.24.0 --outdir="$(mktemp -d)"
 
   fern-broken-links:
