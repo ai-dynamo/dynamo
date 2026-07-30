@@ -1302,16 +1302,15 @@ unsafe fn preprocess_request(
     let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
+    let encoding = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => preprocessor.tokenize_rendered_prompt(&prompt),
+        Ok(None) => preprocessor.tokenize(""),
         Err(e) => {
             tracing::error!(error = ?e, "Failed to apply chat template");
             return Err(QueryRouterResult::ErrQueryFailed);
         }
     };
-
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+    let encoding = match encoding {
         Ok(enc) => enc,
         Err(e) => {
             tracing::error!(error = ?e, "Failed to tokenize");
