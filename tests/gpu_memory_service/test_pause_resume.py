@@ -118,6 +118,7 @@ def test_gms_basic_pause_resume_vllm(
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(300)
 @pytest.mark.sglang
+@pytest.mark.pre_merge
 def test_gms_basic_pause_resume_sglang(
     request,
     runtime_services_dynamic_ports,

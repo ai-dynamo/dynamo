@@ -113,6 +113,23 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
+  sglang-gms-test:
+    name: sglang-gms-nightly
+    needs: [sglang-build]
+    if: inputs.build_sglang
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: GMS Nightly
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: nightly and pre_merge and sglang and gpu_1 and fault_tolerance
+      gpu_test_timeout_minutes: 45
+    secrets: inherit
+
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build]
