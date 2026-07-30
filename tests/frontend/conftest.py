@@ -343,7 +343,7 @@ class SampleBackendWorkerProcess(ManagedProcess):
 
     CPU-only Python reference engine that exercises the Backend SDK's
     `Worker.run()` path — the same code path real backends (vllm/trtllm/
-    sglang) go through. Useful for tests that need to validate the unified
+    sglang) go through. Useful for tests that need to validate the Backend SDK
     Worker/EngineAdapter pipeline without a GPU.
 
     Mirrors `MockerWorkerProcess` but uses the Backend SDK entry point. Accepts

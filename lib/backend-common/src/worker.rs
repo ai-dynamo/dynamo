@@ -1622,7 +1622,7 @@ async fn build_local_model(
 
     // Decode workers don't host the WorkerKvQuery endpoint, so they must not
     // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the legacy non-unified vLLM path (worker_factory.py).
+    // Mirrors the legacy vLLM path (worker_factory.py).
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
@@ -3092,7 +3092,7 @@ mod handoff_integration_tests {
             routes.get("update/load_lora").is_some(),
             "advertised update must be registered under update/<name>"
         );
-        // Bare (unprefixed) keys must NOT be registered by the unified Worker.
+        // Bare (unprefixed) keys must NOT be registered by the Backend SDK Worker.
         assert!(
             routes.get("start_profile").is_none(),
             "control must not be registered under its bare name"

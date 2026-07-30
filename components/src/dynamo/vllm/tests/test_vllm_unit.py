@@ -1494,7 +1494,7 @@ class TestForwardPassMetricsActivation:
     @pytest.mark.parametrize(
         ("overrides", "role", "fpm_trace_relay_supported"),
         [
-            ({}, "unified backend", False),
+            ({}, "Backend SDK", False),
             ({"embedding_worker": True}, "embedding", True),
             ({"headless": True}, "headless", True),
             (

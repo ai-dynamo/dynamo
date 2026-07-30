@@ -147,7 +147,7 @@ impl EngineAdapter {
 ///
 /// The runtime's `HealthCheckManager` fires canary requests as
 /// `SingleIn<serde_json::Value>` against whatever engine is registered for
-/// the endpoint name. The unified backend's network ingress operates on the
+/// the endpoint name. The Backend SDK's network ingress operates on the
 /// typed `PreprocessedRequest`, so we register this adapter alongside the
 /// network handler: it deserializes the JSON canary into `PreprocessedRequest`,
 /// hands it to the same `EngineAdapter`, and re-serializes the response.

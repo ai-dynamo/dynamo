@@ -329,7 +329,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///
     /// Engines advertise control keys and implement them via
     /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
-    /// owned by the unified backend layer.
+    /// owned by the Backend SDK layer.
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
@@ -353,7 +353,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// LoRA load/unload/list) rather than the engine's serving lifecycle.
     /// Keeping them separate avoids inflating the control surface. Engines
     /// advertise update keys and implement them via [`LLMEngine::engine_update`];
-    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    /// the Backend SDK maps each key onto an `/engine/update/{key}` route.
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }

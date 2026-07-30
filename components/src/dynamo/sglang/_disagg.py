@@ -7,7 +7,7 @@
 * :func:`compute_bootstrap_address` — resolve the `(host, port)` triple a
   prefill worker advertises to decode peers from a live `sgl.Engine`.
   Returns `(None, None)` on any failure so legacy callers can keep their
-  graceful-degradation behaviour; the unified path treats `None` as a
+  graceful-degradation behaviour; the Backend SDK treats `None` as a
   fatal configuration error and raises.
 
 * :func:`get_sglang_worker_group_id` — normalize the SGLang multinode
@@ -50,7 +50,7 @@ def compute_bootstrap_address(
     Returns `(None, None)` when the engine doesn't advertise a
     `disaggregation_bootstrap_port` or when address resolution raises.
     Caller decides whether `None` is fatal — legacy `register.py` treats
-    it as soft-skip; the unified path treats it as a fatal misconfig.
+    it as soft-skip; the Backend SDK treats it as a fatal misconfig.
     """
     # Deferred to function body so pre-commit test collection can import
     # `_disagg` without sglang installed.

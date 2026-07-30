@@ -954,7 +954,7 @@ pub(crate) struct KvEventPublisher {
 impl KvEventPublisher {
     /// Wrap an already-constructed Rust publisher as the Python pyclass.
     ///
-    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// Used by the Backend SDK bridge (`crate::backend`) so the Worker
     /// can hand a publisher built from a [`PushSource`] back to the Python
     /// engine without going through the Python-side `__init__` (which
     /// requires an `Endpoint` and rebuilds the publisher from scratch).
