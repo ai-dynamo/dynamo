@@ -95,6 +95,27 @@ impl SglangConfig {
             speculative_max_tokens: args.aic_nextn.map(|nextn| nextn + 1),
         }
     }
+
+    /// Storage reservation hint for output tokens that this worker can realize.
+    ///
+    /// Planned replay outputs keep their known length for allocation-free
+    /// appends. Online requests use SGLang's existing decode-reservation clip
+    /// so a large caller-declared limit does not eagerly size every queued
+    /// request to the whole KV pool.
+    pub(super) fn output_storage_hint(
+        &self,
+        prompt_len: usize,
+        max_output_tokens: usize,
+        has_planned_output: bool,
+    ) -> usize {
+        let realizable = self.total_kv_tokens.saturating_sub(prompt_len);
+        let requested = if has_planned_output {
+            max_output_tokens
+        } else {
+            max_output_tokens.min(self.clip_max_new_tokens)
+        };
+        requested.min(realizable)
+    }
 }
 
 pub(super) fn ceil_to_block(tokens: usize, block_size: usize) -> usize {

@@ -51,10 +51,10 @@ Only `model` is required; every other field has a default or is auto-detected.
     Output Sequence Length — expected average output tokens.
   </ParamField>
   <ParamField path="concurrency" type="number">
-    Target concurrency level. Required (or `requestRate`) when the planner is disabled.
+    Optional target concurrency level. Mutually exclusive with `requestRate`. When neither field is set and the Planner is disabled, the profiler uses its default maximum-throughput selection.
   </ParamField>
   <ParamField path="requestRate" type="number">
-    Target request rate in requests per second. Required (or `concurrency`) when the planner is disabled.
+    Optional target request rate in requests per second. Mutually exclusive with `concurrency`. When neither field is set and the Planner is disabled, the profiler uses its default maximum-throughput selection.
   </ParamField>
 </Indent>
 
@@ -63,10 +63,10 @@ Only `model` is required; every other field has a default or is auto-detected.
 </ParamField>
 
 <Indent>
-  <ParamField path="ttft" type="number">
+  <ParamField path="ttft" type="number" default="2000">
     Time To First Token target, in milliseconds.
   </ParamField>
-  <ParamField path="itl" type="number">
+  <ParamField path="itl" type="number" default="30">
     Inter-Token Latency target, in milliseconds.
   </ParamField>
   <ParamField path="e2eLatency" type="number">
@@ -421,7 +421,7 @@ These fields default from environment variables and are excluded from serialized
 </ParamField>
 
 <ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
-  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. No-op unless SSL verification is enabled. Must point to an existing file when set.
+  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
 </ParamField>
 
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
@@ -492,7 +492,7 @@ These fields default from environment variables and are excluded from serialized
 
 <Indent>
   <ParamField path="auth" type="AuthConfig">
-    Registry authentication. An empty `trusted_sources` fails closed (every token rejected).
+    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy compatibility fallback to unauthenticated access and logs a warning. This fallback is **DEV ONLY**; do not rely on it as an intentional configuration. Select `allow_unauthenticated` explicitly for development. Production deployments must configure `static_secret`.
   </ParamField>
   <Indent>
     <ParamField path="trusted_sources" type="[]string" default="[]">
@@ -528,10 +528,10 @@ These fields default from environment variables and are excluded from serialized
     Maximum accepted plugin protocol version.
   </ParamField>
   <ParamField path="heartbeat_timeout_seconds" type="number" default="15.0">
-    Seconds without a heartbeat before a plugin is considered missed.
+    Reserved liveness setting. Heartbeats update registry timestamps, but no monitor currently applies this timeout or evicts plugins automatically.
   </ParamField>
   <ParamField path="heartbeat_missed_threshold" type="integer" default="2">
-    Consecutive missed heartbeats before a plugin is dropped.
+    Reserved liveness setting. Automatic missed-heartbeat eviction is not currently wired.
   </ParamField>
   <ParamField path="in_process_plugins" type="[]InProcessPluginSpec" default="[]">
     In-process plugins loaded from Python modules at startup. See [InProcessPluginSpec](#inprocesspluginspec).
@@ -547,16 +547,20 @@ These fields default from environment variables and are excluded from serialized
 </Indent>
 
 <Note>
-  `spec.overrides.dgd` is not required to enable the Planner. Use `spec.features.planner` for Planner enablement and configuration; use `spec.overrides.dgd` only to customize the generated DGD after DGDR assembles it. For the deployment workflow, scaling-mode concepts, and cross-field validation rules, see the [Planner Configuration reference](../components/planner/planner-config-reference.mdx) and [Planner Guide](../components/planner/planner-guide.md).
+  `spec.overrides.dgd` is not required to enable the Planner. Use `spec.features.planner` for Planner enablement and configuration; use `spec.overrides.dgd` to customize profiler-generated benchmark deployments and the final DGD. For the deployment workflow, scaling-mode concepts, and cross-field validation rules, see the [Planner Configuration reference](../components/planner/planner-config-reference.mdx) and [Planner Guide](../components/planner/planner-guide.md).
 </Note>
 
 ## Generated DGD overrides
 
-`spec.overrides.dgd` is a partial, versioned DGD merged into the profiler-generated deployment after
-Dynamo selects a configuration. Use `apiVersion: nvidia.com/v1beta1` and
-`kind: DynamoGraphDeployment` for new overrides. Components, pod-template containers, and container
-environment variables merge by `name`; atomic lists such as graph-level `spec.env` and container
-`args` replace their generated values.
+`spec.overrides.dgd` is a partial, versioned DGD. It does not define or extend
+the profiler's candidate topology. Thorough profiling merges the override into
+each generated benchmark candidate before measurement and into the
+interpolation deployment. Every search strategy merges it into the final
+generated DGD. Use `apiVersion: nvidia.com/v1beta1` and
+`kind: DynamoGraphDeployment` for new overrides. Components, pod-template
+containers, and container environment variables merge by `name`; atomic lists
+such as graph-level `spec.env` and container `args` replace their generated
+values.
 
 For example, set an environment variable on one generated component:
 
@@ -652,14 +656,12 @@ The operator maintains observed state under `status`. See [Lifecycle](#lifecycle
 </ParamField>
 
 <ParamField path="status.profilingResults" type="ProfilingResultsStatus">
-  Output of the profiling process — Pareto-optimal configurations and the selected deployment configuration.
+  Output of the profiling process, including the selected deployment configuration.
 </ParamField>
 
 <Indent>
   <ParamField path="pareto" type="[]ParetoConfig">
-    Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.
-
-    See: [ParetoConfig](#paretoconfig)
+    Deprecated compatibility field retained for status objects written by older releases. The current controller does not populate it.
   </ParamField>
   <ParamField path="selectedConfig" type="runtime.RawExtension">
     Recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when `autoApply` is `true`.
@@ -691,7 +693,8 @@ Nested struct types referenced by the fields above, broken out here to keep the 
 
 ### ParetoConfig
 
-A single Pareto-optimal deployment configuration discovered during profiling. Referenced by `status.profilingResults.pareto`.
+Deprecated compatibility type for `status.profilingResults.pareto`. Current
+profiling runs do not populate this type.
 
 <ParamField path="config" type="runtime.RawExtension">
   Full deployment configuration for this Pareto point.
@@ -796,7 +799,7 @@ One static external-plugin registration under `features.planner.scheduling.exter
   Dot-paths into the pipeline context (for example `predictions`, `observations.traffic`) that must be set for the plugin to fire on a tick. Empty means no gating.
 </ParamField>
 <ParamField path="observation_window_seconds" type="number" default="0.0">
-  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds. Enforced to be greater than or equal to `scale_interval_seconds`.
+  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds and must be an integer multiple of `scale_interval_seconds`.
 </ParamField>
 
 ### InProcessPluginSpec
@@ -833,7 +836,7 @@ One in-process plugin under `features.planner.plugin_registration.in_process_plu
   Dot-paths into the pipeline context that must be set for the plugin to fire on a tick.
 </ParamField>
 <ParamField path="observation_window_seconds" type="number" default="0.0">
-  Aggregation window for windowed observation types in `needs`. Must be 0 or greater.
+  Aggregation window for windowed observation types in `needs`. Must be `0.0` or a positive integer multiple of `scale_interval_seconds`.
 </ParamField>
 <ParamField path="kwargs" type="object" default="{}">
   Keyword arguments passed to the plugin class constructor.
@@ -877,16 +880,13 @@ kubectl describe dgdr my-model -n $NAMESPACE
 kubectl get dgdr my-model -n $NAMESPACE -o jsonpath='{.status.profilingPhase}'
 
 # Profiling job logs
-kubectl get pods -n $NAMESPACE -l nvidia.com/dgdr-name=my-model
-kubectl logs -f <profiling-pod-name> -n $NAMESPACE
+PROFILING_JOB=$(kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingJobName}')
+kubectl logs -f "job/${PROFILING_JOB}" -c profiler -n "$NAMESPACE"
 
 # View generated DGD spec (when autoApply: false)
 kubectl get dgdr my-model -n $NAMESPACE \
   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
 
-# View Pareto-optimal configs from profiling
-kubectl get dgdr my-model -n $NAMESPACE \
-  -o jsonpath='{.status.profilingResults.pareto}'
 ```
 
 ### Resource ownership
@@ -897,7 +897,6 @@ kubectl get dgdr my-model -n $NAMESPACE \
 
 ## Known issues
 
-- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an engineering follow-up. Workaround: re-run with a narrower sweep; narrow sweeps bypass the NaN path in practice.
 - **PCIe profiler data not yet available.** See the PCIe callout under [SKU format](#sku-format).
 
 ## Related pages

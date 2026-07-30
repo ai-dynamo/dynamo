@@ -1,21 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: E402
-
 """Integration tests that exercise the real dynamo planner predictors and the
-densify-fixed trace->window tool. Skipped unless the ``dynamo`` extra is
-installed (Rust runtime + prophet/pmdarima/filterpy)."""
+densify-fixed trace->window tool in the planner test environment."""
 
 import json
 
 import pytest
 
-pytest.importorskip("dynamo.planner.core.load.predictors")
-pytest.importorskip("dynamo.planner.offline.trace_data")
-
 from aisimulate.spica import SmartSearchConfig, sweep_load_predictor
 from aisimulate.spica.load_predictor_sweep import build_windows
+
+# FilterPy 1.4.5 contains non-raw math docstrings that Python 3.12 reports while
+# importing the planner predictors.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:invalid escape sequence.*:SyntaxWarning"
+)
 
 
 def _trace(tmp_path, rows):
