@@ -30,20 +30,26 @@ service.
 
 ```mermaid
 flowchart LR
-  S[Dynamo Sidecar] -->|Discovery and Event planes| F[Dynamo Frontend]
-  F -->|Request plane<br/>Native gRPC| E[Inference Engine]
+  F[Dynamo Frontend]
+  subgraph W[Same host or Kubernetes pod]
+    direction TB
+    S[Dynamo Sidecar] <-->|Native gRPC| E[Inference Engine]
+  end
+  S -->|Discovery and Event planes| F
+  F -->|Request plane<br/>Native gRPC| E
 ```
 
 The frontend and router resolve the engine endpoint through discovery, then
 send requests directly to the engine. The sidecar stays off the request path
-and integrates the engine with Dynamo's discovery and event planes.
+and uses the engine's native gRPC service for metadata and event integration
+with Dynamo's discovery and event planes.
 
 ## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
 | Dynamo frontend and router | OpenAI-compatible API, preprocessing, routing, and direct native gRPC requests to the engine |
-| Dynamo sidecar | Engine registration and discovery, plus event forwarding |
+| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding over native gRPC |
 | Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Current Readiness

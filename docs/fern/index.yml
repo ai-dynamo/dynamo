@@ -138,6 +138,8 @@ navigation:
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.mdx
+          - page: Sidecar Backends (Experimental)
+            path: design-docs/sidecar-backends.md
           - page: Deploy with DGD
             path: kubernetes/dgd-guide.md
           - page: Expose the Frontend
