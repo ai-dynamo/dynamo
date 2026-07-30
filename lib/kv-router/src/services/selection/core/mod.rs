@@ -766,6 +766,7 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_id,
+            do_not_queue: false,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,

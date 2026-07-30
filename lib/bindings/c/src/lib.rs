@@ -506,6 +506,15 @@ impl RouterHandles {
                 strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
+                // TODO(c-binding-do-not-queue): the legacy CGO/Go EPP path has no
+                // way to request `do_not_queue` admission — the Go caller doesn't
+                // parse `nvext.do_not_queue`, and a `KvSchedulerError::DoNotQueue`
+                // returned here would need its own arm below (it currently isn't
+                // one) to avoid being misclassified as `ErrQueryFailed` instead of
+                // `ErrBackpressure`. Wiring this through requires an ABI change plus
+                // a Go-side change; the native Rust `ext-proc` EPP (`epp.rs`) is the
+                // supported path for this feature today.
+                false,
             )
             .await
             .map_err(|e| {
@@ -570,6 +579,10 @@ impl RouterHandles {
             None
         };
 
+        // TODO(c-binding-do-not-queue): `find_best_match_details` predates the
+        // `do_not_queue` admission flag and has no parameter for it — same gap as
+        // `query_prefill_worker` above. See that TODO for why this isn't wired up
+        // for the legacy CGO/Go EPP path in this PR.
         let outcome = self
             .decode_router
             .find_best_match_details(

@@ -142,6 +142,21 @@ pub enum FindBestMatchOutcome {
     },
 }
 
+#[derive(Debug, Default)]
+pub struct RoutingOptions {
+    pub lora_name: Option<String>,
+    pub cache_namespace: Option<String>,
+    pub priority_jump: f64,
+    pub strict_priority: u32,
+    pub policy_class: Option<String>,
+    pub session_id: Option<String>,
+    pub expected_output_tokens: Option<u32>,
+    pub pinned_worker: Option<WorkerWithDpRank>,
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    pub routing_constraints: RoutingConstraints,
+    pub do_not_queue: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkerCacheHitEstimate {
     pub effective_overlap_blocks: f64,
@@ -628,23 +643,24 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
-        self.find_best_match_details_with_policy_class(
+        self.find_best_match_details_with_options(
             context_id,
             tokens,
             block_mm_infos,
             router_config_override,
             update_states,
             return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            None,
-            None,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
+            RoutingOptions {
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -669,6 +685,41 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_options(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            RoutingOptions {
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_id,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_options(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        options: RoutingOptions,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         self.find_best_match_details_with_policy_class_inner(
             context_id,
             tokens,
@@ -676,16 +727,7 @@ where
             router_config_override,
             update_states,
             return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
+            options,
             false,
         )
         .await
@@ -701,21 +743,25 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         return_routing_hashes: bool,
-        lora_name: Option<String>,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        session_id: Option<String>,
-        expected_output_tokens: Option<u32>,
-        pinned_worker: Option<WorkerWithDpRank>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
+        options: RoutingOptions,
         track_lifecycle: bool,
     ) -> anyhow::Result<(
         FindBestMatchOutcome,
         Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     )> {
+        let RoutingOptions {
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            do_not_queue,
+        } = options;
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -826,6 +872,7 @@ where
                 strict_priority,
                 policy_class,
                 session_id,
+                do_not_queue,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -913,22 +960,45 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        self.find_best_match_with_options(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            RoutingOptions {
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                expected_output_tokens,
+                allowed_worker_ids,
+                routing_constraints,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_with_options(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        options: RoutingOptions,
+    ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let result = self
-            .find_best_match_details(
+            .find_best_match_details_with_options(
                 context_id,
                 tokens,
                 block_mm_infos,
                 router_config_override,
                 update_states,
                 false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                expected_output_tokens,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
+                options,
             )
             .await?;
         match result {
