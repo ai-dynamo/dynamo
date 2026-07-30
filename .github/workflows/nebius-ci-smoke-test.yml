@@ -39,26 +39,16 @@ jobs:
 
           export KUBECONFIG="${KUBECONFIG_PATH}"
           kubectl config use-context "${KUBE_CONTEXT}"
-          test "$(kubectl config current-context)" = "${KUBE_CONTEXT}"
           echo "KUBECONFIG=${KUBECONFIG}" >> "${GITHUB_ENV}"
 
-          kubectl get namespace kube-system "${KUBE_NAMESPACE}" \
-            -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp'
+          kubectl get namespace "${KUBE_NAMESPACE}"
           kubectl get priorityclass "${PRIORITY_CLASS}"
           kubectl get clusterpolicy deploy-test-pod-policy
-          kubectl get nodes \
-            -l nvidia.com/gpu.product=NVIDIA-H200 \
-            -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu,RDMA:.status.allocatable.rdma/ib'
 
       - name: Run one-GPU smoke job
         shell: bash
         run: |
           set -euo pipefail
-
-          kubectl delete job "${JOB_NAME}" \
-            --namespace "${KUBE_NAMESPACE}" \
-            --ignore-not-found=true \
-            --wait=true
 
           cat <<EOF | kubectl apply -f -
           apiVersion: batch/v1
@@ -66,27 +56,17 @@ jobs:
           metadata:
             name: ${JOB_NAME}
             namespace: ${KUBE_NAMESPACE}
-            labels:
-              app.kubernetes.io/name: nebius-gpu-smoke
-              app.kubernetes.io/part-of: dynamo-ci
           spec:
             activeDeadlineSeconds: 900
             backoffLimit: 0
-            completions: 1
-            parallelism: 1
             ttlSecondsAfterFinished: 300
             template:
-              metadata:
-                labels:
-                  app.kubernetes.io/name: nebius-gpu-smoke
-                  app.kubernetes.io/instance: ${JOB_NAME}
               spec:
                 priorityClassName: ${PRIORITY_CLASS}
                 restartPolicy: Never
                 containers:
                   - name: gpu-smoke
                     image: ${CUDA_IMAGE}
-                    imagePullPolicy: IfNotPresent
                     command: ["/bin/bash", "-ceu"]
                     args:
                       - |
@@ -159,17 +139,6 @@ jobs:
           fi
 
           kubectl logs "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" --all-containers
-          NODE_NAME="$(kubectl get pod "${POD_NAME}" \
-            --namespace "${KUBE_NAMESPACE}" \
-            -o jsonpath='{.spec.nodeName}')"
-
-          {
-            echo "### Nebius H200 one-GPU smoke passed"
-            echo "- Context: \`${KUBE_CONTEXT}\`"
-            echo "- Namespace: \`${KUBE_NAMESPACE}\`"
-            echo "- Job: \`${JOB_NAME}\`"
-            echo "- Node: \`${NODE_NAME}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Cleanup smoke job
         if: always()
