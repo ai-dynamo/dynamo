@@ -53,7 +53,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "6.0.2" }
+dynamo-parsers = { version = "7.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 

@@ -37,12 +37,11 @@ const (
 	DynamoComponentDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
 	// MainContainerName is the well-known name of the primary Dynamo workload
-	// container inside a component's `podTemplate.spec.containers`. The operator
-	// injects its defaults (image, command, env, ports, probes, resources,
-	// volume mounts) into this container. If no container with this name is
-	// present in the user-supplied `podTemplate`, the operator auto-generates
-	// it. Any other container in the `podTemplate` is treated as a user-managed
-	// sidecar.
+	// container inside a component's podTemplate.spec.containers. The
+	// podTemplate must include this container with a non-empty image. The
+	// operator injects its defaults (command, env, ports, probes, resources,
+	// volume mounts) into this container. Any other container in the
+	// podTemplate is treated as a user-managed sidecar.
 	MainContainerName = "main"
 )
 
@@ -98,22 +97,31 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
+	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
+	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
+	// example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
+	// not trigger a rollout.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
+
 	// globalDynamoNamespace places the component in the global Dynamo
 	// namespace rather than the per-deployment namespace derived from the
 	// DGD name.
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate is the pod template used to create the component's pods.
-	// The operator injects its defaults (image, command, env, ports, probes,
-	// resources, volume mounts) into the container named `"main"` inside
-	// `podTemplate.spec.containers`, merging user overrides by name. If no
-	// container named `"main"` is present, the operator auto-generates it
-	// with standard defaults. All other containers in `podTemplate.spec.containers`
-	// are treated as user-managed sidecars: the operator does not inject
-	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects pod templates where a
-	// non-`"main"` container is missing a required field such as `image`.
+	// podTemplate defines the component's Pod configuration. New components must
+	// include a container named "main" with a non-empty image. Existing components
+	// created without a podTemplate may remain unchanged. The operator merges
+	// defaults into the main container.
+	// For DGD components whose main image tag is not a Dynamo semantic version,
+	// set runtimeVersionOverride explicitly.
+	//
+	// All other containers are user-managed sidecars and must specify their
+	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 

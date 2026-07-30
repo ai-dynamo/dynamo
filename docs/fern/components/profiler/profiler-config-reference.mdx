@@ -65,7 +65,7 @@ This entry point profiles a single running endpoint. It is normally invoked by t
 </ParamField>
 
 <ParamField path="--max_kv_tokens" type="integer" default="0">
-  Maximum KV-cache tokens for the endpoint. Used only in `decode` mode to bound the KV-load sweep. `0` lets the profiler detect the limit.
+  Maximum KV-cache tokens for the endpoint. Used only in `decode` mode to bound the KV-load sweep. Decode profiling requires an explicit positive value; the default `0` is valid only for prefill mode and causes decode mode to fail validation.
 </ParamField>
 
 <ParamField path="--work_dir" type="string" default="endpoint_profiling_results/">

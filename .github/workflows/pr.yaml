@@ -992,6 +992,8 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true')
     runs-on: prod-default-v2
+    outputs:
+      image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1010,9 +1012,9 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
           extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
@@ -1042,6 +1044,8 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true')
     runs-on: prod-default-v2
+    outputs:
+      image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1060,9 +1064,9 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
           extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
@@ -1092,6 +1096,8 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true')
     runs-on: prod-default-v2
+    outputs:
+      image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1110,9 +1116,9 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
           extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
 
   # ============================================================================
   # DEPLOY TEST PIPELINES
@@ -1165,7 +1171,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1183,7 +1189,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime
+      image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1201,7 +1207,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1502,13 +1508,13 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=vllm
-            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Deploy Test
@@ -1568,13 +1574,13 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=sglang
-            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Deploy Test
@@ -1634,13 +1640,13 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=trtllm
-            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-cleanup:
     if: always()
