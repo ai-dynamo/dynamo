@@ -16,9 +16,9 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
-        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
+        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -410,7 +410,6 @@ where
             model_name.as_deref(),
             metric_worker_type,
             cancellation_token.child_token(),
-            Default::default(),
         )
         .await?;
 
@@ -689,7 +688,6 @@ where
             false,
         )
         .await
-        .map(|(outcome, _)| outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -712,10 +710,7 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         track_lifecycle: bool,
-    ) -> anyhow::Result<(
-        FindBestMatchOutcome,
-        Option<(RequestProgressUpdater, RequestLifecycleLease)>,
-    )> {
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -837,7 +832,7 @@ where
         {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
-                return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
+                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
@@ -878,21 +873,13 @@ where
             "find_best_match completed"
         );
 
-        debug_assert_eq!(
-            response.request_progress.is_some(),
-            response.lifecycle_lease.is_some()
-        );
-        let lifecycle = response.request_progress.zip(response.lifecycle_lease);
-        Ok((
-            FindBestMatchOutcome::Routed {
-                worker: response.best_worker,
-                overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                effective_overlap_blocks: response.effective_overlap_blocks,
-                cached_tokens: response.cached_tokens,
-                routing_hashes,
-            },
-            lifecycle,
-        ))
+        Ok(FindBestMatchOutcome::Routed {
+            worker: response.best_worker,
+            overlap_blocks: response.effective_overlap_blocks.round() as u32,
+            effective_overlap_blocks: response.effective_overlap_blocks,
+            cached_tokens: response.cached_tokens,
+            routing_hashes,
+        })
     }
 
     /// Give these tokens, find the worker with the best match in its KV cache.
@@ -1004,7 +991,6 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }

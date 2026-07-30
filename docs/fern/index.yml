@@ -137,6 +137,8 @@ navigation:
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.mdx
+          - page: Sidecar Backends (Experimental)
+            path: design-docs/sidecar-backends.md
           - page: Deploy with DGD
             path: kubernetes/dgd-guide.md
           - page: Expose the Frontend
@@ -165,7 +167,7 @@ navigation:
             path: kubernetes/inference-gateway.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: components/router/router-guide.md
+            path: components/router/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
@@ -287,7 +289,7 @@ navigation:
             path: cli/kv-routing.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: components/router/router-guide.md
+            path: components/router/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
@@ -420,13 +422,6 @@ navigation:
             path: reasoning/README.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
-      - section: Fastokens Tokenizer
-        collapsed: true
-        icon: gauge
-        path: features/tokenizer/README.md
-        contents:
-          - page: Overview
-            path: features/tokenizer/README.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -586,6 +581,8 @@ navigation:
                     path: design-docs/dynamo-flow.md
                   - page: Distributed Runtime
                     path: design-docs/distributed-runtime.md
+                  - page: Sidecar Backends (Experimental)
+                    path: design-docs/sidecar-backends.md
                   - page: Disaggregated Serving
                     path: design-docs/disagg-serving.md
               - section: Communication Planes
@@ -739,6 +736,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: backends/sglang/README.md
+                      - page: Sidecar
+                        path: backends/sglang/sidecar.md
                       - page: Reference Guide
                         path: backends/sglang/sglang-reference-guide.md
                       - page: Agents on SGLang
@@ -761,6 +760,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: backends/trtllm/README.md
+                      - page: Sidecar
+                        path: backends/trtllm/sidecar.md
                       - page: Reference Guide
                         path: backends/trtllm/trtllm-reference-guide.md
                       - page: Observability
@@ -775,6 +776,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: backends/vllm/README.md
+                      - page: Sidecar
+                        path: backends/vllm/sidecar.md
                       - page: Reference Guide
                         path: backends/vllm/vllm-reference-guide.md
                       - page: Chat Processor
@@ -852,6 +855,9 @@ navigation:
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: features/multimodal/custom-vision-encoder.md
+          - page: FastTokens Tokenizer
+            slug: fastokens-tokenizer
+            path: features/tokenizer/README.md
           - section: Writing Custom Backends
             contents:
               - page: Custom Backend Overview
@@ -919,7 +925,7 @@ navigation:
       - page: Compatibility
         path: reference/compatibility.mdx
       - page: Examples
-        path: getting-started/examples.md
+        path: reference/examples.md
       - page: Release Artifacts
         path: reference/release-artifacts.mdx
       - section: Releases

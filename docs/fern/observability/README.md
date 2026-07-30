@@ -57,6 +57,27 @@ kubectl get daemonset -A | grep node-exporter
 
 If you run a custom Prometheus instead of kube-prometheus-stack, deploy node-exporter separately as a DaemonSet.
 
+### PodMonitors created by the Dynamo chart
+
+Whether the platform chart creates PodMonitors is controlled by `dynamo-operator.dynamo.metrics.podMonitors.enabled`, which is tri-state:
+
+| Value | Behavior |
+|---|---|
+| `null` (default) | Auto-detect. Creates PodMonitors only when the prometheus-operator CRDs exist in the cluster, which requires a live cluster lookup and so works with `helm install` and `helm upgrade`. |
+| `true` | Always create. Use with `helm template` and GitOps workflows, where CRDs cannot be detected and auto-detect would silently create nothing. |
+| `false` | Never create, even when prometheus-operator is installed. |
+
+When enabled, the chart creates these PodMonitors:
+
+| PodMonitor | Selects | Scrapes |
+|---|---|---|
+| `dynamo-frontend` | `component-type: frontend` | port `http` (`/metrics`) |
+| `dynamo-worker` | `worker` / `decode` / `prefill` | port `system` (worker metrics), ports `system-0` / `system-1` when present (GMS shadow-failover), port `http` when present (frontend sidecar), and port `nixl` when `dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true` |
+| `dynamo-planner` | `component-type: planner` | port `metrics` |
+| `dynamo-router` | `component-type: default` | port 9090 (`DYN_SYSTEM_PORT`), addressed by relabeling rather than a named container port |
+
+Each endpoint matches on a named container port, so a pod that does not declare that port produces no scrape target for it rather than a failing one.
+
 ### DCGM exporter (GPU metrics)
 
 GPU-utilization panels are populated by [dcgm-exporter](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html). Check whether it is already running (the NVIDIA GPU Operator installs it as part of its monitoring components):

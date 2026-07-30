@@ -2449,6 +2449,7 @@ dependencies = [
  "hyper-util",
  "k8s-openapi",
  "kube",
+ "prometheus",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rcgen",

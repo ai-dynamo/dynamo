@@ -27,7 +27,7 @@ const HARDWARES: Option<Hardware>[] = [
 ];
 
 const BUILDS: Option<Build>[] = [
-  { id: "release", label: "Release image", sub: `Planner ${CURRENT_TAG}` },
+  { id: "release", label: "Dynamo release image", sub: CURRENT_TAG },
   { id: "custom", label: "Custom XPU image", sub: "build and push" },
 ];
 
@@ -69,7 +69,7 @@ function commandFor(hardware: Hardware, registry: string): string {
 
   return [
     `export DYNAMO_VERSION=${CURRENT_TAG}`,
-    'export PLANNER_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
+    'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
   ].join("\n");
 }
 
@@ -124,7 +124,7 @@ export function KubernetesContainerSelector() {
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
   const buildLabel = hardware === "intel"
     ? "Custom XPU runtime"
-    : "Published planner image";
+    : "Published Dynamo image";
   const registryNeeded = hardware === "intel";
   const canCopy = !registryNeeded || registryIsValid(registry);
 
@@ -186,7 +186,8 @@ export function KubernetesContainerSelector() {
                 placeholder="registry.example.com/my-team"
                 aria-invalid={!canCopy}
               />
-              {!canCopy && <p className="lqs-hint lqs-hint--error">Enter a lowercase Docker registry/namespace before copying.</p>}
+              <p className="lqs-hint">Use the registry/namespace where you can push the custom image.</p>
+              {!canCopy && <p className="lqs-hint lqs-hint--error">Enter a lowercase Docker registry/namespace to enable copy.</p>}
             </div>
           </div>
         )}
@@ -198,12 +199,14 @@ export function KubernetesContainerSelector() {
               <span className="lqs-badge">{build === "release" ? "Use" : "Build"}</span>
               {buildLabel}
             </div>
-            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU DGD image" : "DGDR planner image"}</div>
+            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU runtime image" : "DGDR planner image"}</div>
           </div>
           <div className="lqs-command">
-            <button type="button" className="lqs-copy" onClick={copyCommand} disabled={!canCopy}>
-              {canCopy ? copyLabel : "Add registry"}
-            </button>
+            {canCopy && (
+              <button type="button" className="lqs-copy" onClick={copyCommand}>
+                {copyLabel}
+              </button>
+            )}
             <pre>{command}</pre>
           </div>
         </div>

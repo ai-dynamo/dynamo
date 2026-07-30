@@ -23,6 +23,7 @@ const STATEMENTS = [
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
+const SLACK_URL = "http://ai-dynamo.org/slack";
 
 function RotatingStatement() {
   const [statementIndex, setStatementIndex] = useState(0);
@@ -113,7 +114,7 @@ function CommunityRail() {
     {
       app: "AI Dynamo Slack",
       message: "Join the Dynamo community",
-      href: "http://ai-dynamo.org/slack",
+      href: SLACK_URL,
       icon: <SlackIcon />,
       tone: "slack",
     },
@@ -195,12 +196,20 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
         aria-label="Get started with Dynamo"
       >
         <RotatingStatement />
-        <a className="dynamo-welcome__cta" href="/dynamo/dev/kubernetes">
-          Get started
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m9 18 6-6-6-6" />
-          </svg>
-        </a>
+        <div className="dynamo-welcome__actions">
+          <a className="dynamo-welcome__cta" href="/dynamo/dev/kubernetes">
+            Get started
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+          </a>
+          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={SLACK_URL} target="_blank" rel="noopener noreferrer">
+            Join Slack
+          </a>
+          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={CALENDAR_URL} target="_blank" rel="noopener noreferrer">
+            View calendar
+          </a>
+        </div>
       </section>
 
       <section
