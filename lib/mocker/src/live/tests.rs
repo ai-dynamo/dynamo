@@ -337,6 +337,7 @@ async fn stale_handoff_control_cannot_mutate_a_replacement_registration() {
         current_events.recv().await,
         Some(LiveHandoffEvent::DestinationReserved { .. })
     ));
+    drop(current_events);
 
     let error = stale_control.cancel_destination().await.unwrap_err();
     assert!(error.to_string().contains("earlier registration"));
@@ -345,6 +346,93 @@ async fn stale_handoff_control_cannot_mutate_a_replacement_registration() {
     assert_eq!(output.token_id, Some(43));
     assert!(output.completed);
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
+    for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let engine = LiveEngine::start_with_output_gate(
+            handoff_args(engine_type, WorkerType::Decode),
+            0,
+            Some(gate_rx),
+            2,
+        )
+        .unwrap();
+        let handoff_id = HandoffId::from(Uuid::new_v4());
+        let (old_control, mut old_events) = engine.register_handoff(handoff_id).unwrap();
+        let (old_registration, old_request) = engine
+            .prepare_request(DirectRequest {
+                tokens: vec![1, 2, 3, 4],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![42]),
+                uuid: Some(Uuid::new_v4()),
+                ..Default::default()
+            })
+            .unwrap();
+        old_control
+            .reserve_destination(old_registration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            old_events.recv().await,
+            Some(LiveHandoffEvent::DestinationReserved { .. })
+        ));
+        old_control.activate_destination().await.unwrap();
+
+        let mut metrics = engine.metrics_receiver();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if metrics.borrow().running_requests == 0 && metrics.borrow().waiting_requests == 0
+                {
+                    break;
+                }
+                metrics.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("old destination should finish before handoff ID reuse");
+        drop(old_events);
+        drop(old_control);
+
+        let (current_control, mut current_events) = engine.register_handoff(handoff_id).unwrap();
+        let (current_registration, mut current_request) = engine
+            .prepare_request(DirectRequest {
+                tokens: vec![5, 6, 7, 8],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![43]),
+                uuid: Some(Uuid::new_v4()),
+                ..Default::default()
+            })
+            .unwrap();
+        current_control
+            .reserve_destination(current_registration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            current_events.recv().await,
+            Some(LiveHandoffEvent::DestinationReserved { .. })
+        ));
+
+        drop(old_request);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while engine.active_request_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old request route should be removed");
+
+        current_control.activate_destination().await.unwrap();
+        gate_tx.send(true).unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(1), current_request.recv())
+            .await
+            .expect("replacement output timed out")
+            .expect("replacement output stream closed");
+        assert_eq!(output.token_id, Some(43));
+        assert!(output.completed);
+        engine.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

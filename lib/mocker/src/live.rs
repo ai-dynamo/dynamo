@@ -35,8 +35,8 @@ mod request;
 pub use handoff::{LiveHandoffControl, LiveHandoffEvent, LiveHandoffEvents};
 
 use handoff::{
-    HandoffRoutes, SharedHandoffRoutes, run_lifecycle_dispatcher, shutdown_handoff_routes,
-    supervise_lifecycle_dispatcher,
+    DestinationCancellation, HandoffRoutes, SharedHandoffRoutes, run_lifecycle_dispatcher,
+    shutdown_handoff_routes, supervise_lifecycle_dispatcher,
 };
 use request::{
     ObservedOutput, OutputDelivery, RequestCancellation, RequestRoute, RequestRoutes, Routes,
@@ -302,6 +302,11 @@ impl LiveEngine {
                 entry.insert(Arc::clone(&route));
             }
         }
+        if self.inner.cancel.is_cancelled() {
+            route.shutdown();
+            remove_route(&self.inner.routes, &route);
+            bail!("live Mocker engine is not running");
+        }
 
         let live = LiveRequest {
             client_id,
@@ -532,37 +537,39 @@ impl Drop for LiveRequestRegistration {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PreparedSubmission {
     Ordinary,
     Source(HandoffId),
-    Destination(HandoffId),
+    Destination(DestinationCancellation),
 }
 
 impl PreparedSubmission {
-    fn cancellation(self) -> RequestCancellation {
+    fn cancellation(&self) -> RequestCancellation {
         match self {
-            Self::Destination(handoff_id) => RequestCancellation::Destination(handoff_id),
+            Self::Destination(cancellation) => {
+                RequestCancellation::Destination(cancellation.clone())
+            }
             Self::Ordinary | Self::Source(_) => RequestCancellation::Request,
         }
     }
 
-    fn command(self, request: DirectRequest) -> SchedulerCommand {
+    fn command(&self, request: DirectRequest) -> SchedulerCommand {
         match self {
             Self::Ordinary => SchedulerCommand::Submit(request),
             Self::Source(handoff_id) => SchedulerCommand::SubmitHandoffPrefill {
-                handoff_id,
+                handoff_id: *handoff_id,
                 request,
             },
-            Self::Destination(handoff_id) => SchedulerCommand::ReserveDestination {
-                handoff_id,
+            Self::Destination(cancellation) => SchedulerCommand::ReserveDestination {
+                handoff_id: cancellation.handoff_id(),
                 request,
             },
         }
     }
 
     fn validate(
-        self,
+        &self,
         result: anyhow::Result<SchedulerCommandResult>,
         client_id: Uuid,
         scheduler_id: Uuid,
@@ -859,9 +866,7 @@ fn spawn_cancellation(
                 )
                 .await
             }
-            RequestCancellation::Destination(handoff_id) => {
-                cancel_destination(&command_tx, handoff_id).await
-            }
+            RequestCancellation::Destination(cancellation) => cancellation.cancel(&command_tx).await,
         };
         if route.finish_cancellation(&result) {
             remove_route(&routes, &route);
