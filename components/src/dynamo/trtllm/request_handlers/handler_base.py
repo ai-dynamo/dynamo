@@ -250,7 +250,7 @@ class RequestHandlerConfig:
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
-    disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    disagg_machine_id: int = 0  # TRT-LLM disagg request-id node/machine id.
     # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
     conversation_affinity: bool = False
 

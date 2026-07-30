@@ -66,6 +66,10 @@ def get_compatible_global_disagg_request_id(machine_id: int) -> int:
     return _trtllm_get_global_disagg_request_id(machine_id)
 
 
+def get_disagg_node_id(worker_id: int, node_id_modulus: int) -> int:
+    return int(worker_id) % node_id_modulus
+
+
 class DisaggregatedParamsCodec:
     """
     Codec for encoding and decoding disaggregated params for network transfer.
