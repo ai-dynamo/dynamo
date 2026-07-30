@@ -47,6 +47,8 @@ _collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey(
 _collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+_SUITE_MARKERS = {"pre_merge", "post_merge", "nightly"}
+_MACHINE_MARKERS = {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8"}
 
 
 def _is_xdist_worker(config: pytest.Config) -> bool:
@@ -645,6 +647,18 @@ def _check_sglang_mm_hashes_present(items) -> None:
         "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
         "will degrade to text-prefix fallback.",
     )
+
+
+def pytest_itemcollected(item):
+    """
+    Apply default suite/machine markers to unmarked tests so CI marker
+    expressions (e.g. ``-m 'pre_merge and gpu_0'``) include them
+    automatically. Runs per-item during collection, before pytest's marker filter.
+    """
+    if not any(item.get_closest_marker(m) for m in _SUITE_MARKERS):
+        item.add_marker(pytest.mark.pre_merge)
+    if not any(item.get_closest_marker(m) for m in _MACHINE_MARKERS):
+        item.add_marker(pytest.mark.gpu_0)
 
 
 @pytest.hookimpl(trylast=True)
