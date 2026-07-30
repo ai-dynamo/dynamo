@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.common.backend.disagg import (
+from dynamo.backend.disagg import (
     enforce_prefill_max_tokens,
     extract_prefill_result,
     require_prefill_result,

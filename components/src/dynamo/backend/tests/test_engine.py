@@ -17,13 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-    exc_type=ImportError,
-)
-
-from dynamo.common.backend.engine import (  # noqa: E402
+from dynamo.backend._engine import (
     DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     ForcedTokenSequenceSpec,
@@ -37,7 +31,7 @@ from dynamo.common.backend.engine import (  # noqa: E402
     resolve_test_logits_processor_spec,
     serialize_logits_processor_entries,
 )
-from dynamo.common.constants import DisaggregationMode  # noqa: E402
+from dynamo.common.constants import DisaggregationMode
 
 # NOTE: `dynamo.logits_processing.examples` pulls in torch, which is not a
 # base/common dependency, so it is imported lazily inside the one test that
@@ -45,7 +39,7 @@ from dynamo.common.constants import DisaggregationMode  # noqa: E402
 # non-framework env.
 
 # Framework-agnostic: routed to sample-unified-test via
-# `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
+# `pre_merge and gpu_0 and backend` (see test_engine.py module docstring).
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.unified,
@@ -318,7 +312,7 @@ def test_forced_sequence_processor_advances_through_sequence():
 
 
 def test_engine_usage_pattern(monkeypatch):
-    """Mirrors how a unified engine threads the spec entry layer:
+    """Mirrors how a Backend SDK engine threads the spec entry layer:
 
     1. In `from_args`: inline env check to flip the backend-specific
        skip-tokenizer-init flag (backend-shaped; no shared helper).

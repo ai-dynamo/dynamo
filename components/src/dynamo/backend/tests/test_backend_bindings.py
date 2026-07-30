@@ -4,7 +4,7 @@
 """Contract tests for the ``dynamo._core.backend`` PyO3 bindings.
 
 These tests verify the Rust → Python binding surface that
-``dynamo.common.backend.Worker`` delegates to. They DO NOT exercise the
+``dynamo.backend.Worker`` delegates to. They DO NOT exercise the
 full lifecycle (which would require etcd, NATS, and a running event
 loop) — that's covered by the Rust unit tests in
 ``lib/backend-common/src/worker.rs``. Here we just pin down the Python
@@ -12,7 +12,8 @@ constructor signatures and class identity so the shim in ``worker.py``
 can't silently drift from the Rust types.
 
 If the compiled extension hasn't been built (e.g. fresh checkout without
-``maturin develop``), every test in the module skips with a clear hint.
+``maturin develop``), the directory ``conftest.py`` skips this module during
+collection.
 """
 
 from __future__ import annotations
@@ -21,15 +22,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from dynamo._core import backend
+
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
-
-
-# Import-time skip: if the extension hasn't been built, all tests below
-# are skipped rather than crashing the collection phase.
-backend = pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-)
 
 
 def test_module_exposes_expected_classes():
@@ -120,7 +115,7 @@ def test_worker_config_accepts_parser_runtime_settings():
 
 
 def test_worker_config_accepts_media_configuration():
-    """Unified registration can advertise frontend media decoding."""
+    """Backend SDK registration can advertise frontend media decoding."""
     from dynamo.llm import MediaDecoder, MediaFetcher
 
     backend.WorkerConfig(
@@ -143,7 +138,7 @@ def test_worker_config_accepts_disaggregation_mode():
 
 @pytest.mark.unified
 def test_python_worker_config_from_runtime_config_copies_parser_settings():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
 
     runtime_cfg = MagicMock()
     runtime_cfg.namespace = "test"
@@ -180,7 +175,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
 
 @pytest.mark.unified
 def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_absent():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
 
     class _BareRuntime:
         namespace = "ns"
@@ -202,7 +197,7 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
 
 @pytest.mark.unified
 def test_python_worker_config_from_runtime_config_overrides_win():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
 
     class _WithComponent:
         namespace = "ns"
@@ -220,7 +215,7 @@ def test_python_worker_config_from_runtime_config_overrides_win():
 
 @pytest.mark.unified
 def test_python_worker_config_picks_up_disaggregation_mode_from_runtime_config():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
 
     class _Prefill:
@@ -237,7 +232,7 @@ def test_python_worker_config_picks_up_disaggregation_mode_from_runtime_config()
 
 @pytest.mark.unified
 def test_python_worker_config_falls_back_to_serving_mode_for_sglang():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
 
     class _Sglang:
@@ -256,7 +251,7 @@ def test_python_worker_config_falls_back_to_serving_mode_for_sglang():
 
 @pytest.mark.unified
 def test_python_worker_config_defaults_to_aggregated_when_runtime_lacks_mode():
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
 
     class _NoMode:
@@ -277,7 +272,7 @@ def test_python_worker_config_coerces_foreign_disaggregation_mode_enum_by_name()
     An explicit `disaggregation_mode=` override still wins."""
     import enum
 
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
 
     class _ForeignMode(enum.Enum):
@@ -307,7 +302,7 @@ def test_python_worker_config_coerces_foreign_disaggregation_mode_enum_by_name()
 def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
     """A non-enum or unrecognized name on `runtime_cfg.disaggregation_mode`
     raises TypeError so a typo-string can't silently degrade to AGG."""
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
 
     class _RuntimeWithStringMode:
         namespace = "ns"
@@ -323,10 +318,10 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
 @pytest.mark.unified
 def test_python_worker_config_translates_all_disagg_modes():
     """Every variant of dynamo.common.constants.DisaggregationMode must map
-    to a Rust binding value -- including ENCODE, which gained unified-path
+    to a Rust binding value -- including ENCODE, which gained Backend SDK
     support. Regression for the prior `NotImplementedError`
     behavior where ENCODE was rejected at translation time."""
-    from dynamo.common.backend.worker import _to_rust_disaggregation_mode
+    from dynamo.backend._worker import _to_rust_disaggregation_mode
     from dynamo.common.constants import DisaggregationMode
 
     rust_mode_for = {
@@ -345,7 +340,7 @@ def test_python_worker_config_round_trips_route_to_encoder():
     -> Rust pyclass without being silently dropped at any layer. vLLM is the
     only Python backend with the field today; SGLang/TRT-LLM get False via
     the getattr default until they add the field."""
-    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.backend._worker import WorkerConfig
 
     # Simulated vLLM-style runtime config that exposes the field.
     class _RuntimeWithRoute:

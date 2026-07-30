@@ -9,14 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-)
-
-from dynamo.common.backend.publisher import PushSource  # noqa: E402
-from dynamo.common.backend.sample_engine import SampleLLMEngine  # noqa: E402
-from dynamo.common.constants import DisaggregationMode  # noqa: E402
+from dynamo.backend import DisaggregationMode
+from dynamo.backend.publisher import PushSource
+from dynamo.sample_engine import SampleLLMEngine
 
 pytestmark = [
     pytest.mark.unit,

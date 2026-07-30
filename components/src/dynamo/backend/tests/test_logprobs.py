@@ -4,7 +4,7 @@
 """Tests for the shared logprob helpers.
 
 The legacy per-backend extraction logic moved into this module; these
-tests cover the contract directly so both the unified engines and the
+tests cover the contract directly so both the Backend SDK engines and the
 legacy handlers (which now delegate here) get verified at the same time.
 """
 
@@ -15,7 +15,7 @@ from typing import Optional
 
 import pytest
 
-from dynamo.common.backend.logprobs import (
+from dynamo.backend.logprobs import (
     DYN_SGL_ALLOW_TOP_LOGPROBS_ENV,
     build_sglang_logprob_kwargs,
     extract_from_completion_output,
@@ -411,9 +411,9 @@ def test_sglang_extract_returns_offset_unchanged_when_no_new_entries():
 
 
 # ---------------------------------------------------------------------------
-# Legacy ↔ unified behavioural parity corner cases.
+# Legacy ↔ backend behavioural parity corner cases.
 #
-# The legacy handlers and unified engines call the same shared helpers, so
+# The legacy handlers and Backend SDK engines call the same shared helpers, so
 # the call sites should produce byte-identical output for any given input.
 # The tests below simulate each engine's wire format and confirm parity by
 # driving both call patterns side-by-side.
@@ -433,7 +433,7 @@ def _vllm_legacy_call(output, num_so_far, tokenizer=None):
     )
 
 
-def _vllm_unified_call(output, tokenizer=None):
+def _vllm_backend_call(output, tokenizer=None):
     """Mirror of ``VllmLLMEngine.generate``'s per-chunk extraction.
     DELTA outputs always slice from offset 0."""
     return extract_from_completion_output(
@@ -459,7 +459,7 @@ def _trtllm_call(output, num_so_far):
 
 def test_parity_vllm_delta_vs_cumulative_yields_same_logprobs():
     """vLLM's legacy path slices a *cumulative* CompletionOutput with a
-    growing offset; the unified path receives DELTA chunks and slices
+    growing offset; the Backend SDK receives DELTA chunks and slices
     from offset 0. For an equivalent token stream both paths must emit
     the same flat list of logprobs."""
     cumulative_tokens = [7, 8, 9]
@@ -479,17 +479,17 @@ def test_parity_vllm_delta_vs_cumulative_yields_same_logprobs():
         if lp:
             legacy_flat.extend(lp)
 
-    unified_flat: list[float] = []
+    backend_flat: list[float] = []
     for i in range(len(cumulative_tokens)):
         output = SimpleNamespace(
             token_ids=[cumulative_tokens[i]],
             logprobs=[cumulative_logprobs[i]],
         )
-        lp, _ = _vllm_unified_call(output)
+        lp, _ = _vllm_backend_call(output)
         if lp:
-            unified_flat.extend(lp)
+            backend_flat.extend(lp)
 
-    assert legacy_flat == unified_flat == [-0.7, -0.8, -0.9]
+    assert legacy_flat == backend_flat == [-0.7, -0.8, -0.9]
 
 
 def test_parity_vllm_delta_vs_cumulative_yields_same_top_logprobs():
@@ -510,23 +510,23 @@ def test_parity_vllm_delta_vs_cumulative_yields_same_top_logprobs():
         if top:
             legacy_top.extend(top)
 
-    unified_top: list[list[dict]] = []
+    backend_top: list[list[dict]] = []
     for i in range(len(cumulative_tokens)):
         output = SimpleNamespace(
             token_ids=[cumulative_tokens[i]],
             logprobs=[cumulative_logprobs[i]],
         )
-        _, top = _vllm_unified_call(output)
+        _, top = _vllm_backend_call(output)
         if top:
-            unified_top.extend(top)
+            backend_top.extend(top)
 
-    assert legacy_top == unified_top
+    assert legacy_top == backend_top
     # Confirm `bytes` field is included on both paths (vLLM-specific).
     assert legacy_top[0][0]["bytes"] == list("a".encode("utf-8"))
 
 
 def test_parity_trtllm_extraction_is_idempotent_across_call_sites():
-    """TRT-LLM's legacy `_extract_logprobs` and the unified call use the
+    """TRT-LLM's legacy `_extract_logprobs` and the backend call use the
     same flags and same offset — confirm a representative payload
     produces byte-identical output through both call patterns."""
     output = SimpleNamespace(
@@ -540,21 +540,21 @@ def test_parity_trtllm_extraction_is_idempotent_across_call_sites():
     )
 
     legacy_log, legacy_top = _trtllm_call(output, num_so_far=0)
-    unified_log, unified_top = _trtllm_call(output, num_so_far=0)
+    backend_log, backend_top = _trtllm_call(output, num_so_far=0)
 
-    assert legacy_log == unified_log == [-0.7, -0.8, -1.9]
-    assert legacy_top == unified_top
-    # Confirm bytes NOT included on TRT-LLM (legacy & unified).
+    assert legacy_log == backend_log == [-0.7, -0.8, -1.9]
+    assert legacy_top == backend_top
+    # Confirm bytes NOT included on TRT-LLM (legacy & backend).
     assert "bytes" not in legacy_top[0][0]
 
 
 def test_parity_sglang_per_choice_offset_tracking_multi_choice():
-    """The unified SGLang generate() tracks `num_logprobs_per_choice` —
+    """The backend SGLang generate() tracks `num_logprobs_per_choice` —
     a dict keyed by output_idx. Without per-choice tracking, interleaved
     n>1 chunks would mis-slice each other's cumulative arrays. Simulate
     interleaved chunks for choice 0 and choice 1 and confirm each
     choice's logprobs are extracted correctly."""
-    # SGLang emits ONE cumulative array per choice. The unified engine
+    # SGLang emits ONE cumulative array per choice. The Backend SDK engine
     # receives chunks tagged with `index` and tracks an offset per index.
     # Sim: choice 0 emits 3 tokens, choice 1 emits 2, interleaved.
     choice_0_arrays = [
@@ -604,7 +604,7 @@ def test_parity_sglang_per_choice_offset_tracking_multi_choice():
 
 def test_parity_sglang_single_offset_misslices_under_n_gt_1():
     """Negative control for the bug we fixed: a *scalar* offset (the
-    pre-fix unified behaviour) would mis-slice when chunks for two
+    pre-fix backend behaviour) would mis-slice when chunks for two
     different choices are interleaved on the same offset cursor. This
     test exists so the regression is obvious if the per-choice dict
     ever gets simplified back into a scalar."""
@@ -646,7 +646,7 @@ def test_parity_parse_logprob_options_consistent_across_engines():
 
 
 def test_parity_sglang_kwargs_rejects_top_logprobs_consistently():
-    """Both legacy decode handler and unified engine call into
+    """Both legacy decode handler and Backend SDK engine call into
     `build_sglang_logprob_kwargs` with the env-derived gate. With the
     gate off, any `logprobs >= 1` (or `prompt_logprobs >= 1`) request
     must raise — regardless of which call site invoked it."""
@@ -763,7 +763,7 @@ def test_parity_sglang_legacy_kwargs_wrapper_matches_shared(monkeypatch):
 def test_parity_vllm_full_stream_byte_identical_top_logprobs():
     """Whole-stream parity: a 4-token generation with non-trivial top-k
     alternatives must emit byte-identical top_logprobs through both
-    legacy cumulative+offset and unified DELTA+0 paths."""
+    legacy cumulative+offset and backend DELTA+0 paths."""
     cumulative_tokens = [10, 20, 30, 40]
     # Each position has 3 alternatives — selected first, then two off-pol.
     cumulative_logprobs = [
@@ -800,25 +800,25 @@ def test_parity_vllm_full_stream_byte_identical_top_logprobs():
                 flat.extend(top)
         return flat
 
-    def _run_unified() -> list[list[dict]]:
-        # Unified: receives the DELTA chunk each step, offset always 0.
+    def _run_backend() -> list[list[dict]]:
+        # Backend: receives the DELTA chunk each step, offset always 0.
         flat: list[list[dict]] = []
         for i in range(len(cumulative_tokens)):
             output = SimpleNamespace(
                 token_ids=[cumulative_tokens[i]],
                 logprobs=[cumulative_logprobs[i]],
             )
-            _, top = _vllm_unified_call(output)
+            _, top = _vllm_backend_call(output)
             if top:
                 flat.extend(top)
         return flat
 
     legacy = _run_legacy()
-    unified = _run_unified()
+    backend = _run_backend()
 
     # Byte-identical comparison on the full structure: rank, token_id,
     # token, logprob, bytes are all included.
-    assert legacy == unified
+    assert legacy == backend
     assert len(legacy) == 4
     # Spot-check a representative entry.
     assert legacy[2] == [
@@ -874,23 +874,23 @@ def test_parity_vllm_with_none_position_mid_stream():
         if lp:
             legacy.extend(lp)
 
-    unified: list[float] = []
+    backend: list[float] = []
     for i in range(len(cumulative_tokens)):
         output = SimpleNamespace(
             token_ids=[cumulative_tokens[i]],
             logprobs=[cumulative_logprobs[i]],
         )
-        lp, _ = _vllm_unified_call(output)
+        lp, _ = _vllm_backend_call(output)
         if lp:
-            unified.extend(lp)
+            backend.extend(lp)
 
     # Both skip the None position (one fewer entry than tokens emitted).
-    assert legacy == unified == [-0.1, -0.3]
+    assert legacy == backend == [-0.1, -0.3]
 
 
 def test_parity_trtllm_selected_token_missing_fallback_consistent():
     """TRT-LLM fallback: when the engine doesn't include the selected
-    token in the logprob dict, both legacy and unified fall back to the
+    token in the logprob dict, both legacy and backend fall back to the
     first dict entry. Confirm the fallback is consistent across a
     multi-position stream where SOME positions hit the fallback."""
     output = SimpleNamespace(

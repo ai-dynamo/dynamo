@@ -11,24 +11,19 @@ from typing import Optional
 
 import pytest
 
-pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-)
-
-from dynamo._core import Context  # noqa: E402
-from dynamo.common.backend.engine import (  # noqa: E402
+from dynamo._core import Context
+from dynamo.backend._engine import (
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
 )
-from dynamo.common.backend.publisher import (  # noqa: E402
+from dynamo.backend.publisher import (
     ComponentSnapshot,
     PushSource,
     ZmqSource,
 )
-from dynamo.common.constants import DisaggregationMode  # noqa: E402
+from dynamo.common.constants import DisaggregationMode
 
 pytestmark = [
     pytest.mark.unit,
@@ -92,7 +87,7 @@ async def test_register_prometheus_default_is_noop():
 # metric extraction is covered by each backend's own unit tests.
 @pytest.mark.asyncio
 async def test_sample_engine_declares_dp_ranks_and_kv_event_source():
-    from dynamo.common.backend.sample_engine import SampleLLMEngine
+    from dynamo.sample_engine import SampleLLMEngine
 
     engine = SampleLLMEngine.__new__(SampleLLMEngine)
 
@@ -112,7 +107,7 @@ async def test_sample_engine_declares_dp_ranks_and_kv_event_source():
 def test_sample_engine_publish_loop_pushes_component_snapshot():
     """An idle publish tick pushes a ComponentSnapshot to the attached
     publisher — the same path real engines use to feed the snapshot gauge."""
-    from dynamo.common.backend.sample_engine import SampleLLMEngine
+    from dynamo.sample_engine import SampleLLMEngine
 
     engine = SampleLLMEngine.__new__(SampleLLMEngine)
     engine._kv_used_blocks = 25

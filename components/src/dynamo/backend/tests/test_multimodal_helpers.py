@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the unified-backend multimodal contract helpers.
+"""Tests for the Backend SDK multimodal contract helpers.
 
 Pin the wire shape: extract_multimodal_kwargs omits absent/None-valued
 keys (but passes through empty dicts), encoder_terminal_chunk produces
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.common.backend.multimodal import (
+from dynamo.backend.multimodal import (
     encoder_terminal_chunk,
     extract_multimodal_kwargs,
     require_encoder_result,

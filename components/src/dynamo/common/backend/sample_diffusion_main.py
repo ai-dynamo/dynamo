@@ -1,19 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Entry point for the sample diffusion backend (CPU-only).
-
-Usage:
-    python -m dynamo.common.backend.sample_diffusion_main --model-name sample-diffusion-model
-"""
-
-from dynamo.common.backend.run import run
-from dynamo.common.backend.sample_diffusion_engine import SampleDiffusionEngine
-
-
-def main():
-    run(SampleDiffusionEngine)
-
+"""Back-compat shim -> `dynamo.sample_engine.diffusion_main`. Removed in the follow-up migration commit."""
+from dynamo.sample_engine.diffusion_main import main
 
 if __name__ == "__main__":
     main()

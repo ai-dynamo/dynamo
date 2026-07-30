@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Behavioural tests for engine-facing helpers in
-``dynamo.common.backend.metrics``."""
+``dynamo.backend.metrics``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 from prometheus_client import CollectorRegistry, Gauge
 
-from dynamo.common.backend.metrics import gather_with_labels, register_global_registry
+from dynamo.backend.metrics import gather_with_labels, register_global_registry
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 

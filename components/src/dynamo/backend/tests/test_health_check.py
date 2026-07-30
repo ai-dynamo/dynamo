@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from dynamo.common.backend.health_check import (
+from dynamo.backend.health_check import (
     HEALTH_CHECK_KEY,
     bos_token_id_or,
     build_health_check_payload,

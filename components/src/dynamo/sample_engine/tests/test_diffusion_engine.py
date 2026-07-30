@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Conformance tests for the raw-media (DiffusionEngine) pipeline, driven by
-the CPU-only ``SampleDiffusionEngine``. Mirrors ``test_sample_engine.py`` for
+the CPU-only ``SampleDiffusionEngine``. Mirrors ``test_engine.py`` for
 the token path: it pins the structural guarantees a ``RawEngine`` must hold
 (``EngineConfig.llm is None``, raw dict-in/dict-out, ``RawEngine`` identity for
 adapter routing) without a GPU or model."""
@@ -13,17 +13,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-)
-
-from dynamo.common.backend.engine import RawEngine  # noqa: E402
-from dynamo.common.backend.health_check import is_probe  # noqa: E402
-from dynamo.common.backend.sample_diffusion_engine import (  # noqa: E402
-    SampleDiffusionEngine,
-)
-from dynamo.llm import ModelInput  # noqa: E402
+from dynamo.backend import RawEngine
+from dynamo.backend.health_check import is_probe
+from dynamo.llm import ModelInput
+from dynamo.sample_engine import SampleDiffusionEngine
 
 pytestmark = [
     pytest.mark.unit,

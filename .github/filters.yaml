@@ -115,6 +115,8 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/backend/**'
+  - 'components/src/dynamo/sample_engine/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
@@ -219,6 +221,7 @@ trtllm:
 # that are specific to the sample backend.
 sample:
   - 'examples/backends/sample/**'
+  - 'components/src/dynamo/sample_engine/**'
   - '!**/*.md'
   - '!**/*.rst'
 

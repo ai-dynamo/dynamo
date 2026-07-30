@@ -1,20 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the shared unified-backend runner."""
+"""Unit tests for the shared Backend SDK runner."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytest.importorskip(
-    "dynamo._core.backend",
-    reason="dynamo._core.backend not built — run `maturin develop` first",
-    exc_type=ImportError,
-)
-
-import dynamo.common.backend.run as run_module  # noqa: E402
-from dynamo.common.backend.worker import WorkerConfig  # noqa: E402
+import dynamo.backend._run as run_module
+from dynamo.backend._worker import WorkerConfig
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 

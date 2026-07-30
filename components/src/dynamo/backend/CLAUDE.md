@@ -108,13 +108,13 @@ Python engine authors keep the split API.)
   `Worker` or a shared utility, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
-  entry points remain untouched. The `common/backend/` entry points (e.g.
-  `sample_main.py`) are a separate path. Do not break or modify existing
+  entry points remain untouched. The unified `dynamo.backend` entry points (e.g.
+  `dynamo.sample_engine`) are a separate path. Do not break or modify existing
   backends when changing this module.
 
 ## Request / Response Contract
 
-`GenerateRequest` and `GenerateChunk` (`engine.py`) are `TypedDict`s that
+`GenerateRequest` and `GenerateChunk` (`_engine.py`) are `TypedDict`s that
 type the `generate()` signature.  `GenerateRequest` has `token_ids`
 (required) plus optional `sampling_options`, `stop_conditions`, and
 `output_options`.  `GenerateChunk` has `token_ids` and `index` (both
@@ -136,9 +136,12 @@ TRT-LLM is under development.
 1. Create `<backend>/<backend>_engine.py` subclassing `LLMEngine`
 2. Implement `from_args()`, `start()`, `generate()`, `cleanup()` (required)
    and `abort()` (optional)
-3. `from_args()` must parse args and return `(engine, WorkerConfig)`
+3. `from_args()` must parse args and return `(engine, WorkerConfig)`. Call
+   `add_worker_args(parser)` for the shared runtime/discovery flags and
+   `build_worker_config(args, model_name=...)` to assemble the `WorkerConfig` —
+   declare only engine-specific flags yourself.
 4. Create `<backend>/<backend>_main.py` calling `run(<YourEngine>)`
-5. Use `sample_engine.py` as the reference implementation
+5. Use `dynamo.sample_engine` (`engine.py`) as the reference implementation
 
 ## Disaggregated Serving
 
@@ -193,7 +196,7 @@ and `require_prefill_result` — small helpers backends call from inside
 not abstractions; backends free to inline the logic when their generate
 path is shaped differently.
 
-The sample engine (`sample_engine.py`) implements the full dispatch in
+The sample engine (`dynamo.sample_engine`) implements the full dispatch in
 pure Python with synthetic handoff payloads — useful as a reference
 when wiring a new backend, and as a CPU-only smoke test for the
 disaggregated wire format (`examples/backends/sample/launch/disagg.sh`).
@@ -254,7 +257,7 @@ pass, KV transfer) nest under the framework's `engine.generate` span. Splat
 `telemetry.engine_trace_kwargs(context)` into the inference-engine call:
 
 ```python
-from dynamo.common.backend import telemetry
+from dynamo.backend import telemetry
 
 # vLLM / TRT-LLM: default kwarg name `trace_headers`, unconditional
 gen = self.engine_client.generate(
@@ -292,17 +295,34 @@ forwarding, the trace_id reaches the worker but never reaches the
 inference engine — the trace tree shows a gap where the engine's internal
 spans should be.
 
+## Package Structure
+
+This package **is** the public `dynamo.backend` SDK. `__init__.py` re-exports
+the committed, semver-stable surface (`LLMEngine`, `RawEngine`,
+`DiffusionEngine`, `EngineConfig`, `LlmRegistration`,
+`GenerateRequest`/`GenerateChunk`, `Worker`/`WorkerConfig`, `add_worker_args`,
+`build_worker_config`, `run`, `Context`, `DisaggregationMode`); import it from
+the package root. The advanced helper
+modules (`publisher`, `telemetry`, `disagg`, `multimodal`, `logprobs`,
+`metrics`, `dp_rank`, `health_check`) are real submodules —
+`dynamo.backend.<name>` — available for richer backends but not yet frozen. The
+private `_engine` / `_worker` / `_run` submodules hold the implementation;
+import from the root, never from those. Logits-processor serialization
+internals (`serialize/deserialize_logits_processor_entries`,
+`is_generation_stage`) and `_to_rust_disaggregation_mode` live in `_engine` /
+`_worker` — framework plumbing, below the author contract.
+`tests/test_facade.py` pins the re-exports by identity.
+
 ## Key Files
 
 | File | What it does |
 |------|-------------|
-| `engine.py` | `BaseEngine` lifecycle ABC + `LLMEngine` / `RawEngine` modality subclasses (`DiffusionEngine` is a `RawEngine` subclass) -- the interface engines implement. |
+| `_engine.py` | `BaseEngine` lifecycle ABC + `LLMEngine` / `RawEngine` modality subclasses (`DiffusionEngine` is a `RawEngine` subclass) -- the interface engines implement. |
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
-| `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
-| `run.py` | Common entry point -- `run(engine_cls)` used by each backend's main (e.g. `sample_main.py`) |
+| `_worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
+| `_run.py` | Common entry point -- `run(engine_cls)` used by each backend's main (e.g. `dynamo/sample_engine/main.py`) |
 | `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). The backend request handlers delegate here. |
-| `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:
   - Lifecycle state machine (Init → Running → Stopped)

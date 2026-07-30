@@ -1,33 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from . import telemetry
-from .engine import (
-    BaseEngine,
-    DiffusionEngine,
-    EngineConfig,
-    GenerateChunk,
-    GenerateRequest,
-    LLMEngine,
-    LlmRegistration,
-    RawEngine,
-    RawRequest,
-    RawResponseChunk,
-)
-from .worker import Worker, WorkerConfig
+"""Back-compat shim: `dynamo.common.backend` moved to `dynamo.backend`.
 
-__all__ = [
-    "BaseEngine",
-    "DiffusionEngine",
-    "EngineConfig",
-    "GenerateChunk",
-    "GenerateRequest",
-    "LLMEngine",
-    "LlmRegistration",
-    "RawEngine",
-    "RawRequest",
-    "RawResponseChunk",
-    "Worker",
-    "WorkerConfig",
-    "telemetry",
-]
+Removed in the follow-up migration commit. Import from `dynamo.backend` instead;
+submodules (`engine`, `worker`, `run`, `publisher`, ...) alias to their new homes.
+"""
+from dynamo.backend import *  # noqa: F401,F403

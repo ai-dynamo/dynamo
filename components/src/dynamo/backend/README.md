@@ -9,14 +9,14 @@ guided decoding / structural tag.
 > **Work in progress.** Multimodal support is backend-specific: vLLM supports
 > aggregated and prefill/decode image and video inference, while separate
 > encode workers and SGLang / TRT-LLM multimodal execution remain on their
-> non-unified paths. Diffusion (image/video/DLLM),
+> legacy paths. Diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
-> text-in-text-out, and snapshot/CRIU are still on the non-unified
+> text-in-text-out, and snapshot/CRIU are still on the legacy
 > path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> [Writing a Backend with the Backend SDK](../../../../docs/development/backend-sdk.md)
 > guide and choose the Python tab. This README is the in-tree reference:
 > file layout, per-engine cancellation cookbook, disaggregation contract,
 > error-handling table, and the feature-gap matrix.
@@ -24,10 +24,17 @@ guided decoding / structural tag.
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
+> **This package is the public SDK.** Import the committed surface from the
+> root — `from dynamo.backend import LLMEngine, EngineConfig, run, Context, …` —
+> and the advanced helpers as `dynamo.backend.<name>` (`publisher`, `telemetry`,
+> `disagg`, `multimodal`, `logprobs`, `metrics`, `dp_rank`, `health_check`). The
+> `_engine` / `_worker` / `_run` submodules are private implementation; import
+> from the package root, not from those.
+
 ## Architecture
 
 ```text
-LLMEngine (ABC)                <-- engine boundary (engine.py)
+LLMEngine (ABC)                <-- engine boundary (_engine.py)
     |   - from_args(argv) -> (LLMEngine, WorkerConfig)  (factory)
     |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
     |   - generate(request, context)         (streaming inference)
@@ -38,9 +45,9 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
     +-- SglangLLMEngine        <-- sglang/llm_engine.py
     +-- TrtllmLLMEngine        <-- trtllm/llm_engine.py
-    +-- SampleLLMEngine        <-- sample_engine.py
+    +-- SampleLLMEngine        <-- sample_engine/engine.py
 
-Worker                  <-- runtime integration (worker.py)
+Worker                  <-- runtime integration (_worker.py)
     - receives WorkerConfig from from_args()
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
@@ -54,7 +61,7 @@ Worker                  <-- runtime integration (worker.py)
 ### Running the sample engine
 
 ```bash
-python -m dynamo.common.backend.sample_main \
+python -m dynamo.sample_engine \
     --model-name test-model \
     --namespace dynamo \
     --component sample \
@@ -70,7 +77,7 @@ dependencies.
 Subclass `LLMEngine` and implement the required methods:
 
 ```python
-from dynamo.common.backend import LLMEngine, EngineConfig, LlmRegistration, WorkerConfig
+from dynamo.backend import LLMEngine, EngineConfig, LlmRegistration, WorkerConfig
 
 class MyEngine(LLMEngine):
     @classmethod
@@ -122,14 +129,14 @@ Then create an entry point:
 
 ```python
 # my_backend/my_backend_main.py
-from dynamo.common.backend.run import run
+from dynamo.backend import run
 from my_backend.my_backend_engine import MyEngine
 
 def main():
     run(MyEngine)
 ```
 
-See `sample_engine.py` for a complete, runnable reference implementation.
+See `dynamo/sample_engine/engine.py` for a complete, runnable reference implementation.
 The sample engine includes synthetic multimodal handling for aggregated and
 Encode/Prefill/Decode deployments. CPU-only direct worker-handoff smokes live in
 `examples/backends/sample/launch/multimodal_agg.sh` and
@@ -139,7 +146,7 @@ the frontend and do not claim frontend routing coverage.
 
 ## Request / Response Types
 
-`GenerateRequest` and `GenerateChunk` (defined in `engine.py`) are
+`GenerateRequest` and `GenerateChunk` (defined in `_engine.py`) are
 `TypedDict`s that document the shared fields across all engines.
 
 ```python
@@ -223,7 +230,7 @@ from dynamo.llm.exceptions import (
 
 ## Disaggregated Serving
 
-The unified path supports the canonical PD-disagg roles via a single
+The Backend SDK supports the canonical PD-disagg roles via a single
 `--disaggregation-mode` flag. The mode flows from CLI → `WorkerConfig` →
 the Rust `Worker`, which uses it to decide model registration
 (`ModelType::empty()` + `WorkerType::Prefill` for prefill workers, the
@@ -260,7 +267,7 @@ Each backend's protocol is different:
 The sample backend implements the full disagg dispatch in pure Python
 with synthetic handoff payloads — no real KV transfer, but the wire
 format is exercised end-to-end. This makes it a fast CI smoke test for
-the unified path:
+the Backend SDK:
 
 ```bash
 examples/backends/sample/launch/disagg.sh
@@ -272,7 +279,7 @@ worker; the frontend's `PrefillRouter` forwards the synthetic
 
 ### Helpers
 
-`dynamo.common.backend.disagg` ships small utilities engines can call
+`dynamo.backend.disagg` ships small utilities engines can call
 directly: `enforce_prefill_max_tokens(request)`,
 `extract_prefill_result(request)`, and
 `require_prefill_result(request, mode)`. These are optional — engines
@@ -318,7 +325,7 @@ vendor metrics without feeding KV-aware routing signals.
 
 ## KV Event Publishing
 
-On the unified path, `Worker` owns `KvEventPublisher` construction. Engines
+On the Backend SDK, `Worker` owns `KvEventPublisher` construction. Engines
 declare sources with `kv_event_sources()`; they do not instantiate
 `KvEventPublisher` directly.
 
@@ -326,7 +333,7 @@ Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
 ZMQ socket:
 
 ```python
-from dynamo.common.backend.publisher import ZmqSource
+from dynamo.backend.publisher import ZmqSource
 
 async def kv_event_sources(self):
     return [
@@ -338,7 +345,7 @@ Use `PushSource` when the engine needs a live publisher and drives
 `publish_stored()` / `publish_removed()` from its own thread:
 
 ```python
-from dynamo.common.backend.publisher import PushSource
+from dynamo.backend.publisher import PushSource
 
 def _on_kv_publisher_ready(self, publisher):
     self._kv_publisher = publisher
@@ -369,11 +376,11 @@ publish loop observe the shutdown signal before resources are released.
 The framework opens an `engine.generate` span around every `generate()` call
 (see the Rust backend-common README for the full attribute table). Engine
 code reaches the recording surface through the
-`dynamo.common.backend.telemetry` facade, which mirrors the OpenTelemetry
+`dynamo.backend.telemetry` facade, which mirrors the OpenTelemetry
 `Span` API — no Dynamo-specific vocabulary:
 
 ```python
-from dynamo.common.backend import telemetry
+from dynamo.backend import telemetry
 
 async def generate(self, request, context):
     # Trace headers for the downstream inference engine (W3C traceparent).
@@ -430,13 +437,13 @@ record summary attributes instead.
 ## File Index
 
 ```text
-common/backend/
-    __init__.py          # Re-exports: LLMEngine, EngineConfig,
-                         #   GenerateChunk, GenerateRequest,
-                         #   Worker, WorkerConfig
-    engine.py            # LLMEngine ABC + EngineConfig dataclass +
-                         #   GenerateRequest/GenerateChunk TypedDicts
-    worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
+backend/
+    __init__.py          # The public facade: re-exports the committed
+                         #   surface (LLMEngine, EngineConfig, run, ...)
+    _engine.py           # LLMEngine ABC + EngineConfig dataclass +
+                         #   GenerateRequest/GenerateChunk TypedDicts (private)
+    _worker.py           # Worker + WorkerConfig (incl. disaggregation_mode) (private)
+    _run.py              # Common entry point: run(engine_cls) (private)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
     logprobs.py          # Shared logprob helpers
@@ -445,18 +452,15 @@ common/backend/
     metrics.py           # Prometheus helpers (gather_with_labels,
                          #   ensure_prometheus_multiproc_dir, registration)
     publisher.py         # ComponentSnapshot dataclass (push payload)
-    run.py               # Common entry point: run(engine_cls)
-    sample_engine.py     # SampleLLMEngine (reference impl)
-    sample_main.py       # Entry point for sample engine
     tests/               # test_backend_bindings, test_disagg_helpers,
-                         #   test_logprobs, test_sample_engine
+                         #   test_logprobs, test_facade
     CLAUDE.md            # Design notes (rationale, invariants)
 ```
 
 ## Feature Gaps
 
-Below is a summary of what the existing (non-unified) backends provide
-that the unified path does not yet support.
+Below is a summary of what the existing (legacy) backends provide
+that the Backend SDK does not yet support.
 
 ### What works today
 
@@ -477,20 +481,20 @@ Lifecycle and runtime:
   adapters rather than the serving lifecycle, they ride the generic
   **engine-update** mechanism (a sibling of engine controls, kept separate
   so the control surface isn't inflated):
-  - **Canonical API** (unified backend): `POST /engine/update/load_lora`
+  - **Canonical API** (Backend SDK): `POST /engine/update/load_lora`
     `{lora_name, source:{uri}}`, `POST /engine/update/unload_lora`
     `{lora_name}`, `POST /engine/update/list_loras` `{}` (uniform `POST` +
     JSON body). Engine updates return **HTTP 200** with a
     `{"status": "error", ...}` body on semantic failure (5xx only when the
     handler raises).
-  - **`/v1/loras` compatibility alias** — for the unified backend, the
+  - **`/v1/loras` compatibility alias** — for the Backend SDK, the
     legacy surface forwards to the engine updates (`POST /v1/loras` →
     `load_lora`, `GET /v1/loras` → `list_loras`,
     `DELETE /v1/loras/{name}` → `unload_lora`), preserving legacy HTTP
     semantics (a `status:"error"` response maps to **HTTP 500** on
     load/unload). When LoRA is unsupported, these return an explicit
     "LoRA management not available" error rather than failing opaquely.
-  - **Legacy (non-unified) vLLM** continues to serve `/v1/loras`
+  - **Legacy (legacy) vLLM** continues to serve `/v1/loras`
     unchanged.
   - Loaded adapters appear in `GET /v1/models`; inference selects an
     adapter by sending `"model": "<lora_name>"`.
@@ -498,7 +502,7 @@ Lifecycle and runtime:
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
 - **KV block clearing (vLLM)** — `POST /engine/control/clear_kv_blocks`
-  on the unified worker's system port,
+  on the Backend SDK worker's system port,
   with an empty JSON object (`{}`). The control resets both the prefix
   cache and connector cache in aggregated, prefill, and decode modes. It
   returns `{"status":"success","message":"KV cache cleared"}` on
@@ -533,8 +537,8 @@ Lifecycle and runtime:
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
   See [Disaggregated Serving](#disaggregated-serving) below.
 - **Logprobs** — selected-token + top-k logprob extraction and
-  streaming, sourced from `dynamo.common.backend.logprobs` and used by
-  both unified engines and the legacy handlers (which now delegate
+  streaming, sourced from `dynamo.backend.logprobs` and used by
+  both Backend SDK engines and the legacy handlers (which now delegate
   here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
   variant. The sample engine and Rust mocker emit synthetic logprobs
   when `output_options.logprobs` is set.
@@ -589,8 +593,8 @@ Request handling:
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
 | Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated and prefill/decode image and video inference; SGLang / TRT-LLM execution and separate encode workers remain separate work. |
-| Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
-| LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
+| Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the Backend SDK. |
+| LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the Backend SDK** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps
@@ -604,7 +608,7 @@ Request handling:
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
-| Separate multimodal encode worker | The unified entry point rejects `--disaggregation-mode encode` and `--route-to-encoder`. Encoder-managed embedding transfer remains on the legacy worker path. P/D video requests also reload raw media on decode because the handoff carries image metadata only. |
+| Separate multimodal encode worker | The Backend SDK entry point rejects `--disaggregation-mode encode` and `--route-to-encoder`. Encoder-managed embedding transfer remains on the legacy worker path. P/D video requests also reload raw media on decode because the handoff carries image metadata only. |
 
 ### SGLang-specific gaps
 
@@ -617,7 +621,7 @@ Request handling:
 | Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer (`MultimodalEncodeWorkerHandler`) |
 | Multimodal worker | Aggregated and disaggregated-prefill multimodal inference with `EmbeddingsProcessor` |
 | Deferred signal handling | `install_graceful_shutdown` captures SGLang's internal `loop.add_signal_handler` registrations for coordinated teardown |
-| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
+| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); Backend SDK doesn't invoke it |
 | Image/video health-check payloads | `ImageDiffusionHealthCheckPayload`, `VideoGenerationHealthCheckPayload` |
 | `register_model_with_readiness_gate` + image/video fast paths | `register.py` skips HF `config.json` download for `ModelType.Images` / `ModelType.Videos` |
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
@@ -638,14 +642,14 @@ Request handling:
 | Backend selection | Legacy `Backend` enum supports `PYTORCH` and `AUTODEPLOY`; unified hardcodes `Backend.PYTORCH` |
 | Modality routing | Legacy `init_worker` dispatches `TEXT` / `MULTIMODAL` / `IMAGE_DIFFUSION` / `VIDEO_DIFFUSION` via `--modality`; unified is LLM-only |
 
-> **Attention-DP scheduling is on the unified path.** `from_args()`
+> **Attention-DP scheduling is on the Backend SDK.** `from_args()`
 > sets `enable_attention_dp` into the engine args, and
 > `SchedulingParams(attention_dp_rank=..., attention_dp_relax=False)`
 > is constructed in the generate flow.
 
 ### Recommended migration order
 
-For users picking what to land next on the unified path:
+For users picking what to land next on the Backend SDK:
 
 1. **Text-in-text-out** (`ModelInput.Text`) — common ask; needs
    engine-side tokenization + chat templating path.

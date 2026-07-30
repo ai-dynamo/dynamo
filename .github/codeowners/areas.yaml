@@ -217,6 +217,8 @@ areas:
   path_globs:
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
+  - components/src/dynamo/backend/
+  - components/src/dynamo/sample_engine/
   - components/src/dynamo/common/config_dump/
   - components/src/dynamo/common/configuration/
   - components/src/dynamo/common/lora/

@@ -20,7 +20,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 import pytest
 
-from dynamo.common.backend import telemetry
+from dynamo.backend import telemetry
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
