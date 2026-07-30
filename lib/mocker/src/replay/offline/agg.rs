@@ -400,6 +400,7 @@ where
 
         self.collector
             .on_arrival(uuid, arrival_time_ms, input_length, output_length);
+        self.traffic.on_arrival();
 
         let effects = self
             .placement
@@ -530,8 +531,9 @@ where
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            // Rejected requests never ran: keep them out of the planner-facing
-            // traffic deltas (they still free their slot and advance below).
+            // Rejected requests never ran: keep them out of completed-request
+            // shape and latency samples. Their offered demand was already
+            // recorded at arrival, matching requests_started_total.
             if !signal.rejected {
                 let latencies = self.collector.request_latencies(signal.uuid);
                 let actual_output_tokens = self
@@ -544,7 +546,7 @@ where
                         )
                     })?;
                 debug_assert!(actual_output_tokens <= removed_state.output_tokens);
-                self.traffic.on_request(
+                self.traffic.on_completion(
                     removed_state.input_tokens,
                     actual_output_tokens,
                     latencies,

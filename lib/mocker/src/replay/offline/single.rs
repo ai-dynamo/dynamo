@@ -212,7 +212,7 @@ impl SingleRuntime {
         let requests_before = self.worker.num_requests();
         let pass = self
             .worker
-            .execute_pass(&mut self.collector, self.current_time_ms);
+            .execute_pass(&mut self.collector, self.current_time_ms)?;
         self.current_time_ms = pass.end_ms;
         let made_progress = self.current_time_ms > pass_start_ms
             || self.worker.num_requests() < requests_before
@@ -545,7 +545,9 @@ mod tests {
                 continue;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
@@ -599,7 +601,9 @@ mod tests {
                 break;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             current_time_ms = pass.end_ms;
         }

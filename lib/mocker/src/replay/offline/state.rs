@@ -432,16 +432,25 @@ impl OfflineWorkerState {
             .expect("offline worker completed more requests than it owned");
     }
 
-    pub(crate) fn execute_pass(
+    pub(crate) fn try_execute_pass(
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
-    ) -> EnginePassResult {
-        self.core.execute_pass(collector, now_ms)
+    ) -> anyhow::Result<EnginePassResult> {
+        self.core.try_execute_pass(collector, now_ms)
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.core.execute_hidden_pass(now_ms)
+        self.try_execute_hidden_pass(now_ms)
+            .expect("offline worker hidden scheduler pass failed")
+    }
+
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
+        self.core.try_execute_hidden_pass(now_ms)
     }
 
     #[cfg(feature = "kvbm-offload")]
