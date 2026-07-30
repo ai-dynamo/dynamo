@@ -529,9 +529,11 @@ overrides:
       # ... your base DGD spec
 ```
 
-The profiler first generates a DGD from the selected configuration, then merges
-this partial override into that generated DGD. The override is not used as the
-profiler's input template.
+The override does not define or extend the profiler's candidate topology. With
+`searchStrategy: thorough`, the profiler merges it into each generated
+benchmark candidate before measurement and into the interpolation deployment.
+For every search strategy, the profiler also merges it into the final generated
+DGD.
 
 ## Integration
 
@@ -633,14 +635,16 @@ With thorough sweeping, profiling still runs against the real backend to collect
 By default, profiler output is stored in ConfigMaps. For detailed artifacts (plots, logs, raw data), attach a PVC via overrides:
 
 ```yaml
-overrides:
-  profilingJob:
-    template:
-      spec:
-        volumes:
-        - name: profiling-output
-          persistentVolumeClaim:
-            claimName: "dynamo-pvc"
+spec:
+  overrides:
+    profilingJob:
+      template:
+        spec:
+          containers: []    # required placeholder; inherits operator containers
+          volumes:
+            - name: profiling-output
+              persistentVolumeClaim:
+                claimName: dynamo-pvc
 ```
 
 **ConfigMaps:**

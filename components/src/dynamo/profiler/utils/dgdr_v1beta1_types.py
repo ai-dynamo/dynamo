@@ -101,11 +101,19 @@ class WorkloadSpec(BaseModel):
     )
     concurrency: Optional[float] = Field(
         default=None,
-        description="Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.",
+        description=(
+            "Concurrency is the target concurrency level. Mutually exclusive "
+            "with RequestRate. When both fields are omitted and the planner is "
+            "disabled, the profiler uses its default maximum-throughput selection."
+        ),
     )
     requestRate: Optional[float] = Field(
         default=None,
-        description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
+        description=(
+            "RequestRate is the target request rate (req/s). Mutually exclusive "
+            "with Concurrency. When both fields are omitted and the planner is "
+            "disabled, the profiler uses its default maximum-throughput selection."
+        ),
     )
 
 

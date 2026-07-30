@@ -180,6 +180,7 @@ class PlannerConnector(Protocol):
     async def wait_for_deployment_ready(self)
     def get_model_name(self, ...)
     def get_gpu_counts(self, ...)
+    def get_worker_info(self, ...)
     async def get_actual_worker_counts(self, ...)
     async def set_component_replicas(self, targets, blocking=True)
 ```

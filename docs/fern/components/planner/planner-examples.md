@@ -12,34 +12,44 @@ reference, see the [Planner Guide](planner-guide.md).
 
 ## Custom Load Predictors
 
+Each YAML block in this section is a standalone `PlannerConfig`. Save the block
+as `planner.yaml` and pass it to
+`python -m dynamo.planner --config planner.yaml`. To use the same fields in a
+DGDR, nest them under `spec.features.planner`.
+
 ### Warm-starting with Trace Data
 
 Pre-load predictors with historical request patterns before live traffic:
 
 ```yaml
-features:
-  planner:
-    load_predictor: arima
-    load_predictor_warmup_trace: /data/trace.jsonl
-    load_predictor_log1p: true
+optimization_target: sla
+load_predictor: arima
+load_predictor_warmup_trace: /data/trace.jsonl
+load_predictor_log1p: true
 ```
 
-The trace file should be in mooncake-style JSONL format with request-count, ISL,
-and OSL samples.
+The parser accepts per-request Mooncake JSONL records:
+
+```json
+{"timestamp": 0, "input_length": 4096, "output_length": 512}
+```
+
+It also accepts `dynamo.request.trace.v1` `request_end` records. The Planner
+groups requests into adjustment intervals and computes request count, average
+input sequence length (ISL), and average output sequence length (OSL).
 
 ### Kalman Filter Tuning
 
 For workloads with rapid changes, tune the Kalman filter:
 
 ```yaml
-features:
-  planner:
-    load_predictor: kalman
-    kalman_q_level: 2.0       # Higher = more responsive to level changes
-    kalman_q_trend: 0.5       # Higher = trend changes faster
-    kalman_r: 5.0             # Lower = trusts new measurements more
-    kalman_min_points: 3      # Fewer points before forecasting starts
-    load_predictor_log1p: true
+optimization_target: sla
+load_predictor: kalman
+kalman_q_level: 2.0       # Higher = more responsive to level changes
+kalman_q_trend: 0.5       # Higher = trend changes faster
+kalman_r: 5.0             # Lower = trusts new measurements more
+kalman_min_points: 3      # Fewer points before forecasting starts
+load_predictor_log1p: true
 ```
 
 ### Prophet for Seasonal Workloads
@@ -47,11 +57,10 @@ features:
 For workloads with daily/weekly patterns:
 
 ```yaml
-features:
-  planner:
-    load_predictor: prophet
-    prophet_window_size: 100   # Larger window for seasonal detection
-    load_predictor_log1p: true
+optimization_target: sla
+load_predictor: prophet
+prophet_window_size: 100   # Larger window for seasonal detection
+load_predictor_log1p: true
 ```
 
 ## Virtual Connector

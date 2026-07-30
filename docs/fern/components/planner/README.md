@@ -129,7 +129,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 **Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). The KV Router is **not** required for load-based scaling. FPM availability by backend:
 
 - **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
-- **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
+- **TensorRT-LLM** — supported, including attention-DP when the runtime emits the required iteration statistics. Dynamo publishes one FPM channel per attention-DP rank and disables FPM emission if the runtime schema is missing required fields.
 - **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm).
 
 ### General

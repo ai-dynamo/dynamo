@@ -99,15 +99,16 @@ At startup, the planner always tries to fetch self-benchmark results from the `g
 Manual native AIC perf-model config:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    aic_perf_model:
-      hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-      system: h200_sxm
-      backend: vllm
-      prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-      decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      aic_perf_model:
+        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
+        system: h200_sxm
+        backend: vllm
+        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
 ```
 
 ### Throughput-Based Scaling Settings

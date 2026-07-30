@@ -48,16 +48,12 @@ Two time sources:
 ## Configuration
 
 ```yaml
-planner:
-  plugin_registration:
-    transport:
-      allow_insecure_grpc: false      # default refuse plaintext grpc (PR #1
-                                      # has no mTLS path yet — setting this to
-                                      # true is the only way to use grpc:// in
-                                      # PR #1; logs WARNING on startup)
-      request_timeout_seconds: 5
-      keepalive_time_ms: 30000
-      max_message_size_bytes: 10485760
+plugin_registration:
+  transport:
+    allow_insecure_grpc: false
+    request_timeout_seconds: 5
+    keepalive_time_ms: 30000
+    max_message_size_bytes: 10485760
 ```
 
 Production scheduling uses `WallClock`. Replay and tests inject

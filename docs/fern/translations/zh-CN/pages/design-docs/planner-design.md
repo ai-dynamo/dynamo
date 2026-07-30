@@ -108,13 +108,15 @@ Throughput proposer 会把预测负载和每个 engine 的 capacity 转换成 re
 ### Interface
 
 ```python
-class PlannerConnector(ABC):
-    async def add_component(self, component_name)
-    async def remove_component(self, component_name)
-    # Extended interface (not on ABC, but implemented by both connectors):
-    async def set_component_replicas(self, targets, blocking)
+class PlannerConnector(WorkerInfoProvider, Protocol):
+    async def async_init(self)
     async def validate_deployment(self, ...)
     async def wait_for_deployment_ready(self)
+    def get_model_name(self, ...)
+    def get_gpu_counts(self, ...)
+    def get_worker_info(self, ...)
+    async def get_actual_worker_counts(self, ...)
+    async def set_component_replicas(self, targets, blocking=True)
 ```
 
 ### KubernetesConnector

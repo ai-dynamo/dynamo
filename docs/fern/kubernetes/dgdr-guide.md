@@ -286,18 +286,20 @@ A DGDR progresses through these phases. Profiling failures are terminal — they
 Watch progress and read profiling logs:
 
 ```bash
+NAMESPACE=your-namespace
+
 # Watch phase transitions
-kubectl get dgdr my-model -n <namespace> -w
+kubectl get dgdr my-model -n "$NAMESPACE" -w
 
 # Detailed status, conditions, and events
-kubectl describe dgdr my-model -n <namespace>
+kubectl describe dgdr my-model -n "$NAMESPACE"
 
 # Current profiling sub-phase
-kubectl get dgdr my-model -n <namespace> -o jsonpath='{.status.profilingPhase}'
+kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingPhase}'
 
 # Profiling job logs
-kubectl get pods -n <namespace> -l app=dynamo-profiler,dgdr=my-model
-kubectl logs -f <profiling-pod-name> -n <namespace>
+PROFILING_JOB=$(kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingJobName}')
+kubectl logs -f "job/${PROFILING_JOB}" -c profiler -n "$NAMESPACE"
 ```
 
 For the full lifecycle, conditions, and monitoring command reference, see [DGDR Reference — Lifecycle](dgdr-reference.mdx#lifecycle).

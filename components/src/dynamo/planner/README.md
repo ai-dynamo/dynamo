@@ -32,13 +32,16 @@ or live FPM regression.
 
 ### Load-Based Scaling
 
-Uses ForwardPassMetrics (FPM) from the Dynamo event plane to make SLA-aware
-scaling decisions via online regression. It does not require profiling data or
-the KV Router and responds quickly to traffic bursts. It supports vLLM,
-SGLang, and TensorRT-LLM deployments that expose the required FPM signals;
-attention-DP deployments are not supported.
+Uses ForwardPassMetrics (FPM) from the Dynamo event plane for reactive scaling.
+With `optimization_target: sla`, the Planner uses online regression to target
+TTFT and ITL. Other optimization targets use static or user-defined queue and
+KV-utilization thresholds. Load-based scaling does not require profiling data
+or the KV Router and supports vLLM, SGLang, and TensorRT-LLM deployments that
+emit the required FPM signals, including per-rank signals for attention-DP.
 
-When both modes are enabled, throughput-based scaling provides a lower bound on replicas while load-based scaling handles real-time adjustments.
+With `optimization_target: sla` and both modes enabled, throughput-based
+scaling provides a lower bound on replicas while load-based scaling handles
+real-time adjustments.
 
 ### Support Matrix
 
