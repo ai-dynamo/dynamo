@@ -62,7 +62,73 @@ jobs:
             '
 
           kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
-          echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "${GITHUB_ENV}"
+
+          PROXY_KUBECONFIG="${RUNNER_TEMP}/kubeconfig-nebius-proxy.yaml"
+          PROXY_PID=""
+
+          for attempt in $(seq 1 10); do
+            PROXY_PORT="$((18000 + attempt))"
+            PROXY_LOG="${RUNNER_TEMP}/kubectl-proxy-${attempt}.log"
+
+            kubectl \
+              --kubeconfig="${KUBECONFIG_PATH}" \
+              --context="${KUBE_CONTEXT}" \
+              proxy \
+              --address=127.0.0.1 \
+              --port="${PROXY_PORT}" \
+              > "${PROXY_LOG}" 2>&1 &
+            CANDIDATE_PID="$!"
+
+            kubectl config set-cluster nebius-pinned \
+              --server="http://127.0.0.1:${PROXY_PORT}" \
+              --kubeconfig="${PROXY_KUBECONFIG}"
+            kubectl config set-context nebius-pinned \
+              --cluster=nebius-pinned \
+              --kubeconfig="${PROXY_KUBECONFIG}"
+            kubectl config use-context nebius-pinned \
+              --kubeconfig="${PROXY_KUBECONFIG}"
+
+            proxy_ready=false
+            for _ in $(seq 1 20); do
+              if kubectl \
+                --kubeconfig="${PROXY_KUBECONFIG}" \
+                get --raw=/version >/dev/null 2>&1; then
+                proxy_ready=true
+                break
+              fi
+              sleep 1
+            done
+
+            if [ "${proxy_ready}" = "true" ] &&
+              kubectl \
+                --kubeconfig="${PROXY_KUBECONFIG}" \
+                get clusterpolicy deploy-test-pod-policy >/dev/null 2>&1 &&
+              test "$(
+                kubectl \
+                  --kubeconfig="${PROXY_KUBECONFIG}" \
+                  get nodes \
+                  -l nvidia.com/gpu.product=NVIDIA-H200 \
+                  --no-headers 2>/dev/null |
+                  wc -l |
+                  tr -d '[:space:]'
+              )" -gt 0; then
+              PROXY_PID="${CANDIDATE_PID}"
+              echo "Pinned verified Nebius connection on attempt ${attempt}"
+              echo "KUBECONFIG=${PROXY_KUBECONFIG}" >> "${GITHUB_ENV}"
+              echo "KUBECTL_PROXY_PID=${PROXY_PID}" >> "${GITHUB_ENV}"
+              export KUBECONFIG="${PROXY_KUBECONFIG}"
+              break
+            fi
+
+            echo "Connection attempt ${attempt} reached a non-Nebius backend; retrying"
+            kill "${CANDIDATE_PID}" 2>/dev/null || true
+            wait "${CANDIDATE_PID}" 2>/dev/null || true
+          done
+
+          if [ -z "${PROXY_PID}" ]; then
+            echo "::error::Could not pin a Teleport connection to the Nebius H200 backend"
+            exit 1
+          fi
 
           kubectl get namespace kube-system "${KUBE_NAMESPACE}" \
             -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp'
@@ -194,6 +260,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          cleanup_proxy() {
+            if [ -n "${KUBECTL_PROXY_PID:-}" ]; then
+              kill "${KUBECTL_PROXY_PID}" 2>/dev/null || true
+              wait "${KUBECTL_PROXY_PID}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_proxy EXIT
 
           if [ -z "${KUBECONFIG:-}" ] || [ ! -f "${KUBECONFIG}" ]; then
             echo "Kubeconfig was not initialized; nothing to clean up"
