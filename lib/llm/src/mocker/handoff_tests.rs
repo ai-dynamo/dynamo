@@ -3,8 +3,11 @@
 
 use super::*;
 use async_trait::async_trait;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use dynamo_mocker::common::handoff::{HandoffTransferTiming, NormalizedHandoffEvent};
+use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData};
+use dynamo_mocker::common::handoff::{
+    HandoffTransferTiming, NormalizedHandoffConformance, NormalizedHandoffEvent,
+    NormalizedStoredTiming,
+};
 use dynamo_mocker::common::protocols::{
     EngineType, FpmPublisher, KvCacheEventSink, KvEventPublishers, KvTransferTimingMode,
     MockEngineArgs, WorkerType,
@@ -16,6 +19,8 @@ use dynamo_mocker::services::bootstrap::{
 };
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use uuid::Uuid;
+
+use std::collections::HashSet;
 
 fn args_with_mode(
     engine_type: EngineType,
@@ -461,17 +466,65 @@ async fn collect_output(
     output
 }
 
-fn stored_event_count(events: &mut mpsc::UnboundedReceiver<KvCacheEvent>) -> usize {
+fn drain_stored_hashes(
+    events: &mut mpsc::UnboundedReceiver<KvCacheEvent>,
+) -> Vec<ExternalSequenceBlockHash> {
     std::iter::from_fn(|| events.try_recv().ok())
-        .map(|event| match event.data {
-            KvCacheEventData::Stored(data) => data.blocks.len(),
-            KvCacheEventData::Removed(_) | KvCacheEventData::Cleared => 0,
+        .flat_map(|event| match event.data {
+            KvCacheEventData::Stored(data) => data
+                .blocks
+                .into_iter()
+                .map(|block| block.block_hash)
+                .collect(),
+            KvCacheEventData::Removed(_) | KvCacheEventData::Cleared => Vec::new(),
         })
-        .sum()
+        .collect()
+}
+
+struct LiveHandoffObservation {
+    lifecycle: Vec<NormalizedHandoffEvent>,
+    before_activation: usize,
+    activation_hashes: Vec<ExternalSequenceBlockHash>,
+    remaining_kv: mpsc::UnboundedReceiver<KvCacheEvent>,
+}
+
+async fn observe_live_handoff(
+    mut lifecycle_rx: mpsc::UnboundedReceiver<NormalizedHandoffEvent>,
+    mut destination_kv: mpsc::UnboundedReceiver<KvCacheEvent>,
+) -> LiveHandoffObservation {
+    let mut lifecycle = Vec::new();
+    let mut before_activation = 0;
+    let mut activation_hashes = Vec::new();
+    let mut activated = false;
+    loop {
+        let event = lifecycle_rx
+            .recv()
+            .await
+            .expect("handoff observer closed before completion");
+        lifecycle.push(event);
+        match event {
+            NormalizedHandoffEvent::DestinationActivated => {
+                activation_hashes.extend(drain_stored_hashes(&mut destination_kv));
+                activated = true;
+            }
+            NormalizedHandoffEvent::Completed => {
+                return LiveHandoffObservation {
+                    lifecycle,
+                    before_activation,
+                    activation_hashes,
+                    remaining_kv: destination_kv,
+                };
+            }
+            _ if !activated => {
+                before_activation += drain_stored_hashes(&mut destination_kv).len();
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn wait_for_idle(engine: &LiveEngine) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let metrics = engine.metrics_receiver().borrow().clone();
             if engine.active_request_count() == 0
@@ -483,76 +536,103 @@ async fn wait_for_idle(engine: &LiveEngine) {
             tokio::task::yield_now().await;
         }
     })
+    .await;
+    if result.is_err() {
+        let metrics = engine.metrics_receiver().borrow().clone();
+        panic!(
+            "live handoff engine must return to idle: routes={}, running={}, waiting={}, active_blocks={}",
+            engine.active_request_count(),
+            metrics.running_requests,
+            metrics.waiting_requests,
+            metrics.active_decode_blocks,
+        );
+    }
+}
+
+async fn probe_engine_drained(engine: &LiveEngine) -> bool {
+    let mut probe = engine
+        .submit(dynamo_mocker::common::protocols::DirectRequest {
+            tokens: (10_000..10_252).collect(),
+            max_output_tokens: 1,
+            output_token_ids: Some(vec![42]),
+            uuid: Some(Uuid::new_v4()),
+            ..Default::default()
+        })
+        .await
+        .expect("drain probe submission failed");
+    let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(signal) = probe.recv().await {
+            if signal.completed {
+                return true;
+            }
+        }
+        false
+    })
     .await
-    .expect("live handoff engine must return to idle");
+    .unwrap_or(false);
+    drop(probe);
+    wait_for_idle(engine).await;
+    completed && engine.active_request_count() == 0
 }
 
 #[tokio::test]
-async fn live_handoff_preserves_timing_kv_and_cleanup_for_supported_engines() {
+async fn live_and_offline_handoff_surfaces_share_one_conformance_report() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         for transfer_timing_mode in [
             KvTransferTimingMode::FullPrompt,
             KvTransferTimingMode::DestinationMissing,
         ] {
-            let (source_engine, mut source_kv) =
-                start_live_engine(engine_type, WorkerType::Prefill, transfer_timing_mode);
-            let (destination_engine, mut destination_kv) =
-                start_live_engine(engine_type, WorkerType::Decode, transfer_timing_mode);
-            let shutdown = CancellationToken::new();
-            let server =
-                BootstrapServer::start(0, shutdown.clone(), BootstrapServerConfig::default())
-                    .await
+            for source_arrives_first in [true, false] {
+                let (source_engine, mut source_kv) =
+                    start_live_engine(engine_type, WorkerType::Prefill, transfer_timing_mode);
+                let (destination_engine, destination_kv) =
+                    start_live_engine(engine_type, WorkerType::Decode, transfer_timing_mode);
+                let shutdown = CancellationToken::new();
+                let server =
+                    BootstrapServer::start(0, shutdown.clone(), BootstrapServerConfig::default())
+                        .await
+                        .unwrap();
+                let incoming = server.take_incoming_receiver().unwrap();
+                let manager = SourceHandoffManager::start(
+                    incoming,
+                    1,
+                    Duration::from_secs(2),
+                    shutdown.clone(),
+                );
+                let handoff_id = HandoffId::new();
+                let request_id = Uuid::new_v4();
+                let identity = BootstrapIdentity {
+                    handoff_id,
+                    bootstrap_room: 19,
+                    request_id,
+                };
+                let order = order_for_engine(engine_type).unwrap();
+
+                let (source_registration, source_request) = source_engine
+                    .prepare_request(request(request_id, 1))
                     .unwrap();
-            let incoming = server.take_incoming_receiver().unwrap();
-            let manager =
-                SourceHandoffManager::start(incoming, 1, Duration::from_secs(2), shutdown.clone());
-            let handoff_id = HandoffId::new();
-            let request_id = Uuid::new_v4();
-            let identity = BootstrapIdentity {
-                handoff_id,
-                bootstrap_room: 19,
-                request_id,
-            };
-            let order = order_for_engine(engine_type).unwrap();
-            let destination_connection = connect_to_prefill(
-                "127.0.0.1",
-                server.port(),
-                identity.clone(),
-                ParticipantRegistration {
-                    role: BootstrapParticipantRole::Destination,
-                    dp_rank: 0,
-                    order,
-                    engine_type,
-                },
-            )
-            .await
-            .unwrap();
+                let (source_control, source_events) =
+                    source_engine.register_handoff(handoff_id).unwrap();
+                let (source_control, source_events) =
+                    live_handoff_boundary(source_control, source_events, source_registration);
+                let (destination_registration, destination_request) = destination_engine
+                    .prepare_request(request(request_id, 2))
+                    .unwrap();
+                let (destination_control, destination_events) =
+                    destination_engine.register_handoff(handoff_id).unwrap();
+                let (destination_control, destination_events) = live_handoff_boundary(
+                    destination_control,
+                    destination_events,
+                    destination_registration,
+                );
 
-            let (source_registration, source_request) = source_engine
-                .prepare_request(request(request_id, 1))
-                .unwrap();
-            let (source_control, source_events) =
-                source_engine.register_handoff(handoff_id).unwrap();
-            let (source_control, source_events) =
-                live_handoff_boundary(source_control, source_events, source_registration);
-            let (destination_registration, destination_request) = destination_engine
-                .prepare_request(request(request_id, 1))
-                .unwrap();
-            let (destination_control, destination_events) =
-                destination_engine.register_handoff(handoff_id).unwrap();
-            let (destination_control, destination_events) = live_handoff_boundary(
-                destination_control,
-                destination_events,
-                destination_registration,
-            );
-
-            let permits = Arc::new(tokio::sync::Semaphore::new(1));
-            let permit: OwnedSemaphorePermit = permits.clone().try_acquire_owned().unwrap();
-            let (completion_tx, completion_rx) = oneshot::channel();
-            let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
-            manager
-                .try_register(SourceRegistration {
-                    identity,
+                let permits = Arc::new(tokio::sync::Semaphore::new(1));
+                let permit: OwnedSemaphorePermit = permits.clone().try_acquire_owned().unwrap();
+                let (completion_tx, completion_rx) = oneshot::channel();
+                let (observer_tx, observer_rx) = mpsc::unbounded_channel();
+                let observer = tokio::spawn(observe_live_handoff(observer_rx, destination_kv));
+                let mut source = Some(SourceRegistration {
+                    identity: identity.clone(),
                     order,
                     engine_type,
                     control: source_control,
@@ -561,62 +641,123 @@ async fn live_handoff_preserves_timing_kv_and_cleanup_for_supported_engines() {
                     cancel: CancellationToken::new(),
                     observer: Some(observer_tx),
                     _permit: permit,
-                })
+                });
+                if source_arrives_first {
+                    manager.try_register(source.take().unwrap()).unwrap();
+                }
+                let destination_connection = connect_to_prefill(
+                    "127.0.0.1",
+                    server.port(),
+                    identity,
+                    ParticipantRegistration {
+                        role: BootstrapParticipantRole::Destination,
+                        dp_rank: 0,
+                        order,
+                        engine_type,
+                    },
+                )
+                .await
                 .unwrap();
-            let destination_session = tokio::spawn(run_destination_session(
-                destination_connection,
-                destination_control,
-                destination_events,
-                CancellationToken::new(),
-                Duration::from_secs(2),
-                shutdown.clone(),
-            ));
+                if !source_arrives_first {
+                    manager.wait_for_pending_destination(handoff_id).await;
+                    manager.try_register(source.take().unwrap()).unwrap();
+                }
+                let destination_session = tokio::spawn(run_destination_session(
+                    destination_connection,
+                    destination_control,
+                    destination_events,
+                    CancellationToken::new(),
+                    Duration::from_secs(2),
+                    shutdown.clone(),
+                ));
 
-            let (source_output, destination_output, source_completion, destination_completion) =
-                tokio::time::timeout(Duration::from_secs(5), async {
+                let (
+                    source_output,
+                    destination_output,
+                    source_completion,
+                    destination_completion,
+                    observation,
+                ) = tokio::time::timeout(Duration::from_secs(5), async {
                     tokio::join!(
                         collect_output(source_request),
                         collect_output(destination_request),
                         completion_rx,
                         destination_session,
+                        observer,
                     )
                 })
                 .await
                 .expect("live handoff timed out");
-            assert!(source_completion.unwrap().is_ok());
-            assert!(destination_completion.unwrap().is_ok());
-            assert!(source_output.last().is_some_and(|signal| signal.completed));
-            assert!(
-                destination_output
-                    .last()
-                    .is_some_and(|signal| signal.completed)
-            );
-            assert_eq!(permits.available_permits(), 1);
-
-            let observed = std::iter::from_fn(|| observer_rx.try_recv().ok()).collect::<Vec<_>>();
-            for expected in [
-                NormalizedHandoffEvent::SourceHeld,
-                NormalizedHandoffEvent::DestinationAccepted,
-                NormalizedHandoffEvent::DestinationReserved,
-                NormalizedHandoffEvent::DestinationActivated,
-                NormalizedHandoffEvent::SourceReleased,
-                NormalizedHandoffEvent::Completed,
-            ] {
+                assert!(source_completion.unwrap().is_ok());
+                assert!(destination_completion.unwrap().is_ok());
+                assert!(source_output.last().is_some_and(|signal| signal.completed));
                 assert!(
-                    observed.contains(&expected),
-                    "missing {expected:?} for {engine_type:?}/{transfer_timing_mode:?}: {observed:?}"
+                    destination_output
+                        .last()
+                        .is_some_and(|signal| signal.completed)
                 );
-            }
-            assert!(stored_event_count(&mut source_kv) > 0);
-            assert!(stored_event_count(&mut destination_kv) > 0);
-            wait_for_idle(&source_engine).await;
-            wait_for_idle(&destination_engine).await;
+                assert_eq!(permits.available_permits(), 1);
 
-            shutdown.cancel();
-            manager.wait_closed().await;
-            server.wait_closed().await;
-            source_engine.shutdown().await.unwrap();
-            destination_engine.shutdown().await.unwrap();
+                let mut observation = observation.unwrap();
+                let activation_set = observation
+                    .activation_hashes
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>();
+                let repeated_activation_hashes_after_activation =
+                    drain_stored_hashes(&mut observation.remaining_kv)
+                        .into_iter()
+                        .filter(|hash| activation_set.contains(hash))
+                        .count();
+                assert!(!drain_stored_hashes(&mut source_kv).is_empty());
+                wait_for_idle(&source_engine).await;
+                wait_for_idle(&destination_engine).await;
+                let source_drained = probe_engine_drained(&source_engine).await;
+                let destination_drained = probe_engine_drained(&destination_engine).await;
+                let source_route_reusable = source_engine.register_handoff(handoff_id).is_ok();
+                let destination_route_reusable =
+                    destination_engine.register_handoff(handoff_id).is_ok();
+                let report = NormalizedHandoffConformance {
+                    engine_type,
+                    order,
+                    lifecycle: observation.lifecycle,
+                    source_output_tokens: source_output
+                        .iter()
+                        .filter(|signal| signal.token_id.is_some())
+                        .count(),
+                    destination_output_tokens: destination_output
+                        .iter()
+                        .filter(|signal| signal.token_id.is_some())
+                        .count(),
+                    completed_requests: destination_output
+                        .iter()
+                        .filter(|signal| signal.completed)
+                        .count(),
+                    destination_stored: NormalizedStoredTiming {
+                        before_activation: observation.before_activation,
+                        on_activation: observation.activation_hashes.len(),
+                        repeated_activation_hashes_after_activation,
+                    },
+                    source_drained,
+                    destination_drained,
+                    driver_drained: permits.available_permits() == 1
+                        && source_route_reusable
+                        && destination_route_reusable,
+                };
+                report.validate().unwrap();
+                let offline = dynamo_mocker::replay::run_offline_handoff_conformance(
+                    engine_type,
+                    transfer_timing_mode,
+                )
+                .unwrap();
+                assert_eq!(report, offline);
+
+                shutdown.cancel();
+                manager.wait_closed().await;
+                server.wait_closed().await;
+                source_engine.shutdown().await.unwrap();
+                destination_engine.shutdown().await.unwrap();
+            }
         }
     }
 }

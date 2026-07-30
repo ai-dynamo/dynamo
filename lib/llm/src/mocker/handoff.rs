@@ -198,6 +198,7 @@ pub(crate) struct SourceHandoffManager {
 #[derive(Clone, Default)]
 struct SourceHandoffManagerTestState {
     pending_sources: HashSet<HandoffId>,
+    pending_destinations: HashSet<HandoffId>,
     retired: HashSet<HandoffId>,
 }
 
@@ -269,6 +270,14 @@ impl SourceHandoffManager {
         let mut state = self.state_rx.clone();
         let _ = state
             .wait_for(|state| state.pending_sources.contains(&handoff_id))
+            .await;
+    }
+
+    #[cfg(test)]
+    async fn wait_for_pending_destination(&self, handoff_id: HandoffId) {
+        let mut state = self.state_rx.clone();
+        let _ = state
+            .wait_for(|state| state.pending_destinations.contains(&handoff_id))
             .await;
     }
 
@@ -500,8 +509,15 @@ async fn run_manager(
                 .iter()
                 .filter_map(|(handoff_id, session)| session.source.is_some().then_some(*handoff_id))
                 .collect();
+            let pending_destinations = pending
+                .iter()
+                .filter_map(|(handoff_id, session)| {
+                    session.destination.is_some().then_some(*handoff_id)
+                })
+                .collect();
             let _ = state_tx.send(SourceHandoffManagerTestState {
                 pending_sources,
+                pending_destinations,
                 retired: retired.keys().copied().collect(),
             });
         }
