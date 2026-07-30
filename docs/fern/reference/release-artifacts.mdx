@@ -101,8 +101,8 @@ Current stable release: v1.3.0 (container tag `1.3.0`, wheel version `1.3.0.post
 | wheel | ai-dynamo | Main package with backend integrations (vLLM, SGLang, TRT-LLM) | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo==1.3.0.post1` |
 | wheel | ai-dynamo-runtime | Core Python bindings for the Dynamo runtime | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install ai-dynamo-runtime==1.3.0.post1` |
 | wheel | kvbm | KV Block Manager for disaggregated KV cache | Python 3.10–3.12 · Linux (glibc v2.28+) | `uv pip install kvbm==1.3.0.post1` |
-| helm | dynamo-platform | Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster | - | `helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.3.0` |
-| helm | snapshot | Snapshot DaemonSet for fast GPU worker recovery | - | `helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.3.0` |
+| helm | dynamo-platform | Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster | - | `helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.3.0.tgz` |
+| helm | snapshot | Snapshot DaemonSet for fast GPU worker recovery | - | `helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.3.0.tgz` |
 | crate | dynamo-runtime | Core distributed runtime library | MSRV Rust v1.82 | `cargo add dynamo-runtime@1.3.0` |
 | crate | dynamo-llm | LLM inference engine | MSRV Rust v1.82 | `cargo add dynamo-llm@1.3.0` |
 | crate | dynamo-protocols | Async OpenAI-compatible API client | MSRV Rust v1.82 | `cargo add dynamo-protocols@1.3.0` |

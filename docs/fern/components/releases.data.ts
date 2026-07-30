@@ -652,7 +652,7 @@ export const ARTIFACTS: Artifact[] = [
       {
         label: "helm install · dynamo-platform 1.3.0",
         clipboard:
-          "helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.3.0",
+          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.3.0.tgz",
       },
     ],
   },
@@ -664,7 +664,7 @@ export const ARTIFACTS: Artifact[] = [
     tags: [
       {
         label: "helm install · snapshot 1.3.0",
-        clipboard: "helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.3.0",
+        clipboard: "helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.3.0.tgz",
       },
     ],
   },
