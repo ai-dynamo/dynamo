@@ -13,7 +13,7 @@ use crate::{
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
-        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyIn, ManyOut, SingleIn, StreamingDispatch,
         error::{PipelineError, PipelineErrorExt},
     },
     protocols::{EndpointId, maybe_error::MaybeError},
@@ -149,9 +149,10 @@ where
     /// Number of round robin requests handled. Used to decide which server is next.
     round_robin_counter: Arc<AtomicU64>,
 
-    /// The next step in the chain. PushRouter (this object) picks an instances,
-    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
-    addressed: Arc<AddressedPushRouter>,
+    /// The final hop: after selecting an instance, `PushRouter` hands it to this
+    /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
+    /// A trait object so an alternate transport can swap it out.
+    addressed: Arc<dyn StreamingDispatch<T, U>>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
@@ -320,11 +321,14 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
 /// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
 /// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-fn spawn_instance_removal_watcher(
+fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
-    addressed: Arc<AddressedPushRouter>,
+    dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) {
+) where
+    T: Data + Serialize + 'static,
+    U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
+{
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
@@ -388,23 +392,12 @@ fn spawn_instance_removal_watcher(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    let n = addressed.cancel_instance_streams(eid).await;
-                                    if n > 0 {
-                                        tracing::warn!(
-                                            namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
-                                            instance_id = eid.instance_id,
-                                            cancelled = n,
-                                            "Cancelled pending response streams for removed \
-                                             instance (discovery-driven cleanup)"
-                                        );
-                                    }
+                                    dispatch.on_instance_removed(eid).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                addressed.clear_instance_tombstone(&eid).await;
+                                dispatch.on_instance_added(&eid).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -558,7 +551,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -619,7 +613,8 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // Type-erase to the seam so discovery-removal cleanup runs through it.
+        let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
         spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
@@ -649,6 +644,49 @@ where
         };
 
         Ok(router)
+    }
+
+    /// Like the other constructors but with a caller-supplied [`StreamingDispatch`]
+    /// as the final hop. Fault detection is on, so the dispatch's `ErrorType`
+    /// mapping drives report-down / overload / migration as usual.
+    ///
+    /// Wires frontend-local occupancy only — no `WorkerLoadMonitor` and no
+    /// multimodal cache indexer, so `RouterMode::DeviceAwareWeighted` is
+    /// non-functional; a caller needing those must extend it.
+    pub async fn from_client_with_dispatch(
+        client: Client,
+        router_mode: RouterMode,
+        dispatch: Arc<dyn StreamingDispatch<T, U>>,
+    ) -> anyhow::Result<Self> {
+        let occupancy_state = if matches!(
+            router_mode,
+            RouterMode::PowerOfTwoChoices
+                | RouterMode::LeastLoaded
+                | RouterMode::DeviceAwareWeighted
+        ) {
+            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+        } else {
+            None
+        };
+
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            dispatch.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
+        Ok(PushRouter {
+            client,
+            addressed: dispatch,
+            router_mode,
+            round_robin_counter: Arc::new(AtomicU64::new(0)),
+            fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
+            occupancy_state,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
+            _phantom: PhantomData,
+        })
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
