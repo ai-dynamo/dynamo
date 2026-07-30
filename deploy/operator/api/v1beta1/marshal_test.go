@@ -94,10 +94,13 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Marshal a v1beta1 root object with empty metadata")
 			raw, err := json.Marshal(tt.obj)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
+
+			t.Log("Verify the root metadata envelope is preserved")
 			root := unmarshalToMap(t, raw)
 			metadata, found := root["metadata"]
 			if !found {

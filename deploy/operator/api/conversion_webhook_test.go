@@ -23,6 +23,7 @@ import (
 )
 
 func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
+	t.Log("Set up the conversion webhook")
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1alpha1 to scheme: %v", err)
@@ -38,6 +39,7 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 		"DynamoGraphDeploymentRequest",
 	} {
 		t.Run(kind, func(t *testing.T) {
+			t.Log("Build a partial v1alpha1 object with an empty metadata envelope")
 			source := map[string]any{
 				"apiVersion": v1alpha1.GroupVersion.String(),
 				"kind":       kind,
@@ -48,6 +50,7 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 				t.Fatalf("marshal source object: %v", err)
 			}
 
+			t.Log("Submit the partial object to the conversion webhook")
 			review := apiextensionsv1.ConversionReview{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: apiextensionsv1.SchemeGroupVersion.String(),
@@ -73,6 +76,7 @@ func TestConversionWebhook_PartialObjectsRetainMetadata(t *testing.T) {
 				t.Fatalf("conversion webhook status = %d, body = %s", recorder.Code, recorder.Body)
 			}
 
+			t.Log("Verify the converted v1beta1 object retains an empty metadata envelope")
 			var response apiextensionsv1.ConversionReview
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("unmarshal conversion response: %v", err)
