@@ -8,6 +8,7 @@ import os
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urlparse
 
+import numpy as np
 import torch
 from blake3 import blake3
 
@@ -66,19 +67,69 @@ except ImportError as e:
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 
-# SGLang model types whose video preprocessing crashes on pre-decoded frames.
-# When ``_encode`` receives an ndarray (our NVDEC path), SGLang's
-# ``preprocess_video`` returns ``(frames, None)`` for non-``VideoDecoderWrapper``
-# input, so ``video_metadata`` becomes ``[None]``. For these model types
-# ``_process_video_items`` then runs ``for m in video_metadata: m.get("fps")``
-# (sglang.srt.disaggregation.encode_server, v0.5.15) which raises
-# ``AttributeError`` on the ``None`` entry. The qwen2.5 family takes a different
-# (``video_grid_thw``) branch and is unaffected, so it is safe. Do not route
-# these models through the pre-decoded NVDEC path; SGLang has no in-image
-# software decoder for them either, so this is no worse than the status quo.
+# SGLang model types whose video preprocessing needs per-frame timestamps from
+# ``video_metadata``. For these, ``_process_video_items`` runs
+# ``for m in video_metadata: m.get("fps")`` (sglang.srt.disaggregation.encode_server,
+# v0.5.15). With the metadata shim below every pre-decoded frame carries a valid
+# metadata dict (so that branch no longer crashes on ``None``), but routing these
+# models through NVDEC is still gated pending end-to-end timestamp validation. The
+# qwen2.5 family takes the ``video_grid_thw`` branch and does not read the metadata,
+# so it is unaffected either way. SGLang has no in-image software decoder for the
+# gated models either, so keeping them on the URL path is no worse than status quo.
 _NVDEC_UNSAFE_MODEL_TYPES = frozenset(
     {"qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe", "intern_s2_preview"}
 )
+
+# Fallback source fps stamped into the synthesized ``video_metadata`` for
+# pre-decoded NVDEC frames (see ``_install_nvdec_video_metadata_shim``). The
+# supported qwen2_5_vl model_type ignores ``video_metadata`` entirely; the value
+# only feeds the qwen3_vl timestamp branch, which is gated off today.
+_NVDEC_SHIM_FPS = 24.0
+
+
+def _install_nvdec_video_metadata_shim() -> None:
+    """Let SGLang accept pre-decoded frames under transformers >= 5.12.
+
+    SGLang's ``preprocess_video`` returns ``(frames, None)`` for a pre-decoded
+    ndarray, and ``_flatten_and_load_videos`` then sets
+    ``video_processor_kwargs["video_metadata"] = [None]`` -- its ``if
+    video_metadata:`` treats the ``[None]`` list as truthy. transformers >= 5.12
+    strict-validates that kwarg and rejects ``[None]`` (it accepts
+    ``VideoMetadata`` / ``dict`` / ``list[dict]`` / ``None``), so
+    ``MMEncoder._encode`` raises ``BadRequestError``. Wrap ``preprocess_video`` so
+    a pre-decoded ndarray instead carries a valid metadata dict -- the same shape
+    SGLang builds on its own torchvision path -- which ``list[dict]`` validation
+    accepts. This unblocks qwen2_5_vl (which ignores the metadata) and any other
+    pre-decoded-pixel path (frontend decoding), and supplies the ``fps`` /
+    ``frames_indices`` the qwen3_vl branch reads. Idempotent; a no-op when SGLang
+    is unavailable or already patched. Validated on gpu-ts against the real
+    ``MMEncoder._encode`` (before FAIL -> after PASS).
+    """
+    try:
+        from sglang.srt.disaggregation import encode_server as es
+    except (ImportError, OSError):
+        return
+
+    orig = getattr(es, "preprocess_video", None)
+    if orig is None or getattr(orig, "_dynamo_nvdec_shim", False):
+        return
+
+    async def _preprocess_video_with_metadata(vr, *args, **kwargs):
+        video, metadata = await orig(vr, *args, **kwargs)
+        if metadata is None and isinstance(video, np.ndarray) and video.ndim >= 1:
+            num_frames = int(video.shape[0])
+            fps = _NVDEC_SHIM_FPS
+            metadata = {
+                "fps": fps,
+                "duration": (num_frames / fps) if fps else 0.0,
+                "total_num_frames": num_frames,
+                "frames_indices": list(range(num_frames)),
+                "video_backend": "nvdec",
+            }
+        return video, metadata
+
+    _preprocess_video_with_metadata._dynamo_nvdec_shim = True  # type: ignore[attr-defined]
+    es.preprocess_video = _preprocess_video_with_metadata
 
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
@@ -126,6 +177,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             dist_init_method="tcp://127.0.0.1:0",
             rank=0,
         )
+
+        # Make SGLang's video processor accept pre-decoded NVDEC frames on
+        # transformers >= 5.12 (see _install_nvdec_video_metadata_shim). Safe to
+        # install unconditionally: it only rewrites the ``None`` metadata SGLang
+        # emits for pre-decoded pixels, leaving the software-decoder path intact.
+        _install_nvdec_video_metadata_shim()
 
         # Load tokenizer to convert image token string to integer ID
         self.tokenizer = AutoTokenizer.from_pretrained(
