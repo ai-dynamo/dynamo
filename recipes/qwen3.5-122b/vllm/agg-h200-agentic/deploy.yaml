@@ -57,6 +57,13 @@ spec:
               args:
                 - -m
                 - dynamo.frontend
+                # KV-aware routing over worker-published KV events; block size must
+                # match the worker's --block-size so prefix hashing lines up.
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --kv-cache-block-size
+                - "64"
                 - --trust-remote-code
               env:
                 - name: POD_UID
@@ -127,6 +134,8 @@ spec:
                 - --kv-cache-dtype
                 - auto
                 - --enable-prefix-caching
+                - --block-size
+                - "64"
                 - --mamba-ssm-cache-dtype
                 - float16
                 - --max-model-len
