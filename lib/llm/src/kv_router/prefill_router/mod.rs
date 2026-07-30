@@ -209,6 +209,7 @@ impl
         let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
+        let policy_class = context.metadata().get("policy-class").cloned();
         let engine_ctx = context.context();
 
         // Conditional-disagg bypass is a router-owned decision. Drop any
@@ -239,6 +240,7 @@ impl
                 .select_decode_worker_for_conditional_disagg(
                     &req,
                     &request_id,
+                    policy_class.clone(),
                     session_affinity.as_deref(),
                     decode_affinity_target,
                 )

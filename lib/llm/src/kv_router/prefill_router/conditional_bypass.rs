@@ -64,6 +64,7 @@ impl PrefillRouter {
         &self,
         req: &PreprocessedRequest,
         request_id: &str,
+        policy_class: Option<String>,
         session_affinity: Option<&SessionAffinityId>,
         decode_affinity_target: Option<AffinityTarget>,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
@@ -122,23 +123,10 @@ impl PrefillRouter {
             .routing
             .as_ref()
             .and_then(|routing| routing.allowed_worker_ids.clone());
-        let affinity_pinned_worker = match decode_affinity_target {
-            Some(target) => {
-                let Some(dp_rank) = target
-                    .dp_rank
-                    .or_else(|| decode_router.unique_dp_rank_for_worker(target.worker_id))
-                else {
-                    tracing::debug!(
-                        request_id,
-                        worker_id = target.worker_id,
-                        "Skipping conditional disagg because decode affinity target has no resolved DP rank"
-                    );
-                    return Ok(None);
-                };
-                Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
-            }
-            None => None,
-        };
+        let session_id = req
+            .agent_context
+            .as_ref()
+            .map(|context| context.session_id.clone());
         let request_pinned_worker = match resolve_request_decode_pin(req.routing.as_ref(), |id| {
             decode_router.unique_dp_rank_for_worker(id)
         }) {
@@ -153,7 +141,26 @@ impl PrefillRouter {
                 return Ok(None);
             }
         };
-        let pinned_worker = request_pinned_worker.or(affinity_pinned_worker);
+        let pinned_worker = match request_pinned_worker {
+            Some(worker) => Some(worker),
+            None => match decode_affinity_target {
+                Some(target) => {
+                    let Some(dp_rank) = target
+                        .dp_rank
+                        .or_else(|| decode_router.unique_dp_rank_for_worker(target.worker_id))
+                    else {
+                        tracing::debug!(
+                            request_id,
+                            worker_id = target.worker_id,
+                            "Skipping conditional disagg because decode affinity target has no resolved DP rank"
+                        );
+                        return Ok(None);
+                    };
+                    Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
+                }
+                None => None,
+            },
+        };
         let routing_constraints = req
             .routing
             .as_ref()
@@ -171,8 +178,8 @@ impl PrefillRouter {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                None,
-                None,
+                policy_class.clone(),
+                session_id.clone(),
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
@@ -203,7 +210,7 @@ impl PrefillRouter {
         let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
             let busy = self
-                .peek_prefill_chosen_worker_busy(req, session_affinity)
+                .peek_prefill_chosen_worker_busy(req, policy_class, session_id, session_affinity)
                 .await;
             tracing::debug!(
                 request_id,
@@ -287,6 +294,8 @@ impl PrefillRouter {
     async fn peek_prefill_chosen_worker_busy(
         &self,
         req: &PreprocessedRequest,
+        policy_class: Option<String>,
+        session_id: Option<String>,
         session_affinity: Option<&SessionAffinityId>,
     ) -> Option<bool> {
         let threshold = self.conditional_disagg_prefill_busy_threshold?;
@@ -349,8 +358,8 @@ impl PrefillRouter {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                None,
-                None,
+                policy_class,
+                session_id,
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,

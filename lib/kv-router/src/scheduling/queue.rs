@@ -699,7 +699,9 @@ impl<
         let active_tokens = self.slots.active_tokens(decay_now);
         let workers = self.workers_with_configs.borrow();
         let config = workers.get(&worker.worker_id)?;
-        let capacity = config.max_num_batched_tokens()? as f64;
+        let capacity = config
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS) as f64;
         Some(active_tokens.get(&worker).copied().unwrap_or(0) as f64 > threshold * capacity)
     }
 
