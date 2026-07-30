@@ -55,6 +55,11 @@ live runtime policy (`max_gpu_budget`, `min_gpu_budget`, `min_endpoint`) when th
 candidate enables the planner. Keeping them in the flat sample makes replay and generated
 deployment artifacts reproduce the search contract.
 
+The current deployment generator applies these G2 host-offload fields to
+aggregate and prefill workers. It intentionally omits them from disaggregated
+decode workers, which already consume transferred KV and must not be scored with
+a second local offload tier.
+
 ### Parallel fields (`_unroll_parallel`)
 
 Unrolled from the chosen `parallel_config` via `_shape_fields`. The keys differ by mode:

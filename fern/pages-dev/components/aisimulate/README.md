@@ -19,8 +19,9 @@ of the stable `ai-dynamo` Python API.
 ## Spica
 
 [Spica](spica/README.md) is AI Simulate's first package. It searches engine, router, Planner, and
-KV Block Manager (KVBM) settings with a black-box optimizer, evaluates candidates with Dynamo
-Replay, and supports scalar and Pareto-front objectives.
+parallelism settings with a black-box optimizer, accepts pinned G2 host-offload settings, and
+conditionally searches router cache-hit weights. It evaluates candidates with Dynamo Replay and
+supports scalar and Pareto-front objectives.
 
 Spica requires the matching Dynamo runtime from the same source revision. Follow the
 [Spica development setup](spica/README.md#develop), then invoke the package module:

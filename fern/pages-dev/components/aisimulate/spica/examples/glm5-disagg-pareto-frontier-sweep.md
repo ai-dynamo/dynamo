@@ -74,7 +74,7 @@ provide one config as a strict pin or several configs as a custom projection poo
 
 ## Configuration
 
-The runnable configuration is
+The reference configuration is
 `examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml`:
 
 ```yaml
@@ -154,9 +154,15 @@ shape of the frontier without treating those near-duplicates as different deploy
 For this workload, 50-55 rounds is the practical quality/runtime point. The final 27 rounds
 after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolume.
 
-## Reproduce
+## Reproduction Status
+
+This historical experiment cannot currently be reproduced with Dynamo's
+packaged AI Configurator 0.9 dependency. The configuration is retained as a
+reference until Dynamo upgrades to an AI Configurator release that provides
+`aiconfigurator.sdk.memory`.
 
 ```bash
+# Reference command; fails fast with the currently packaged dependencies.
 python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```

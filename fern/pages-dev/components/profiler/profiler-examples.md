@@ -69,8 +69,7 @@ spec:
 
 ### Private Model
 
-For gated or private HuggingFace models, pass your token via an environment variable injected
-into the profiling job. Create the secret first:
+For gated or private HuggingFace models, create the standard token Secret:
 
 ```bash
 kubectl create secret generic hf-token-secret \
@@ -78,7 +77,8 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Then reference it in your DGDR:
+No DGDR override is required. The operator injects the Secret's `HF_TOKEN` key
+into the profiling job as `HUGGING_FACE_HUB_TOKEN`:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -88,20 +88,6 @@ metadata:
 spec:
   model: "meta-llama/Llama-3.1-8B-Instruct"
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
-
-  overrides:
-    profilingJob:
-      template:
-        spec:
-          containers: []    # required placeholder; leave empty to inherit defaults
-          initContainers:
-            - name: profiler
-              env:
-                - name: HF_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: hf-token-secret
-                      key: HF_TOKEN
 ```
 
 ### Custom SLA Targets

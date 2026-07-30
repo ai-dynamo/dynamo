@@ -35,15 +35,16 @@ Spica's source lives in `aisimulate/src/aisimulate/spica` and is published by th
 distribution in the Dynamo repository. Installing that distribution provides the canonical
 `aisimulate.spica` Python package and its CPU Vizier and JAX dependencies. Runnable configuration
 files and tools live in `examples/aisimulate/spica`. Spica uses AI Configurator's lower-layer
-forward-pass and memory provider, then evaluates candidates with Dynamo Replay.
+forward-pass provider and, when available, memory provider, then evaluates candidates with
+Dynamo Replay.
 
 ## Spica and Replay Optimize
 
 Use `dynamo.profiler.utils.replay_optimize`, documented in
 [DynoSim Sweeps](../../../dynosim/sweeps.mdx), for a focused heuristic search over tensor-parallel
 shapes, worker counts, router settings, SLA constraints, and a GPU budget. Use Spica for the broader
-experimental search space, Planner policies, KVBM controls, black-box optimization, or Pareto
-objectives.
+experimental search space, Planner policies, pinned G2 host-offload settings, conditional router
+cache-hit weights, black-box optimization, or Pareto objectives.
 
 ## Status
 
@@ -106,7 +107,7 @@ JAX just warns and falls back to CPU, so there's no reason to install them witho
 one. When a Spica sampler is constructed, it detects the installed CUDA plugin and
 leaves JAX's platform selection enabled; an explicit `JAX_PLATFORMS=cpu` or
 `JAX_PLATFORMS=cuda` still overrides that behavior. Importing
-Importing `aisimulate.spica` alone does not modify JAX, logging, or warning settings.
+`aisimulate.spica` alone does not modify JAX, logging, or warning settings.
 
 ### Real Replay
 
