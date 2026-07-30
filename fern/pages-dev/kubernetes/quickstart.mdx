@@ -5,8 +5,12 @@ title: Kubernetes Quickstart
 subtitle: Get a model running on Kubernetes and send your first request.
 ---
 
+import { KubernetesContainerSelector } from "@/components/KubernetesContainerSelector";
+
 Select **NVIDIA GPU** or **Intel GPU** based on the accelerator hardware in your cluster, and
 follow that tab throughout the guide. The Intel GPU path uses the XPU runtime and tooling.
+
+<KubernetesContainerSelector />
 
 <Steps>
   <Step title="Check the prerequisites">
@@ -68,6 +72,7 @@ kubectl get resourceslices
 ```bash
 export NAMESPACE=dynamo-system
 export DYNAMO_VERSION=1.3.0
+export PLANNER_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"
 
 helm upgrade --install dynamo-platform \
   "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${DYNAMO_VERSION}.tgz" \
@@ -109,7 +114,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-0.6B
   backend: auto
-  image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}
+  image: ${PLANNER_IMAGE}
 EOF
 ```
       </Tab>
@@ -117,7 +122,8 @@ EOF
         From the root of your Dynamo clone, build and push the vLLM XPU runtime image:
 
 ```bash
-export XPU_IMAGE="registry.example.com/vllm-runtime-xpu:quickstart"
+export IMAGE_REGISTRY='registry.example.com/my-team'
+export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"
 
 python3 container/render.py \
   --framework=vllm \
