@@ -42,9 +42,8 @@ dynamo:
   etcd_version: v3.5.30
 
   nixl_ref: v1.0.1
-  nixl_ucx_ref: v1.20.x
+  nixl_ucx_ref: v1.21.0
   nixl_gdrcopy_ref: v2.5.2
-  nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   nixl_libfabric_ref: v2.4.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.

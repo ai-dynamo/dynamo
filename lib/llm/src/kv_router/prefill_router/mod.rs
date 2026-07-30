@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
+use futures::stream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -90,6 +91,9 @@ enum PrefillOutcome {
         worker_id: u64,
         worker_link: Option<TraceLink>,
     },
+    Terminal {
+        output: Box<Annotated<LLMEngineOutput>>,
+    },
 }
 
 fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
@@ -121,9 +125,23 @@ pub enum PrefillQueryOutcome {
     },
 }
 
-struct PrefillCompletion {
-    result: PrefillResult,
-    worker_link: Option<TraceLink>,
+enum PrefillCompletion {
+    Handoff {
+        result: PrefillResult,
+        worker_link: Option<TraceLink>,
+    },
+    Terminal {
+        output: Box<Annotated<LLMEngineOutput>>,
+    },
+}
+
+fn strip_terminal_disaggregated_params(
+    mut output: Annotated<LLMEngineOutput>,
+) -> Annotated<LLMEngineOutput> {
+    if let Some(data) = output.data.as_mut() {
+        data.disaggregated_params = None;
+    }
+    output
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -248,19 +266,27 @@ impl
                 drop(prefill_phase_barrier);
                 let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
 
-                if let Some(bootstrap_info) =
-                    extract_bootstrap_info(&completion.result.disaggregated_params)
-                {
-                    PrefillOutcome::Bootstrap {
-                        bootstrap_info,
-                        worker_id: prepared.worker_id,
+                match completion {
+                    PrefillCompletion::Handoff {
+                        result,
+                        worker_link,
+                    } => {
+                        if let Some(bootstrap_info) =
+                            extract_bootstrap_info(&result.disaggregated_params)
+                        {
+                            PrefillOutcome::Bootstrap {
+                                bootstrap_info,
+                                worker_id: prepared.worker_id,
+                            }
+                        } else {
+                            PrefillOutcome::Completed {
+                                result,
+                                worker_id: prepared.worker_id,
+                                worker_link,
+                            }
+                        }
                     }
-                } else {
-                    PrefillOutcome::Completed {
-                        result: completion.result,
-                        worker_id: prepared.worker_id,
-                        worker_link: completion.worker_link,
-                    }
+                    PrefillCompletion::Terminal { output } => PrefillOutcome::Terminal { output },
                 }
             };
             Ok((outcome, topology_constraints))
@@ -280,6 +306,21 @@ impl
                 }
                 return Err(error);
             }
+        };
+
+        // A prefill request can terminate before the backend establishes a KV
+        // handoff (for example, EOS on the one-token context step). Native
+        // disaggregated backends return that context response directly instead
+        // of launching a generation-only request with missing handoff IDs.
+        let outcome = match outcome {
+            PrefillOutcome::Terminal { output } => {
+                let output = strip_terminal_disaggregated_params(*output);
+                return Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                    Box::pin(stream::once(async move { output })),
+                    engine_ctx,
+                ));
+            }
+            outcome => outcome,
         };
 
         // NVBugs 5969206: Do NOT abort decode routing when context is killed.
@@ -321,6 +362,9 @@ impl
                 decode_req.prefill_result = Some(result);
                 decode_req.migration_link = worker_link;
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
+            }
+            PrefillOutcome::Terminal { .. } => {
+                unreachable!("terminal prefill outcomes return before decode routing")
             }
         };
 
@@ -448,7 +492,10 @@ mod tests {
     use dynamo_kv_router::config::RouterConfigOverride;
     use std::collections::{HashMap, HashSet};
 
-    use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
+    use crate::protocols::common::{
+        FinishReason,
+        preprocessor::{PreprocessedRequest, RoutingHints},
+    };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
 
@@ -463,6 +510,27 @@ mod tests {
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    #[test]
+    fn terminal_response_strips_disaggregated_params() {
+        let output = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![2],
+            finish_reason: Some(FinishReason::EoS),
+            disaggregated_params: Some(serde_json::json!({
+                "ctx_request_id": null,
+                "request_type": "context_only",
+            })),
+            ..Default::default()
+        });
+
+        let output = strip_terminal_disaggregated_params(output);
+        let data = output
+            .data
+            .expect("terminal response should retain its data");
+        assert_eq!(data.token_ids, vec![2]);
+        assert_eq!(data.finish_reason, Some(FinishReason::EoS));
+        assert!(data.disaggregated_params.is_none());
     }
 
     #[test]

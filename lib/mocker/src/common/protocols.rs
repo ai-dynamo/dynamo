@@ -327,7 +327,7 @@ impl PrefillCost {
         &self,
         new_tokens: Option<usize>,
         perf_model: &PerfModel,
-    ) -> f64 {
+    ) -> anyhow::Result<f64> {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
         let isl = self.cached_tokens + tokens;
         perf_model.predict_prefill_time(1, isl, self.cached_tokens)

@@ -24,13 +24,10 @@ because it mis-models MoE expert sharding.
 
 from __future__ import annotations
 
-import importlib
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Iterable
 
-from aiconfigurator.sdk.perf_database import get_latest_database_version
-
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
+from aiconfigurator_core.sdk.memory import estimate_kv_cache
+from aiconfigurator_core.sdk.perf_database import get_latest_database_version
 
 from .parallel_enum import ParallelShape
 
@@ -42,27 +39,6 @@ DEFAULT_MEMORY_FRACTION = 0.9
 
 class NoPerfDatabase(RuntimeError):
     """No perf database for this ``(hardware_sku, backend)`` — cannot estimate KV cache."""
-
-
-def _load_memory_estimator() -> Callable[..., dict[str, Any]]:
-    """Load AIC's optional unified KV-cache estimator on first use.
-
-    AIC 0.9, which Dynamo currently supports, does not provide
-    ``aiconfigurator.sdk.memory``. Keep ordinary Spica imports working with that
-    release, while preserving transitive import failures from an otherwise present
-    estimator module.
-    """
-    try:
-        memory = importlib.import_module("aiconfigurator.sdk.memory")
-    except ModuleNotFoundError as exc:
-        if exc.name == "aiconfigurator.sdk.memory":
-            raise AicMemoryEstimatorUnavailableError(
-                "aiconfigurator.sdk.memory is required for experimental Spica "
-                "KV-cache estimation; install an AIConfigurator release with the "
-                "compatible estimator (AIC 0.10 or newer)"
-            ) from exc
-        raise
-    return memory.estimate_kv_cache
 
 
 def memory_fraction_kind(backend: str) -> str:
@@ -99,7 +75,7 @@ def estimate_kv_tokens(
     Genuine estimation errors (bad inputs, unsupported model) propagate.
     """
     try:
-        est = _load_memory_estimator()(
+        est = estimate_kv_cache(
             model_name,
             hardware_sku,
             backend,

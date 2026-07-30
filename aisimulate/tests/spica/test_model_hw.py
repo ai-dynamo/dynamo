@@ -1,35 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: E402
-
 """Model/hardware resolution + KV-cache parallel-config validity via AIConfigurator.
 
-Skipped unless ``aiconfigurator`` is importable. Uses models whose configs
-resolve without HF auth (DeepSeek-V3, Qwen3-32B)."""
+Uses models whose configs resolve without HF auth (DeepSeek-V3, Qwen3-32B)."""
 
 import pytest
 
-pytest.importorskip("aiconfigurator")
-
 import aisimulate.spica.model_hw as mh_mod
-from aisimulate.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
 from aisimulate.spica.model_hw import (
     NoViableParallelConfig,
     parallel_configs_for,
     resolve_model_hardware,
 )
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 DEEPSEEK = "deepseek-ai/DeepSeek-V3"
 QWEN = "Qwen/Qwen3-32B"
-
-
-def _require_memory_estimator() -> None:
-    try:
-        _load_memory_estimator()
-    except AicMemoryEstimatorUnavailableError as exc:
-        pytest.skip(str(exc))
 
 
 @pytest.mark.model(DEEPSEEK)
@@ -56,25 +42,35 @@ def test_unknown_hardware_sku_raises():
         resolve_model_hardware(QWEN, "h200_typo", backend="trtllm")
 
 
-def test_aic_private_helper_compatibility_boundary(monkeypatch):
-    seen = []
+def test_aic_core_system_spec_contract(monkeypatch):
     monkeypatch.setattr(
         mh_mod,
-        "_get_system_config",
-        lambda hardware: seen.append(("system", hardware))
-        or {"vram_per_gpu": 80, "gpus_per_node": 8},
+        "get_model_config_from_model_path",
+        lambda model: {
+            "architecture": "Qwen3ForCausalLM",
+            "context": 40960,
+        },
+    )
+    monkeypatch.setattr(mh_mod, "check_is_moe", lambda model_config: False)
+    monkeypatch.setattr(
+        mh_mod.perf_database,
+        "load_system_spec",
+        lambda hardware: {
+            "gpu": {"mem_capacity": 80},
+            "node": {"num_gpus_per_node": 8},
+        },
     )
     monkeypatch.setattr(
         mh_mod,
         "_estimate_model_weight_bytes",
-        lambda model: seen.append(("weight", model)) or 123,
+        lambda model: 123,
     )
 
-    system, weight_bytes = mh_mod._aic_model_system_facts("model", "hardware")
+    mh = resolve_model_hardware("model", "hardware", backend="trtllm")
 
-    assert system == {"vram_per_gpu": 80, "gpus_per_node": 8}
-    assert weight_bytes == 123
-    assert seen == [("system", "hardware"), ("weight", "model")]
+    assert mh.vram_per_gpu == 80
+    assert mh.gpus_per_node == 8
+    assert mh.weight_bytes == 123
 
 
 @pytest.mark.model(DEEPSEEK)
@@ -153,48 +149,15 @@ def test_kv_filter_no_feasible_shape_raises(monkeypatch):
 
 
 @pytest.mark.model(DEEPSEEK)
-def test_missing_memory_estimator_warns_and_keeps_enumerated_configs(monkeypatch):
-    def unavailable(*args, **kwargs):
-        raise AicMemoryEstimatorUnavailableError("estimator unavailable")
-
-    monkeypatch.setattr(mh_mod, "feasible_shape_tokens", unavailable)
-
-    with pytest.warns(
-        UserWarning,
-        match=r"\[EXPERIMENTAL\].*Continuing.*kv_load_ratio.*fail closed",
-    ):
-        configs = parallel_configs_for(
-            DEEPSEEK,
-            "gb200",
-            gpu_budget=16,
-            deployment_mode="agg",
-            backend="trtllm",
-            max_seq_len=8192,
-        )
-
-    assert configs
-    assert all(config.total_gpus <= 16 for config in configs)
-
-
-@pytest.mark.model(DEEPSEEK)
 def test_kv_path_end_to_end_deepseek_gb200():
-    # Real native estimate; skipped without the gb200 perf DB / model build.
-    _require_memory_estimator()
-    try:
-        cfgs = parallel_configs_for(
-            DEEPSEEK,
-            "gb200",
-            gpu_budget=16,
-            deployment_mode="agg",
-            backend="trtllm",
-            max_seq_len=8192,
-        )
-    except NoPerfDatabase:
-        pytest.skip("no gb200/trtllm perf DB")
-    except ValueError as exc:
-        if "unsupported model/backend/GPU" in str(exc):
-            pytest.skip(f"native KV build unavailable: {exc}")
-        raise
+    cfgs = parallel_configs_for(
+        DEEPSEEK,
+        "gb200",
+        gpu_budget=16,
+        deployment_mode="agg",
+        backend="trtllm",
+        max_seq_len=8192,
+    )
     assert cfgs
     # DeepSeek-V3 OOMs at 2 GPUs/worker; smallest feasible worker is >= 4 GPUs.
     assert all(c.shape.gpus_per_worker >= 4 for c in cfgs)
@@ -204,8 +167,7 @@ def test_kv_path_end_to_end_deepseek_gb200():
 @pytest.mark.model(DEEPSEEK)
 def test_kv_path_tiny_budget_raises():
     # 2 GPUs cannot hold DeepSeek-V3 at any shape -> no feasible config.
-    _require_memory_estimator()
-    try:
+    with pytest.raises(NoViableParallelConfig):
         parallel_configs_for(
             DEEPSEEK,
             "gb200",
@@ -214,12 +176,3 @@ def test_kv_path_tiny_budget_raises():
             backend="trtllm",
             max_seq_len=8192,
         )
-    except NoPerfDatabase:
-        pytest.skip("no gb200/trtllm perf DB")
-    except NoViableParallelConfig:
-        return  # expected
-    except ValueError as exc:
-        if "unsupported model/backend/GPU" in str(exc):
-            pytest.skip(f"native KV build unavailable: {exc}")
-        raise
-    pytest.fail("expected NoViableParallelConfig for a 2-GPU DeepSeek-V3 budget")
