@@ -123,7 +123,8 @@ EOF
         From the root of your Dynamo clone, build and push the vLLM XPU runtime image:
 
 ```bash
-export XPU_IMAGE="registry.example.com/vllm-runtime-xpu:quickstart"
+export IMAGE_REGISTRY="registry.example.com/my-team"
+export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"
 
 python3 container/render.py \
   --framework=vllm \

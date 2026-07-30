@@ -13,7 +13,6 @@ import { CURRENT_TAG } from "./releases.data";
 import { LOCAL_SELECTOR_CSS } from "./local-selector-styles";
 
 type Hardware = "nvidia" | "intel";
-type Backend = "sglang" | "trtllm" | "vllm";
 type Build = "release" | "custom";
 
 type Option<T extends string> = {
@@ -27,45 +26,30 @@ const HARDWARES: Option<Hardware>[] = [
   { id: "intel", label: "Intel XPU", sub: "source build" },
 ];
 
-const BACKENDS: Option<Backend>[] = [
-  { id: "sglang", label: "SGLang" },
-  { id: "trtllm", label: "TensorRT-LLM" },
-  { id: "vllm", label: "vLLM" },
-];
-
 const BUILDS: Option<Build>[] = [
-  { id: "release", label: "Release image", sub: `Dynamo ${CURRENT_TAG}` },
-  { id: "custom", label: "Custom image", sub: "build and push" },
+  { id: "release", label: "Release image", sub: `Planner ${CURRENT_TAG}` },
+  { id: "custom", label: "Custom XPU image", sub: "build and push" },
 ];
-
-const RUNTIME_IMAGES: Record<Backend, string> = {
-  sglang: "sglang-runtime",
-  trtllm: "tensorrtllm-runtime",
-  vllm: "vllm-runtime",
-};
-
-const FRAMEWORK_ARGS: Record<Backend, string> = {
-  sglang: "sglang",
-  trtllm: "trtllm",
-  vllm: "vllm",
-};
-
-function cudaVersionFlag(backend: Backend): string[] {
-  return backend === "trtllm" ? ["  --cuda-version=13.1 \\"] : [];
-}
-
-function backendEnabled(hardware: Hardware, backend: Backend): boolean {
-  return hardware === "nvidia" || backend === "vllm";
-}
 
 function buildEnabled(hardware: Hardware, build: Build): boolean {
-  return hardware === "nvidia" || build === "custom";
+  return hardware === "nvidia" ? build === "release" : build === "custom";
 }
 
-function commandFor(hardware: Hardware, backend: Backend, build: Build): string {
+function normalizeRegistry(registry: string): string {
+  return registry.trim().replace(/\/+$/, "");
+}
+
+function registryIsValid(registry: string): boolean {
+  const normalized = normalizeRegistry(registry);
+  return normalized.length > 0 && !/\s/.test(normalized);
+}
+
+function commandFor(hardware: Hardware, registry: string): string {
   if (hardware === "intel") {
+    const imageRegistry = normalizeRegistry(registry) || "<your-registry>/<namespace>";
     return [
-      'export XPU_IMAGE="registry.example.com/vllm-runtime-xpu:quickstart"',
+      `export IMAGE_REGISTRY="${imageRegistry}"`,
+      'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"',
       "",
       "python3 container/render.py \\",
       "  --framework=vllm \\",
@@ -77,26 +61,9 @@ function commandFor(hardware: Hardware, backend: Backend, build: Build): string 
     ].join("\n");
   }
 
-  if (build === "release") {
-    return [
-      `export DYNAMO_VERSION=${CURRENT_TAG}`,
-      'export PLANNER_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
-      `export RUNTIME_IMAGE="nvcr.io/nvidia/ai-dynamo/${RUNTIME_IMAGES[backend]}:\${DYNAMO_VERSION}"`,
-    ].join("\n");
-  }
-
   return [
-    `export RUNTIME_IMAGE="registry.example.com/${RUNTIME_IMAGES[backend]}:quickstart"`,
-    'export PLANNER_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:' + CURRENT_TAG + '"',
-    "",
-    "python3 container/render.py \\",
-    `  --framework=${FRAMEWORK_ARGS[backend]} \\`,
-    "  --device=cuda \\",
-    ...cudaVersionFlag(backend),
-    "  --target=runtime \\",
-    "  --output-short-filename",
-    'docker build --tag "$RUNTIME_IMAGE" --file container/rendered.Dockerfile .',
-    'docker push "$RUNTIME_IMAGE"',
+    `export DYNAMO_VERSION=${CURRENT_TAG}`,
+    'export PLANNER_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:${DYNAMO_VERSION}"',
   ].join("\n");
 }
 
@@ -143,34 +110,45 @@ function ChoiceRow<T extends string>({
 
 export function KubernetesContainerSelector() {
   const [hardware, setHardware] = useState<Hardware>("nvidia");
-  const [backend, setBackend] = useState<Backend>("vllm");
   const [build, setBuild] = useState<Build>("release");
+  const [registry, setRegistry] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
 
-  const command = commandFor(hardware, backend, build);
-  const backendLabel = BACKENDS.find((option) => option.id === backend)?.label ?? backend;
+  const command = commandFor(hardware, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
   const buildLabel = hardware === "intel"
-    ? "Source build"
-    : build === "release"
-      ? "Published release"
-      : "Custom runtime";
+    ? "Custom XPU runtime"
+    : "Published planner image";
+  const registryNeeded = hardware === "intel";
+  const canCopy = !registryNeeded || registryIsValid(registry);
 
   function chooseHardware(next: Hardware) {
     setHardware(next);
     if (next === "intel") {
-      setBackend("vllm");
       setBuild("custom");
     } else {
       setBuild("release");
     }
   }
 
+  function resetCopyLabel(label = "Copy") {
+    window.setTimeout(() => setCopyLabel(label), 1200);
+  }
+
   async function copyCommand() {
-    if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(command);
-    setCopyLabel("Copied!");
-    window.setTimeout(() => setCopyLabel("Copy"), 1200);
+    if (!canCopy) return;
+    if (!navigator.clipboard?.writeText) {
+      setCopyLabel("Copy failed");
+      resetCopyLabel();
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopyLabel("Copied!");
+    } catch {
+      setCopyLabel("Copy failed");
+    }
+    resetCopyLabel();
   }
 
   return (
@@ -184,21 +162,28 @@ export function KubernetesContainerSelector() {
 
         <ChoiceRow label="Hardware" options={HARDWARES} selected={hardware} onSelect={chooseHardware} />
         <ChoiceRow
-          label="Backend"
-          options={BACKENDS}
-          selected={backend}
-          onSelect={setBackend}
-          isDisabled={(value) => !backendEnabled(hardware, value)}
-          disabledTitle={(option) => `${option.label} does not currently have an Intel XPU quickstart path.`}
-        />
-        <ChoiceRow
           label="Container"
           options={BUILDS}
           selected={build}
           onSelect={setBuild}
           isDisabled={(value) => !buildEnabled(hardware, value)}
-          disabledTitle={() => "Intel XPU quickstart images are built from source and pushed to your registry."}
+          disabledTitle={(option) => `${option.label} is not used by this quickstart path.`}
         />
+        {registryNeeded && (
+          <div className="lqs-row">
+            <span className="lqs-label">Registry</span>
+            <div className="lqs-field">
+              <input
+                className="lqs-input"
+                value={registry}
+                onChange={(event) => setRegistry(event.target.value)}
+                placeholder="registry.example.com/my-team"
+                aria-invalid={!canCopy}
+              />
+              {!canCopy && <p className="lqs-hint lqs-hint--error">Enter your registry/namespace before copying.</p>}
+            </div>
+          </div>
+        )}
 
         <div className="lqs-output">
           <div className={`lqs-rec lqs-rec--${build === "release" ? "stable" : "source"}`}>
@@ -207,11 +192,11 @@ export function KubernetesContainerSelector() {
               <span className="lqs-badge">{build === "release" ? "Use" : "Build"}</span>
               {buildLabel}
             </div>
-            <div className="lqs-support">{hardwareLabel} · {backendLabel}</div>
+            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU DGD image" : "DGDR planner image"}</div>
           </div>
           <div className="lqs-command">
-            <button type="button" className="lqs-copy" onClick={copyCommand}>
-              {copyLabel}
+            <button type="button" className="lqs-copy" onClick={copyCommand} disabled={!canCopy}>
+              {canCopy ? copyLabel : "Add registry"}
             </button>
             <pre>{command}</pre>
           </div>
