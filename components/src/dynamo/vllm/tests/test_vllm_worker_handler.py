@@ -1392,11 +1392,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["a", "b"], "model": "test-model"}
-        with patch.dict(
-            mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: ""},
-        ):
-            responses = [r async for r in handler.generate(request, context)]
+        responses = [r async for r in handler.generate(request, context)]
 
         assert len(responses) == 1
         response = responses[0]
@@ -1411,43 +1407,6 @@ class TestEmbeddingWorkerHandlerCancellation:
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_text_numpy_response_transport_uses_base64_bytes(self):
-        handler = self._make_embedding_handler()
-        context = self._make_context()
-
-        async def fake_encode(prompt, pooling_params, request_id):
-            output = MagicMock()
-            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
-            output.prompt_token_ids = [1, 2, 3]
-            yield output
-
-        handler.engine_client.encode = fake_encode
-        with patch.dict(
-            mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "numpy"},
-        ):
-            responses = [
-                response
-                async for response in handler.generate(
-                    {"input": ["hello"], "model": "test-model"}, context
-                )
-            ]
-
-        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
-        assert responses[0]["data"][0]["embedding"] == expected_b64
-
-    def test_invalid_response_transport_warns_and_uses_default(self, caplog):
-        with patch.dict(
-            mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
-        ):
-            transport = mod._embedding_response_transport()
-
-        assert transport == mod._EMBEDDING_RESPONSE_TRANSPORT_DEFAULT
-        assert mod._EMBEDDING_RESPONSE_TRANSPORT_ENV in caplog.text
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -1469,21 +1428,17 @@ class TestEmbeddingWorkerHandlerCancellation:
             yield output
 
         handler.engine_client.encode = fake_encode
-        with patch.dict(
-            mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: ""},
-        ):
-            responses = [
-                response
-                async for response in handler.generate(
-                    {
-                        "token_ids": [[11, 12, 13]],
-                        "model": "test-model",
-                        **encoding_fields,
-                    },
-                    context,
-                )
-            ]
+        responses = [
+            response
+            async for response in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    **encoding_fields,
+                },
+                context,
+            )
+        ]
 
         assert responses == [
             {
@@ -1509,43 +1464,6 @@ class TestEmbeddingWorkerHandlerCancellation:
                 context,
             ):
                 pass
-
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(5)
-    async def test_tokens_numpy_response_matches_default_wire_shape(self):
-        handler = self._make_embedding_handler()
-        context = self._make_context()
-
-        async def fake_encode(prompt, pooling_params, request_id):
-            output = MagicMock()
-            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
-            output.prompt_token_ids = prompt["prompt_token_ids"]
-            yield output
-
-        handler.engine_client.encode = fake_encode
-        with patch.dict(
-            mod.os.environ,
-            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "numpy"},
-        ):
-            responses = [
-                response
-                async for response in handler.generate(
-                    {
-                        "token_ids": [[11, 12, 13]],
-                        "model": "test-model",
-                        "encoding_format": "float",
-                    },
-                    context,
-                )
-            ]
-
-        assert responses == [
-            {
-                "embeddings": [mod._encode_floats_to_base64([0.1, 0.2, 0.3])],
-                "prompt_tokens": 3,
-                "total_tokens": 3,
-            }
-        ]
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

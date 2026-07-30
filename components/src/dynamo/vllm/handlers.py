@@ -29,6 +29,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
@@ -103,9 +104,6 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
-_EMBEDDING_RESPONSE_TRANSPORT_ENV: Final = "DYN_EMBEDDING_RESPONSE_TRANSPORT"
-_EMBEDDING_RESPONSE_TRANSPORT_DEFAULT: Final = "default"
-_EMBEDDING_RESPONSE_TRANSPORT_NUMPY: Final = "numpy"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -3861,15 +3859,6 @@ class EmbeddingWorkerHandler:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
-        use_numpy = (
-            _embedding_response_transport() == _EMBEDDING_RESPONSE_TRANSPORT_NUMPY
-        )
-
-        def _encode_row_base64(row: Any) -> str:
-            if use_numpy:
-                return _pooling_output_to_base64(row)
-            return _encode_floats_to_base64(_pooling_output_to_list(row))
-
         embedding_objects: list[Dict[str, Any]] = []
         token_embeddings: list[str] = []
         prompt_tokens = 0
@@ -3907,7 +3896,7 @@ class EmbeddingWorkerHandler:
             # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
             # to (de)serialize. Client-visible wire format is preserved
             # because Rust converts at the HTTP boundary.
-            encoded = _encode_row_base64(embedding_row)
+            encoded = _pooling_output_to_base64(embedding_row)
             if is_tokens_path:
                 token_embeddings.append(encoded)
                 continue
@@ -3937,29 +3926,6 @@ class EmbeddingWorkerHandler:
                 "total_tokens": prompt_tokens,
             },
         }
-
-
-def _embedding_response_transport() -> str:
-    """Select the worker-side encoder for the base64 embedding wire format.
-
-    The default ``struct.pack`` path preserves upstream behavior. ``numpy``
-    skips the intermediate Python float list but produces the same bytes.
-    Invalid values warn and use the upstream-compatible default.
-    """
-
-    raw = os.environ.get(_EMBEDDING_RESPONSE_TRANSPORT_ENV, "")
-    value = raw.strip().lower()
-    if not value:
-        return _EMBEDDING_RESPONSE_TRANSPORT_DEFAULT
-    if value == _EMBEDDING_RESPONSE_TRANSPORT_NUMPY:
-        return value
-    logger.warning(
-        "invalid value for %s: %r; expected 'numpy'; using default "
-        "(struct.pack + base64)",
-        _EMBEDDING_RESPONSE_TRANSPORT_ENV,
-        raw,
-    )
-    return _EMBEDDING_RESPONSE_TRANSPORT_DEFAULT
 
 
 def _is_token_id(x: Any) -> bool:
@@ -4037,17 +4003,27 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
     )
 
 
-def _flatten_pooling_tensor(data: "torch.Tensor") -> "torch.Tensor":
-    """Flatten a vLLM ``PoolingOutput.data`` tensor to a 1-D float32 CPU tensor.
+def _flatten_pooling_tensor(data: "torch.Tensor") -> "np.ndarray":
+    """Flatten pooling output to a 1-D little-endian float32 NumPy array.
 
     Shared by :func:`_pooling_output_to_list` and
     :func:`_pooling_output_to_base64` so the detach/cpu/flatten/cast step isn't
-    duplicated. ``float32`` matches the OpenAI base64 f32 wire format.
+    duplicated. Explicit little-endian ``float32`` matches the OpenAI base64
+    wire format. The endian conversion is zero-copy on little-endian hosts and
+    performs the required byte swap on a big-endian host.
 
     vLLM's pooling pipeline can return a tensor with a singleton batch dim
     (shape ``(1, hidden_dim)``) instead of a 1D vector; we flatten unconditionally.
     """
-    return data.detach().cpu().flatten().to(torch.float32)
+    return (
+        data.detach()
+        .cpu()
+        .flatten()
+        .to(torch.float32)
+        .contiguous()
+        .numpy()
+        .astype("<f4", copy=False)
+    )
 
 
 def _pooling_output_to_list(data: Any) -> list[float]:
@@ -4090,6 +4066,6 @@ def _pooling_output_to_base64(data: Any) -> str:
     """
     if isinstance(data, torch.Tensor):
         vec = _flatten_pooling_tensor(data)
-        return base64.b64encode(vec.contiguous().numpy().tobytes()).decode("ascii")
+        return base64.b64encode(vec.tobytes()).decode("ascii")
     # Fallback for non-tensor pooling outputs (rare): reuse the list path.
     return _encode_floats_to_base64(_pooling_output_to_list(data))
