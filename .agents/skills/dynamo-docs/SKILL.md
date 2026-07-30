@@ -35,7 +35,7 @@ The `docs-website` branch is CI-managed and must **never** be edited by hand.
 
 Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) follows the
 [Documentation Style Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/documentation-style-guide.md)
-(`docs/documentation-style-guide.md`). Read it before writing content. The docs bot enforces a
+(`docs/fern/documentation-style-guide.md`). Read it before writing content. The docs bot enforces a
 **must-fix** subset on every PR — get these right or the checks fail:
 
 - **SPDX header** on every file, copyright range `2025-2026`. Fern pages put the two `#` lines
@@ -412,7 +412,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 
 | File | Purpose |
 |---|---|
-| `docs/documentation-style-guide.md` | Authoring standard for every page (must-fix + guidance) |
+| `docs/fern/documentation-style-guide.md` | Authoring standard for every page (must-fix + guidance) |
 | `docs/recipes/_catalog/README.md` | Recipe/benchmark page authoring (catalog contract, blueprint, picker) |
 | `docs/recipes/_catalog/validate.py` | Catalog validator (covers both recipe and benchmark catalogs) |
 | `docs/fern/index.yml` | Navigation tree (two tabs: `docs` + `recipes`) |

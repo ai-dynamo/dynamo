@@ -62,7 +62,6 @@ These fuse layout permutation with copy for non-standard transfer paths:
 - `cuda/stubs.c` — Abort-on-call fallbacks for all `extern "C"` symbols.
 - `src/tensor_kernels.rs` — Rust FFI wrappers, enums (`TensorDataType`, `BlockLayout`, `MemcpyBatchMode`), and integration tests.
 - `examples/kvbench.rs` — Benchmark harness (Llama 3.1 70B profile, CSV output).
-- `scripts/plot_roofline.py` — Roofline bandwidth plots from kvbench output.
 
 ### Dimension conventions
 
