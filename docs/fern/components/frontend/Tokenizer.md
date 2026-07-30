@@ -23,7 +23,7 @@ Use this backend when tokenization is a measurable bottleneck, for example on hi
 
 #### `basetenkenizer` Native Encoder and Decoder
 
-The `basetenkenizer` backend uses [Baseten Tokenizer](https://github.com/baseten/basetenkenizer), a high-performance Rust BPE implementation for inference. Unlike the hybrid `fastokens` path, it performs both encoding and decoding natively and supports segmented encoding for renderers that must preserve trusted control-token boundaries.
+The `basetenkenizer` backend uses the Baseten Tokenizer implementation exposed by `dynamo-tokenizers`, a high-performance Rust BPE implementation for inference. Unlike the hybrid `fastokens` path, it performs both encoding and decoding natively and supports segmented encoding for renderers that must preserve trusted control-token boundaries.
 
 Use this backend for supported `tokenizer.json` models when you need Baseten Tokenizer behavior, including token-compatible Kimi tokenizer artifacts.
 
