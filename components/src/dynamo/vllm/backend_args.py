@@ -6,6 +6,7 @@
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
 import logging
+import os
 import warnings
 from typing import Optional, Union
 
@@ -190,7 +191,15 @@ class DynamoVllmArgGroup(ArgGroup):
             arg_type=int,
             help="Number of Dynamo embedding endpoint processes sharing one "
             "vLLM EngineCore. Only valid with --embedding-worker. The parent "
-            "process counts as one worker (default: 1).",
+            "process counts as one worker (default: 1). Choose roughly the "
+            "minimum of CPU cores available to the worker and expected peak "
+            "request concurrency; values above the CPU count are unlikely to "
+            "help. More than one process is useful only when requests overlap, "
+            "because a single in-flight request occupies one process. The "
+            "processes share a single EngineCore, so adding processes adds "
+            "request-handling and tokenization capacity, not GPU throughput. "
+            "Each process binds DYN_SYSTEM_PORT + its index, so a pool of N "
+            "reserves DYN_SYSTEM_PORT through DYN_SYSTEM_PORT + N - 1.",
         )
 
         # Headless mode for multi-node TP/PP
@@ -700,4 +709,31 @@ class DynamoVllmConfig(ConfigBase):
                 "--embedding-worker-processes greater than 1 cannot be combined "
                 "with --headless. Shared-EngineCore processes serve Dynamo "
                 "embedding endpoints and therefore require the runtime."
+            )
+        self._validate_system_port_range()
+
+    def _validate_system_port_range(self) -> None:
+        """Reject a system-port range that would not fit.
+
+        Each embedding process binds DYN_SYSTEM_PORT + its index, so a pool of N
+        claims N consecutive ports. Failing here names the conflict instead of
+        letting an out-of-range child die during startup with a bind error.
+        """
+        raw = os.environ.get("DYN_SYSTEM_PORT")
+        if raw is None or not raw.strip():
+            return
+        try:
+            base = int(raw)
+        except ValueError:
+            return
+        if base <= 0:
+            return
+
+        highest = base + self.embedding_worker_processes - 1
+        if highest > 65535:
+            raise ValueError(
+                f"DYN_SYSTEM_PORT={base} with --embedding-worker-processes "
+                f"{self.embedding_worker_processes} needs ports {base}-{highest}, "
+                "which exceeds the maximum port 65535. Lower DYN_SYSTEM_PORT or "
+                "reduce the process count."
             )

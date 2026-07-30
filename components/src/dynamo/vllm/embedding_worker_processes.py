@@ -189,11 +189,43 @@ def _child_environment(
     env[_INDEX_ENV] = str(process_index)
     env[_PARENT_PID_ENV] = str(parent_pid)
     env[_ENGINE_ADDRESSES_ENV] = addresses_json
-    # Each Dynamo runtime process needs a distinct system-status listener.
-    # Port zero asks the OS to select a collision-free ephemeral port.
-    env["DYN_SYSTEM_PORT"] = "0"
     env["PYTHONUNBUFFERED"] = "1"
+
+    # Each Dynamo runtime process needs its own system-status listener, but the
+    # port must stay predictable: Prometheus scrapes a fixed containerPort and
+    # Kubernetes liveness, readiness, and startup probes all target it, so an
+    # ephemeral port leaves a child unscrapeable and unprobeable.
+    #
+    # Base plus index, which matches the operator's existing pattern for
+    # multi-engine containers. The parent is index 0 and keeps the configured
+    # port, and children start at index 1, so a pool of N occupies
+    # DYN_SYSTEM_PORT .. DYN_SYSTEM_PORT + N - 1 with no collision.
+    #
+    # Only assign when the parent actually enabled the server. The default is
+    # -1, meaning disabled, and hardcoding a port here used to start a listener
+    # in every child even when the operator deliberately turned it off. An
+    # explicit "0" means the caller asked for ephemeral ports, so pass that
+    # through unchanged rather than overriding an intentional choice.
+    parent_port = _configured_system_port()
+    if parent_port is not None and parent_port > 0:
+        env["DYN_SYSTEM_PORT"] = str(parent_port + process_index)
     return env
+
+
+def _configured_system_port() -> int | None:
+    """The parent's DYN_SYSTEM_PORT, or None when unset or unparseable."""
+    raw = os.environ.get("DYN_SYSTEM_PORT")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring unparseable DYN_SYSTEM_PORT=%r; embedding worker "
+            "children will inherit it unchanged",
+            raw,
+        )
+        return None
 
 
 def _terminate_processes(

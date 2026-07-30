@@ -33,7 +33,7 @@ def _vllm_config():
     )
 
 
-def test_child_environment_uses_ephemeral_system_port(monkeypatch):
+def test_child_environment_offsets_system_port_by_index(monkeypatch):
     monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
     env = processes._child_environment(
         process_count=4,
@@ -45,8 +45,39 @@ def test_child_environment_uses_ephemeral_system_port(monkeypatch):
     assert env[processes._ROLE_ENV] == processes._CHILD_ROLE
     assert env[processes._INDEX_ENV] == "2"
     assert env[processes._PARENT_PID_ENV] == "123"
-    assert env["DYN_SYSTEM_PORT"] == "0"
+    # The parent keeps 19401 as index 0, so children start one above it.
+    assert env["DYN_SYSTEM_PORT"] == "19403"
     assert env["PYTHONUNBUFFERED"] == "1"
+
+
+@pytest.mark.parametrize("raw", ["-1", "0", "not-a-port"])
+def test_child_environment_preserves_non_positive_system_port(monkeypatch, raw):
+    """-1 means disabled and 0 means "pick an ephemeral port".
+
+    Overriding either would start a listener the operator did not ask for, or
+    discard an explicit request for ephemeral ports.
+    """
+    monkeypatch.setenv("DYN_SYSTEM_PORT", raw)
+    env = processes._child_environment(
+        process_count=2,
+        process_index=1,
+        addresses_json='{"process_count": 2}',
+        parent_pid=123,
+    )
+
+    assert env["DYN_SYSTEM_PORT"] == raw
+
+
+def test_child_environment_omits_system_port_when_parent_has_none(monkeypatch):
+    monkeypatch.delenv("DYN_SYSTEM_PORT", raising=False)
+    env = processes._child_environment(
+        process_count=2,
+        process_index=1,
+        addresses_json='{"process_count": 2}',
+        parent_pid=123,
+    )
+
+    assert "DYN_SYSTEM_PORT" not in env
 
 
 def test_decode_child_addresses_validates_parent_count(monkeypatch):

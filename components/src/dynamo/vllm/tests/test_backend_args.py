@@ -356,3 +356,29 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+    def test_system_port_range_that_overflows_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "65534")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        with pytest.raises(ValueError, match="exceeds the maximum port 65535"):
+            config._validate_embedding_worker_processes()
+
+    def test_system_port_range_that_fits_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize("raw", ["-1", "0", "", "not-a-port"])
+    def test_disabled_or_unparseable_system_port_skips_range_check(
+        self, monkeypatch, raw
+    ):
+        """No range is reserved unless the parent asked for a real port."""
+        monkeypatch.setenv("DYN_SYSTEM_PORT", raw)
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4096
+        config._validate_embedding_worker_processes()
