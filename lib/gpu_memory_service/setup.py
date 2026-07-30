@@ -40,7 +40,12 @@ def _create_ext_modules():
             name="gpu_memory_service.client.torch.extensions._allocator_ext",
             sources=["client/torch/extensions/allocator.cpp"],
             extra_compile_args=extra_compile_args,
-        )
+        ),
+        Extension(
+            name="gpu_memory_service.core.client.torch.extensions._allocator_ext",
+            sources=["core/client/torch/extensions/allocator.cpp"],
+            extra_compile_args=extra_compile_args,
+        ),
     ]
 
 
@@ -64,6 +69,11 @@ setup(
     # Package directory mapping: the current directory IS the gpu_memory_service package
     packages=[
         "gpu_memory_service",
+        "gpu_memory_service.core",
+        "gpu_memory_service.core.client",
+        "gpu_memory_service.core.client.torch",
+        "gpu_memory_service.core.client.torch.extensions",
+        "gpu_memory_service.core.server",
         "gpu_memory_service.cli",
         "gpu_memory_service.cli.snapshot",
         "gpu_memory_service.common",
@@ -82,6 +92,9 @@ setup(
         "gpu_memory_service.integrations.vllm",
         "gpu_memory_service.snapshot",
         "gpu_memory_service.snapshot.backends",
+        "gpu_memory_service.v1",
+        "gpu_memory_service.v1.integrations",
+        "gpu_memory_service.v1.integrations.vllm",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -106,6 +119,7 @@ setup(
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
+        "gpu_memory_service.core.client.torch.extensions": ["*.cpp"],
     },
     entry_points={
         "console_scripts": [
