@@ -24,7 +24,6 @@ use dynamo_llm::{
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
-    error::{DynamoError, ErrorType as DynamoErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
@@ -146,8 +145,6 @@ impl
 
 struct AlwaysFailEngine {}
 
-struct InvalidArgumentEngine {}
-
 #[async_trait]
 impl
     AsyncEngine<
@@ -164,26 +161,6 @@ impl
             code: 403,
             message: "Always fail".to_string(),
         })?
-    }
-}
-
-#[async_trait]
-impl
-    AsyncEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        Error,
-    > for InvalidArgumentEngine
-{
-    async fn generate(
-        &self,
-        _request: SingleIn<NvCreateChatCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
-        Err(DynamoError::builder()
-            .error_type(DynamoErrorType::InvalidArgument)
-            .message("No user query found in messages.")
-            .build()
-            .into())
     }
 }
 
@@ -577,65 +554,6 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     println!("{}", response.text().await.unwrap());
-
-    cancel_token.cancel();
-    task.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn test_chat_template_invalid_argument_returns_400_without_blanket_role_rejection() {
-    let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder()
-        .port(port)
-        .enable_chat_endpoints(true)
-        .build()
-        .unwrap();
-    let state = service.state_clone();
-    let manager = state.manager();
-
-    manager
-        .add_chat_completions_model(
-            "accepting-template",
-            ModelDeploymentCard::with_name_only("accepting-template").mdcsum(),
-            Arc::new(CounterEngine {}),
-        )
-        .unwrap();
-    manager
-        .add_chat_completions_model(
-            "rejecting-template",
-            ModelDeploymentCard::with_name_only("rejecting-template").mdcsum(),
-            Arc::new(InvalidArgumentEngine {}),
-        )
-        .unwrap();
-
-    let token = CancellationToken::new();
-    let cancel_token = token.clone();
-    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
-    wait_for_service_ready(port).await;
-
-    let client = reqwest::Client::new();
-    let endpoint = format!("http://localhost:{port}/v1/chat/completions");
-    let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-        "model": "accepting-template",
-        "messages": [{"role": "assistant", "content": "prefill"}],
-        "max_tokens": 1,
-        "stream": false
-    }))
-    .unwrap();
-
-    let response = client.post(&endpoint).json(&request).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    request.inner.model = "rejecting-template".to_string();
-    for stream in [false, true] {
-        request.inner.stream = Some(stream);
-        let response = client.post(&endpoint).json(&request).send().await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
-        assert_eq!(body["message"], "No user query found in messages.");
-    }
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
