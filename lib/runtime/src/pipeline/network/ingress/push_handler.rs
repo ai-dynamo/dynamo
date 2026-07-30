@@ -155,7 +155,7 @@ where
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
-        publisher: &StreamSender,
+        publisher: &quic_response::QuicResponseSender,
         payload_codec: RequestPlanePayloadCodec,
     ) where
         U: Data + std::fmt::Debug,
@@ -596,23 +596,26 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            response_connection_info,
-            self.metrics().map(|m| m.cancellation_total.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
-            }
-            PipelineError::Generic(format!("Failed to create response stream: {e}"))
+        tracing::trace!("creating QUIC response sender");
+        let response_pool = self.quic_response_client_pool.get().ok_or_else(|| {
+            PipelineError::Generic("QUIC response client pool was not initialized".to_string())
         })?;
+        let mut publisher = response_pool
+            .sender_with_cancellation_metric(
+                request.context(),
+                response_connection_info,
+                self.metrics()
+                    .map(|metrics| metrics.cancellation_total.clone()),
+            )
+            .await
+            .map_err(|e| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                        .inc();
+                }
+                PipelineError::Generic(format!("Failed to create response stream: {e}"))
+            })?;
 
         tracing::trace!("calling generate");
         let stream = self
@@ -635,7 +638,15 @@ where
         let stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
+                publisher.send_prologue(None).await.map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!("Failed to open QUIC response stream: {error}"))
+                })?;
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
                 stream
@@ -662,6 +673,9 @@ where
 
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
+        publisher.finish().await.map_err(|error| {
+            PipelineError::Generic(format!("Failed to finish QUIC response stream: {error}"))
+        })?;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.

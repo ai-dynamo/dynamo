@@ -61,7 +61,7 @@ pub trait RequestPlaneClient: Send + Sync {
     /// # Returns
     ///
     /// Returns an acknowledgment response. Note that for streaming responses,
-    /// the actual response data comes over the TCP response plane, not through
+    /// the actual response data comes over the QUIC response plane, not through
     /// this acknowledgment.
     ///
     /// # Errors

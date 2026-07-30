@@ -364,9 +364,8 @@ mod push_handler_notify_tests {
     use crate::engine::{AsyncEngine, AsyncEngineContextProvider};
     use crate::local_endpoint_registry::LocalAsyncEngine;
     use crate::pipeline::network::codec::{TwoPartCodec, TwoPartMessage};
-    use crate::pipeline::network::tcp::server::{ServerOptions, TcpStreamServer};
     use crate::pipeline::network::{
-        ConnectionInfo, Ingress, PushWorkHandler, ResponseService, StreamOptions,
+        ConnectionInfo, Ingress, PushWorkHandler, quic_response::QuicResponseServer,
     };
     use crate::pipeline::{ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
@@ -454,33 +453,27 @@ mod push_handler_notify_tests {
         TwoPartCodec::default().encode_message(msg).unwrap()
     }
 
-    /// Sets up a TCP server and registers a response stream for push_handler
+    /// Sets up a QUIC server and registers a response stream for push_handler
     /// to connect back to.
-    async fn setup_tcp_receiver(request_id: &str) -> (Arc<TcpStreamServer>, ConnectionInfo) {
-        let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new(options).await.unwrap();
-
+    async fn setup_quic_receiver(
+        request_id: &str,
+    ) -> (
+        Arc<QuicResponseServer>,
+        ConnectionInfo,
+        crate::pipeline::network::StreamProvider<crate::pipeline::network::StreamReceiver>,
+    ) {
+        let shutdown = crate::CancellationToken::new();
+        let address = "127.0.0.1:0".parse().unwrap();
+        let server = QuicResponseServer::new(address, address, shutdown).unwrap();
         let context = crate::pipeline::Context::with_id_and_metadata(
             (),
             request_id.to_string(),
             Default::default(),
         );
-        let stream_options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
+        let registered = server.register_response(context.context());
+        let (connection_info, provider) = registered.into_parts();
 
-        let pending = server.register(stream_options).await;
-        let connection_info = pending
-            .recv_stream
-            .as_ref()
-            .unwrap()
-            .connection_info
-            .clone();
-
-        (server, connection_info)
+        (server, connection_info, provider)
     }
 
     /// Registers an endpoint in the DRT with the given engine in local registry.
@@ -519,7 +512,7 @@ mod push_handler_notify_tests {
     /// Helper: send a request through the ingress pipeline.
     async fn send_request(ingress: &Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>) {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let (_server, connection_info) = setup_tcp_receiver(&request_id).await;
+        let (_server, connection_info, _provider) = setup_quic_receiver(&request_id).await;
         let payload = encode_request(
             &request_id,
             connection_info,
@@ -545,6 +538,7 @@ mod push_handler_notify_tests {
 
     /// Helper: create ingress pipeline with given engine and notifier.
     fn create_ingress(
+        drt: &crate::DistributedRuntime,
         engine: Arc<MockStreamingEngine>,
         notifier: Arc<tokio::sync::Notify>,
     ) -> Arc<Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>> {
@@ -552,6 +546,9 @@ mod push_handler_notify_tests {
             Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>>::for_engine(engine).unwrap();
         ingress
             .set_endpoint_health_check_notifier(notifier)
+            .unwrap();
+        ingress
+            .set_quic_response_client_pool(drt.quic_response_client_pool().unwrap())
             .unwrap();
         ingress
     }
@@ -578,7 +575,7 @@ mod push_handler_notify_tests {
         let notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
         assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
 
-        let ingress = create_ingress(MockStreamingEngine::success(5), notifier);
+        let ingress = create_ingress(&drt, MockStreamingEngine::success(5), notifier);
         start_manager(&drt, 500).await;
 
         send_request(&ingress).await;
@@ -628,7 +625,7 @@ mod push_handler_notify_tests {
         assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
 
         // Pipeline streams only errors — no notifications sent
-        let ingress = create_ingress(MockStreamingEngine::all_errors(3), notifier);
+        let ingress = create_ingress(&drt, MockStreamingEngine::all_errors(3), notifier);
         start_manager(&drt, 50).await;
 
         send_request(&ingress).await;
@@ -681,7 +678,11 @@ mod push_handler_notify_tests {
         assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
 
         // 5 chunks: 4 success + error at index 4
-        let ingress = create_ingress(MockStreamingEngine::with_error_at(5, vec![4]), notifier);
+        let ingress = create_ingress(
+            &drt,
+            MockStreamingEngine::with_error_at(5, vec![4]),
+            notifier,
+        );
         start_manager(&drt, 500).await;
 
         send_request(&ingress).await;
