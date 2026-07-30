@@ -7,38 +7,49 @@ subtitle: Examples for custom load predictors and the VirtualConnector for non-K
 
 Planner-specific examples for advanced configuration and non-Kubernetes
 integrations. For DGDR manifests, see
-[DGDR Examples](../../kubernetes/dgdr-examples.md). For the full configuration
+[DGDR Templates](../../templates/dgdr.mdx). For the full configuration
 reference, see the [Planner Guide](planner-guide.md).
 
 ## Custom Load Predictors
+
+Each YAML block in this section is a standalone `PlannerConfig`. Save the block
+as `planner.yaml` and pass it to
+`python -m dynamo.planner --config planner.yaml`. To use the same fields in a
+DGDR, nest them under `spec.features.planner`.
 
 ### Warm-starting with Trace Data
 
 Pre-load predictors with historical request patterns before live traffic:
 
 ```yaml
-# In planner arguments
-args:
-  - --load-predictor arima
-  - --load-predictor-warmup-trace /data/trace.jsonl
-  - --load-predictor-log1p
+optimization_target: sla
+load_predictor: arima
+load_predictor_warmup_trace: /data/trace.jsonl
+load_predictor_log1p: true
 ```
 
-The trace file should be in mooncake-style JSONL format with request-count, ISL,
-and OSL samples.
+The parser accepts per-request Mooncake JSONL records:
+
+```json
+{"timestamp": 0, "input_length": 4096, "output_length": 512}
+```
+
+It also accepts `dynamo.request.trace.v1` `request_end` records. The Planner
+groups requests into adjustment intervals and computes request count, average
+input sequence length (ISL), and average output sequence length (OSL).
 
 ### Kalman Filter Tuning
 
 For workloads with rapid changes, tune the Kalman filter:
 
 ```yaml
-args:
-  - --load-predictor kalman
-  - --kalman-q-level 2.0      # Higher = more responsive to level changes
-  - --kalman-q-trend 0.5      # Higher = trend changes faster
-  - --kalman-r 5.0            # Lower = trusts new measurements more
-  - --kalman-min-points 3     # Fewer points before forecasting starts
-  - --load-predictor-log1p    # Often helps with request-rate series
+optimization_target: sla
+load_predictor: kalman
+kalman_q_level: 2.0       # Higher = more responsive to level changes
+kalman_q_trend: 0.5       # Higher = trend changes faster
+kalman_r: 5.0             # Lower = trusts new measurements more
+kalman_min_points: 3      # Fewer points before forecasting starts
+load_predictor_log1p: true
 ```
 
 ### Prophet for Seasonal Workloads
@@ -46,10 +57,10 @@ args:
 For workloads with daily/weekly patterns:
 
 ```yaml
-args:
-  - --load-predictor prophet
-  - --prophet-window-size 100   # Larger window for seasonal detection
-  - --load-predictor-log1p
+optimization_target: sla
+load_predictor: prophet
+prophet_window_size: 100   # Larger window for seasonal detection
+load_predictor_log1p: true
 ```
 
 ## Virtual Connector
@@ -82,11 +93,12 @@ while True:
     await client.complete(decision)
 ```
 
-See `components/planner/test/test_virtual_connector.py` for a full working
-example.
+See the
+[VirtualConnector integration test](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/tests/integration/test_virtual_connector.py)
+for a complete example.
 
 ## Related Documentation
 
 - [Planner Guide](planner-guide.md) -- Planner configuration reference
-- [DGDR Examples](../../kubernetes/dgdr-examples.md) -- DGDR YAML examples
+- [DGDR Templates](../../templates/dgdr.mdx) -- DGDR YAML examples
 - [Profiler Guide](../profiler/profiler-guide.md) -- Profiling workflow

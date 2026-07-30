@@ -110,7 +110,7 @@ Prefer [Dynamo Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)
 when a recipe matches your model, backend, hardware, and serving mode. Recipes
 include tuned `deploy.yaml` manifests and, in many cases, matching `perf.yaml`
 benchmark jobs that you can run or adapt. If no recipe matches, start from the
-[Deployment Overview](../kubernetes/model-deployment-guide.md) or the backend
+[Model Deployment](../getting-started/kubernetes-deployment.mdx) or the backend
 examples in [examples/backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends).
 
 ### Step 2: Port-Forward and Run a Single Benchmark
@@ -323,7 +323,7 @@ Server-side benchmarking runs directly within the Kubernetes cluster, eliminatin
 ### Step 1: Deploy Your DynamoGraphDeployment
 Deploy a `DynamoGraphDeployment` using a matching
 [Dynamo Recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes), the
-[Deployment Overview](../kubernetes/model-deployment-guide.md), or the backend
+[Model Deployment](../getting-started/kubernetes-deployment.mdx), or the backend
 examples in [examples/backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends).
 Ensure it has a frontend service exposed and the model is fully loaded before
 running benchmarks — check pod logs or verify the health endpoint returns

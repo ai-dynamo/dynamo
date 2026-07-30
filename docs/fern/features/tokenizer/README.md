@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Fastokens Tokenizer
+title: FastTokens Tokenizer
 subtitle: Reduce frontend tokenization latency for long-context BPE models
 ---
 
 `fastokens` is an optional tokenizer backend for BPE `tokenizer.json` models. It uses the Rust encoder from the [`fastokens` GitHub repository](https://github.com/crusoecloud/fastokens) for text-to-token-ID conversion while Dynamo continues to use HuggingFace `tokenizers` for decoding and streaming output.
 
-## Why Use Fastokens in Dynamo
+## Why Use FastTokens in Dynamo
 
 The Dynamo frontend tokenizes every incoming prompt before sending the request to an inference backend. For short prompts, that cost is usually small. For agentic, retrieval-augmented generation (RAG), and long-context workloads, tokenization can become a meaningful part of Time To First Token (TTFT), especially when KV cache hit rates are high and the model path is already fast.
 
@@ -37,7 +37,7 @@ Stay on the default backend if:
 - The frontend logs that `fastokens` failed to load and fell back to HuggingFace.
 - Your model uses `.model` or `.tiktoken` tokenizer files, where this flag has no effect.
 
-## Enable and Validate Fastokens
+## Enable and Validate FastTokens
 
 <Steps>
   <Step title="Quick Start">
@@ -107,7 +107,7 @@ Stay on the default backend if:
   </Step>
 </Steps>
 
-## How Dynamo Integrates Fastokens
+## How Dynamo Integrates FastTokens
 
 <Accordion title="View integration details">
   Dynamo uses a hybrid integration:

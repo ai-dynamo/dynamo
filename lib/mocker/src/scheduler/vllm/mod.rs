@@ -9,6 +9,7 @@
 mod core;
 mod live;
 mod policy;
+mod request;
 
 pub(crate) use core::VllmCore;
 pub use live::{MockerMetrics, Scheduler};
