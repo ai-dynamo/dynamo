@@ -420,13 +420,6 @@ navigation:
             path: reasoning/README.md
           - page: Troubleshooting Tool Calls
             path: tool-calling/troubleshooting.md
-      - section: Fastokens Tokenizer
-        collapsed: true
-        icon: gauge
-        path: features/tokenizer/README.md
-        contents:
-          - page: Overview
-            path: features/tokenizer/README.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -852,6 +845,9 @@ navigation:
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: features/multimodal/custom-vision-encoder.md
+          - page: FastTokens Tokenizer
+            slug: fastokens-tokenizer
+            path: features/tokenizer/README.md
           - section: Writing Custom Backends
             contents:
               - page: Custom Backend Overview
@@ -919,7 +915,7 @@ navigation:
       - page: Compatibility
         path: reference/compatibility.mdx
       - page: Examples
-        path: getting-started/examples.md
+        path: reference/examples.md
       - page: Release Artifacts
         path: reference/release-artifacts.mdx
       - section: Releases
