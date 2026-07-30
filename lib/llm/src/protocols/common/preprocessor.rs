@@ -318,6 +318,19 @@ pub struct PreprocessedRequest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub is_probe: bool,
+
+    /// Whether the original client request was a streaming request.
+    /// False means the client sent stream=false and the backend may use
+    /// non-streaming generation (lower per-token overhead).
+    /// Defaults to true so existing backends that don't read this field
+    /// keep their current streaming behaviour.
+    #[builder(default = "true")]
+    #[serde(default = "default_stream")]
+    pub stream: bool,
+}
+
+fn default_stream() -> bool {
+    true
 }
 
 /// Enforce the object-only `encoder_result` contract at the serde boundary.

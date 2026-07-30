@@ -3261,6 +3261,9 @@ impl
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
+        // Forward the original client streaming preference so backends can choose
+        // non-streaming generation when stream=false (lower per-token overhead).
+        common_request.stream = original_stream_flag;
 
         // Capture media counts before `common_request` is moved into the context.
         let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
@@ -3442,6 +3445,9 @@ impl
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
+        // Forward the original client streaming preference so backends can choose
+        // non-streaming generation when stream=false (lower per-token overhead).
+        common_request.stream = original_stream_flag;
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {

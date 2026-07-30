@@ -1074,10 +1074,10 @@ class HandlerBase(BaseGenerativeHandler):
                 set(sampling_params.stop_token_ids) - visible_stop_token_ids
             )
 
-        # TODO: Instead of True, we should use streaming from the request.
-        # However, currently dynamo run does not send streaming in the request.
         streaming = (
-            False if self.disaggregation_mode == DisaggregationMode.PREFILL else True
+            False
+            if self.disaggregation_mode == DisaggregationMode.PREFILL
+            else request.get("stream", True)
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
