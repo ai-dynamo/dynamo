@@ -75,9 +75,10 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 func (v *DynamoGraphDeploymentValidator) Validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr},
+		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -91,7 +92,7 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 }
 
 // ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
-// ctx, oldDGD, and newDGD must not be nil.
+// ctx, oldDGD, and newDGD must not be nil. runtimeVersionSource identifies the request's source API.
 // If userInfo is nil, replica changes for DGDSA-enabled components fail closed.
 func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
@@ -99,14 +100,30 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 	userInfo *authenticationv1.UserInfo,
 	operatorPrincipal string,
+	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr},
+		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
+	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+		oldAlpha, err := alphaDynamoGraphDeploymentForValidation(oldDGD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+		allErrs = append(allErrs, validation.validateDynamoGraphDeploymentSpecUpdateV1alpha1(
+			&newAlpha.Spec,
+			&oldAlpha.Spec,
+			field.NewPath("spec"),
+		)...)
+	}
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 

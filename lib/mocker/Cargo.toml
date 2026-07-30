@@ -18,6 +18,7 @@ profile = []
 # Test/benchmark-only deterministic replay plumbing. Production replay never
 # enables this feature and keeps the existing random selector behavior.
 replay-bench = ["dynamo-kv-router/bench"]
+test-support = []
 aic-forward-pass = ["dep:aiconfigurator-core"]
 zmq-events = ["dep:tmq"]
 # Enables G1↔G2 offload simulation via kvbm-engine.
