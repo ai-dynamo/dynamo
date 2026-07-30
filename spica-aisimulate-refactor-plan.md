@@ -20,6 +20,9 @@ sweep package while keeping it in the Dynamo repository for now.
 - Spica owns process management, parallelism, candidate timeouts, and result
   collection. Actual replay execution is provided through an injected
   `RunnerFactory`.
+- Replay is being decoupled in parallel: backend-only Spica calls standalone
+  Dynamo-independent AISim Replay, while Spica with Dynamo adapters calls the
+  Dynamo Replay composition built on top of the same AISim Replayer.
 - The eventual physical move of the core/backend package to the AIConfigurator
   repository is out of scope, but the resulting package boundary must allow that
   move without further Dynamo-specific cleanup.
@@ -30,11 +33,14 @@ flowchart LR
     E["Selected adapter entry points"] --> A["Adapter search-space generation"]
     A --> S
     S --> V["Optimizer candidate"]
-    V --> M["Backend and adapter materialization"]
+    V --> M["Build concrete ReplaySpec"]
     M --> R["Serializable ReplaySpec"]
-    RF["Injected RunnerFactory"] --> W["Spica worker processes"]
-    R --> W
-    W --> P["ReplayReport"]
+    R --> W["Spica worker processes"]
+    RF["Injected RunnerFactory"] --> W
+    W -->|"no Dynamo hooks"| AR["AISim Replay<br/>no Dynamo dependency"]
+    W -->|"Dynamo hooks"| DR["Dynamo Replay<br/>AISim Replay + Dynamo runtime adapters"]
+    AR --> P["ReplayReport"]
+    DR --> P
     P --> S
 ```
 
@@ -165,6 +171,9 @@ Spica exposes an injected runner boundary:
 
 ```python
 class RunnerFactory(Protocol):
+    def capabilities(self) -> RunnerCapabilities:
+        ...
+
     def create(self, worker_id: int) -> Runner:
         ...
 
@@ -195,6 +204,9 @@ Runner behavior is constrained as follows:
 - `runner_factory` is a required keyword-only argument; core provides no Dynamo
   default Runner.
 - The factory must be multiprocessing-serializable.
+- Before starting the optimizer, Spica compares every requested runtime hook
+  with `RunnerFactory.capabilities()` and fails early if the selected replay
+  composition cannot execute it.
 - Each worker creates and reuses one Runner, then closes it during worker
   shutdown.
 - Spica retains ownership of worker processes, evaluation parallelism,
@@ -216,10 +228,15 @@ Runner behavior is constrained as follows:
 - workload and SLA measurement information;
 - namespaced `AdapterReplaySpec` objects;
 - runtime hooks represented as
-  `RuntimeHookSpec(provider, kind, config)`.
+  `RuntimeHookSpec(provider, kind, api_version, config)`.
 
 Runtime hook descriptors contain data, not Python callback objects. The injected
 Runner owns hook resolution and invocation.
+
+`RunnerCapabilities` declares the supported `ReplaySpec` version and runtime
+hook provider/kind/version tuples. A Dynamo-independent AISim Replay runner
+supports the neutral spec and built-in policies only. A Dynamo Replay runner
+adds support for the selected Dynamo Router and Planner hook contracts.
 
 `ReplayReport` contains at least:
 
@@ -232,6 +249,48 @@ class ReplayReport:
 The core reads `metrics` for feasibility checks, scalar scoring, goodput
 validation, and Pareto ranking. Runner- or adapter-specific diagnostics remain in
 `metadata`.
+
+## Parallel Replay Refactor
+
+Spica and Replay are separate parallel workstreams joined by the AISim-owned
+`ReplaySpec`, `ReplayReport`, runtime-hook, and runner contracts. Neither
+workstream waits for the other's concrete implementation after these contracts
+and their fixtures are frozen.
+
+There is one Spica core and one AISim Replayer, with two compositions rather
+than two forked implementations:
+
+| Path | Spica composition | Replay composition |
+| --- | --- | --- |
+| Backend-only | AISimulate Spica without Dynamo adapters | AISim Replay with built-in neutral placement, initially round-robin |
+| Dynamo features | The same Spica core with selected Dynamo search adapters | Dynamo Replay, which reuses AISim Replay and injects Dynamo Router and/or Planner runtime policies |
+
+The dependency direction is:
+
+```text
+backend-only Spica -> AISim Replay -> Generalized Mocker Engine
+
+Dynamo-enabled Spica -> Dynamo Replay -> AISim Replay -> Generalized Mocker Engine
+                              |
+                              +-> Dynamo Router and Planner runtime adapters
+```
+
+The Spica-side entry point and Replay-side runtime hook have different jobs:
+
+- The Spica adapter validates an adapter-owned search space, performs optional
+  preparation such as the Planner load-predictor pre-sweep, and materializes
+  serializable policy configuration into `ReplaySpec`.
+- AISim Replay owns the virtual clock, event loop, worker fleet, built-in neutral
+  policies, and base report. It has no Dynamo dependency.
+- Dynamo Replay resolves the runtime-hook descriptors, constructs the Dynamo
+  `PlacementPolicy` and `ScalingPolicy` adapters, and injects them into the same
+  AISim Replayer. It does not implement a second replay loop.
+
+During parallel development, Spica is implemented and tested against a contract
+`RunnerFactory`; Replay is implemented against versioned `ReplaySpec` fixtures.
+No temporary import of the current `dynamo.replay` is added back to AISimulate.
+If an integration bridge is temporarily required, it lives on the Dynamo Replay
+side and implements the same runner contract.
 
 ## Code Separation
 
@@ -322,25 +381,31 @@ they model backend/GPU behavior independently of KVBM.
 
 ## Implementation Sequence
 
-1. Create or update the Dynamo Enhancement Proposal to lock the package
-   boundary, Adapter ABI v1, ReplaySpec, and RunnerFactory contract.
-2. Add the core protocols, entry-point resolver, namespaced adapter
-   configuration, and fake adapter/runner test infrastructure.
-3. Refactor the search loop to:
-   adapter preparation, merged search-space generation, backend/adapter
-   candidate materialization, ReplaySpec construction, Runner execution, and
-   scoring.
-4. Split out `BackendDeploymentSpec` and remove the Dynamo ReplayEvaluator from
-   core.
-5. Move Planner and Router behavior into their component adapters and register
-   their entry points.
-6. Remove KVBM fields, legacy flat schema, direct Dynamo imports, and unused
-   dependencies.
-7. Update installation guidance, Python API examples, and backend/Planner/Router
-   sweep examples.
+1. Freeze the shared contract first in the Dynamo Enhancement Proposal:
+   Adapter ABI v1, ReplaySpec v1, RuntimeHookSpec, RunnerCapabilities,
+   RunnerFactory, ReplayReport, and canonical serialized fixtures.
+2. In the Spica workstream, add the core protocols, entry-point resolver,
+   namespaced adapter configuration, and contract fake runner.
+3. Refactor the Spica search loop to perform adapter preparation, merge search
+   spaces, build a concrete ReplaySpec, validate runner capabilities, execute
+   through Runner, and score ReplayReport.
+4. In parallel, the Replay workstream extracts AISim Replay and the Generalized
+   Mocker Engine without Dynamo dependencies, then implements the
+   Dynamo-independent RunnerFactory.
+5. On the Dynamo side, implement Dynamo Replay as a composition over AISim
+   Replay, resolve the Router and Planner runtime hooks, and expose a
+   Dynamo-capable RunnerFactory.
+6. Move Planner and Router search behavior into their component adapters and
+   register their Spica entry points.
+7. Remove the mixed DeploymentPlan/ReplayEvaluator path, KVBM fields, legacy
+   flat schema, direct Dynamo imports, and unused dependencies.
+8. Run the shared contract suite followed by backend-only and Dynamo-enabled
+   end-to-end integration, then update installation and sweep examples.
 
-The refactor should land atomically, with reviewable commits following this
-sequence, so the main branch never contains mismatched core and adapter ABIs.
+Each workstream remains buildable against the frozen contract and fake fixtures.
+The real integration path is enabled only when Spica and the selected replay
+composition advertise compatible contract versions; no unversioned intermediate
+API is accepted.
 
 ## Test Plan
 
@@ -386,6 +451,8 @@ sequence, so the main branch never contains mismatched core and adapter ABIs.
 ### Runner and sweep orchestration
 
 - Round-trip serialize every ReplaySpec model.
+- Validate ReplaySpec and runtime-hook requirements against RunnerCapabilities
+  before starting the optimizer.
 - Create one Runner per worker and close it on normal and abnormal shutdown.
 - Cover sequential and spawned parallel execution.
 - Preserve candidate timeout, worker crash, runner exception, failed candidate,
@@ -393,6 +460,20 @@ sequence, so the main branch never contains mismatched core and adapter ABIs.
 - Preserve scalar, goodput, and Pareto scoring from `ReplayReport.metrics`.
 - Exercise Planner and Router adapters together and verify their parameters,
   configs, and hooks remain namespaced.
+
+### Cross-workstream Replay contract
+
+- Use the same canonical ReplaySpec fixtures in the Spica and Replay test suites.
+- Run a backend-only Spica candidate through AISim Replay without installing or
+  importing Dynamo.
+- Run Planner- and Router-enabled candidates through Dynamo Replay and verify it
+  reuses the AISim Replayer while constructing the requested runtime policies.
+- Reject a Dynamo runtime hook when the caller injects the
+  Dynamo-independent AISim Replay RunnerFactory.
+- Verify the same base ReplayReport metrics and serialization version across
+  AISim Replay and Dynamo Replay when no Dynamo runtime hook is selected.
+- Add dependency firewalls proving AISim Replay and the Generalized Mocker
+  Engine have no Dynamo workspace or Python dependencies.
 
 ### Breaking schema and KVBM
 
@@ -414,6 +495,10 @@ sequence, so the main branch never contains mismatched core and adapter ABIs.
   behavior.
 - Spica requires an injected `RunnerFactory` and continues to own evaluation
   process lifecycle and timeouts.
+- Backend-only Spica invokes Dynamo-independent AISim Replay.
+- Spica with Dynamo adapters invokes Dynamo Replay, which composes the same AISim
+  Replayer with Dynamo runtime policies instead of forking the replay loop.
+- A runner/spec capability mismatch fails before any candidate execution.
 - KVBM fields and behavior are fully removed with explicit validation errors.
 - The core/backend package can later move to the AIConfigurator repository
   without removing additional Dynamo-specific logic.
@@ -422,5 +507,7 @@ sequence, so the main branch never contains mismatched core and adapter ABIs.
 
 - Physically moving `aisimulate` to the AIConfigurator repository.
 - Implementing native G2 support.
-- Implementing the real replay Runner or completing the replay-engine split.
+- Replay event-loop and Generalized Mocker Engine implementation details; those
+  belong to the parallel Replay workstream, while their public contract and
+  Spica integration are in scope here.
 - Maintaining compatibility with the old flat Planner/Router/KVBM schema.
