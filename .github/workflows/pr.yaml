@@ -720,6 +720,15 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
+      # TEMP-11836: 30m default -> 90m. NOT a capacity problem. In run
+      # 30540988226 the parallel stage was killed after a single test
+      # (test_sglang_indexers_sync[nats-tcp]) hung for 4253s against its own
+      # declared timeout=320s -- the per-test timeout does not fire, and the
+      # VRAM-aware orchestrator has no hard-kill for a hung child. This wider
+      # cap only buys the rest of the suite room to finish around such a hang;
+      # the fixes belong in OPS-7470 (the indexers-sync flake) and in a
+      # hard-kill for the parallel orchestrator. Revert once those land.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
