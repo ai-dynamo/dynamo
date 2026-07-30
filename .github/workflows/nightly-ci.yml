@@ -314,6 +314,73 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # OPERATOR + PLANNER (nightly-published non-runtime images)
+  # ============================================================================
+  # Built HERE — not reused from post-merge — for two reasons:
+  #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
+  #      compliance-<sha>-<token> artifacts on the run id this workflow
+  #      forwards, so the CSVs must be produced by THIS run.
+  #   2. Tag isolation (same invariant as the runtime builds): the -nightly
+  #      ECR tag suffix means a missing or failed nightly build can never
+  #      fall through to — or overwrite — the post-merge image at the same SHA.
+  # Neither job gates the release below: release.yml copies both fail-soft
+  # (crane-manifest probe, warn-skip) so an operator/planner build flake
+  # cannot block the runtime nightly. resolve-source-sha is always GITHUB_SHA
+  # here, so github.sha-keyed tags match the resolved source.
+
+  operator-build:
+    name: kubernetes-operator
+    needs: [create-fresh-builder, resolve-source-sha]
+    runs-on: prod-default-v2
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+      - name: Build and push operator (nightly tag)
+        id: build
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator-nightly
+          # Canonical compliance artifact name — OSRB attach tokens and the
+          # nightly diff-baseline lookup key on compliance-<sha>-operator,
+          # independent of the -nightly image-tag suffix.
+          artifact_tag: ${{ github.sha }}-operator
+          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          # OSRB CSV diff baseline: previous successful scheduled nightly run
+          # (first nightly soft-degrades to baseline_unavailable).
+          diff_event_context: nightly
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  planner-build:
+    name: dynamo-planner
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
+      build_timeout_minutes: 45
+      archive_sources: false
+      # OSRB CSV diff baseline: nightly context -> diff against the previous
+      # successful scheduled nightly run's compliance artifacts; manual runs
+      # are excluded (see resolve_diff_base.py). Compliance artifact is
+      # compliance-<sha>-dynamo-planner (target_tag_plain — no -nightly
+      # suffix), matching the OSRB token.
+      diff_event_context: nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  # ============================================================================
   # COMPLIANCE
   # ============================================================================
   # Compliance extract + verify now runs as an inline step INSIDE each build job
@@ -379,6 +446,32 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  vllm-h100-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs vllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: vllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
@@ -440,15 +533,18 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: H100 Test
-      # 80 GiB H100 (aws-dev-02): sglang tests that exceed the 24 GiB gpu_1 lane.
+      # 2x 80 GiB H100 lane; runs sglang single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and h100 and gpu_1
-      gpu_test_timeout_minutes: 60
+      gpu_test_markers: sglang and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -499,6 +595,32 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  trtllm-h100-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: trtllm
+      test_type: H100 Test
+      # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: trtllm and (gpu_1 or gpu_2)
+      gpu_test_timeout_minutes: 240
+      # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '80'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -626,20 +748,27 @@ jobs:
       - compute-release-mode
       - notify-slack-start
       - manual-release-approval
-      - vllm-test
-      - vllm-multi-gpu-test
-      - sglang-test
-      - sglang-multi-gpu-test
-      - sglang-h100-test
-      - trtllm-test
-      - trtllm-multi-gpu-test
+      - vllm-build
+      - sglang-build
+      - trtllm-build
       - dynamo-pipeline
-      - rust-tests
-    # !cancelled() lets framework/rust failures fall through; dynamo-pipeline
-    # is gated strictly because stage-wheels-artifactory extracts wheels from
-    # its image. manual-release-approval is `skipped` on cron, `success` on dispatch.
+      - operator-build
+      - planner-build
+    # !cancelled() lets the job evaluate the explicit gates below rather than
+    # implicitly requiring every need to succeed (notify-slack-start is
+    # best-effort). All three runtime builds and dynamo-pipeline are gated
+    # strictly: release.yml copies their -nightly ECR images to NGC and extracts
+    # wheels from the dynamo-pipeline image, so a failed build must not publish a
+    # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
+    # operator-build and planner-build are ORDERING-ONLY needs (deliberately
+    # absent from the gate below): release.yml copies them fail-soft, so a
+    # flake in either must not block the runtime nightly — but the copy step
+    # has to run after they finish or the crane probe would race the builds.
     if: ${{ !cancelled()
         && needs.compute-release-mode.outputs.release == 'true'
+        && needs.vllm-build.result == 'success'
+        && needs.sglang-build.result == 'success'
+        && needs.trtllm-build.result == 'success'
         && needs.dynamo-pipeline.result == 'success'
         && (needs.manual-release-approval.result == 'success'
             || needs.manual-release-approval.result == 'skipped') }}
@@ -649,6 +778,13 @@ jobs:
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
+      # THIS run's build results — release.yml's copy step skips either image
+      # when its build here did not succeed, so a failed build can never
+      # republish a previous run's image at an unchanged SHA. (A direct
+      # workflow_dispatch of release.yml leaves these empty and stages from
+      # existing -nightly ECR tags, matching the runtimes.)
+      operator_build_result: ${{ needs.operator-build.result }}
+      planner_build_result: ${{ needs.planner-build.result }}
     secrets: inherit
 
   # ============================================================================
@@ -657,7 +793,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -862,7 +998,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -883,7 +1019,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

@@ -24,7 +24,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # on FastVideo's default attention backends without it.
 
 # Install Dynamo with /v1/videos support.
-RUN uv pip install ai-dynamo==1.2.1
+RUN uv pip install ai-dynamo==1.3.0.post1
 
 # Install FastVideo, which provides the typed fastvideo.api surface
 # and NVFP4 transformer quantization support.

@@ -77,13 +77,8 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub request_progress: Option<RequestProgressUpdater>,
-    pub admission_lease: Option<super::queue::AdmissionLease>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestOutcome {
-    Completed { context_tokens: usize },
-    Aborted,
+    pub lifecycle_lease: Option<super::queue::RequestLifecycleLease>,
+    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -95,8 +90,8 @@ pub enum ScheduleMode {
     Tracked {
         request_id: String,
     },
-    /// Tracks worker and admission state; the caller reports dispatch and a terminal outcome.
-    TrackedWithAdmission {
+    /// Tracks worker and request lifecycle state; the caller reports dispatch and a terminal outcome.
+    TrackedWithLifecycle {
         request_id: String,
     },
 }
@@ -121,7 +116,7 @@ impl ScheduleMode {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { request_id } => request_id.as_deref(),
-            Self::Tracked { request_id } | Self::TrackedWithAdmission { request_id } => {
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
                 Some(request_id)
             }
         }
@@ -130,13 +125,13 @@ impl ScheduleMode {
     pub fn is_tracked(&self) -> bool {
         matches!(
             self,
-            Self::Tracked { .. } | Self::TrackedWithAdmission { .. }
+            Self::Tracked { .. } | Self::TrackedWithLifecycle { .. }
         )
     }
 
-    pub(crate) fn admission_request_id(&self) -> Option<&str> {
+    pub(crate) fn lifecycle_request_id(&self) -> Option<&str> {
         match self {
-            Self::TrackedWithAdmission { request_id } => Some(request_id),
+            Self::TrackedWithLifecycle { request_id } => Some(request_id),
             Self::QueryOnly { .. } | Self::Tracked { .. } => None,
         }
     }
@@ -144,7 +139,7 @@ impl ScheduleMode {
     pub fn tracked_request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { .. } => None,
-            Self::Tracked { request_id } | Self::TrackedWithAdmission { request_id } => {
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
                 Some(request_id)
             }
         }
@@ -292,6 +287,16 @@ impl SchedulingRequest {
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
         self.isl_tokens.div_ceil(block_size as usize) as u64
+    }
+
+    pub(crate) fn potential_decode_blocks_after_admission(
+        &self,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+    ) -> usize {
+        self.worker_load_for(worker)
+            .potential_decode_blocks()
+            .saturating_add(self.request_blocks(block_size) as usize)
     }
 
     pub(crate) fn response_is_closed(&self) -> bool {

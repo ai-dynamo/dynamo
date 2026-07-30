@@ -523,7 +523,7 @@ mod race_tests {
         use super::super::*;
 
         #[tokio::test]
-        async fn clear_sweeps_split_suffixes_across_event_threads_and_dp_ranks() {
+        async fn clear_sweeps_only_its_rank_across_split_suffixes() {
             let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32);
             let worker_a0 = WorkerWithDpRank::new(1, 0);
             let worker_a1 = WorkerWithDpRank::new(1, 1);
@@ -555,7 +555,7 @@ mod race_tests {
             flush_and_settle(&index).await;
 
             assert_score(&index, &[1, 2], worker_a0, 1).await;
-            assert_score(&index, &[1, 2], worker_a1, 1).await;
+            assert_score(&index, &[1, 2], worker_a1, 2).await;
             assert_score(&index, &[1, 2], worker_b, 2).await;
             assert_score(&index, &[1, 3], worker_b, 2).await;
         }

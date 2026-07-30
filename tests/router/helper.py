@@ -23,6 +23,25 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
+def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
+    """Decode JSON objects from single-line SSE data fields."""
+    chunks = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    return chunks
+
+
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
@@ -316,6 +335,38 @@ async def wait_for_frontend_ready(
 
         # Wait before next poll
         await asyncio.sleep(1)
+
+
+async def wait_for_model_absent(
+    frontend_url: str,
+    model_name: str,
+    timeout: float = 30,
+) -> None:
+    """Wait until a removed model no longer appears in the frontend model list."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    models_url = f"{frontend_url}/v1/models"
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(models_url) as response:
+                    if response.status == 200:
+                        payload = await response.json()
+                        model_ids = {
+                            model.get("id")
+                            for model in payload.get("data", [])
+                            if isinstance(model, dict)
+                        }
+                        if model_name not in model_ids:
+                            return
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                pass
+
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    f"Timeout waiting for model {model_name!r} to leave {models_url}"
+                )
+            await asyncio.sleep(0.1)
 
 
 async def poll_for_worker_instances(

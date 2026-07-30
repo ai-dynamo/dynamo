@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{AdmissionLease, RequestProgressUpdater, RoutingEligibility},
+    scheduling::{RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -27,9 +27,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) scheduler_tracked: bool,
-    pub(super) request_progress: Option<RequestProgressUpdater>,
-    pub(super) admission_lease: Option<AdmissionLease>,
+    pub(super) lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
 }
 
 #[derive(Clone, Copy)]
@@ -70,14 +68,13 @@ struct BestMatchArgs<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
-    scheduler_tracked: bool,
 }
 
 impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
-        let outcome = self
+        let (outcome, lifecycle) = self
             .chooser
-            .find_best_match_details_with_admission(
+            .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
@@ -94,9 +91,9 @@ impl KvPushRouter {
                 args.pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
+                true,
             )
             .await?;
-
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
@@ -104,8 +101,6 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                request_progress,
-                admission_lease,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -113,9 +108,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                scheduler_tracked: args.scheduler_tracked,
-                request_progress,
-                admission_lease,
+                lifecycle,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
@@ -176,7 +169,6 @@ impl KvPushRouter {
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
-                    scheduler_tracked: !is_query_only,
                 })
                 .await?;
 
@@ -249,7 +241,6 @@ impl KvPushRouter {
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,
-            scheduler_tracked: !is_query_only,
         })
         .await
     }

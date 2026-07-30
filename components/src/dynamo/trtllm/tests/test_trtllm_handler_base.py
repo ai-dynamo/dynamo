@@ -3,6 +3,7 @@
 
 import asyncio
 import re as re_mod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from unittest import mock
@@ -24,7 +25,10 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    BYPASS_REMOTE_PREFILL_ANNOTATION,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -109,6 +113,14 @@ class TestOverrideSamplingParams:
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
+
+    def test_disabled_top_k_sentinel_is_converted(self):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"top_k": -1}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.top_k == 0
 
     def test_truthy_values_are_applied(self):
         """Test that normal truthy values are correctly set."""
@@ -534,6 +546,29 @@ class TestMultimodalGuard:
         assert result == [10, 20, 30]
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_rejected_cache_uuid_does_not_mutate_request(self):
+        handler = _ConcreteHandler.__new__(_ConcreteHandler)
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {"image_url": ["cached-image"]},
+            "max_tokens": 8,
+            "prefill_result": {
+                "disaggregated_params": {
+                    "worker_id": 7,
+                    "_epd_metadata": {"_prefill_prompt": "describe image"},
+                }
+            },
+        }
+        original_request = deepcopy(request)
+
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            async for _ in handler._generate_locally_impl(request, MagicMock()):
+                pass
+
+        assert request == original_request
+
+    @pytest.mark.asyncio
     async def test_decode_with_prefill_metadata_bypasses_guard(self):
         handler = self._make_handler(multimodal_processor=None)
         handler.disaggregation_mode = DisaggregationMode.DECODE
@@ -633,6 +668,13 @@ class TestDisaggRequestId:
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
 
+    def _make_decode_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        return handler
+
     def test_disagg_request_id_populated_in_prefill_mode(self):
         """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
         handler = self._make_prefill_handler()
@@ -697,6 +739,18 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+    def test_decode_conditional_bypass_uses_request_disagg_params(self):
+        """Conditional-disagg bypass runs full context+generation on decode."""
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=None,
+        )
+        assert params.request_type == "context_and_generation"
 
 
 class TestHealthCheckPriority:
