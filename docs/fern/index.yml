@@ -836,6 +836,8 @@ navigation:
                     path: kubernetes/disagg-communication-guide.md
                   - page: Gateway API Routing
                     path: design-docs/gateway-api-routing.md
+                  - page: Vanilla vLLM GAIE On-ramp
+                    path: design-docs/vanilla-vllm-gaie-onramp.md
               - section: Multinode
                 collapsed: true
                 contents:

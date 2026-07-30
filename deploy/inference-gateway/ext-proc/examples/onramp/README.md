@@ -24,7 +24,7 @@ KV-aware selection is provided by the runtime-free
 which the EPP runs **in-process**: the EPP and the selection service are compiled into one binary,
 so there is no separate selector Deployment and no HTTP hop. The EPP can run single-replica, or
 **replicated** with cross-replica active-load sync between EPP pods (see
-[Replicated mode](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx#epp-replication)).
+[EPP Replication](../../../../../docs/fern/design-docs/vanilla-vllm-gaie-onramp.md#epp-replication)).
 
 Whether the EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` environment
 variable: `dynamo` uses the Dynamo runtime, while `standalone` runs the runtime-free selection
@@ -92,3 +92,13 @@ flowchart LR
    currently-Ready worker (booking its load via select-and-reserve), and returns
    the worker's endpoint to Envoy as routing headers. The selected
    worker processes the original forwarded request.
+
+For the full procedure, adaptation guidance, and troubleshooting, see
+[Experimental: Vanilla vLLM GAIE On-ramp](../../../../../docs/fern/kubernetes/vanilla-vllm-onramp.mdx).
+
+For architecture and environment details, see
+[Vanilla vLLM GAIE On-ramp Architecture](../../../../../docs/fern/design-docs/vanilla-vllm-gaie-onramp.md)
+and [Gateway API Routing Reference](../../../../../docs/fern/components/router/gateway-api-reference.mdx#standalone-epp-runtime-environment).
+
+For selector replication semantics, see
+[Standalone Selection Service](../../../../../docs/fern/components/router/standalone-selection.md).
