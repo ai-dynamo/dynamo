@@ -126,31 +126,21 @@ pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = (
 }
 
 impl<Events: EngineEventBatch> EngineEffects<Events> {
-    pub(in crate::replay::offline) fn prepare_scheduled_completion(
-        &mut self,
-        at_ms: f64,
-        capacity: usize,
-    ) {
-        assert!(
-            self.scheduled_completion.is_none(),
-            "offline replay engine effects already contain a scheduled completion"
-        );
-        self.scheduled_completion = Some(ScheduledWorkerCompletions {
-            at_ms,
-            payloads: Vec::with_capacity(capacity),
-        });
-    }
-
     pub(in crate::replay::offline) fn schedule_completion(
         &mut self,
         at_ms: f64,
         payload: WorkerCompletionPayload<Events>,
+        capacity_hint: usize,
     ) {
+        assert!(
+            capacity_hint > 0,
+            "scheduled completion capacity hint must be non-zero"
+        );
         let scheduled =
             self.scheduled_completion
                 .get_or_insert_with(|| ScheduledWorkerCompletions {
                     at_ms,
-                    payloads: Vec::with_capacity(1),
+                    payloads: Vec::with_capacity(capacity_hint),
                 });
         assert_eq!(
             scheduled.at_ms.to_bits(),

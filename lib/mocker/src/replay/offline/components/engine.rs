@@ -27,6 +27,7 @@ fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
 struct PassBoundary {
     start_ms: f64,
     end_ms: f64,
+    completion_capacity: usize,
 }
 
 impl PassBoundary {
@@ -628,7 +629,7 @@ where
 
         if boundary.end_ms > boundary.start_ms {
             Self::required_worker_mut(workers, rank_id).mark_busy();
-            effects.schedule_completion(boundary.end_ms, payload);
+            effects.schedule_completion(boundary.end_ms, payload, boundary.completion_capacity);
             return;
         }
 
@@ -687,7 +688,7 @@ where
             }
 
             let mut effects = EngineEffects::default();
-            if rank_ids.len() == 1 {
+            let group_end_ms = if rank_ids.len() == 1 {
                 let rank_id = rank_ids[0];
                 let executed = match self.pass_mode {
                     EnginePassMode::Visible => {
@@ -717,107 +718,99 @@ where
                     PassBoundary {
                         start_ms: now_ms,
                         end_ms: group_end_ms,
+                        completion_capacity: 1,
                     },
                     executed,
                     align_collector,
                     &mut effects,
                 );
-
-                if !effects.is_empty() {
-                    if group_end_ms <= now_ms {
-                        // A zero-duration pass can remain ready. Re-arm it here
-                        // without depending on caller completion processing.
-                        self.refresh_group(worker_id);
+                group_end_ms
+            } else {
+                let completion_capacity = rank_ids.len();
+                let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
+                    SmallVec::with_capacity(completion_capacity);
+                for &rank_id in rank_ids {
+                    if !Self::required_worker(&self.workers, rank_id).is_ready() {
+                        executed_by_rank.push(None);
+                        continue;
                     }
-                    return Ok(effects);
+                    let executed = match self.pass_mode {
+                        EnginePassMode::Visible => {
+                            let Some(collector) = collector.as_deref_mut() else {
+                                bail!("offline replay visible engine pass requires a collector");
+                            };
+                            Self::required_worker_mut(&mut self.workers, rank_id)
+                                .try_execute_pass(collector, now_ms)
+                        }
+                        EnginePassMode::Hidden => {
+                            Self::required_worker_mut(&mut self.workers, rank_id)
+                                .try_execute_hidden_pass(now_ms)
+                        }
+                    }?;
+                    executed_by_rank.push(Some(executed));
                 }
-                if self.group_is_ready(worker_id) {
-                    self.deferred_ready_groups.insert(worker_id);
-                }
-                continue;
-            }
 
-            let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
-                SmallVec::with_capacity(rank_ids.len());
-            for &rank_id in rank_ids {
-                if !Self::required_worker(&self.workers, rank_id).is_ready() {
-                    executed_by_rank.push(None);
-                    continue;
-                }
-                let executed = match self.pass_mode {
-                    EnginePassMode::Visible => {
-                        let Some(collector) = collector.as_deref_mut() else {
-                            bail!("offline replay visible engine pass requires a collector");
-                        };
-                        Self::required_worker_mut(&mut self.workers, rank_id)
-                            .try_execute_pass(collector, now_ms)
-                    }
-                    EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
-                        .try_execute_hidden_pass(now_ms),
-                }?;
-                executed_by_rank.push(Some(executed));
-            }
+                let group_end_ms = executed_by_rank
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(|executed| executed.end_ms)
+                    .fold(now_ms, f64::max);
+                let boundary = PassBoundary {
+                    start_ms: now_ms,
+                    end_ms: group_end_ms,
+                    completion_capacity,
+                };
 
-            let group_end_ms = executed_by_rank
-                .iter()
-                .filter_map(Option::as_ref)
-                .map(|executed| executed.end_ms)
-                .fold(now_ms, f64::max);
-            let boundary = PassBoundary {
-                start_ms: now_ms,
-                end_ms: group_end_ms,
+                for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
+                    let Some(executed) = executed else {
+                        if group_end_ms > now_ms {
+                            // Empty ranks still participate in the barrier so work
+                            // arriving mid-epoch cannot start ahead of a sibling.
+                            Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
+                            effects.schedule_completion(
+                                group_end_ms,
+                                WorkerCompletionPayload {
+                                    stage: self.stage,
+                                    worker_idx: rank_id,
+                                    completed_requests: 0,
+                                    output_signals: Vec::new(),
+                                    lifecycle_events: Vec::new(),
+                                    engine_events: Observation::Batch::default(),
+                                    progress: EngineProgress::default(),
+                                    fpm: Some(ForwardPassSnapshot {
+                                        wall_time_secs: boundary.wall_time_secs(),
+                                        ..Default::default()
+                                    }),
+                                    accept_length_output_tokens: 0,
+                                    accept_length_decode_forwards: 0,
+                                },
+                                boundary.completion_capacity,
+                            );
+                        }
+                        continue;
+                    };
+
+                    let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                        Some(
+                            collector
+                                .as_deref_mut()
+                                .expect("visible pass collector checked before execution"),
+                        )
+                    } else {
+                        None
+                    };
+                    Self::lower_executed_pass(
+                        &mut self.workers,
+                        self.stage,
+                        rank_id,
+                        boundary,
+                        executed,
+                        align_collector,
+                        &mut effects,
+                    );
+                }
+                group_end_ms
             };
-            if group_end_ms > now_ms {
-                effects.prepare_scheduled_completion(group_end_ms, rank_ids.len());
-            }
-
-            for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
-                let Some(executed) = executed else {
-                    if group_end_ms > now_ms {
-                        // Empty ranks still participate in the barrier so work
-                        // arriving mid-epoch cannot start ahead of a sibling.
-                        Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                        effects.schedule_completion(
-                            group_end_ms,
-                            WorkerCompletionPayload {
-                                stage: self.stage,
-                                worker_idx: rank_id,
-                                completed_requests: 0,
-                                output_signals: Vec::new(),
-                                lifecycle_events: Vec::new(),
-                                engine_events: Observation::Batch::default(),
-                                progress: EngineProgress::default(),
-                                fpm: Some(ForwardPassSnapshot {
-                                    wall_time_secs: boundary.wall_time_secs(),
-                                    ..Default::default()
-                                }),
-                                accept_length_output_tokens: 0,
-                                accept_length_decode_forwards: 0,
-                            },
-                        );
-                    }
-                    continue;
-                };
-
-                let align_collector = if self.pass_mode == EnginePassMode::Visible {
-                    Some(
-                        collector
-                            .as_deref_mut()
-                            .expect("visible pass collector checked before execution"),
-                    )
-                } else {
-                    None
-                };
-                Self::lower_executed_pass(
-                    &mut self.workers,
-                    self.stage,
-                    rank_id,
-                    boundary,
-                    executed,
-                    align_collector,
-                    &mut effects,
-                );
-            }
 
             if !effects.is_empty() {
                 if group_end_ms <= now_ms {
@@ -868,8 +861,6 @@ where
     }
 
     pub(in crate::replay::offline) fn in_flight(&self) -> usize {
-        #[cfg(debug_assertions)]
-        self.debug_assert_total_in_flight();
         self.total_in_flight
     }
 

@@ -107,6 +107,8 @@ pub(super) fn push_worker_completions<Events: EngineEventBatch>(
         seq_no: *next_event_seq,
         kind,
     });
+    // Preserve the sequence numbers that later events would have received
+    // before these payloads were represented by one heap entry.
     *next_event_seq = next_event_seq
         .checked_add(payload_count)
         .expect("offline replay event sequence overflow");

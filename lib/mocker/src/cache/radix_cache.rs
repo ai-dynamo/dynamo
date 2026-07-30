@@ -278,7 +278,7 @@ impl RadixCache {
             .filter(|(id, node)| *id != self.root && node.lock_ref == 0 && node.children.is_empty())
             .map(|(id, node)| (node.last_access_time, id))
             .collect::<BTreeSet<_>>();
-        debug_assert_eq!(
+        assert_eq!(
             self.evictable_leaves, expected,
             "SGLang evictable-leaf index drifted from radix nodes"
         );
@@ -642,6 +642,8 @@ impl RadixCache {
     }
 
     fn split_node(&mut self, child_id: NodeId, split_pos: usize) -> NodeId {
+        // Keep child_id as the suffix node so its last-access timestamp and
+        // evictable-index key remain valid across the split.
         let (child_parent, original_ck, prefix_key, prefix_value, suffix_ck, lock_ref, accessed) = {
             let child = &mut self.nodes[child_id];
             let child_parent = child.parent;

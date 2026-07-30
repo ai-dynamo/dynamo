@@ -40,7 +40,8 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 - `lib/mocker/src/replay/offline/core.rs`
   Small `ReplayWorkerCore` wrapper used by the single-worker path.
 - `lib/mocker/src/replay/offline/runtime_utils.rs`
-  Shared helpers used by `agg.rs` and `disagg.rs`: event scheduling and `next_timestamp`.
+  Shared helpers used by `agg.rs` and `disagg.rs`: event scheduling,
+  `ReadyWorkerCompletions`, and `next_timestamp`.
 - `lib/mocker/src/replay/offline/progress.rs`
   `ReplayProgress`, the indicatif-based progress bar used by the harnesses.
 - `lib/mocker/src/replay/offline/components/`
@@ -142,13 +143,13 @@ So offline replay is not a toy simulator. It reuses the real per-pass mocker sch
 The multi-worker and disagg harnesses use `SimulationEvent` from `lib/mocker/src/replay/offline/events.rs` as a min-time priority queue implemented with `BinaryHeap`. The event itself is a small struct carrying the scheduled timestamp, a sequence number for tie-breaking, and a typed payload:
 
 ```rust
-pub(crate) struct SimulationEvent {
-    pub(crate) at_ms: f64,
-    pub(crate) seq_no: u64,
-    pub(crate) kind: SimulationEventKind,
+pub(in crate::replay::offline) struct SimulationEvent {
+    pub(in crate::replay::offline) at_ms: f64,
+    pub(in crate::replay::offline) seq_no: u64,
+    pub(in crate::replay::offline) kind: SimulationEventKind,
 }
 
-pub(crate) enum SimulationEventKind {
+pub(in crate::replay::offline) enum SimulationEventKind {
     WorkerCompletion { stage, worker_idx, completed_requests, output_signals, kv_events },
     WorkerCompletionBatch { payloads },
     DecodeHandoff { uuid },

@@ -1970,20 +1970,7 @@ where
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
-            let payload = self.prefill_engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.prefill_fpm_buffer
-                    .insert(payload.worker_idx, fpm, self.now_ms);
-            }
-            self.process_prefill_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.lifecycle_events,
-                payload.engine_events,
-            )?;
+            self.apply_worker_completion(payload)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
             push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
@@ -2034,20 +2021,7 @@ where
     ) -> Result<()> {
         self.record_decode_admissions(effects.admissions)?;
         for payload in effects.immediate_completions {
-            let payload = self.decode_engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.decode_fpm_buffer
-                    .insert(payload.worker_idx, fpm, self.now_ms);
-            }
-            self.process_decode_pass(
-                payload.output_signals,
-                payload.lifecycle_events,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
+            self.apply_worker_completion(payload)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
             push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);

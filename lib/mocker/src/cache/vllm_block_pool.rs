@@ -878,20 +878,26 @@ mod tests {
     }
 
     #[test]
-    fn evicting_non_primary_duplicate_preserves_primary_lookup() {
-        let mut pool = VllmBlockPool::new(2);
+    fn evicting_middle_duplicate_preserves_primary_lookup() {
+        let mut pool = VllmBlockPool::new(4);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
         assert!(pool.cache_private(first_id, 3));
 
-        let mut second = reserve(&mut pool, &[], 1).reservation;
-        let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 3));
-        pool.release(second_id);
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
+        let middle_id = duplicate_ids[1];
+        pool.release(middle_id);
 
         let pressure = reserve(&mut pool, &[], 1);
         assert!(pressure.removed.is_empty());
         pool.cancel(pressure.reservation);
+        assert!(pool.copies.get(middle_id).is_none());
 
         let primary = pool
             .reserve_exact_prefix([3], 1)
@@ -899,6 +905,8 @@ mod tests {
         assert_eq!(primary.reservation.prefix, vec![(3, first_id)]);
         pool.cancel(primary.reservation);
         pool.release(first_id);
+        pool.release(duplicate_ids[0]);
+        pool.release(duplicate_ids[2]);
         pool.assert_lru_consistent();
     }
 

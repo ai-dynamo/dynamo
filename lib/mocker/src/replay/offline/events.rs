@@ -9,28 +9,28 @@ use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
 use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SimulationWorkerStage {
+pub(in crate::replay::offline) enum SimulationWorkerStage {
     Aggregated,
     Prefill,
     Decode,
 }
 
 #[derive(Debug)]
-pub(crate) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
-    pub stage: SimulationWorkerStage,
-    pub worker_idx: usize,
-    pub completed_requests: usize,
-    pub output_signals: Vec<OutputSignal>,
-    pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub engine_events: Events,
-    pub progress: EngineProgress,
-    pub fpm: Option<ForwardPassSnapshot>,
-    pub accept_length_output_tokens: usize,
-    pub accept_length_decode_forwards: usize,
+pub(in crate::replay::offline) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) stage: SimulationWorkerStage,
+    pub(in crate::replay::offline) worker_idx: usize,
+    pub(in crate::replay::offline) completed_requests: usize,
+    pub(in crate::replay::offline) output_signals: Vec<OutputSignal>,
+    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
+    pub(in crate::replay::offline) engine_events: Events,
+    pub(in crate::replay::offline) progress: EngineProgress,
+    pub(in crate::replay::offline) fpm: Option<ForwardPassSnapshot>,
+    pub(in crate::replay::offline) accept_length_output_tokens: usize,
+    pub(in crate::replay::offline) accept_length_decode_forwards: usize,
 }
 
 #[derive(Debug)]
-pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
+pub(in crate::replay::offline) enum SimulationEventKind<Events: EngineEventBatch = ()> {
     WorkerCompletion {
         stage: SimulationWorkerStage,
         worker_idx: usize,
@@ -75,10 +75,10 @@ impl<Events: EngineEventBatch> SimulationEventKind<Events> {
 }
 
 #[derive(Debug)]
-pub(crate) struct SimulationEvent<Events: EngineEventBatch = ()> {
-    pub(crate) at_ms: f64,
-    pub(crate) seq_no: u64,
-    pub(crate) kind: SimulationEventKind<Events>,
+pub(in crate::replay::offline) struct SimulationEvent<Events: EngineEventBatch = ()> {
+    pub(in crate::replay::offline) at_ms: f64,
+    pub(in crate::replay::offline) seq_no: u64,
+    pub(in crate::replay::offline) kind: SimulationEventKind<Events>,
 }
 
 impl<Events: EngineEventBatch> PartialEq for SimulationEvent<Events> {
