@@ -48,14 +48,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tooLongComponentName := boundaryComponentName + "x"
 
 	tests := []struct {
-		name            string
-		deployment      runtime.Object
-		oldDeployment   runtime.Object
-		mutateRequest   func(*testing.T, map[string]any) // mutates the source-version request map
-		withoutTopology bool                             // omits the default cluster topology fixture
-		groveDisabled   bool                             // disables the configured Grove pathway
-		checkpointOff   bool                             // disables checkpoint creation and restore
-		username        string                           // supplies the admission request identity
+		name               string
+		deployment         runtime.Object
+		oldDeployment      runtime.Object
+		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
+		withoutTopology    bool                             // omits the default cluster topology fixture
+		groveDisabled      bool                             // disables the configured Grove pathway
+		checkpointOff      bool                             // disables checkpoint creation and restore
+		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+		username           string                           // supplies the admission request identity
 
 		wantSchemaErr      string
 		wantCELErr         string
@@ -69,6 +70,98 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name:       "valid deployment with components",
 			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name: "beta component main image is required when pod template is absent on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers: Required value: is required"},
+		},
+		{
+			name: "alpha service main image is required when extra pod spec is absent on create",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
+		},
+		{
+			name: "component custom image requires runtime version override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: customRuntimeImage}},
+				}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "alpha component custom image uses source-version path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "unchanged legacy beta component runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "unchanged legacy alpha service runtime version is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "beta component image change to custom requires runtime version override",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		{
+			name:               "changing a legacy alpha custom image requires runtime version override",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:other-custom"
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
 		},
 		{
 			name: "no components",
@@ -244,7 +337,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 sidecars must provide an image in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "metrics"}},
 				}}
 			}),
 			wantCELErr: "spec.components[1].podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
@@ -252,7 +345,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 converted sidecar without image reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "metrics"}},
 				}}
 			}),
@@ -261,7 +354,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1alpha1 frontend sidecar without image reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].FrontendSidecar = &nvidiacomv1alpha1.FrontendSidecarSpec{}
-				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "metrics"}},
 				}}
 			}),
@@ -270,7 +363,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 init containers must provide an image in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers:     []corev1.Container{{Name: consts.MainContainerName}},
+					Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					InitContainers: []corev1.Container{{Name: "prepare"}},
 				}}
 			}),
@@ -279,7 +372,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 converted init container without image reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{
 					InitContainers: []corev1.Container{{Name: "prep"}},
 				}}
 			}),
@@ -291,7 +384,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
 					}},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}},
 				}
 			}),
 			wantCELErr: "spec.components[1].podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
@@ -305,7 +398,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 						consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
 					}},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}},
 				}
 			}),
 			wantPodAnnotations: map[string]string{
@@ -336,7 +429,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.FrontendSidecar = k8sptr.To("missing")
 				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: consts.MainContainerName}},
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 				}}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].frontendSidecar: Invalid value: "missing": must match a podTemplate.spec.containers name`},
@@ -354,7 +447,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 pod template container counts are not artificially bounded",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				podTemplate := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: consts.MainContainerName}},
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 				}}
 				for i := range 32 {
 					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, corev1.Container{
@@ -752,7 +845,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				className := "nginx"
 				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeFrontend,
+					ComponentType:          consts.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+					},
 					Ingress: &nvidiacomv1alpha1.IngressSpec{
 						Enabled:                    true,
 						IngressControllerClassName: &className,
@@ -802,11 +899,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "alpha frontend sidecar rejects generated container name conflict",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["frontend"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeFrontend,
+					ComponentType:          consts.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
 					FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{
 						Image: "custom/frontend:latest",
 					},
-					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"}, PodSpec: &corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name:  consts.FrontendSidecarContainerName,
 							Image: "custom/frontend:latest",
@@ -890,6 +988,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				service := dgd.Spec.Services["worker"]
 				service.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+					Image: "registry.example/runtime:1.1.0",
 					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 						corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					}},
@@ -1238,11 +1337,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.Components = append(spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-					ComponentName: "extra",
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "extra",
+					Replicas:               k8sptr.To(int32(1)),
+					RuntimeVersionOverride: "1.1.0",
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-						Name: consts.MainContainerName,
-						Env:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
+						Name:  consts.MainContainerName,
+						Image: "registry.example/runtime:1.1.0",
+						Env:   []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
 					}}}},
 				})
 			}),
@@ -1264,8 +1365,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				spec.Components = []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 					spec.Components[1],
 					{
-						ComponentName: "extra",
-						Replicas:      k8sptr.To(int32(1)),
+						ComponentName:          "extra",
+						Replicas:               k8sptr.To(int32(1)),
+						RuntimeVersionOverride: "1.1.0",
+						PodTemplate:            &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}}},
 					},
 				}
 			}),
@@ -1644,18 +1747,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
 			test := admissionTestCase{
-				object:            tt.deployment,
-				oldObject:         tt.oldDeployment,
-				mutateObject:      tt.mutateRequest,
-				gates:             gates,
-				withoutTopology:   tt.withoutTopology,
-				username:          tt.username,
-				wantSchemaError:   tt.wantSchemaErr,
-				wantCELError:      tt.wantCELErr,
-				wantAdmissionErrs: tt.wantAdmissionErrs,
-				wantWebhookErrors: tt.wantWebhookErrs,
-				wantWarnings:      tt.wantWarnings,
-				notWantError:      tt.notWantErr,
+				object:             tt.deployment,
+				oldObject:          tt.oldDeployment,
+				mutateObject:       tt.mutateRequest,
+				gates:              gates,
+				withoutTopology:    tt.withoutTopology,
+				seedWithoutWebhook: tt.seedWithoutWebhook,
+				username:           tt.username,
+				wantSchemaError:    tt.wantSchemaErr,
+				wantCELError:       tt.wantCELErr,
+				wantAdmissionErrs:  tt.wantAdmissionErrs,
+				wantWebhookErrors:  tt.wantWebhookErrs,
+				wantWarnings:       tt.wantWarnings,
+				notWantError:       tt.notWantErr,
 			}
 			if tt.oldDeployment != nil {
 				test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
@@ -1805,14 +1909,22 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "frontend",
-					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentName:          "frontend",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 				{
-					ComponentName: "worker",
-					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(2)),
+					ComponentName:          "worker",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(2)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+					}},
 				},
 			},
 		},
@@ -1829,8 +1941,12 @@ func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeplo
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      k8sptr.To(int32(1)),
+					ComponentType:          consts.ComponentTypeWorker,
+					RuntimeVersionOverride: "1.1.0",
+					Replicas:               k8sptr.To(int32(1)),
+					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
+					},
 				},
 			},
 		},
@@ -1926,16 +2042,15 @@ func enableBetaInterPodGMS(component *nvidiacomv1beta1.DynamoComponentDeployment
 	}
 	component.PodTemplate = &corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name: consts.MainContainerName,
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+			Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "registry.example/runtime:1.1.0",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
-			},
+			}},
 		},
 	}
 }
@@ -1948,16 +2063,15 @@ func enableBetaIntraPodGMS(component *nvidiacomv1beta1.DynamoComponentDeployment
 	}
 	component.PodTemplate = &corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name: consts.MainContainerName,
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+			Containers: []corev1.Container{{
+				Name:  consts.MainContainerName,
+				Image: "registry.example/runtime:1.1.0",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
-			},
+			}},
 		},
 	}
 }
