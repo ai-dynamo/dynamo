@@ -419,15 +419,18 @@ class MmCase:
 
     Each :class:`MmCase` produces exactly one ``EngineConfig`` keyed
     ``mm_{topology}_{short_name}[_{suffix}]``. The case carries its own
-    payload (HTTP-URL, base64-inline, video, audio) and any per-case
-    overrides on top of the parent :class:`TopologyConfig`.
+    inference payload (HTTP-URL, base64-inline, video, audio), optional
+    follow-up payloads such as metrics checks, and any per-case overrides
+    on top of the parent :class:`TopologyConfig`.
 
-    ``payload`` is the only required field; everything else either inherits
-    from the parent ``TopologyConfig`` (marks, timeout) or extends it
-    (extra script args, env overlay).
+    ``payload`` is the only required field; follow-up payloads run in order
+    after it. Everything else either inherits from the parent
+    ``TopologyConfig`` (marks, timeout) or extends it (extra script args,
+    env overlay).
     """
 
     payload: BasePayload  # required — fully formed test payload
+    followup_payloads: list[BasePayload] = field(default_factory=list)
     suffix: str = ""  # appended to config key; "" yields the bare topology key
     extra_script_args: list[str] = field(default_factory=list)
     marks: list[Any] = field(default_factory=list)  # if empty, inherit topology marks
@@ -565,7 +568,7 @@ def make_multimodal_configs(
                 script_args=list(base_script_args) + list(case.extra_script_args),
                 marks=marks,
                 delayed_start=topo_cfg.delayed_start,
-                request_payloads=[case.payload],
+                request_payloads=[case.payload, *case.followup_payloads],
                 env={**topo_env, **case.env},
             )
 

@@ -229,12 +229,14 @@ type WorkloadSpec struct {
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
-	// Required (or RequestRate) when the planner is disabled.
+	// Mutually exclusive with the requestRate field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	Concurrency *float64 `json:"concurrency,omitempty"`
 
 	// RequestRate is the target request rate (req/s).
-	// Required (or Concurrency) when the planner is disabled.
+	// Mutually exclusive with the concurrency field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
@@ -342,7 +344,7 @@ type KVRouterSpec struct {
 type FeaturesSpec struct {
 	// Planner contains the raw Planner configuration passed to the Planner service.
 	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-	// See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.
+	// See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.
 	// DGDR passes this object through without field-level validation; the Planner
 	// service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.

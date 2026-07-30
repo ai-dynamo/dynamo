@@ -139,6 +139,11 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
     /// Membership remains indexed by logical worker and global DP rank. Publisher incarnation is
     /// deliberately absent from this routing/index identity.
     pub sources: HashMap<WorkerWithDpRank, KvSourceStatus<S>>,
+    /// Runtime-declared KV event publication capability, stored once per logical worker.
+    ///
+    /// `Some(true)` and `Some(false)` are explicit declarations. `None` is a legacy or otherwise
+    /// unknown declaration.
+    pub kv_event_publishing_enabled: HashMap<WorkerId, Option<bool>>,
     /// Monotonic cold-reset fence for each logical source in `sources`.
     ///
     /// A consumer must cold-reset a logical rank before accepting a source when this value
@@ -164,11 +169,40 @@ impl<S> KvSourceMembershipView<S> {
         self.recovery_expected.get(worker).copied()
     }
 
+    pub fn kv_event_publishing_enabled(&self, worker_id: WorkerId) -> Option<bool> {
+        self.kv_event_publishing_enabled
+            .get(&worker_id)
+            .copied()
+            .flatten()
+    }
+
     pub fn resolved_kv_state_endpoint(&self) -> Option<&EndpointId> {
         match &self.endpoint_resolution {
             KvStateEndpointResolution::Resolved(endpoint) => Some(endpoint),
             KvStateEndpointResolution::Ambiguous { .. } => None,
         }
+    }
+
+    /// Whether runtime fields that determine this source binding still match the view.
+    ///
+    /// Metadata-only runtime changes do not require waiting for another source-membership
+    /// publication. Endpoint mapping and the logical worker/rank set do.
+    pub(crate) fn matches_binding_inputs(
+        &self,
+        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> bool {
+        if self.endpoint_resolution
+            != resolve_kv_state_endpoint(&self.serving_endpoint, runtime_configs.values())
+        {
+            return false;
+        }
+
+        let mut worker_count = 0usize;
+        let workers_match = expected_workers(runtime_configs).all(|(worker, _)| {
+            worker_count = worker_count.saturating_add(1);
+            self.sources.contains_key(&worker)
+        });
+        workers_match && worker_count == self.sources.len()
     }
 }
 
@@ -344,28 +378,13 @@ where
     ) -> KvSourceMembershipView<S> {
         let endpoint_resolution =
             resolve_kv_state_endpoint(serving_endpoint, runtime_configs.values());
-        let workers: Vec<_> = runtime_configs
-            .iter()
-            .flat_map(|(&worker_id, config)| {
-                (0..config.data_parallel_size).filter_map(move |offset| {
-                    config
-                        .data_parallel_start_rank
-                        .checked_add(offset)
-                        .map(|dp_rank| {
-                            (
-                                WorkerWithDpRank::new(worker_id, dp_rank),
-                                config.enable_local_indexer,
-                            )
-                        })
-                })
-            })
-            .collect();
+        let workers: HashMap<_, _> = expected_workers(runtime_configs).collect();
 
         let sources: HashMap<WorkerWithDpRank, KvSourceStatus<S>> = match &endpoint_resolution {
             KvStateEndpointResolution::Resolved(kv_state_endpoint) => workers
-                .iter()
+                .keys()
                 .copied()
-                .map(|(worker, _)| {
+                .map(|worker| {
                     let key = KvSourceKey::new(kv_state_endpoint.clone(), worker);
                     (worker, self.status(&key))
                 })
@@ -375,24 +394,44 @@ where
                     endpoints: endpoints.clone(),
                 };
                 workers
-                    .iter()
+                    .keys()
                     .copied()
-                    .map(|(worker, _)| (worker, KvSourceStatus::Ambiguous(ambiguity.clone())))
+                    .map(|worker| (worker, KvSourceStatus::Ambiguous(ambiguity.clone())))
                     .collect()
             }
         };
-        let recovery_expected = workers
-            .into_iter()
-            .collect::<HashMap<WorkerWithDpRank, bool>>();
+        let kv_event_publishing_enabled = runtime_configs
+            .iter()
+            .map(|(&worker_id, config)| (worker_id, config.kv_event_publishing_enabled))
+            .collect();
 
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
             lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
-            recovery_expected,
+            recovery_expected: workers,
+            kv_event_publishing_enabled,
             sources,
         }
     }
+}
+
+fn expected_workers(
+    runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> impl Iterator<Item = (WorkerWithDpRank, bool)> + '_ {
+    runtime_configs.iter().flat_map(|(&worker_id, config)| {
+        (0..config.data_parallel_size).filter_map(move |offset| {
+            config
+                .data_parallel_start_rank
+                .checked_add(offset)
+                .map(|dp_rank| {
+                    (
+                        WorkerWithDpRank::new(worker_id, dp_rank),
+                        config.enable_local_indexer,
+                    )
+                })
+        })
+    })
 }
 
 /// Resolve the effective KV-state endpoint advertised by active base runtime configs.
@@ -536,6 +575,35 @@ mod tests {
     }
 
     #[test]
+    fn binding_inputs_ignore_metadata_only_runtime_changes() {
+        let serving = endpoint("generate");
+        let kv_endpoint = endpoint("kv-events");
+        let original = HashMap::from([(
+            7,
+            ModelRuntimeConfig {
+                context_length: Some(4096),
+                data_parallel_start_rank: 2,
+                data_parallel_size: 2,
+                kv_state_endpoint: Some(kv_endpoint.clone()),
+                ..Default::default()
+            },
+        )]);
+        let view = KvSourceMembership::<KvEventSource>::new().view(&serving, &original);
+
+        let mut metadata_only = original.clone();
+        metadata_only.get_mut(&7).unwrap().context_length = Some(8192);
+        assert!(view.matches_binding_inputs(&metadata_only));
+
+        let mut remapped = metadata_only.clone();
+        remapped.get_mut(&7).unwrap().kv_state_endpoint = Some(endpoint("other-kv-events"));
+        assert!(!view.matches_binding_inputs(&remapped));
+
+        let mut resized = metadata_only;
+        resized.get_mut(&7).unwrap().data_parallel_size = 3;
+        assert!(!view.matches_binding_inputs(&resized));
+    }
+
+    #[test]
     fn overlapping_random_incarnations_are_ambiguous_until_one_remains() {
         let kv_endpoint = endpoint("kv-events");
         let key = KvSourceKey::new(kv_endpoint.clone(), WorkerWithDpRank::new(7, 3));
@@ -574,6 +642,7 @@ mod tests {
                 data_parallel_start_rank: 2,
                 data_parallel_size: 2,
                 kv_state_endpoint: Some(kv_endpoint.clone()),
+                kv_event_publishing_enabled: Some(true),
                 ..Default::default()
             },
         )]);
@@ -594,5 +663,18 @@ mod tests {
             Some(&KvSourceStatus::Missing)
         );
         assert!(view.status(&WorkerWithDpRank::new(99, 0)).is_none());
+        assert_eq!(view.kv_event_publishing_enabled.len(), 1);
+        assert_eq!(view.kv_event_publishing_enabled(7), Some(true));
+        assert_eq!(view.kv_event_publishing_enabled(99), None);
+    }
+
+    #[test]
+    fn view_preserves_legacy_unknown_capability_for_expected_worker() {
+        let serving = endpoint("generate");
+        let configs = HashMap::from([(7, ModelRuntimeConfig::default())]);
+        let view = KvSourceMembership::<KvEventSource>::new().view(&serving, &configs);
+
+        assert_eq!(view.kv_event_publishing_enabled, HashMap::from([(7, None)]));
+        assert_eq!(view.kv_event_publishing_enabled(7), None);
     }
 }

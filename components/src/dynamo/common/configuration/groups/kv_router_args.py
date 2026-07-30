@@ -29,6 +29,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_credit",
     "overlap_score_credit_decay",
     "prefill_load_scale",
+    "decode_active_request_weight",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
@@ -111,6 +112,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_credit: float
     overlap_score_credit_decay: float
     prefill_load_scale: float
+    decode_active_request_weight: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -216,6 +218,20 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-active-request-weight",
+            env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
+                "each active request on a candidate worker. Use this to balance "
+                "decode batch size when step latency depends more on request count "
+                "than resident KV footprint. Must be finite and non-negative."
+            ),
+            arg_type=float,
+            dest="decode_active_request_weight",
         )
         add_argument(
             g,

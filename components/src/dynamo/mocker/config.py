@@ -3,21 +3,17 @@
 
 import argparse
 import json
-import logging
 import os
 import socket
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
-    AicMemoryEstimatorUnavailableError,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
-
-logger = logging.getLogger(__name__)
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -110,44 +106,34 @@ def _estimate_aic_num_gpu_blocks(
     resolved_block_size = _resolve_block_size_for_capacity(
         engine_type, block_size, sglang_page_size
     )
-    try:
-        return estimate_num_gpu_blocks(
-            backend_name=aic_backend,
-            system=aic_system or _DEFAULT_AIC_SYSTEM,
-            model_path=aic_model_path,
-            tp_size=aic_tp_size if aic_tp_size is not None else 1,
-            block_size=resolved_block_size,
-            max_num_batched_tokens=(
-                max_num_batched_tokens
-                if max_num_batched_tokens is not None
-                else _DEFAULT_MAX_NUM_BATCHED_TOKENS
-            ),
-            gpu_memory_utilization=(
-                gpu_memory_utilization
-                if gpu_memory_utilization is not None
-                else DEFAULT_GPU_MEMORY_UTILIZATION
-            ),
-            mem_fraction_static=(
-                mem_fraction_static
-                if mem_fraction_static is not None
-                else DEFAULT_MEM_FRACTION_STATIC
-            ),
-            # None -> aic.py applies the TRT-LLM default (0.9).
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
-            backend_version=aic_backend_version,
-            moe_tp_size=aic_moe_tp_size,
-            moe_ep_size=aic_moe_ep_size,
-            attention_dp_size=aic_attention_dp_size,
-        )
-    except AicMemoryEstimatorUnavailableError as exc:
-        logger.warning(
-            "AIC KV-cache capacity estimation is unavailable: %s. Falling back "
-            "to default num_gpu_blocks=%d; upgrade aiconfigurator or set "
-            "--num-gpu-blocks-override explicitly.",
-            exc,
-            _DEFAULT_NUM_GPU_BLOCKS,
-        )
-        return _DEFAULT_NUM_GPU_BLOCKS
+    return estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=aic_system or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=aic_tp_size if aic_tp_size is not None else 1,
+        block_size=resolved_block_size,
+        max_num_batched_tokens=(
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        gpu_memory_utilization=(
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION
+        ),
+        mem_fraction_static=(
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        ),
+        # None -> aic.py applies the TRT-LLM default.
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        backend_version=aic_backend_version,
+        moe_tp_size=aic_moe_tp_size,
+        moe_ep_size=aic_moe_ep_size,
+        attention_dp_size=aic_attention_dp_size,
+    )
 
 
 def _resolve_num_gpu_blocks(
@@ -288,7 +274,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
         enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
-        g1_backend=getattr(args, "g1_backend", "kvbm"),
+        g1_backend=getattr(args, "g1_backend", None),
         enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
         speedup_ratio=getattr(args, "speedup_ratio", 1.0),
         decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
@@ -376,6 +362,9 @@ def build_runtime_config(
         rc.max_num_batched_tokens = _DEFAULT_MAX_NUM_BATCHED_TOKENS
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
+    )
+    rc.kv_event_publishing_enabled = (
+        engine_args.enable_prefix_caching and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")
