@@ -1,23 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: E402
-
 """Per-branch candidate space. The branch enumeration calls the KV-feasibility
-path, so it needs aiconfigurator + a perf DB (skips otherwise)."""
+path against the AIC Core performance database."""
 
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("aiconfigurator")
-
 from aisimulate.spica.config import SmartSearchConfig
-from aisimulate.spica.kv_estimate import NoPerfDatabase, _load_memory_estimator
+from aisimulate.spica.kv_estimate import NoPerfDatabase
 from aisimulate.spica.model_hw import NoViableParallelConfig
 from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
 from aisimulate.spica.search_space import branch_knob_choices, enumerate_branches
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
@@ -32,13 +27,6 @@ def _config(**ss_overrides) -> SmartSearchConfig:
     }
     ss.update(ss_overrides)
     return SmartSearchConfig(search_space=ss, workload={"trace_path": TRACE})
-
-
-def _require_memory_estimator() -> None:
-    try:
-        _load_memory_estimator()
-    except AicMemoryEstimatorUnavailableError as exc:
-        pytest.skip(str(exc))
 
 
 def test_branch_knob_choices_by_mode():
@@ -117,20 +105,10 @@ def test_mixed_planner_policies_keep_dependent_knobs():
     assert "planner_load_sensitivity" in choices
 
 
-@pytest.mark.filterwarnings(
-    "ignore:\\[EXPERIMENTAL\\] Spica cannot apply KV-capacity filtering.*:UserWarning"
-)
 def test_enumerate_branches_deepseek_gb200():
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=16)
-    try:
-        with pytest.warns(UserWarning, match="disagg.*replay-incompatible.*trtllm"):
-            branches = enumerate_branches(cfg)
-    except (NoPerfDatabase, NoViableParallelConfig):
-        pytest.skip("no gb200/trtllm perf DB")
-    except ValueError as exc:
-        if "unsupported model/backend/GPU" in str(exc):
-            pytest.skip(f"native KV build unavailable: {exc}")
-        raise
+    with pytest.warns(UserWarning, match="disagg.*replay-incompatible.*trtllm"):
+        branches = enumerate_branches(cfg)
     # Dynamo replay rejects TRT-LLM disaggregation, so only agg is searchable.
     assert {b.deployment_mode for b in branches} == {"agg"}
     for b in branches:
@@ -177,26 +155,19 @@ def test_replay_incompatible_backend_is_removed_before_sampling(monkeypatch):
 
 def test_pinned_parallel_configs_replace_the_menu():
     # a dense, KV-trivial model so the pinned shapes are guaranteed feasible
-    _require_memory_estimator()
     cfg = _config(
         model_name="meta-llama/Meta-Llama-3.1-8B",
         deployment_mode=["agg"],
         gpu_budget=32,
         parallel_configs=[{"tp": 4, "replicas": 2}, {"tp": 8, "replicas": 1}],
     )
-    try:
-        branches = enumerate_branches(cfg)
-    except NoPerfDatabase:
-        pytest.skip("no gb200/trtllm perf DB")
+    branches = enumerate_branches(cfg)
     (branch,) = branches
     menu = {(c.shape.tp, c.replicas) for c in branch.parallel_configs}
     assert menu == {(4, 2), (8, 1)}  # exactly the pinned set, not the full enumeration
     assert all(c.total_gpus == 8 for c in branch.parallel_configs)
 
 
-@pytest.mark.filterwarnings(
-    "ignore:\\[EXPERIMENTAL\\] Spica cannot apply KV-capacity filtering.*:UserWarning"
-)
 def test_pinned_parallel_config_illegal_is_rejected():
     cfg = _config(
         model_name="meta-llama/Meta-Llama-3.1-8B",
@@ -204,11 +175,8 @@ def test_pinned_parallel_config_illegal_is_rejected():
         gpu_budget=32,
         parallel_configs=[{"tp": 3, "replicas": 1}],  # tp=3 not on the GPU ladder
     )
-    try:
-        with pytest.raises(NoViableParallelConfig):
-            enumerate_branches(cfg)
-    except NoPerfDatabase:
-        pytest.skip("no gb200/trtllm perf DB")
+    with pytest.raises(NoViableParallelConfig):
+        enumerate_branches(cfg)
 
 
 # --- per-mode failure policy: skip an infeasible mode, keep the viable ones --------

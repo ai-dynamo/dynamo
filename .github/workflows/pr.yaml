@@ -89,6 +89,7 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
+      - frontend-test
       - frontend-copy-to-acr
     if: always()
     steps:
@@ -574,7 +575,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 45
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -646,7 +647,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
-      build_timeout_minutes: 45
+      build_timeout_minutes: 60
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -802,6 +803,28 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
+  frontend-test:
+    name: frontend
+    needs: [changed-files, frontend-build]
+    if: needs.changed-files.outputs.frontend == 'true'
+    # The frontend process hosts the KV router. Validate the experimental
+    # --router-prefill-load-model=aic dependency and native prefill predictor in
+    # the shipped frontend image on both architectures.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-v2' || 'prod-tester-arm-v2' }}
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}
+      env:
+        HOME: /home/dynamo
+        USER: dynamo
+    steps:
+      - name: Validate router-side AIC in the frontend image
+        working-directory: /workspace
+        run: python tests/frontend/router_aic_image_smoke.py
+
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
@@ -820,6 +843,7 @@ jobs:
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'

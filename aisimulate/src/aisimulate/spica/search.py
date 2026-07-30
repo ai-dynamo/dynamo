@@ -39,7 +39,7 @@ from tqdm import tqdm
 from .config import Candidate, OptimizationGoal, SmartSearchConfig
 from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
-from .kv_estimate import _load_memory_estimator, resolve_backend_version
+from .kv_estimate import resolve_backend_version
 from .kv_load import InfeasibleKVCapacity, resolve_kv_load
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
 from .planner import filter_scaling_policies, scaling_fields
@@ -232,13 +232,6 @@ def run_smart_search(
     candidate evaluations (live feasible/failed tally + best score) and prints a
     one-line summary at the end; set False for quiet/non-interactive runs.
     """
-    # AIConfigurator 0.9 does not provide the memory estimator needed to turn a
-    # candidate-relative KV ratio into concrete concurrency. Detect that unsupported
-    # mode before branch enumeration/Vizier work instead of returning an empty result
-    # after every candidate fails to build.
-    if config.workload.kv_load_ratio is not None:
-        _load_memory_estimator()
-
     goal = config.goal
     # Predictive throughput scaling only works under the planner's "sla" target
     # (a goodput sweep). For throughput/latency sweeps, drop the throughput-scaling

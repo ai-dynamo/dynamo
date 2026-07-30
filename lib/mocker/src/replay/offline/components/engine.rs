@@ -562,11 +562,11 @@ where
                             bail!("offline replay visible engine pass requires a collector");
                         };
                         Self::required_worker_mut(&mut self.workers, rank_id)
-                            .execute_pass(collector, now_ms)
+                            .try_execute_pass(collector, now_ms)
                     }
                     EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
-                        .execute_hidden_pass(now_ms),
-                };
+                        .try_execute_hidden_pass(now_ms),
+                }?;
                 executed_by_rank.push(Some(executed));
             }
 
