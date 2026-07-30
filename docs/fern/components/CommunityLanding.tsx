@@ -63,9 +63,9 @@ const CHANNELS = [
     icon: "slack",
   },
   {
-    name: "YouTube",
-    label: "Meetings, talks, and demos",
-    href: "https://www.youtube.com/@ai-dynamo-community",
+    name: "Office Hours",
+    label: "Recordings and demos",
+    href: "https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X",
     tone: "youtube",
     icon: "youtube",
   },
