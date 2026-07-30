@@ -22,7 +22,8 @@ vision encoding.
 | Video | Not supported | Not supported | Not supported |
 | Audio | Not supported | Not supported | Not supported |
 
-`Agg` refers to an aggregated worker.
+`Agg` refers to an aggregated worker. The entries in this matrix represent the
+supported topologies for frontend decoding.
 
 This matrix describes parallel media decoding, not the overall multimodal
 support of each backend. A backend can support video or audio by decoding it on
@@ -69,9 +70,11 @@ registers the model.
 
 ## Requirements and Limitations
 
-- Run the frontend with NIXL and UCX available. The image built from
-  [`container/templates/frontend.Dockerfile`](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/frontend.Dockerfile)
-  does not include the required UCX media-transfer support.
+- The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0` image installs
+  NIXL wheels but does not expose the native NIXL and UCX libraries and plugins
+  required by the Rust frontend. It cannot run parallel media decoding as
+  shipped. Run the frontend in a backend runtime image or environment where
+  NIXL and UCX are configured and available.
 - Run the frontend on a node with GPU access. NIXL initialization requires
   `libcuda.so.1`, even though image decompression runs on the CPU.
 - To fetch images from trusted internal IP addresses or ports, set
