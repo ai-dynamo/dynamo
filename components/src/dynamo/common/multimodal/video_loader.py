@@ -27,6 +27,10 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from dynamo.common.multimodal.media_source import (
+    is_local_media_url,
+    read_local_media_bytes,
+)
 from dynamo.common.multimodal.nvdec_decoder import (
     decode_video_nvdec,
     probe_video_codec,
@@ -134,8 +138,20 @@ class VideoLoader:
             # codec falls through to vLLM's software decoder below. Note the
             # runtime images purge the software decode wheels (opencv/av/decord/
             # torchcodec) for codec compliance, so that fallback only resolves
-            # where a decoder has been installed separately. data:/file:// are not
-            # fetched at this layer and so are never hardware-decoded.
+            # where a decoder has been installed separately.
+            decoded = await self._maybe_decode_with_nvdec(content)
+            if decoded is not None:
+                return decoded
+            return await asyncio.to_thread(media_io.load_bytes, content)
+
+        # file:// and data: never touch the network, but they still deserve
+        # hardware decode: without this they reach only the software decoder,
+        # which the codec-compliant images do not ship, so H.264/H.265 from a
+        # local file or data URI would fail despite NVDEC being available and
+        # able to decode it. Reading is gated by the same url policy the vLLM
+        # connector below uses, so this adds no local-read surface.
+        if is_local_media_url(normalized_url):
+            content = await read_local_media_bytes(normalized_url, self._url_policy)
             decoded = await self._maybe_decode_with_nvdec(content)
             if decoded is not None:
                 return decoded

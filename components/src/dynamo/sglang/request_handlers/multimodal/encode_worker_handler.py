@@ -31,6 +31,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.media_source import (
+    is_local_media_url,
+    read_local_media_bytes,
+)
 from dynamo.common.multimodal.nvdec_decoder import (
     decode_video_nvdec,
     nvdec_available,
@@ -426,18 +430,28 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     async def _maybe_nvdec_frames(self, url: str) -> Optional[Any]:
         """Decode an H.264/H.265 video URL to frames for SGLang's pre-decoded path.
 
-        Fetches the URL (SSRF-validated), probes the container codec, and only
-        H.264/H.265 are hardware-decoded via NVDEC into a ``(T, H, W, 3)`` uint8
-        RGB ndarray. SGLang's ``load_video`` passes ndarrays through untouched,
-        so the frames reach the video processor directly. Returns ``None`` to
-        fall back to URL passthrough (non-http scheme, other codec, or any
-        failure) -- NVDEC is purely additive and never blocks the existing path.
+        Reads the URL (SSRF-validated for http(s); policy-gated for ``file://``
+        and ``data:``), probes the container codec, and only H.264/H.265 are
+        hardware-decoded via NVDEC into a ``(T, H, W, 3)`` uint8 RGB ndarray.
+        SGLang's ``load_video`` passes ndarrays through untouched, so the frames
+        reach the video processor directly. Returns ``None`` to fall back to URL
+        passthrough (unsupported scheme, other codec, or any failure) -- NVDEC is
+        purely additive and never blocks the existing path.
+
+        ``file://`` and ``data:`` are included because SGLang's own decoders are
+        stripped from the codec-compliant image: without hardware decode those
+        schemes have no decoder at all, so excluding them here would drop local
+        and inline video entirely rather than merely skipping acceleration.
         """
         try:
             normalized = await validate_media_url(url, self._url_policy)
-            if urlparse(normalized).scheme not in ("http", "https"):
+            scheme = urlparse(normalized).scheme
+            if scheme in ("http", "https"):
+                content = await fetch_bytes(normalized, 30.0, policy=self._url_policy)
+            elif is_local_media_url(normalized):
+                content = await read_local_media_bytes(normalized, self._url_policy)
+            else:
                 return None
-            content = await fetch_bytes(normalized, 30.0, policy=self._url_policy)
             if not should_use_nvdec(probe_video_codec(content)):
                 return None
             frames, _meta = await asyncio.to_thread(
