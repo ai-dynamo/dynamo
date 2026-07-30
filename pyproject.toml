@@ -279,6 +279,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "wheel_smoke: marks tests that validate wheels copied from runtime images",
+    "installs_extra_dependencies: marks tests that pip-install a package the runtime image intentionally omits (via DYN_TEST_ONLY_PIP_INSTALL). The feature under test may not work in an unmodified shipped image",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",

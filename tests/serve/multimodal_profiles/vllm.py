@@ -120,7 +120,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "agg_video": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge, pytest.mark.installs_extra_dependencies],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
@@ -128,6 +128,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # Backend video decode goes through vLLM's VideoMediaIO (opencv);
                 # the shipped image omits it as a media-codec carrier, so install
                 # it for this test only. See common._install_test_only_packages.
+                # installs_extra_dependencies: this VP9 case therefore proves the routing
+                # works *given* a decoder, not that VP9 decodes in a shipped
+                # image -- it does not, until the opt-in decoders land.
                 env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
@@ -235,13 +238,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "epd_video": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.post_merge, pytest.mark.installs_extra_dependencies],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
                 profiled_vram_gib=19.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
-                # See agg_video: install the opencv backend decoder for this test only.
+                # See agg_video: install the opencv backend decoder for this test
+                # only, so this is likewise a installs_extra_dependencies case.
                 env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),

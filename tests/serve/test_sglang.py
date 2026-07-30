@@ -530,6 +530,10 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # Installs decord below, which the shipped image omits: this proves
+            # the routing works given a decoder, not that the codec decodes in a
+            # shipped image.
+            pytest.mark.installs_extra_dependencies,
             # Bisected with tests/utils/profile_pytest.py: minimum = 4368
             # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
             # the cap, sglang's default 65% fraction allocates ~278k tokens
@@ -575,6 +579,9 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # See video_agg_qwen: installs decord, so likewise a
+            # installs_extra_dependencies case.
+            pytest.mark.installs_extra_dependencies,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
             pytest.mark.timeout(360),
