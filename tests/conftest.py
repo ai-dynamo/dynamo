@@ -47,8 +47,18 @@ _collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey(
 _collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
-_SUITE_MARKERS = {"pre_merge", "post_merge", "nightly"}
-_MACHINE_MARKERS = {"gpu_0", "gpu_1", "gpu_2", "gpu_4", "gpu_8"}
+_SUITE_MARKERS = {"pre_merge", "post_merge", "nightly", "weekly", "release"}
+_MACHINE_MARKERS = {
+    "gpu_0",
+    "gpu_1",
+    "gpu_2",
+    "gpu_4",
+    "gpu_8",
+    "h100",
+    "k8s",
+    "xpu_1",
+    "xpu_2",
+}
 
 
 def _is_xdist_worker(config: pytest.Config) -> bool:
