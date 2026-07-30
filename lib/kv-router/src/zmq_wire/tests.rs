@@ -1230,3 +1230,55 @@ fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
+
+/// Unrecognized media (e.g. vLLM 0.26.0 `FS` / `OBJ`, or any future string) must
+/// be dropped in conversion, never silently indexed on the device (G1) primary
+/// tree — for both store and remove, and regardless of locality.
+#[test]
+fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for medium in ["FS", "OBJ", "XYZ"] {
+            for locality in [None, Some(Locality::Local)] {
+                let raw = raw_placement_event(event_kind, Some(medium), locality);
+                assert!(
+                    convert_placement(raw, worker).is_none(),
+                    "unrecognized medium {medium} must be dropped (locality {locality:?})"
+                );
+            }
+        }
+    }
+}
+
+/// Unrecognized media (vLLM 0.26.0 `FS` / `OBJ`) are hash-only lower-tier events
+/// too: they must bypass the normalizer and not flip a salted GPU hash to
+/// `Ambiguous`, so later salted GPU children keep inheriting the namespace.
+#[test]
+fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+
+    // An FS event reusing the same hash must skip the normalizer entirely.
+    let fs_same_hash = namespaced_block_stored(1, None, None, "FS");
+    assert!(normalizer.preprocess(fs_same_hash, worker).is_some());
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    // The salted chain continuation still inherits the parent namespace.
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("unrecognized-media event must not make the parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}

@@ -139,17 +139,19 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::NonLocalLocality);
         }
 
-        // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
-        // extra_keys/cache_namespace and must not mutate per-group metadata or
-        // the salted-namespace propagation chain; they are also outside the
-        // SW/SSM group filter's semantics, so route them straight to conversion.
-        // Device and host-pinned events (CPU offload, #10368) stay on the
-        // normalizer path so their salted namespaces still propagate.
-        if raw
-            .medium()
-            .and_then(StorageTier::from_kv_medium)
-            .is_some_and(|tier| matches!(tier, StorageTier::Disk | StorageTier::External))
-        {
+        // Hash-only lower-tier events (STORAGE -> Disk, External) and
+        // unrecognized media (e.g. vLLM 0.26.0 FS/OBJ, which conversion drops)
+        // carry no extra_keys/cache_namespace and must not mutate per-group
+        // metadata or the salted-namespace propagation chain; they are also
+        // outside the SW/SSM group filter's semantics, so route them straight to
+        // conversion. Device and host-pinned events (GPU, CPU offload #10368)
+        // stay on the normalizer path so their salted namespaces still propagate.
+        if raw.medium().is_some_and(|m| {
+            !matches!(
+                StorageTier::from_kv_medium(m),
+                Some(StorageTier::Device | StorageTier::HostPinned)
+            )
+        }) {
             return Ok(raw);
         }
 
