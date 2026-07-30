@@ -65,7 +65,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
 
-# Unified backend
+# Backend SDK
 bash launch/agg_multimodal.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
 
 # XPU deployment
@@ -161,12 +161,12 @@ the same model-specific limitations as the legacy vLLM path.
 ### Unified vLLM Backend
 
 Pass `--unified` to the aggregated or P/D launchers to run
-`python -m dynamo.vllm.unified_main`. The unified path supports HTTP URLs,
+`python -m dynamo.vllm.unified_main`. The Backend SDK supports HTTP URLs,
 data URLs, frontend-decoded images, `mm_processor_kwargs`, frontend-provided
 multimodal hashes, and Kimi-style `vision_chunk` inputs.
 
 The Python vLLM frontend can pre-render multimodal processor inputs and send
-them to an aggregated unified worker. Shared memory is the same-node default;
+them to an aggregated Backend SDK worker. Shared memory is the same-node default;
 NIXL supports the transfer channel used by cross-node deployments:
 
 ```bash

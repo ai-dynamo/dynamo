@@ -256,7 +256,7 @@ def _forward_pass_metrics_enabled(
 
     unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
     if unsupported_role is None and not fpm_trace_relay_supported:
-        unsupported_role = "unified backend"
+        unsupported_role = "Backend SDK"
     if unsupported_role is None:
         return True
 

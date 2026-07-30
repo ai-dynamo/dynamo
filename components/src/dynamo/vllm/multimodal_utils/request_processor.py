@@ -3,7 +3,7 @@
 
 """Shared vLLM multimodal request preparation.
 
-The legacy handler and unified backend both receive Dynamo's
+The legacy handler and Backend SDK both receive Dynamo's
 ``PreprocessedRequest`` wire shape. This module owns the engine-facing
 translation: media loading, frontend-transferred ``mm_kwargs``, stable
 multimodal UUIDs, and the model-specific prefill/decode handoff.
@@ -656,7 +656,7 @@ class VllmMultimodalRequestProcessor:
 
         Entry points must call :meth:`validate_multimodal_request` on the raw
         request before invoking this transformation. ``prepare_prompt`` does
-        that for unified engines; the legacy handler validates at ``generate``
+        that for Backend SDK engines; the legacy handler validates at ``generate``
         so text and token modes share the same security boundary.
         """
         mm_processor_kwargs = get_mm_processor_kwargs(request)
@@ -739,7 +739,7 @@ class VllmMultimodalRequestProcessor:
         context: Any,
         mode: DisaggregationMode,
     ) -> PreparedMultimodalPrompt:
-        """Prepare the complete engine prompt for the unified backend."""
+        """Prepare the complete engine prompt for the Backend SDK."""
         self.validate_multimodal_request(request)
         prepared = await self.prepare_input(request, request_id, context, mode)
         prompt = prepared.pre_rendered_prompt or self.build_tokens_prompt(

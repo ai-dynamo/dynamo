@@ -166,7 +166,7 @@ def test_drain_callback_exception_does_not_block_shutdown():
 # ---------------------------------------------------------------------------
 # cleanup_callback tests
 #
-# Regression coverage for the unified backend leak: when the Rust runtime
+# Regression coverage for the Backend SDK leak: when the Rust runtime
 # tears down on SIGTERM, the Python Worker.run() finally block cannot finish
 # engine.cleanup() before the loop's native backing collapses. cleanup_callback
 # moves engine.cleanup() into the signal-handler path, *before* runtime.shutdown().
@@ -176,7 +176,7 @@ def test_drain_callback_exception_does_not_block_shutdown():
 def test_cleanup_callback_called_before_shutdown():
     """Cleanup callback must be awaited before runtime.shutdown().
 
-    This is the regression test for the unified backend GPU/process-group leak:
+    This is the regression test for the Backend SDK GPU/process-group leak:
     engine.cleanup() must run before the Rust runtime tears down, otherwise
     PyTorch's destroy_process_group() never fires.
     """

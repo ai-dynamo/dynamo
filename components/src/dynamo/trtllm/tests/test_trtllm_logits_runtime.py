@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the TRT-LLM slice of the
-DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
-tokenizer-init flip, the unified `generate` attach/skip matrix
+DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the Backend SDK `from_args`
+tokenizer-init flip, the Backend SDK `generate` attach/skip matrix
 threaded through the shared spec entry layer in
 `dynamo.backend._engine`, the TRT-LLM realizer (spec entry →
 live `BaseLogitsProcessor` → `TrtllmDynamoLogitsAdapter`), the
@@ -13,7 +13,7 @@ no-op-on-empty contract.
 Shared-layer policy itself (generation-stage gating, spec entry
 composition, env-gated spec resolver) is tested in
 `dynamo.backend.tests.test_engine` without GPU or tensorrt_llm.
-These tests exercise the same policy through the unified TRT-LLM
+These tests exercise the same policy through the Backend SDK TRT-LLM
 engine to confirm the wiring."""
 
 from __future__ import annotations

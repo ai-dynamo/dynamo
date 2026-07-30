@@ -169,7 +169,7 @@ impl LifecycleGauges {
 /// atomic stores into the runtime's `MetricsRegistry`.
 ///
 /// Replaces the previous Python `LLMBackendMetrics` registry on the
-/// unified path. Legacy entry points still use the Python class for
+/// Backend SDK. Legacy entry points still use the Python class for
 /// their own `dynamo_component_*` surface; the two registries never
 /// share a process.
 pub struct ComponentGauges {

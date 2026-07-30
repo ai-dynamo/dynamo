@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Common entry point for unified backends.
+//! Common entry point for backends.
 //!
 //! Each backend's `main.rs` parses CLI args, constructs its `LLMEngine`, and
 //! hands the pair off to [`run`]:

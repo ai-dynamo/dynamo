@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Disaggregated-serving mode for unified backends.
+//! Disaggregated-serving mode for backends.
 //!
 //! [`DisaggregationMode`] is metadata carried on [`crate::WorkerConfig`]. The
 //! [`crate::Worker`] consumes it for two registration-time decisions (the

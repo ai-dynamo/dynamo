@@ -88,7 +88,7 @@ async def graceful_shutdown_with_discovery(
             Any exception raised by drain_callback is logged and swallowed so that
             shutdown still proceeds even if draining times out or fails.
         cleanup_callback: Optional async callable awaited after drain_callback
-            but *before* runtime.shutdown(). Used by unified backends to release
+            but *before* runtime.shutdown(). Used by backends to release
             engine resources (GPU memory, PyTorch process groups) before the Rust
             runtime tears down — the Python ``Worker.run()`` ``finally`` block
             cannot be relied on for this because ``runtime.shutdown()`` collapses

@@ -545,9 +545,9 @@ async fn metadata_file_handler(
 /// Helper function to call a LoRA management endpoint for the local worker.
 ///
 /// Resolution order (both are in-process, never network discovery):
-/// 1. The legacy local endpoint registry, populated by non-unified workers via
+/// 1. The legacy local endpoint registry, populated by legacy workers via
 ///    `.register_local_engine()`.
-/// 2. The generic engine-route registry (`/engine/*`). Unified-backend workers
+/// 2. The generic engine-route registry (`/engine/*`). Backend SDK workers
 ///    advertise LoRA lifecycle ops (`load_lora`/`unload_lora`/`list_loras`) as
 ///    engine *updates*, registered under `update/<name>`; this fallback maps the
 ///    bare LoRA name onto that key so the legacy `/v1/loras` surface forwards to
@@ -586,7 +586,7 @@ async fn call_lora_endpoint(
         anyhow::bail!("No response received from endpoint '{}'", endpoint_name)
     }
 
-    // 2. Unified-backend engine-update registry fallback. The unified Worker
+    // 2. Backend SDK engine-update registry fallback. The Backend SDK Worker
     //    registers LoRA ops as engine updates under `update/<name>`, so map the
     //    bare LoRA endpoint name onto that namespaced key.
     let update_key = format!("update/{endpoint_name}");
@@ -1284,7 +1284,7 @@ mod integration_tests {
     /// `/v1/loras` compat shim: with the legacy local registry empty, a LoRA
     /// update registered in `engine_routes()` under `update/<name>` resolves via
     /// the fallback and its JSON response is parsed into a `LoraResponse`. This
-    /// is the path unified-backend workers take for `/v1/loras`.
+    /// is the path Backend SDK workers take for `/v1/loras`.
     #[tokio::test]
     async fn test_call_lora_endpoint_resolves_via_engine_routes() {
         temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
@@ -1299,7 +1299,7 @@ mod integration_tests {
                     }))
                 })
             });
-            // Unified Worker registers LoRA ops under the `update/` namespace.
+            // Backend SDK Worker registers LoRA ops under the `update/` namespace.
             drt.engine_routes().register("update/load_lora", callback);
 
             // Local registry is empty, so resolution must fall through to
@@ -1358,7 +1358,7 @@ mod integration_tests {
                     }))
                 })
             });
-            // Unified Worker registers LoRA ops under the `update/` namespace.
+            // Backend SDK Worker registers LoRA ops under the `update/` namespace.
             drt.engine_routes().register("update/unload_lora", callback);
 
             let response = call_lora_endpoint(&drt, "unload_lora", serde_json::json!({}))

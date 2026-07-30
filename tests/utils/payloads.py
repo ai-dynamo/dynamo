@@ -1498,7 +1498,7 @@ class MetricsPayload(BasePayload):
     Validates common dynamo_component_* metrics shared across all backends.
     Backend-specific subclasses handle engine-specific metrics.
 
-    Set ``check_lifecycle_gauges=True`` to additionally assert the unified-
+    Set ``check_lifecycle_gauges=True`` to additionally assert the Backend SDK-
     only framework gauges (``cleanup_time_seconds``, ``drain_time_seconds``,
     ``kv_cache_hit_rate``). Off by default because legacy entry points
     don't emit them.
@@ -1599,7 +1599,7 @@ class MetricsPayload(BasePayload):
         ]
 
     def _get_lifecycle_gauge_checks(self) -> list[MetricCheck]:
-        """Unified-only framework lifecycle gauges. Legacy entry points
+        """Backend SDK-only framework lifecycle gauges. Legacy entry points
         don't emit these — gated by ``check_lifecycle_gauges`` so legacy
         callers don't trip on the absence.
 

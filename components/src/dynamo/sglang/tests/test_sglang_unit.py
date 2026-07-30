@@ -774,7 +774,7 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
 @pytest.mark.parametrize(
     ("overrides", "role", "fpm_trace_relay_supported"),
     [
-        ({}, "unified backend", False),
+        ({}, "Backend SDK", False),
         ({"embedding_worker": True}, "embedding", True),
         ({"multimodal_encode_worker": True}, "dedicated multimodal", True),
         ({"multimodal_worker": True}, "dedicated multimodal", True),
