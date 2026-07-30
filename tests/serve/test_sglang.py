@@ -9,13 +9,19 @@ from typing import Optional
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED, MULTIMODAL_VIDEO_URL
+from tests.serve.conftest import (
+    MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    MULTIMODAL_VIDEO_URL,
+)
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
@@ -82,6 +88,10 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
 # video tests depend on that host being reachable: a read timeout fetching the
 # clip failed the run with no relation to the code under test.
 VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
+
+# Evaluated once at collection, like the vLLM profile's guard: NVDEC needs
+# the container's driver "video" capability, which CI runners do not grant.
+_NVDEC_UNAVAILABLE = not nvdec_available()
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
 # Each profile expands into one config per MmCase per topology with the
@@ -571,6 +581,55 @@ sglang_configs = {
                 temperature=0.0,
                 max_tokens=100,
             )
+        ],
+    ),
+    "video_agg_qwen_nvdec": SGLangConfig(
+        # H.264/H.265 video input decoded on the GPU by NVDEC, which is the only
+        # video decoder in the shipped image -- so unlike video_agg_qwen above
+        # this installs nothing and exercises what a deployment actually gets.
+        # It is also the only end-to-end cover for the video_metadata shim in
+        # encode_worker_handler, which SGLang's pre-decoded-frame path needs.
+        # Both codecs run against one deployment to avoid a second model load.
+        name="video_agg_qwen_nvdec",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            # CI runners lack the driver "video" capability libnvcuvid needs, so
+            # this skips there and is exercised on GPU hardware instead.
+            pytest.mark.skipif(
+                _NVDEC_UNAVAILABLE,
+                reason=(
+                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                ),
+            ),
+            # Same model and bounds as video_agg_qwen above.
+            pytest.mark.profiled_vram_gib(20.5),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(390),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2-VL-7B-Instruct",
+        ],
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {"type": "video_url", "video_url": {"url": url}},
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+            for url in (MULTIMODAL_VIDEO_H264_URL, MULTIMODAL_VIDEO_H265_URL)
         ],
     ),
     "video_e_pd_qwen": SGLangConfig(
