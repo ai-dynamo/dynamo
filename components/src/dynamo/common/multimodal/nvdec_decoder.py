@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 DISABLE_ENV = "DYN_DISABLE_NVDEC"
 GPU_ID_ENV = "DYN_NVDEC_GPU_ID"
 
+# Used only when the decoder cannot report a source frame rate (see
+# _source_fps). Consumers divide by this to build frame timestamps, so it must
+# stay non-zero; 30 fps is a common capture rate and keeps timestamps in a
+# plausible range rather than failing the request outright.
+FALLBACK_FPS = 30.0
+
 # Codecs routed to NVDEC. VP8/VP9/AV1 stay on the existing royalty-free path.
 HW_ROUTED_CODECS = frozenset({"h264", "hevc"})
 
@@ -152,16 +158,48 @@ def _frame_to_rgb_hwc(frame) -> np.ndarray:
 
 
 def _source_fps(decoder) -> float:
-    """Best-effort source fps for metadata; 0.0 if the API doesn't expose it."""
+    """Source frame rate for the metadata dict. Never returns 0.
+
+    This value is not cosmetic. ``load_video`` hands ``(frames, metadata)``
+    straight to vLLM as ``mm_data["video"]``, and Qwen3-VL turns sampled frame
+    indices into timestamps with ``idx / fps`` -- a zero raises
+    ZeroDivisionError and the request 500s.
+
+    PyNvVideoCodec 2.2.0 exposes the rate as
+    ``get_stream_metadata().average_fps``; older probes are kept for other
+    versions, then ``num_frames / duration``, then a documented fallback so a
+    future API change degrades timestamp accuracy instead of failing requests.
+    """
+    meta = getattr(decoder, "get_stream_metadata", None)
+    if callable(meta):
+        try:
+            info = meta()
+            val = getattr(info, "average_fps", None)
+            if val and float(val) > 0:
+                return float(val)
+            # Derive it when the rate is absent but the span is known.
+            frames = float(getattr(info, "num_frames", 0) or 0)
+            duration = float(getattr(info, "duration", 0) or 0)
+            if frames > 0 and duration > 0:
+                return frames / duration
+        except Exception:  # noqa: BLE001 - metadata only, never fatal
+            pass
+
     for attr in ("get_fps", "fps", "GetFPS"):
         val = getattr(decoder, attr, None)
         try:
             val = val() if callable(val) else val
-            if val:
+            if val and float(val) > 0:
                 return float(val)
         except Exception:  # noqa: BLE001 - metadata only, never fatal
             continue
-    return 0.0
+
+    logger.warning(
+        "NVDEC could not determine source fps; falling back to %.1f. Frame "
+        "timestamps handed to the model will be approximate.",
+        FALLBACK_FPS,
+    )
+    return FALLBACK_FPS
 
 
 def decode_video_nvdec(

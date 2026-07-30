@@ -167,3 +167,59 @@ def test_decode_rejects_bad_num_frames(monkeypatch):
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv())
     with pytest.raises(ValueError):
         nd.decode_video_nvdec(b"x", num_frames=0)
+
+
+# ---------------------------------------------------------------------------
+# _source_fps -- metadata["fps"] reaches vLLM as mm_data["video"], and Qwen3-VL
+# computes timestamps as `idx / fps`, so a 0 here 500s the request.
+# ---------------------------------------------------------------------------
+
+
+class _Meta:
+    def __init__(self, average_fps=None, num_frames=None, duration=None):
+        if average_fps is not None:
+            self.average_fps = average_fps
+        if num_frames is not None:
+            self.num_frames = num_frames
+        if duration is not None:
+            self.duration = duration
+
+
+class _Decoder:
+    def __init__(self, meta=None, **attrs):
+        if meta is not None:
+            self.get_stream_metadata = lambda: meta
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+
+def test_source_fps_prefers_stream_metadata():
+    """PyNvVideoCodec 2.2.0 reports the rate via get_stream_metadata()."""
+    dec = _Decoder(meta=_Meta(average_fps=10.0), get_fps=lambda: 30.0)
+    assert nd._source_fps(dec) == 10.0
+
+
+def test_source_fps_derives_from_frames_and_duration():
+    dec = _Decoder(meta=_Meta(num_frames=24, duration=2.0))
+    assert nd._source_fps(dec) == 12.0
+
+
+def test_source_fps_falls_back_to_legacy_attrs():
+    assert nd._source_fps(_Decoder(get_fps=lambda: 25.0)) == 25.0
+
+
+def test_source_fps_never_returns_zero():
+    """Regression: a 0 fps crashed the vLLM NVDEC serve path with
+    ZeroDivisionError in Qwen3-VL's _calculate_timestamps."""
+    # Nothing usable: no metadata, no legacy attrs, and a zero-valued one.
+    for dec in (_Decoder(), _Decoder(get_fps=lambda: 0), _Decoder(meta=_Meta())):
+        fps = nd._source_fps(dec)
+        assert fps > 0, f"fps must never be 0 (got {fps})"
+        assert fps == nd.FALLBACK_FPS
+
+
+def test_decode_metadata_fps_is_nonzero(monkeypatch):
+    """End of the chain: the dict handed to vLLM must carry a usable fps."""
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=10))
+    _, metadata = nd.decode_video_nvdec(b"x", num_frames=4)
+    assert metadata["fps"] > 0
