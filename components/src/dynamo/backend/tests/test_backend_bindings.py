@@ -136,7 +136,7 @@ def test_worker_config_accepts_disaggregation_mode():
         backend.WorkerConfig(namespace="dynamo", disaggregation_mode=mode)
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_from_runtime_config_copies_parser_settings():
     from dynamo.backend._worker import WorkerConfig
 
@@ -173,7 +173,7 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     assert config.structural_tag_schema == "strict"
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_absent():
     from dynamo.backend._worker import WorkerConfig
 
@@ -195,7 +195,7 @@ def test_python_worker_config_from_runtime_config_applies_defaults_when_fields_a
     assert cfg.structural_tag_schema == "auto"
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_from_runtime_config_overrides_win():
     from dynamo.backend._worker import WorkerConfig
 
@@ -213,7 +213,7 @@ def test_python_worker_config_from_runtime_config_overrides_win():
     assert cfg.component == "from-override"
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_picks_up_disaggregation_mode_from_runtime_config():
     from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
@@ -230,7 +230,7 @@ def test_python_worker_config_picks_up_disaggregation_mode_from_runtime_config()
     assert cfg.disaggregation_mode is DisaggregationMode.PREFILL
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_falls_back_to_serving_mode_for_sglang():
     from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
@@ -249,7 +249,7 @@ def test_python_worker_config_falls_back_to_serving_mode_for_sglang():
     assert cfg.disaggregation_mode is DisaggregationMode.DECODE
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_defaults_to_aggregated_when_runtime_lacks_mode():
     from dynamo.backend._worker import WorkerConfig
     from dynamo.common.constants import DisaggregationMode
@@ -264,7 +264,7 @@ def test_python_worker_config_defaults_to_aggregated_when_runtime_lacks_mode():
     assert cfg.disaggregation_mode is DisaggregationMode.AGGREGATED
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_coerces_foreign_disaggregation_mode_enum_by_name():
     """Foreign enum on `runtime_cfg` (e.g. TRT-LLM's local
     `DisaggregationMode`) is coerced by `.name` when a member with the
@@ -298,7 +298,7 @@ def test_python_worker_config_coerces_foreign_disaggregation_mode_enum_by_name()
     assert cfg.disaggregation_mode is DisaggregationMode.AGGREGATED
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
     """A non-enum or unrecognized name on `runtime_cfg.disaggregation_mode`
     raises TypeError so a typo-string can't silently degrade to AGG."""
@@ -315,7 +315,7 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
         WorkerConfig.from_runtime_config(_RuntimeWithStringMode(), model_name="m")
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_translates_all_disagg_modes():
     """Every variant of dynamo.common.constants.DisaggregationMode must map
     to a Rust binding value -- including ENCODE, which gained Backend SDK
@@ -334,7 +334,7 @@ def test_python_worker_config_translates_all_disagg_modes():
         assert _to_rust_disaggregation_mode(py_mode) == expected_rust
 
 
-@pytest.mark.unified
+@pytest.mark.backend
 def test_python_worker_config_round_trips_route_to_encoder():
     """route_to_encoder must flow from runtime_cfg -> WorkerConfig dataclass
     -> Rust pyclass without being silently dropped at any layer. vLLM is the

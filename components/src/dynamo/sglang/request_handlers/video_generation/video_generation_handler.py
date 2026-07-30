@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import torch
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (

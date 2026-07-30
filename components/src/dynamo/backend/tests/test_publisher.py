@@ -27,7 +27,7 @@ from dynamo.common.constants import DisaggregationMode
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.unified,
+    pytest.mark.backend,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]

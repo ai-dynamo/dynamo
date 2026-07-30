@@ -9,7 +9,8 @@ from typing import Any, AsyncIterator, Callable, Literal, Optional, Protocol
 import sglang as sgl
 import torch
 
-from dynamo._core import Client, Context
+from dynamo._core import Client
+from dynamo.backend import Context
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx

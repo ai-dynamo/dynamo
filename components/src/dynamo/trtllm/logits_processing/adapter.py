@@ -7,7 +7,7 @@ from typing import Any, List, Optional, Sequence
 import torch
 from tensorrt_llm.sampling_params import LogitsProcessor
 
-from dynamo.common.backend.engine import ForcedTokenSequenceSpec, PythonProcessorSpec
+from dynamo.backend._engine import ForcedTokenSequenceSpec, PythonProcessorSpec
 from dynamo.logits_processing import BaseLogitsProcessor
 from dynamo.logits_processing.examples import ForcedSequenceLogitsProcessor
 

@@ -19,7 +19,8 @@ except (ImportError, OSError):
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
-from dynamo._core import Client, Context
+from dynamo._core import Client
+from dynamo.backend import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,

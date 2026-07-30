@@ -5,7 +5,7 @@
 // trace identity, and span access for engine observability.
 //
 // Engine code reaches the observability surface through the
-// `dynamo.common.backend.telemetry` facade, which is itself a thin wrapper
+// `dynamo.backend.telemetry` facade, which is itself a thin wrapper
 // over [`Context::current_span`] / [`Context::start_span`]. Both return a
 // unified [`SpanProxy`] handle whose `set_attribute` / `add_event` /
 // `set_status` operations mirror the OTel `Span` API.
@@ -53,7 +53,7 @@ fn warn_bridge_missing_once(method: &str) {
 ///
 /// The span is private — engine code reaches it via [`Context::current_span`]
 /// (the auto-span proxy) or [`Context::start_span`] (a child span). The
-/// facade in `dynamo.common.backend.telemetry` is a one-line wrapper around
+/// facade in `dynamo.backend.telemetry` is a one-line wrapper around
 /// those methods.
 #[derive(Clone)]
 #[pyclass]
@@ -356,7 +356,7 @@ impl Context {
     /// `SpanProxy`; when no parent was plumbed in (test contexts) or the
     /// OTel bridge isn't installed, the proxy is a silent no-op.
     ///
-    /// Prefer the `dynamo.common.backend.telemetry.current_span(context)`
+    /// Prefer the `dynamo.backend.telemetry.current_span(context)`
     /// facade in engine code — it's the documented surface.
     fn current_span(&self) -> SpanProxy {
         match &self.span {
@@ -382,7 +382,7 @@ impl Context {
     ///
     /// Returns a no-op proxy when no parent was plumbed in or the bridge
     /// isn't installed. Prefer the
-    /// `dynamo.common.backend.telemetry.start_span(context, name)` facade
+    /// `dynamo.backend.telemetry.start_span(context, name)` facade
     /// in engine code.
     #[pyo3(signature = (name, attrs=None))]
     fn start_span(&self, name: &str, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<SpanProxy> {

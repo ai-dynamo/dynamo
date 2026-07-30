@@ -40,7 +40,7 @@ sample_configs = {
             # the pre-merge-gate worst-case bounded.
             pytest.mark.timeout(450),
             pytest.mark.pre_merge,
-            pytest.mark.unified,
+            pytest.mark.backend,
             pytest.mark.vllm,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -53,7 +53,7 @@ sample_configs = {
             # Rust gauges and the engine-side model_load_time/
             # kv_cache_hit_rate Python gauges). Runs after the chat +
             # completion payloads so requests_total >= 2. Sample
-            # backend is unified-only, so opt into the lifecycle-gauge
+            # backend is Backend-SDK-only, so opt into the lifecycle-gauge
             # assertions.
             metric_payload_default(min_num_requests=2, check_lifecycle_gauges=True),
         ],
@@ -75,7 +75,7 @@ def test_sample_deployment(
     dynamo_dynamic_ports,
     predownload_models,
 ):
-    """Test sample backend deployment using the unified Worker."""
+    """Test sample backend deployment using the Backend SDK Worker."""
     config = dataclasses.replace(
         sample_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

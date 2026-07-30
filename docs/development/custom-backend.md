@@ -10,11 +10,11 @@ lower-level worker path, and a packaging path:
 
 | Path | Use when |
 | --- | --- |
-| [Writing Unified Backends](unified-backends.md) | You are writing a new token-in-token-out engine in Python or Rust and want Dynamo to own the runtime lifecycle. |
-| [Python Workers (lower-level)](backend-guide.md) | You need the older `register_model` and `serve_endpoint` path for features the unified backend does not cover yet. |
+| [Writing a Backend with the Backend SDK](backend-sdk.md) | You are writing a new token-in-token-out engine in Python or Rust and want Dynamo to own the runtime lifecycle. |
+| [Python Workers (lower-level)](backend-guide.md) | You need the older `register_model` and `serve_endpoint` path for features the Backend SDK does not cover yet. |
 | [Runtime Containers](custom-containers.md) | You need to package a built-in or custom backend into a deployable Dynamo image. |
 
-The unified backend path is the preferred starting point for new custom engines.
+The Backend SDK path is the preferred starting point for new custom engines.
 It gives Python and Rust backends the same lifecycle shape: parse arguments,
 start the engine, stream generated chunks, handle cancellation, drain, and clean
 up. The Dynamo framework owns runtime registration, signal handling, model

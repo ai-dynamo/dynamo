@@ -589,7 +589,7 @@ class Context:
         (test contexts) or the OTel bridge isn't installed.
 
         Engines normally reach this through
-        ``dynamo.common.backend.telemetry.current_span(context)``.
+        ``dynamo.backend.telemetry.current_span(context)``.
         """
         ...
 
@@ -602,7 +602,7 @@ class Context:
         ``__exit__`` / ``close()`` / drop.
 
         Engines normally reach this through
-        ``dynamo.common.backend.telemetry.start_span(context, name)``.
+        ``dynamo.backend.telemetry.start_span(context, name)``.
         """
         ...
 

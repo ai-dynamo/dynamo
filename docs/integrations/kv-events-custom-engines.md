@@ -8,9 +8,9 @@ This document explains how to implement KV event publishing for custom inference
 
 > [!NOTE]
 > This guide covers lower-level Python workers and custom runtime integrations
-> that instantiate `KvEventPublisher` directly. Unified backends should prefer
+> that instantiate `KvEventPublisher` directly. backends should prefer
 > `LLMEngine.kv_event_sources()` and let `Worker` construct publishers; see
-> [KV event publishing for unified backends](../development/unified-backends.md#python-kv-event-publishing-optional).
+> [KV event publishing for backends](../development/backend-sdk.md#python-kv-event-publishing-optional).
 
 ## Overview
 

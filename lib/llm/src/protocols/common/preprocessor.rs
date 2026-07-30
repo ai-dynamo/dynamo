@@ -317,7 +317,7 @@ pub struct PreprocessedRequest {
     /// cross-worker coordination (KV transfer, bootstrap handshake,
     /// `require_prefill_result`) and run local-only. The wire-format key
     /// is `_HEALTH_CHECK` so the canary payload built by
-    /// `dynamo.common.backend.health_check.build_health_check_payload`
+    /// `dynamo.backend.health_check.build_health_check_payload`
     /// (and the legacy `HealthCheckPayload` base class) round-trips through
     /// this field. Skipped from serialization when false so normal traffic
     /// doesn't carry the marker.

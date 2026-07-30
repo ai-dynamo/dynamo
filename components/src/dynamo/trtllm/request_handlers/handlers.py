@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Optional
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )

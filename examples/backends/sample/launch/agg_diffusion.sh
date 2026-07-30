@@ -46,7 +46,7 @@ print_launch_banner "Launching Sample Diffusion Aggregated Serving" "$MODEL_NAME
 python3 -m dynamo.frontend &
 
 # run sample diffusion worker (serves /v1/images/generations)
-python3 -m dynamo.common.backend.sample_diffusion_main \
+python3 -m dynamo.sample_engine.diffusion_main \
   --model-name "$MODEL_NAME" \
   --endpoint-types images \
   "${EXTRA_ARGS[@]}" &

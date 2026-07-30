@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test for the unified-backend worker tracing subscriber.
+"""Regression test for the Backend SDK worker tracing subscriber.
 
 A silent regression once removed `logging::init()` from the PyO3
 `Worker.run()` path. Workers running under `OTEL_EXPORT_ENABLED=1`
@@ -21,7 +21,7 @@ import time
 import pytest
 
 from tests.frontend.conftest import (
-    SampleUnifiedWorkerProcess,
+    SampleBackendWorkerProcess,
     wait_for_http_completions_ready,
 )
 from tests.frontend.test_request_tracing_logs import (
@@ -69,13 +69,13 @@ def _find_engine_generate_span_entries(entries):
     ]
 
 
-def test_unified_worker_emits_engine_generate_span(
+def test_backend_worker_emits_engine_generate_span(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_tokenizers,
 ):
-    """Aggregated unified worker must emit at least one engine.generate
+    """Aggregated Backend SDK worker must emit at least one engine.generate
     span event under OTEL_EXPORT_ENABLED=1.
     """
     ports = dynamo_dynamic_ports
@@ -88,7 +88,7 @@ def test_unified_worker_emits_engine_generate_span(
         extra_env=_OTEL_ENV,
         terminate_all_matching_process_names=False,
     ):
-        with SampleUnifiedWorkerProcess(
+        with SampleBackendWorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,

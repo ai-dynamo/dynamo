@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TokenSpeed LLMEngine implementation for the unified backend."""
+"""TokenSpeed LLMEngine implementation for the Backend SDK."""
 
 from __future__ import annotations
 
@@ -12,15 +12,15 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from dynamo._core import Context
-from dynamo.common.backend.engine import (
+from dynamo.backend import (
+    Context,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
     LlmRegistration,
+    WorkerConfig,
 )
-from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput

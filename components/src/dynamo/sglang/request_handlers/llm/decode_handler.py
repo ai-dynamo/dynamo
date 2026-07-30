@@ -9,8 +9,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import sglang as sgl
 from PIL.Image import Image as PILImage
 
-from dynamo._core import Context
-from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.backend import Context
+from dynamo.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader

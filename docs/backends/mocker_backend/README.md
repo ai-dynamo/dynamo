@@ -71,7 +71,7 @@ reachable via `NATS_SERVER` / `ETCD_ENDPOINTS` env vars.
 
 ## Writing your own Rust backend
 
-See [Writing Unified Backends](../../development/unified-backends.md) and choose the
+See [Writing a Backend with the Backend SDK](../../development/backend-sdk.md) and choose the
 Rust tab — a step-by-step walkthrough that uses this mocker example as its
 reference engine.
 

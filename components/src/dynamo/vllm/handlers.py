@@ -43,8 +43,8 @@ from vllm.sampling_params import (
 )
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo._core import Context
-from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.backend import Context
+from dynamo.backend import logprobs as _shared_logprobs
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
