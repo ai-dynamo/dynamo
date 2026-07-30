@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -17,8 +12,8 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, RoutingConstraints, StorageTier, TokensWithHashes,
-        WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
@@ -210,44 +205,23 @@ fn cache_hit_for_worker(
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct RouterHintPrep {
-    candidates: Option<RouterHintRootCandidates>,
-    target_cached_prefix_blocks: HashMap<WorkerWithDpRank, u32>,
-}
-
-impl RouterHintPrep {
-    fn from_tiered_matches(tiered_matches: &indexer::TieredMatchDetails) -> Self {
-        let candidates = tiered_matches
-            .lower_tier
-            .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref())
-            .or(tiered_matches.device.router_hint_root_candidates.as_ref())
-            .cloned();
-
-        let mut target_cached_prefix_blocks = HashMap::new();
-        for (worker, blocks) in &tiered_matches.device.overlap_scores.scores {
-            target_cached_prefix_blocks.insert(*worker, *blocks);
-        }
-        if let Some(lower_tier_details) = tiered_matches.lower_tier.get(&StorageTier::HostPinned) {
-            for (worker, blocks) in &lower_tier_details.hits {
-                let entry = target_cached_prefix_blocks.entry(*worker).or_insert(0);
-                *entry = entry.saturating_add(usize_to_u32_saturating(*blocks));
-            }
-        }
-
-        Self {
-            candidates,
-            target_cached_prefix_blocks,
-        }
-    }
-
-    fn target_cached_prefix_blocks(&self, target: WorkerWithDpRank) -> u32 {
-        self.target_cached_prefix_blocks
-            .get(&target)
-            .copied()
-            .unwrap_or(0)
-    }
+fn target_cached_prefix_blocks(
+    overlap: &dynamo_kv_router::scheduling::OverlapSignals,
+    target: WorkerWithDpRank,
+) -> u32 {
+    let device = overlap
+        .tier_overlap_blocks
+        .device
+        .get(&target)
+        .copied()
+        .unwrap_or(0);
+    let lower_tier = overlap
+        .tier_overlap_blocks
+        .host_pinned
+        .get(&target)
+        .copied()
+        .unwrap_or(0);
+    usize_to_u32_saturating(device.saturating_add(lower_tier))
 }
 
 fn usize_to_u32_saturating(value: usize) -> u32 {
@@ -1002,11 +976,9 @@ where
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .signals();
-        let router_hint_prep = if retain_router_hint_chain {
-            RouterHintPrep::from_tiered_matches(&tiered_matches)
-        } else {
-            RouterHintPrep::default()
-        };
+        let router_hint_candidates = retain_router_hint_chain
+            .then(|| tiered_matches.router_hint_root_candidates().cloned())
+            .flatten();
         drop(tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
@@ -1031,6 +1003,8 @@ where
             block_hashes: block_hashes_for_refresh,
             isl_tokens,
             overlap,
+            router_hint_candidates,
+            retain_router_hint_chain,
             router_config_override: router_config_override.cloned(),
             lora_name,
             priority_jump,
@@ -1073,12 +1047,13 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
+        };
         let target_cached_prefix_blocks =
-            router_hint_prep.target_cached_prefix_blocks(response.best_worker);
+            target_cached_prefix_blocks(&response.overlap, response.best_worker);
         let router_hint = self.router_hint_for_selection(
             response.best_worker,
             target_cached_prefix_blocks,
-            router_hint_prep.candidates.as_ref(),
+            response.router_hint_candidates.as_ref(),
         );
 
         let total_elapsed = start.elapsed();

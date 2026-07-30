@@ -17,6 +17,7 @@ use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
+use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
@@ -106,6 +107,8 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
 }
 
@@ -247,6 +250,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -276,6 +281,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
+    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub retain_router_hint_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.

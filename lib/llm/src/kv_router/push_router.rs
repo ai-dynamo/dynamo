@@ -768,6 +768,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+
     async fn terminal_item_does_not_skip_transport_eof() {
         let (router, runtime) = router(None).await;
         let context = Context::new(()).context();
