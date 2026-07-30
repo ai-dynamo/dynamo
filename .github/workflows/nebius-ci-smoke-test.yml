@@ -25,6 +25,7 @@ jobs:
       KUBE_NAMESPACE: dynamo-deploy-test
       JOB_NAME: nebius-gpu-smoke-${{ github.run_id }}-${{ github.run_attempt }}
       CUDA_IMAGE: nvidia/cuda:13.0.2-base-ubuntu24.04
+      PRIORITY_CLASS: ci-nightly-high-priority
     steps:
       - name: Select Nebius cluster
         shell: bash
@@ -138,7 +139,7 @@ jobs:
 
           kubectl get namespace kube-system "${KUBE_NAMESPACE}" \
             -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp'
-          kubectl get priorityclass ci-nightly-high-priority
+          kubectl get priorityclass "${PRIORITY_CLASS}"
           kubectl get clusterpolicy deploy-test-pod-policy
           kubectl get nodes \
             -l nvidia.com/gpu.product=NVIDIA-H200 \
@@ -175,6 +176,7 @@ jobs:
                   app.kubernetes.io/name: nebius-gpu-smoke
                   app.kubernetes.io/instance: ${JOB_NAME}
               spec:
+                priorityClassName: ${PRIORITY_CLASS}
                 restartPolicy: Never
                 containers:
                   - name: gpu-smoke
@@ -216,7 +218,10 @@ jobs:
 
           POD_JSON="$(kubectl get pod "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" -o json)"
           jq -e '.spec.nodeSelector["nvidia.com/gpu.product"] == "NVIDIA-H200"' <<< "${POD_JSON}"
-          jq -e '.spec.priorityClassName == "ci-nightly-high-priority"' <<< "${POD_JSON}"
+          jq -e \
+            --arg priority_class "${PRIORITY_CLASS}" \
+            '.spec.priorityClassName == $priority_class' \
+            <<< "${POD_JSON}"
           jq -e '
             any(
               .spec.tolerations[]?;
