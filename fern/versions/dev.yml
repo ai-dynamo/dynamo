@@ -133,6 +133,8 @@ navigation:
         contents:
           - page: Introduction
             path: ../pages-dev/getting-started/kubernetes-deployment.mdx
+          - page: Sidecar Backends (Experimental)
+            path: ../pages-dev/design-docs/sidecar-backends.md
           - page: Deploy with DGD
             path: ../pages-dev/kubernetes/dgd-guide.md
           - page: Expose the Frontend
@@ -557,6 +559,8 @@ navigation:
                     path: ../pages-dev/design-docs/dynamo-flow.md
                   - page: Distributed Runtime
                     path: ../pages-dev/design-docs/distributed-runtime.md
+                  - page: Sidecar Backends (Experimental)
+                    path: ../pages-dev/design-docs/sidecar-backends.md
                   - page: Disaggregated Serving
                     path: ../pages-dev/design-docs/disagg-serving.md
               - section: Communication Planes
@@ -710,6 +714,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: ../pages-dev/backends/sglang/README.md
+                      - page: Sidecar
+                        path: ../pages-dev/backends/sglang/sidecar.md
                       - page: Reference Guide
                         path: ../pages-dev/backends/sglang/sglang-reference-guide.md
                       - page: Agents on SGLang
@@ -732,6 +738,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: ../pages-dev/backends/trtllm/README.md
+                      - page: Sidecar
+                        path: ../pages-dev/backends/trtllm/sidecar.md
                       - page: Reference Guide
                         path: ../pages-dev/backends/trtllm/trtllm-reference-guide.md
                       - page: Observability
@@ -746,6 +754,8 @@ navigation:
                     contents:
                       - page: Overview
                         path: ../pages-dev/backends/vllm/README.md
+                      - page: Sidecar
+                        path: ../pages-dev/backends/vllm/sidecar.md
                       - page: Reference Guide
                         path: ../pages-dev/backends/vllm/vllm-reference-guide.md
                       - page: Chat Processor
