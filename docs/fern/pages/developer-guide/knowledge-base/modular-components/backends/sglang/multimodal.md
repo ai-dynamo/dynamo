@@ -12,8 +12,20 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Video** | HTTP/HTTPS URL | Yes, H.264/H.265 | Yes, H.264/H.265 | Hardware-decoded on NVDEC, then encoded to embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
+
+> [!IMPORTANT]
+> **Video input is limited to H.264 and H.265, over `http`/`https` only.** The runtime
+> image ships no software video decoder, so these codecs are decoded on the GPU by
+> NVDEC and no other codec (VP8, VP9, AV1) has a decoder available. `file://` video is
+> not hardware-decoded and therefore not supported. NVDEC requires a GPU with a video
+> decode engine and a container granted the `video` driver capability — see
+> [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
+>
+> Video is additionally skipped for model types whose preprocessing cannot accept
+> pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL path,
+> which has no decoder in this image.
 
 ### Supported URL Formats
 

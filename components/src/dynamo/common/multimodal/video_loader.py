@@ -130,9 +130,12 @@ class VideoLoader:
             content = await fetch_bytes(
                 normalized_url, self._http_timeout, policy=self._url_policy
             )
-            # Dual decode path: hardware-decode H.264/H.265 on NVDEC; VP8/VP9/AV1
-            # stay on vLLM's software (OpenCV) decoder. data:/file:// keep the
-            # software path for now (their bytes are not fetched at this layer).
+            # Dual decode path: hardware-decode H.264/H.265 on NVDEC; every other
+            # codec falls through to vLLM's software decoder below. Note the
+            # runtime images purge the software decode wheels (opencv/av/decord/
+            # torchcodec) for codec compliance, so that fallback only resolves
+            # where a decoder has been installed separately. data:/file:// are not
+            # fetched at this layer and so are never hardware-decoded.
             decoded = await self._maybe_decode_with_nvdec(content)
             if decoded is not None:
                 return decoded
