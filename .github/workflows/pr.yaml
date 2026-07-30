@@ -1311,6 +1311,7 @@ jobs:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      planner_image_tag: ${{ needs.planner-copy-to-acr.outputs.image_tag }}
     secrets:
       AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -18,6 +18,10 @@ on:
         description: 'Operator image tag used to self-bootstrap a missing vCluster'
         type: string
         required: true
+      planner_image_tag:
+        description: 'Planner image tag published to ACR'
+        type: string
+        required: true
     secrets:
       AZURE_ACR_HOSTNAME:
         required: true
@@ -111,7 +115,7 @@ jobs:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ github.sha }}-dynamo-planner
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ inputs.planner_image_tag }}
           platform_arch: amd64
           test_name: dgdr-${{ matrix.suite }}
           test_file: tests/deploy/test_dgdr.py
