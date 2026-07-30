@@ -681,10 +681,11 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'  # TEMP-11836: post_merge validation, revert to pre_merge before merge
       gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'  # TEMP-11836
-      # TEMP-11836: bumped 45->90 while this job runs the doubled (pre_merge or
-      # post_merge) suite; the parallel GPU stage overran 45m. Revert to 45 with
-      # the marker set before merge.
-      gpu_test_timeout_minutes: 90
+      # TEMP-11836: bumped 45->120 while this job runs the doubled (pre_merge or
+      # post_merge) suite. 45m then 90m both overran; run 30498270711 died at 90m
+      # with 1018 passed, 0 failures and only 6 tests left, so this is pure
+      # capacity, not a hang. Revert to 45 with the marker set before merge.
+      gpu_test_timeout_minutes: 120
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
@@ -766,6 +767,10 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'  # TEMP-11836
       gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'  # TEMP-11836
+      # TEMP-11836: bumped the 30m default to 90 while this job runs the doubled
+      # (pre_merge or post_merge) suite; the parallel GPU stage overran 30m.
+      # Drop this (revert to the 30m default) with the marker set before merge.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
