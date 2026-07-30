@@ -2942,6 +2942,25 @@ thinking
         response
     }
 
+    fn make_chat_resp_with_tool_call(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &str,
+    ) -> NvCreateChatCompletionResponse {
+        let mut response = make_chat_resp_with_text("");
+        let choice = &mut response.inner.choices[0];
+        choice.finish_reason = Some(finish_reason);
+        choice.message.content = None;
+        choice.message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
+            id: "call_abc".into(),
+            r#type: FunctionType::Function,
+            function: dynamo_protocols::types::FunctionCall {
+                name: "get_weather".into(),
+                arguments: arguments.into(),
+            },
+        }]);
+        response
+    }
+
     #[test]
     fn test_reasoning_summary_requires_explicit_request() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
@@ -3082,6 +3101,49 @@ thinking
             panic!("expected message output");
         };
         assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    #[test]
+    fn test_tool_calls_finish_reason_returns_completed_response() {
+        let chat_resp = make_chat_resp_with_tool_call(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            r#"{"location":"SF"}"#,
+        );
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Completed);
+        assert!(response.inner.incomplete_details.is_none());
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Completed));
+    }
+
+    #[test]
+    fn test_unmodified_length_with_tool_call_returns_incomplete_response() {
+        let chat_resp = make_chat_resp_with_tool_call(
+            dynamo_protocols::types::FinishReason::Length,
+            r#"{"location":"SF"#,
+        );
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        assert_eq!(
+            response
+                .inner
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Incomplete));
     }
 
     #[test]

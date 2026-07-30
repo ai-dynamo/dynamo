@@ -1330,6 +1330,13 @@ mod tests {
         assert!(!end_types.contains(&"response.function_call_arguments.done".to_string()));
         assert!(!end_types.contains(&"response.output_item.done".to_string()));
         assert!(end_types.contains(&"response.completed".to_string()));
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Completed);
+        let OutputItem::FunctionCall(call) = &response.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Completed));
     }
 
     #[test]
@@ -1353,6 +1360,43 @@ mod tests {
                 "response.output_item.done".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_length_finish_reason_marks_open_tool_call_incomplete() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF"),
+        ));
+        let finish_events = conv.process_chunk(&finish_chunk(FinishReason::Length));
+        assert!(finish_events.is_empty());
+
+        let end_events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&end_events),
+            vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.incomplete".to_string(),
+            ]
+        );
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(
+            response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+        let OutputItem::FunctionCall(call) = &response.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Incomplete));
     }
 
     #[test]
