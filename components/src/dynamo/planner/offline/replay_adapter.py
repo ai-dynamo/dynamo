@@ -131,18 +131,18 @@ def _merge_traffic(
 
     Exact for every field the planner's scaling consumes:
       - ``duration_s``/``num_req``: summed.
-      - ``avg_isl``/``avg_osl``: num_req-weighted — their denominator *is*
-        ``num_req``, so a num_req-weighted mean of per-window means re-sums to
-        the exact overall mean.
+      - ``avg_isl``/``avg_osl``: weighted by ``shape_count`` (completed,
+        non-rejected requests). ``num_req`` is offered load and intentionally
+        has different timing under queueing.
+      - ``avg_ttft_ms``/``avg_itl_ms``: weighted by their native sample counts.
       - ``avg_kv_hit_rate``: weighted by ``hit_rate_count`` (its true
         denominator: router admissions with ``isl_blocks > 0``), so the merge
         reconstructs the exact sample mean rather than approximating it.
       - ``avg_accept_length``: weighted by ``accept_length_forward_count``
         (decode request-forwards, its true denominator), exact across windows.
 
-    ``avg_ttft_ms``/``avg_itl_ms`` are num_req-weighted approximations (their
-    per-sample counts are not carried across windows); they feed diagnostics
-    only, never the scaling trajectory."""
+    Older bridge payloads without native counts fall back to ``num_req`` for
+    compatibility."""
     if acc is None:
         return dict(window)
     na = float(acc.get("num_req", 0.0))
@@ -159,6 +159,12 @@ def _merge_traffic(
     hit_w = float(window.get("hit_rate_count", 0.0))
     fwd_a = float(acc.get("accept_length_forward_count", 0.0))
     fwd_w = float(window.get("accept_length_forward_count", 0.0))
+    shape_a = float(acc.get("shape_count", na))
+    shape_w = float(window.get("shape_count", nw))
+    ttft_a = float(acc.get("ttft_count", na))
+    ttft_w = float(window.get("ttft_count", nw))
+    itl_a = float(acc.get("itl_count", na))
+    itl_w = float(window.get("itl_count", nw))
 
     merged: dict[str, Any] = {
         "duration_s": acc.get("duration_s", 0.0) + window.get("duration_s", 0.0),
@@ -166,11 +172,13 @@ def _merge_traffic(
         # Carry the native denominators so chained multi-window merges stay exact.
         "hit_rate_count": hit_a + hit_w,
         "accept_length_forward_count": fwd_a + fwd_w,
-        # num_req-weighted: exact for isl/osl, diagnostics-only for ttft/itl.
-        "avg_isl": _weighted("avg_isl", na, nw),
-        "avg_osl": _weighted("avg_osl", na, nw),
-        "avg_ttft_ms": _weighted("avg_ttft_ms", na, nw),
-        "avg_itl_ms": _weighted("avg_itl_ms", na, nw),
+        "shape_count": shape_a + shape_w,
+        "ttft_count": ttft_a + ttft_w,
+        "itl_count": itl_a + itl_w,
+        "avg_isl": _weighted("avg_isl", shape_a, shape_w),
+        "avg_osl": _weighted("avg_osl", shape_a, shape_w),
+        "avg_ttft_ms": _weighted("avg_ttft_ms", ttft_a, ttft_w),
+        "avg_itl_ms": _weighted("avg_itl_ms", itl_a, itl_w),
         # Count-weighted by the true denominator -> exact across windows.
         "avg_kv_hit_rate": _weighted("avg_kv_hit_rate", hit_a, hit_w),
     }
@@ -613,12 +621,11 @@ class ReplayPlannerAdapter:
                     accept_length=t.get("avg_accept_length"),
                 )
                 # Stash observed TTFT/ITL for the diagnostics recorder.
-                # When num_req == 0, the Rust accumulator returns 0 as a
-                # placeholder; only record latency values when we actually
-                # observed requests in this window.
+                ttft_count = float(t.get("ttft_count", num_req))
+                itl_count = float(t.get("itl_count", num_req))
                 self._last_traffic = Metrics(
-                    ttft=t.get("avg_ttft_ms") if num_req > 0 else None,
-                    itl=t.get("avg_itl_ms") if num_req > 0 else None,
+                    ttft=t.get("avg_ttft_ms") if ttft_count > 0 else None,
+                    itl=t.get("avg_itl_ms") if itl_count > 0 else None,
                     num_req=traffic.num_req,
                     isl=traffic.isl,
                     osl=traffic.osl,

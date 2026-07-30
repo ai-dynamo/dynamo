@@ -317,3 +317,37 @@ def test_merge_traffic_weights_ratio_fields_by_native_counts():
     assert merged["hit_rate_count"] == 100
     assert merged["accept_length_forward_count"] == 100
     assert merged["avg_isl"] == pytest.approx(100.0)
+
+
+def test_merge_traffic_keeps_offered_count_separate_from_completion_samples():
+    a = {
+        "num_req": 100,
+        "duration_s": 1.0,
+        "avg_isl": 10.0,
+        "avg_osl": 20.0,
+        "shape_count": 1,
+        "avg_ttft_ms": 1_000.0,
+        "ttft_count": 1,
+        "avg_itl_ms": 10.0,
+        "itl_count": 1,
+    }
+    b = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 200.0,
+        "shape_count": 9,
+        "avg_ttft_ms": 2_000.0,
+        "ttft_count": 9,
+        "avg_itl_ms": 20.0,
+        "itl_count": 9,
+    }
+
+    merged = _merge_traffic(a, b)
+
+    assert merged["num_req"] == 101
+    assert merged["shape_count"] == 10
+    assert merged["avg_isl"] == pytest.approx(91.0)
+    assert merged["avg_osl"] == pytest.approx(182.0)
+    assert merged["avg_ttft_ms"] == pytest.approx(1_900.0)
+    assert merged["avg_itl_ms"] == pytest.approx(19.0)
