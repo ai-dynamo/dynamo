@@ -15,15 +15,15 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
 | `sidecar` | Nothing directly; sidecar source and proto files also match `rust` |
+| `backend_common` | Nothing directly; Rust source and manifests also match `rust` |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
-| `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
 | `examples` | Nothing (classification only) |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `examples`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
+> **Note:** `docs`, `examples`, `ignore`, `sidecar`, and `backend_common` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar and backend-common Rust source and manifests also match `rust`, which runs the workspace Rust checks.
 
 ## Fixing "Uncovered Files" Errors
 

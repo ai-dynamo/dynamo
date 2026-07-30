@@ -4,13 +4,6 @@
 """Common entry point for backend workers.
 
 A backend's ``main`` calls :func:`run` with its ``BaseEngine`` subclass.
-Example::
-
-    from dynamo.common.backend.run import run
-    from dynamo.common.backend.sample_engine import SampleLLMEngine
-
-    def main():
-        run(SampleLLMEngine)
 """
 
 from collections.abc import Awaitable, Callable

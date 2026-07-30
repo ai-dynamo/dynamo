@@ -15,10 +15,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   sidecar  -> classification only; source and proto files also match rust
+#   backend_common -> classification only; Rust source and manifests also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   examples, ignore, sidecar, backend_common
 
 all:
   - '**'
@@ -39,8 +40,9 @@ docs:
   - '.agents/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
-  # Sidecar documentation is not part of the Fern docs site.
+  # Crate-local documentation is not part of the Fern docs site.
   - '!lib/sidecar/**'
+  - '!lib/backend-common/**'
 
 examples:
   - 'recipes/**'
@@ -133,9 +135,10 @@ core:
   # Negation patterns MUST come after positive patterns — micromatch processes
   # patterns left-to-right, so negations only filter matches accumulated by
   # preceding patterns. Placing them first has no effect.
-  # Rust sidecars have their own classification and do not use the framework
-  # container or E2E pipelines triggered by `core`.
+  # Standalone Rust backend crates have their own classifications and do not
+  # use the framework container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!lib/backend-common/**'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
@@ -209,6 +212,9 @@ planner:
 sidecar:
   - 'lib/sidecar/**'
 
+backend_common:
+  - 'lib/backend-common/**'
+
 vllm:
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
@@ -235,16 +241,6 @@ trtllm:
   - '!**/*.md'
   - '!**/*.rst'
 
-# sample -> sample-unified-test (framework-agnostic CPU-only backend
-# reference implementation). Piggybacks on the vllm image, so a sample-only
-# change triggers vllm-build + sample-unified-test. The common/backend ABC
-# already triggers `core`; this filter is for the launch scripts and tests
-# that are specific to the sample backend.
-sample:
-  - 'examples/backends/sample/**'
-  - '!**/*.md'
-  - '!**/*.rst'
-
 frontend:
   - *ci
   - '.cargo/config.toml'
@@ -263,9 +259,10 @@ frontend:
   - 'tests/frontend/router_aic_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
-  # Sidecars are standalone Rust binaries and are not part of the frontend
-  # image or its E2E test pipeline.
+  # Standalone Rust backend crates are not part of the frontend image or its
+  # E2E test pipeline.
   - '!lib/sidecar/**'
+  - '!lib/backend-common/**'
   - '!**/*.md'
   - '!**/*.rst'
 

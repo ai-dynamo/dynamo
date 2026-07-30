@@ -226,7 +226,6 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
-  - examples/backends/sample/
   - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/

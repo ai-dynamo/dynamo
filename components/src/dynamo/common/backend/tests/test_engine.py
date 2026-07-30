@@ -44,8 +44,7 @@ from dynamo.common.constants import DisaggregationMode  # noqa: E402
 # needs it (guarded by importorskip) to keep this module collectable in a
 # non-framework env.
 
-# Framework-agnostic: routed to sample-unified-test via
-# `pre_merge and gpu_0 and unified` (see test_engine.py module docstring).
+# Framework-agnostic: runs in the Dynamo runtime CPU test suite.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.unified,
