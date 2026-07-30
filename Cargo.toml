@@ -82,7 +82,7 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.4.0" }
 velo = { version = "0.1.0" }
 
 # External dependencies
-aiconfigurator-core = { version = "=0.11.0-dev20260728" }
+aiconfigurator-core = { version = "=0.11.0" }
 anyhow = { version = "1" }
 lru = { version = "0.16" }
 async-nats = { version = "0.49.1", features = ["service"] }
@@ -183,6 +183,9 @@ rcgen = { version = "0.13" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+
+[patch.crates-io]
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "faa9350523495bb394d8ff1687f40e81e70345ac" }
 
 [profile.dev.package]
 insta.opt-level = 3

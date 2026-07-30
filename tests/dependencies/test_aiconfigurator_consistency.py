@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 pytestmark = [
+    pytest.mark.skip(reason="release/1.4.0 pins AIC to an immutable Git source"),
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,

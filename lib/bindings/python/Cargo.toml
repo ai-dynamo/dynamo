@@ -45,12 +45,12 @@ mm-routing = ["dynamo-llm/mm-routing"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
-# aiconfigurator-core 0.11 dev release. `extension-module` is
+# aiconfigurator-core 0.11 release. `extension-module` is
 # NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
 # own interpreter is used; AicEngineBuilder::build() crosses into Python once at
 # startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
 # on the predict hot path.
-aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
+aiconfigurator-core = { version = "=0.11.0", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "6.0.2" }
@@ -118,6 +118,9 @@ dynamo-llm = { path = "../../llm", default-features = false }
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
+
+[patch.crates-io]
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "faa9350523495bb394d8ff1687f40e81e70345ac" }
 
 [profile.profiling]
 inherits = "release"
