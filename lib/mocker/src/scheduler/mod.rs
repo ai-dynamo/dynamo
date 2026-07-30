@@ -286,21 +286,30 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn execute_pass(
+    pub(crate) fn try_execute_pass(
         &mut self,
         collector: &mut crate::replay::TraceCollector,
         now_ms: f64,
-    ) -> EnginePassResult {
+    ) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.execute_pass(collector, now_ms),
-            Self::Sglang(core) => core.execute_pass(collector, now_ms),
+            Self::Vllm(core) => core.try_execute_pass(collector, now_ms),
+            Self::Sglang(core) => core.try_execute_pass(collector, now_ms),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_hidden_pass(now_ms)
+            .expect("engine hidden scheduler pass failed")
+    }
+
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.execute_hidden_pass(now_ms),
-            Self::Sglang(core) => core.execute_hidden_pass(now_ms),
+            Self::Vllm(core) => core.try_execute_hidden_pass(now_ms),
+            Self::Sglang(core) => core.try_execute_hidden_pass(now_ms),
         }
     }
 

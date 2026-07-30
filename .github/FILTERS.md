@@ -10,7 +10,8 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 |--------|----------|
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
 | `operator` | Kubernetes operator tests |
-| `snapshot` | Snapshot Agent tests |
+| `snapshot` | Snapshot Agent + all-framework DynamoCheckpoint deploy tests |
+| `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |

@@ -34,6 +34,9 @@ dynamo:
   # it so planner NOTICES attribute only what the builder adds on top.
   planner_baseline_sbom: python@043085f9
   python_version: "3.12"
+  # Every stage must use the same uv: stages share one BuildKit uv cache mount,
+  # and uv rejects cache entries written by a newer version.
+  uv_version: "0.12.0"
 
   nats_version: v2.10.28
   etcd_version: v3.5.30
