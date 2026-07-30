@@ -83,6 +83,8 @@ helm upgrade --install dynamo-platform \
 
 kubectl get pods --namespace "$NAMESPACE"
 ```
+
+    For this DGDR quickstart, `DYNAMO_IMAGE` points to the Dynamo planner image. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for the NVIDIA GPU path.
   </Step>
 
   <Step title="Create the model access secret">

@@ -78,7 +78,7 @@ You can also run the KV router as a standalone service without the Dynamo fronte
 | **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
 | **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, advanced disaggregated prefill routing, custom pipelines |
 
-The standalone router does not include the HTTP frontend and does not expose `/v1/chat/completions`. It exposes routing endpoints through the Dynamo runtime and router metrics through the system status server.
+The standalone router does not include the HTTP frontend and does not expose `/v1/chat/completions`. It exposes routing endpoints through the Dynamo runtime and, when configured, router metrics through the system status server.
 
 ## Deployment Modes
 

@@ -54,9 +54,8 @@ Clients can use `generate` when the router should forward the request, `best_wor
 
 ## Manual prefill routing example
 
-<Note>
-This is an advanced alternative setup. For most disaggregated serving deployments, use the frontend's automatic prefill routing, which activates when workers register with `WorkerType.Prefill`. See [Disaggregated Serving](router-disaggregated-serving.md).
-</Note>
+> [!NOTE]
+> This is an advanced alternative setup. For most disaggregated serving deployments, use the frontend's automatic prefill routing, which activates when workers register with `WorkerType.Prefill`. See [Disaggregated Serving](router-disaggregated-serving.md).
 
 Use a standalone router when you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
@@ -74,10 +73,18 @@ python -m dynamo.router \
   --no-router-track-active-blocks
 
 # Start decode workers.
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
+python -m dynamo.vllm \
+  --model MODEL_NAME \
+  --block-size 64 \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Start prefill workers.
-python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
+python -m dynamo.vllm \
+  --model MODEL_NAME \
+  --block-size 64 \
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 ```
 
 For an integrated frontend disaggregated example, see [`examples/backends/vllm/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router.sh). For explicit multi-router composition, see the [Global Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/global_router/README.md).
@@ -86,9 +93,8 @@ For event-driven prefix-cache state, add the backend-specific KV event publishin
 
 ## Configuration guidance
 
-<Note>
-Set `--router-block-size` on standalone routers. Unlike frontend-embedded routing, standalone routers do not infer block size from the ModelDeploymentCard during worker registration.
-</Note>
+> [!NOTE]
+> Set `--router-block-size` on standalone routers. Unlike frontend-embedded routing, standalone routers do not infer block size from the ModelDeploymentCard during worker registration.
 
 The block size must match across the standalone router and all target workers. For vLLM, that means `--router-block-size` on the router should match `--block-size` on the vLLM workers.
 

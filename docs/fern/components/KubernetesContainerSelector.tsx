@@ -199,7 +199,7 @@ export function KubernetesContainerSelector() {
               <span className="lqs-badge">{build === "release" ? "Use" : "Build"}</span>
               {buildLabel}
             </div>
-            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU runtime image" : "Kubernetes deployment image"}</div>
+            <div className="lqs-support">{hardwareLabel} / {hardware === "intel" ? "vLLM XPU runtime image" : "DGDR planner image"}</div>
           </div>
           <div className="lqs-command">
             {canCopy && (
