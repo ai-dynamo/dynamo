@@ -49,7 +49,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{
-    disable_ansi_logging, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
+    ConsoleLogFormat, console_log_format, disable_ansi_logging, env_is_truthy, span_events_enabled,
 };
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
@@ -315,17 +315,23 @@ fn span_events_for_logging() -> FmtSpan {
     }
 }
 
-fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, String)>) {
+fn log_otel_init_status(
+    service_name: &str,
+    endpoint_opt: Option<(OtlpProtocol, String)>,
+    console_format: ConsoleLogFormat,
+) {
     if let Some((protocol, endpoint)) = endpoint_opt {
         tracing::info!(
             endpoint = %endpoint,
             protocol = %protocol.as_str(),
             service = %service_name,
+            console_format = console_format.as_str(),
             "OpenTelemetry OTLP export enabled (traces and logs)"
         );
     } else {
         tracing::info!(
             service = %service_name,
+            console_format = console_format.as_str(),
             "OpenTelemetry OTLP export disabled, traces local only"
         );
     }
@@ -1292,10 +1298,19 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let trace_filter_layer = filters(load_config());
     let otel_filter_layer = filters(load_config());
     let otel_logs_filter_layer = filters(load_config());
-    let jsonl_enabled = jsonl_logging_enabled();
+    let console_format = console_log_format();
     let otlp_enabled = otlp_exporter_enabled();
+    // Trace context (span CLOSE events, trace IDs, the OTel bridge) is required
+    // for OTLP export or when the console itself emits JSONL; the console
+    // format choice is decoupled from the OTel export decision.
+    let trace_context_enabled = otlp_enabled || console_format == ConsoleLogFormat::Jsonl;
+    let span_events = if trace_context_enabled {
+        span_events_for_logging()
+    } else {
+        FmtSpan::NONE
+    };
 
-    if jsonl_enabled || otlp_enabled {
+    if trace_context_enabled {
         let service_name = get_service_name();
         let sample_ratio = trace_sample_ratio_from_env();
 
@@ -1399,50 +1414,87 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
 
-        macro_rules! init_otel_subscriber {
-            ($fmt_layer:expr) => {
-                tracing_subscriber::registry()
-                    .with(
-                        tracing_opentelemetry::layer()
-                            .with_tracer(tracer)
-                            .with_filter(otel_filter_layer),
-                    )
-                    .with(otel_logs_layer)
-                    .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-                    .with($fmt_layer)
-                    .init();
-            };
-        }
+        let l = console_layer(console_format, span_events, fmt_filter_layer);
+        tracing_subscriber::registry()
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer)
+                    .with_filter(otel_filter_layer),
+            )
+            .with(otel_logs_layer)
+            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+            .with(l)
+            .init();
 
-        if jsonl_enabled {
-            let l = fmt::layer()
-                .with_ansi(false)
-                .with_span_events(span_events_for_logging())
-                .event_format(CustomJsonFormatter::new())
-                .with_writer(std::io::stderr)
-                .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
-        } else {
-            let l = fmt::layer()
-                .with_ansi(!disable_ansi_logging())
-                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-                .with_writer(std::io::stderr)
-                .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
-        }
-
-        log_otel_init_status(&service_name, endpoint_opt);
+        log_otel_init_status(&service_name, endpoint_opt, console_format);
     } else {
-        let l = fmt::layer()
-            .with_ansi(!disable_ansi_logging())
-            .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-            .with_writer(std::io::stderr)
-            .with_filter(fmt_filter_layer);
+        let l = console_layer(console_format, span_events, fmt_filter_layer);
 
         tracing_subscriber::registry().with(l).init();
     }
 
     Ok(())
+}
+
+/// Console (stderr) fmt layer whose event format is selected by
+/// `DYN_LOGGING_CONSOLE_FORMAT`, independent of the OTel export state.
+fn console_layer<S>(
+    format: ConsoleLogFormat,
+    span_events: FmtSpan,
+    filter_layer: LoggingFilter,
+) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a> + 'static,
+{
+    fmt::layer()
+        .with_ansi(format == ConsoleLogFormat::Readable && !disable_ansi_logging())
+        .with_span_events(span_events)
+        .event_format(ConsoleEventFormatter::new(format))
+        .with_writer(std::io::stderr)
+        .with_filter(filter_layer)
+}
+
+type ReadableEventFormatter = tracing_subscriber::fmt::format::Format<
+    tracing_subscriber::fmt::format::Compact,
+    TimeFormatter,
+>;
+
+enum ConsoleEventFormatter {
+    Readable(ReadableEventFormatter),
+    Jsonl(CustomJsonFormatter),
+}
+
+impl ConsoleEventFormatter {
+    fn new(format: ConsoleLogFormat) -> Self {
+        match format {
+            ConsoleLogFormat::Readable => {
+                Self::Readable(fmt::format().compact().with_timer(TimeFormatter::new()))
+            }
+            ConsoleLogFormat::Jsonl => Self::Jsonl(CustomJsonFormatter::new()),
+        }
+    }
+}
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for ConsoleEventFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::Readable(formatter) => {
+                tracing_subscriber::fmt::FormatEvent::format_event(formatter, ctx, writer, event)
+            }
+            Self::Jsonl(formatter) => {
+                tracing_subscriber::fmt::FormatEvent::format_event(formatter, ctx, writer, event)
+            }
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)] // Constructed once during logging initialization.
@@ -2960,6 +3012,80 @@ pub mod tests {
     #[tracing::instrument(level = "info", target = "other_module", skip_all)]
     async fn other_target_info_span() {
         tracing::info!(target: "other_module", "inside other target span");
+    }
+
+    #[test]
+    fn test_readable_console_with_otel_export() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "test_readable_console_with_otel_export_subprocess",
+                "--",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_READABLE_OTEL", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "readable")
+            .env("DYN_LOGGING_JSONL", "1")
+            .env("OTEL_EXPORT_ENABLED", "1")
+            .env("DYN_LOG", "info")
+            .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", DEFAULT_OTLP_ENDPOINT)
+            .env("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", DEFAULT_OTLP_ENDPOINT)
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_readable_console_with_otel_export_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_READABLE_OTEL").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+        tracing::info!("readable console with otel marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        assert!(
+            content.contains("OpenTelemetry OTLP export enabled"),
+            "expected OTLP init log in captured stderr, got: {content}"
+        );
+        assert!(
+            content.contains("readable console with otel marker"),
+            "expected marker log in captured stderr, got: {content}"
+        );
+
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                serde_json::from_str::<Value>(line).is_err(),
+                "expected readable log line, got JSON: {line}"
+            );
+        }
+
+        Ok(())
     }
 
     /// Comprehensive test for span events covering:

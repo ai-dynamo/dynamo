@@ -427,10 +427,55 @@ pub use dynamo_truthy::{
     env_is_falsey, env_is_truthy, is_falsey, is_truthy, parse_bool, parse_bool_opt,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLogFormat {
+    Readable,
+    Jsonl,
+}
+
+impl ConsoleLogFormat {
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "readable" | "text" => Some(Self::Readable),
+            "jsonl" | "json" => Some(Self::Jsonl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Readable => "readable",
+            Self::Jsonl => "jsonl",
+        }
+    }
+}
+
 /// Check whether JSONL logging enabled
 /// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
 pub fn jsonl_logging_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_JSONL)
+}
+
+/// Return the console log format.
+///
+/// `DYN_LOGGING_CONSOLE_FORMAT` takes precedence. `DYN_LOGGING_JSONL` remains
+/// supported as a legacy alias for selecting JSONL console output.
+pub fn console_log_format() -> ConsoleLogFormat {
+    match std::env::var(environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT) {
+        Ok(value) => match ConsoleLogFormat::from_env_value(&value) {
+            Some(format) => format,
+            None => {
+                eprintln!(
+                    "Invalid {} value '{}'; using readable console logs",
+                    environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT,
+                    value
+                );
+                ConsoleLogFormat::Readable
+            }
+        },
+        Err(_) if jsonl_logging_enabled() => ConsoleLogFormat::Jsonl,
+        Err(_) => ConsoleLogFormat::Readable,
+    }
 }
 
 /// Check whether logging with ANSI terminal escape codes and colors is disabled.
@@ -511,5 +556,50 @@ mod tests {
         // Test opposite behavior
         assert!(!is_truthy("0"));
         assert!(!is_falsey("1"));
+    }
+
+    #[test]
+    fn test_console_log_format() {
+        use environment_names::logging;
+
+        temp_env::with_vars(
+            vec![
+                (logging::DYN_LOGGING_CONSOLE_FORMAT, None::<&str>),
+                (logging::DYN_LOGGING_JSONL, None::<&str>),
+            ],
+            || {
+                assert_eq!(console_log_format(), ConsoleLogFormat::Readable);
+            },
+        );
+
+        temp_env::with_vars(
+            vec![
+                (logging::DYN_LOGGING_CONSOLE_FORMAT, None::<&str>),
+                (logging::DYN_LOGGING_JSONL, Some("true")),
+            ],
+            || {
+                assert_eq!(console_log_format(), ConsoleLogFormat::Jsonl);
+            },
+        );
+
+        temp_env::with_vars(
+            vec![
+                (logging::DYN_LOGGING_CONSOLE_FORMAT, Some("readable")),
+                (logging::DYN_LOGGING_JSONL, Some("true")),
+            ],
+            || {
+                assert_eq!(console_log_format(), ConsoleLogFormat::Readable);
+            },
+        );
+
+        temp_env::with_vars(
+            vec![
+                (logging::DYN_LOGGING_CONSOLE_FORMAT, Some("jsonl")),
+                (logging::DYN_LOGGING_JSONL, Some("false")),
+            ],
+            || {
+                assert_eq!(console_log_format(), ConsoleLogFormat::Jsonl);
+            },
+        );
     }
 }
