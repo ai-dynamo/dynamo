@@ -210,14 +210,13 @@ impl SglangKvManager {
         let page_size = self.cache.page_size();
         lease.ensure_page_hashes(token_ids, page_size);
         let materialized_hashes = lease.page_hashes_through(token_ids.len(), page_size);
-        let (prefix_len, last_node) = self.cache.match_prefix_hashes(materialized_hashes);
+        let (prefix_len, last_node) = self.cache.match_prefix_hashes_and_lock(materialized_hashes);
         let required_pages = token_ids.len().div_ceil(page_size) - prefix_len / page_size;
         let required_tokens = required_pages * page_size;
 
         // Protect the matched path before making room. Otherwise an LRU
         // eviction can remove the prefix used to size this allocation, and a
         // second match would require more pages than were freed.
-        self.cache.inc_lock_ref(last_node);
         let reservable = self.cache.available_tokens() + self.cache.evictable_size;
         if required_tokens > reservable {
             self.cache.dec_lock_ref(last_node);
@@ -460,9 +459,8 @@ impl SglangKvManager {
         page_hashes: &[LocalBlockHash],
         token_count: usize,
     ) -> Option<SglangDestinationReservation> {
-        let (prefix_len, last_node) = self.cache.match_prefix_hashes(page_hashes);
+        let (prefix_len, last_node) = self.cache.match_prefix_hashes_and_lock(page_hashes);
         let prefix_pages = self.collect_path_pages_through(last_node, prefix_len);
-        self.cache.inc_lock_ref(last_node);
 
         let allocated_tokens = if token_count == 0 {
             0

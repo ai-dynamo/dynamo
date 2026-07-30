@@ -851,15 +851,22 @@ mod tests {
 
     #[test]
     fn removal_is_reported_only_for_the_last_physical_copy() {
-        let mut pool = VllmBlockPool::new(2);
+        let mut pool = VllmBlockPool::new(4);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
         assert!(pool.cache_private(first_id, 3));
-        let mut second = reserve(&mut pool, &[], 1).reservation;
-        let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 3));
+
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
         pool.release(first_id);
-        pool.release(second_id);
+        for &duplicate_id in &duplicate_ids {
+            pool.release(duplicate_id);
+        }
 
         let first_eviction = reserve(&mut pool, &[], 1);
         assert!(first_eviction.removed.is_empty());
@@ -868,12 +875,18 @@ mod tests {
         let promoted = pool
             .reserve_exact_prefix([3], 1)
             .expect("promoted duplicate should remain reservable");
-        assert_eq!(promoted.reservation.prefix, vec![(3, second_id)]);
+        assert_eq!(promoted.reservation.prefix, vec![(3, duplicate_ids[0])]);
         pool.cancel(promoted.reservation);
 
-        let second_eviction = reserve(&mut pool, &[], 2);
-        assert_eq!(second_eviction.removed, vec![3]);
-        pool.cancel(second_eviction.reservation);
+        for fresh in [2, 3] {
+            let duplicate_eviction = reserve(&mut pool, &[], fresh);
+            assert!(duplicate_eviction.removed.is_empty());
+            pool.cancel(duplicate_eviction.reservation);
+        }
+
+        let final_eviction = reserve(&mut pool, &[], 4);
+        assert_eq!(final_eviction.removed, vec![3]);
+        pool.cancel(final_eviction.reservation);
         pool.assert_lru_consistent();
     }
 
