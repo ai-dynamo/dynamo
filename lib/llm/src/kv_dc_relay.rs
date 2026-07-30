@@ -38,8 +38,8 @@ pub use host::{
 };
 pub use identity::{
     CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
-    DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
-    PoolIdentitySources,
+    DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError,
+    ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources,
 };
 #[cfg(feature = "kv-dc-relay-wan")]
 pub use transport_config::KvDcRelayTransportConfig;

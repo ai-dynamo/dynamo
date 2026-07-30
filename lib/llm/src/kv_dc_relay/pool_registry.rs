@@ -23,7 +23,7 @@ use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
 use super::host::KvDcRelayError;
 use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
-    ModelAlias,
+    KvQuerySemantics, ModelAlias,
 };
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::load::{PoolLoadSnapshot, PoolLoadState};
@@ -51,6 +51,7 @@ pub(super) struct PoolAttachRequest {
     pub(super) pool_id: PoolId,
     pub(super) endpoint: EndpointId,
     pub(super) registrations: Vec<CanonicalModelRegistration>,
+    pub(super) query_semantics: KvQuerySemantics,
     #[cfg(feature = "kv-dc-relay-wan")]
     pub(super) serving_facts: EndpointServingFacts,
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -76,6 +77,7 @@ struct PoolEntry {
     identity: ProducerIdentity,
     layout_generation: u64,
     registrations: Arc<[CanonicalModelRegistration]>,
+    query_semantics: KvQuerySemantics,
     cancel: CancellationToken,
     state: PoolEntryState,
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -502,8 +504,12 @@ impl PoolRegistry {
             self.actor_config.publication_delay,
         );
         let identity = handle.identity();
-        let descriptor =
-            DcPoolDescriptor::new(identity, request.endpoint.clone(), registrations.clone());
+        let descriptor = DcPoolDescriptor::new(
+            identity,
+            request.endpoint.clone(),
+            registrations.clone(),
+            request.query_semantics,
+        );
         state.reservations.remove(&request.pool_id);
         debug_assert!(!state.pools.contains_key(&request.pool_id));
         state.pools.insert(
@@ -514,6 +520,7 @@ impl PoolRegistry {
                 identity,
                 layout_generation,
                 registrations: registrations.clone(),
+                query_semantics: request.query_semantics,
                 cancel: cancel.clone(),
                 state: PoolEntryState::Active,
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -590,6 +597,7 @@ impl PoolRegistry {
             entry.identity,
             entry.endpoint.clone(),
             registrations.clone(),
+            entry.query_semantics,
         );
         attachment.registrations = registrations;
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
@@ -1142,7 +1150,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::kv_dc_relay::identity::ModelTarget;
+    use crate::kv_dc_relay::identity::{KvQueryHashFormat, ModelTarget};
 
     type TestCkfBuilder =
         Box<dyn FnOnce(CkfConfig) -> Result<DcCkfState, CkfBuildError> + Send + 'static>;
@@ -1183,11 +1191,16 @@ mod tests {
         )
     }
 
+    fn query_semantics() -> KvQuerySemantics {
+        KvQuerySemantics::new(64, KvQueryHashFormat::DynamoStandardV1).unwrap()
+    }
+
     fn request(pool_id: PoolId, endpoint: &str, model: &str) -> PoolAttachRequest {
         PoolAttachRequest {
             pool_id,
             endpoint: EndpointId::from(endpoint),
             registrations: vec![registration(model)],
+            query_semantics: query_semantics(),
             #[cfg(feature = "kv-dc-relay-wan")]
             serving_facts: EndpointServingFacts::default(),
             #[cfg(feature = "kv-dc-relay-wan")]
@@ -1317,6 +1330,38 @@ mod tests {
         registry.shutdown().await;
         assert_eq!(catalog.pools().len(), attachments.len());
         assert!(registry.catalog().pools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_publishes_and_preserves_generation_query_semantics() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let expected = KvQuerySemantics::new(128, KvQueryHashFormat::DynamoEagleV1).unwrap();
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.query_semantics = expected;
+        let mut attachment = registry.attach(attach_request).await.unwrap();
+        let producer = attachment.handle.identity();
+
+        let catalog = registry.catalog();
+        let initial_descriptor = descriptor(&catalog, pool(1));
+        assert_eq!(initial_descriptor.producer(), producer);
+        assert_eq!(initial_descriptor.query_semantics(), expected);
+
+        registry
+            .replace_registrations(
+                &mut attachment,
+                vec![CanonicalModelRegistration::new(
+                    CanonicalModelId::new("llama").unwrap(),
+                    vec![ModelAlias::new("chat").unwrap()],
+                )],
+            )
+            .await
+            .unwrap();
+        let catalog = registry.catalog();
+        let updated_descriptor = descriptor(&catalog, pool(1));
+        assert_eq!(updated_descriptor.producer(), producer);
+        assert_eq!(updated_descriptor.query_semantics(), expected);
+
+        registry.detach(attachment).await.unwrap();
     }
 
     #[tokio::test]
@@ -1639,6 +1684,7 @@ mod tests {
                 pool_id: pool(1),
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: registrations(),
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -1651,6 +1697,7 @@ mod tests {
                 pool_id: pool(2),
                 endpoint: EndpointId::from("slow.router.generate"),
                 registrations: registrations(),
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -1701,6 +1748,7 @@ mod tests {
                     CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -1898,6 +1946,7 @@ mod tests {
                 pool_id: pool(1),
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: vec![registration("llama")],
+                query_semantics: query_semantics(),
                 serving_facts: serving_facts.clone(),
                 runtime_configs,
             })

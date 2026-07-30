@@ -10,7 +10,8 @@ use dynamo_kv_router::indexer::cuckoo::{DcCkfFormatIdentity, ProducerIdentity};
 use dynamo_runtime::protocols::EndpointId;
 
 use super::super::identity::{
-    CanonicalModelRegistration, DcPoolDescriptor, DcRelayIdentity, ModelTarget,
+    CanonicalModelRegistration, DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat,
+    KvQuerySemantics, ModelTarget,
 };
 use super::super::protocol as proto;
 
@@ -114,6 +115,18 @@ pub(crate) fn descriptor_to_wire(descriptor: &DcPoolDescriptor) -> proto::KvPool
             .iter()
             .map(registration_to_wire)
             .collect(),
+        query_semantics: Some(query_semantics_to_wire(descriptor.query_semantics())),
+    }
+}
+
+fn query_semantics_to_wire(semantics: KvQuerySemantics) -> proto::KvQuerySemantics {
+    let hash_format = match semantics.hash_format() {
+        KvQueryHashFormat::DynamoStandardV1 => proto::KvQueryHashFormat::DynamoStandardV1,
+        KvQueryHashFormat::DynamoEagleV1 => proto::KvQueryHashFormat::DynamoEagleV1,
+    };
+    proto::KvQuerySemantics {
+        kv_block_size: semantics.kv_block_size(),
+        hash_format: hash_format as i32,
     }
 }
 

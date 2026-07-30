@@ -53,14 +53,24 @@ The serving `DynamoEndpointId` is descriptor metadata. It does not replace or ex
 
 ## Catalog and Model Registrations
 
-Each `KvPoolDescriptor` contains one producer, one serving endpoint, and nested model
-registrations. The Relay producer emits one canonical base target and any LoRA targets backed by
-that model. Each registration has:
+Each `KvPoolDescriptor` contains one producer, one serving endpoint, required `KvQuerySemantics`,
+and nested model registrations. Query semantics specify a nonzero KV block size and one atomic
+token-to-sequence-hash format. `DYNAMO_STANDARD_V1` uses block-size token windows;
+`DYNAMO_EAGLE_V1` uses `kv_block_size + 1` token windows with a `kv_block_size` stride. Each format
+also fixes token and multimodal encoding, request-wide LoRA/cache-namespace salting, local block
+hashing, and rolling sequence hashing. Consumers must reject an unspecified or unknown format.
+
+The Relay producer emits one canonical base target and any LoRA targets backed by that model. Each
+registration has:
 
 - a canonical model ID;
 - a `ModelTarget` for either a base model or a Low-Rank Adaptation (LoRA) adapter with its backing
   base model;
 - zero or more aliases.
+
+For a LoRA request, the hash salt is the canonical `ModelTarget.lora.adapter`; aliases and the
+registration's lookup ID are not hash inputs. Base-model requests use no LoRA salt. This keeps base
+and adapter KV entries in one physical pool while preserving distinct cache keys.
 
 The wire contract does not publish derived model-to-pool or alias-to-model indexes. Consumers build
 those indexes, if needed, from the current catalog snapshot. Independent endpoints that advertise

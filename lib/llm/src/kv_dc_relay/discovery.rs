@@ -23,7 +23,6 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-const KV_EVENT_HASH_FORMAT_VERSION: u16 = 1;
 
 pub(crate) type KvCacheDomainKey = ResolvedIndexerDomain;
 
@@ -245,9 +244,11 @@ struct EndpointMembershipBuilder {
 
 struct ProjectionDiagnostics<'a> {
     invalid_models: HashSet<ModelCardInstanceId>,
+    invalid_query_semantics: HashSet<ModelCardInstanceId>,
     invalid_aliases: HashSet<(ModelCardInstanceId, String)>,
     orphan_adapters: HashSet<ModelCardInstanceId>,
     warned_invalid_models: &'a HashSet<ModelCardInstanceId>,
+    warned_invalid_query_semantics: &'a HashSet<ModelCardInstanceId>,
     warned_invalid_aliases: &'a HashSet<(ModelCardInstanceId, String)>,
     warned_orphan_adapters: &'a HashSet<ModelCardInstanceId>,
 }
@@ -255,14 +256,17 @@ struct ProjectionDiagnostics<'a> {
 impl<'a> ProjectionDiagnostics<'a> {
     fn new(
         warned_invalid_models: &'a HashSet<ModelCardInstanceId>,
+        warned_invalid_query_semantics: &'a HashSet<ModelCardInstanceId>,
         warned_invalid_aliases: &'a HashSet<(ModelCardInstanceId, String)>,
         warned_orphan_adapters: &'a HashSet<ModelCardInstanceId>,
     ) -> Self {
         Self {
             invalid_models: HashSet::new(),
+            invalid_query_semantics: HashSet::new(),
             invalid_aliases: HashSet::new(),
             orphan_adapters: HashSet::new(),
             warned_invalid_models,
+            warned_invalid_query_semantics,
             warned_invalid_aliases,
             warned_orphan_adapters,
         }
@@ -336,6 +340,7 @@ struct MembershipState {
     next_membership_generation: u64,
     previous: Arc<HashMap<EndpointId, EndpointMembership>>,
     warned_invalid_models: HashSet<ModelCardInstanceId>,
+    warned_invalid_query_semantics: HashSet<ModelCardInstanceId>,
     warned_invalid_aliases: HashSet<(ModelCardInstanceId, String)>,
     warned_orphan_adapters: HashSet<ModelCardInstanceId>,
     #[cfg(test)]
@@ -349,6 +354,7 @@ impl Default for MembershipState {
             next_membership_generation: 1,
             previous: Arc::default(),
             warned_invalid_models: HashSet::new(),
+            warned_invalid_query_semantics: HashSet::new(),
             warned_invalid_aliases: HashSet::new(),
             warned_orphan_adapters: HashSet::new(),
             #[cfg(test)]
@@ -408,6 +414,7 @@ impl MembershipState {
         }
         let mut diagnostics = ProjectionDiagnostics::new(
             &self.warned_invalid_models,
+            &self.warned_invalid_query_semantics,
             &self.warned_invalid_aliases,
             &self.warned_orphan_adapters,
         );
@@ -427,12 +434,31 @@ impl MembershipState {
         for (endpoint, cards) in grouped {
             let mut base_cards = Vec::new();
             let mut adapter_cards = Vec::new();
+            let mut query_semantics_conflicts = Vec::new();
             for (id, card) in cards {
                 if id.model_suffix.is_some() || card.lora.is_some() {
                     adapter_cards.push((id, card));
                     continue;
                 }
-                let domain = resolve_indexer_domain(card, &endpoint, KV_EVENT_HASH_FORMAT_VERSION);
+                let domain = match resolve_indexer_domain(card, &endpoint) {
+                    Ok(domain) => domain,
+                    Err(error) => {
+                        diagnostics.invalid_query_semantics.insert(id.clone());
+                        if !diagnostics.warned_invalid_query_semantics.contains(id) {
+                            tracing::warn!(
+                                endpoint = %endpoint,
+                                model = card.name(),
+                                %error,
+                                "Model card has invalid KV query semantics"
+                            );
+                        }
+                        query_semantics_conflicts.push(MaterializationConflict::Card {
+                            card: id.clone(),
+                            reason: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
                 let model = match CanonicalModelId::new(card.name().to_string()) {
                     Ok(model) => Some(model),
                     Err(error) => {
@@ -476,7 +502,7 @@ impl MembershipState {
                 worker_topology: HashMap::new(),
                 adapters: HashMap::new(),
                 roles: HashSet::new(),
-                conflicts: Vec::new(),
+                conflicts: query_semantics_conflicts,
             };
             if domain_count > 1 {
                 builder.conflicts.push(MaterializationConflict::Endpoint {
@@ -702,11 +728,13 @@ impl MembershipState {
 
         let ProjectionDiagnostics {
             invalid_models,
+            invalid_query_semantics,
             invalid_aliases,
             orphan_adapters,
             ..
         } = diagnostics;
         self.warned_invalid_models = invalid_models;
+        self.warned_invalid_query_semantics = invalid_query_semantics;
         self.warned_invalid_aliases = invalid_aliases;
         self.warned_orphan_adapters = orphan_adapters;
         let endpoints = Arc::new(endpoints);
@@ -1141,6 +1169,62 @@ mod tests {
         endpoint: &EndpointId,
     ) -> &'a EndpointMembership {
         &view.endpoints[endpoint]
+    }
+
+    #[test]
+    fn standard_and_eagle_workers_cannot_materialize_one_endpoint_pool() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        let standard = card("llama", "meta/llama", 64);
+        let mut eagle = standard.clone();
+        eagle.runtime_config.enable_eagle = true;
+        state.replace_all(
+            vec![
+                instance("generate", 1, None, standard),
+                instance("generate", 2, None, eagle),
+            ],
+            &filter,
+        );
+
+        let endpoint = EndpointId::from("prod.backend.generate");
+        let view = state.view(&filter);
+        let membership = membership_for_endpoint(&view, &endpoint);
+        assert!(!membership.is_materializable());
+        assert!(membership.conflicts.iter().any(|conflict| {
+            matches!(
+                conflict,
+                MaterializationConflict::Endpoint { reason, .. }
+                    if reason.contains("multiple indexer domains")
+            )
+        }));
+    }
+
+    #[test]
+    fn zero_block_size_is_a_hard_materialization_conflict() {
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        state.replace_all(
+            vec![instance(
+                "generate",
+                1,
+                None,
+                card("llama", "meta/llama", 0),
+            )],
+            &filter,
+        );
+
+        let endpoint = EndpointId::from("prod.backend.generate");
+        let view = state.view(&filter);
+        let membership = membership_for_endpoint(&view, &endpoint);
+        assert!(membership.domain.is_none());
+        assert!(!membership.is_materializable());
+        assert!(membership.conflicts.iter().any(|conflict| {
+            matches!(
+                conflict,
+                MaterializationConflict::Card { reason, .. }
+                    if reason.contains("block size must be nonzero")
+            )
+        }));
     }
 
     #[test]

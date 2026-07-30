@@ -4,9 +4,10 @@
 use std::collections::HashSet;
 
 use super::super::{
-    CkfFormat, DigestIdentity, DynamoEndpointId, IdentitySource as ProtoIdentitySource, KvPoolId,
-    ModelRegistration, POOL_IDENTITY_VERSION, ProducerIdentity, RELAY_CONTRACT_MARKER,
-    RELAY_PROTOCOL_VERSION, v1::model_target,
+    CkfFormat, DigestIdentity, DynamoEndpointId, IdentitySource as ProtoIdentitySource,
+    KvPoolDescriptor, KvPoolId, KvQueryHashFormat, KvQuerySemantics, ModelRegistration,
+    POOL_IDENTITY_VERSION, ProducerIdentity, RELAY_CONTRACT_MARKER, RELAY_PROTOCOL_VERSION,
+    v1::model_target,
 };
 use super::images::MAX_BUCKET_COUNT;
 
@@ -32,6 +33,10 @@ pub enum WireIdentityError {
     BucketCountTooLarge { actual: u64, maximum: usize },
     #[error("layout generation must be nonzero")]
     ZeroLayoutGeneration,
+    #[error("KV query block size must be nonzero")]
+    ZeroQueryBlockSize,
+    #[error("unsupported KV query hash format {0}")]
+    QueryHashFormat(i32),
     #[error("{0} must not be empty or contain surrounding whitespace")]
     InvalidText(&'static str),
     #[error("model registration repeats alias {0:?}")]
@@ -141,6 +146,43 @@ pub fn validate_model_registration(
         }
     }
     Ok(())
+}
+
+pub fn validate_query_semantics(semantics: &KvQuerySemantics) -> Result<(), WireIdentityError> {
+    if semantics.kv_block_size == 0 {
+        return Err(WireIdentityError::ZeroQueryBlockSize);
+    }
+    let hash_format = KvQueryHashFormat::try_from(semantics.hash_format)
+        .map_err(|_| WireIdentityError::QueryHashFormat(semantics.hash_format))?;
+    if hash_format == KvQueryHashFormat::Unspecified {
+        return Err(WireIdentityError::QueryHashFormat(semantics.hash_format));
+    }
+    Ok(())
+}
+
+pub fn validate_pool_descriptor(descriptor: &KvPoolDescriptor) -> Result<(), WireIdentityError> {
+    validate_producer_identity(
+        descriptor
+            .producer
+            .as_ref()
+            .ok_or(WireIdentityError::MissingField("pool producer"))?,
+    )?;
+    validate_endpoint_id(
+        descriptor
+            .serving_endpoint
+            .as_ref()
+            .ok_or(WireIdentityError::MissingField("serving endpoint"))?,
+    )?;
+    validate_query_semantics(
+        descriptor
+            .query_semantics
+            .as_ref()
+            .ok_or(WireIdentityError::MissingField("KV query semantics"))?,
+    )?;
+    descriptor
+        .registrations
+        .iter()
+        .try_for_each(validate_model_registration)
 }
 
 fn validate_digest(
@@ -279,6 +321,69 @@ mod tests {
         assert_eq!(
             validate_model_registration(&duplicate),
             Err(WireIdentityError::DuplicateAlias("chat".into()))
+        );
+    }
+
+    #[test]
+    fn query_semantics_fail_closed_for_missing_zero_and_unknown_values() {
+        let valid = KvQuerySemantics {
+            kv_block_size: 64,
+            hash_format: KvQueryHashFormat::DynamoStandardV1 as i32,
+        };
+        validate_query_semantics(&valid).unwrap();
+
+        assert_eq!(
+            validate_query_semantics(&KvQuerySemantics {
+                kv_block_size: 0,
+                ..valid
+            }),
+            Err(WireIdentityError::ZeroQueryBlockSize)
+        );
+        for hash_format in [KvQueryHashFormat::Unspecified as i32, 99] {
+            assert_eq!(
+                validate_query_semantics(&KvQuerySemantics {
+                    hash_format,
+                    ..valid
+                }),
+                Err(WireIdentityError::QueryHashFormat(hash_format))
+            );
+        }
+
+        let descriptor = KvPoolDescriptor {
+            producer: None,
+            serving_endpoint: None,
+            registrations: Vec::new(),
+            query_semantics: None,
+        };
+        assert_eq!(
+            validate_pool_descriptor(&descriptor),
+            Err(WireIdentityError::MissingField("pool producer"))
+        );
+
+        let descriptor = KvPoolDescriptor {
+            producer: Some(ProducerIdentity {
+                pool_id: Some(pool_id()),
+                producer_incarnation: 7,
+                layout_generation: 1,
+                ckf_format: Some(CkfFormat {
+                    format_version: 1,
+                    seed: 11,
+                    bucket_count: 64,
+                    fingerprint_bits: 16,
+                    slots_per_bucket: 4,
+                }),
+            }),
+            serving_endpoint: Some(DynamoEndpointId {
+                namespace: "prod".into(),
+                component: "backend".into(),
+                endpoint: "generate".into(),
+            }),
+            registrations: Vec::new(),
+            query_semantics: None,
+        };
+        assert_eq!(
+            validate_pool_descriptor(&descriptor),
+            Err(WireIdentityError::MissingField("KV query semantics"))
         );
     }
 }

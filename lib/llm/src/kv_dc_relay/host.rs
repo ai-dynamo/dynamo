@@ -1616,6 +1616,7 @@ async fn start_endpoint_pool(
             pool_id: PoolId::new(binding.domain.id, ckf_dc_id),
             endpoint: endpoint.clone(),
             registrations: registrations.clone(),
+            query_semantics: binding.domain.query_semantics,
             #[cfg(feature = "kv-dc-relay-wan")]
             serving_facts: serving_facts.clone(),
             #[cfg(feature = "kv-dc-relay-wan")]
@@ -2135,8 +2136,8 @@ async fn endpoint_stats(
 fn cache_domain_stats(domain: &KvCacheDomainKey) -> KvDcRelayCacheDomainStats {
     KvDcRelayCacheDomainStats {
         model_artifact: domain.diagnostic_model_artifact.clone(),
-        kv_block_size: domain.kv_block_size,
-        event_hash_format: domain.event_hash_format,
+        kv_block_size: domain.query_semantics.kv_block_size(),
+        event_hash_format: domain.query_semantics.hash_format().identity_version(),
     }
 }
 
@@ -2213,9 +2214,16 @@ mod tests {
                 RoutingScopeId::new([seed.wrapping_add(1); 16], IdentitySource::Explicit),
             ),
             diagnostic_model_artifact: artifact.to_string(),
-            kv_block_size: 64,
-            event_hash_format: 1,
+            query_semantics: query_semantics(),
         }
+    }
+
+    fn query_semantics() -> super::super::identity::KvQuerySemantics {
+        super::super::identity::KvQuerySemantics::new(
+            64,
+            super::super::identity::KvQueryHashFormat::DynamoStandardV1,
+        )
+        .unwrap()
     }
 
     fn registry() -> PoolRegistry {
@@ -2502,6 +2510,7 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -2546,6 +2555,7 @@ mod tests {
                 pool_id: PoolId::new(desired_binding.domain.id, DcId::new(7)),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: new_registrations,
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -2749,6 +2759,7 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -2927,6 +2938,7 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 serving_facts: EndpointServingFacts::default(),
                 #[cfg(feature = "kv-dc-relay-wan")]

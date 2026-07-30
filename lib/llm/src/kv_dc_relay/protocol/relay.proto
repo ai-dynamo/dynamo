@@ -35,6 +35,14 @@ enum ServingReadinessState {
   SERVING_READINESS_STATE_READY = 2;
 }
 
+// One atomic, executable token-to-sequence-hash pipeline. Consumers must reject
+// unspecified or unknown formats rather than combining independently versioned steps.
+enum KvQueryHashFormat {
+  KV_QUERY_HASH_FORMAT_UNSPECIFIED = 0;
+  KV_QUERY_HASH_FORMAT_DYNAMO_STANDARD_V1 = 1;
+  KV_QUERY_HASH_FORMAT_DYNAMO_EAGLE_V1 = 2;
+}
+
 message RelayIdentity
 {
   fixed64 drt_instance_id = 1;
@@ -111,11 +119,18 @@ message ModelRegistration
   repeated string aliases = 3;
 }
 
+message KvQuerySemantics
+{
+  uint32 kv_block_size = 1;
+  KvQueryHashFormat hash_format = 2;
+}
+
 message KvPoolDescriptor
 {
   ProducerIdentity producer = 1;
   DynamoEndpointId serving_endpoint = 2;
   repeated ModelRegistration registrations = 3;
+  KvQuerySemantics query_semantics = 4;
 }
 
 message KvPoolCatalogSnapshot

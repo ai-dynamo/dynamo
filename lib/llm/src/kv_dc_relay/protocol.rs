@@ -14,19 +14,19 @@ pub mod wire;
 pub use v1::{
     BaseModelTarget, CkfFormat, DigestIdentity, DynamoEndpointId, FilterUpdate, FilterUpdateKind,
     IdentitySource, IndexerDomainId, KvPoolCatalogSnapshot, KvPoolCatalogUpdate, KvPoolDescriptor,
-    KvPoolId, KvPoolLoadEntry, KvPoolLoadUpdate, LoraModelTarget, ModelRegistration, ModelTarget,
-    ProducerIdentity, RelayIdentity, RelayInfo, RelayInfoRequest, ServingReadinessEntry,
-    ServingReadinessState, ServingReadinessUpdate, SubscribeKvPoolLoadRequest,
-    SubscribeKvPoolRequest, SubscribeServingReadinessRequest, WatchKvPoolCatalogRequest,
-    kv_event_relay_client::KvEventRelayClient,
+    KvPoolId, KvPoolLoadEntry, KvPoolLoadUpdate, KvQueryHashFormat, KvQuerySemantics,
+    LoraModelTarget, ModelRegistration, ModelTarget, ProducerIdentity, RelayIdentity, RelayInfo,
+    RelayInfoRequest, ServingReadinessEntry, ServingReadinessState, ServingReadinessUpdate,
+    SubscribeKvPoolLoadRequest, SubscribeKvPoolRequest, SubscribeServingReadinessRequest,
+    WatchKvPoolCatalogRequest, kv_event_relay_client::KvEventRelayClient,
 };
 
 #[cfg(feature = "kv-dc-relay-wan")]
 pub use v1::kv_event_relay_server::{KvEventRelay, KvEventRelayServer};
 pub use wire::{
     WireIdentityError, validate_ckf_format, validate_contract_marker, validate_endpoint_id,
-    validate_model_registration, validate_pool_id, validate_producer_identity,
-    validate_protocol_envelope,
+    validate_model_registration, validate_pool_descriptor, validate_pool_id,
+    validate_producer_identity, validate_protocol_envelope, validate_query_semantics,
 };
 
 /// Current Relay protocol revision.
@@ -111,6 +111,10 @@ mod tests {
                         }),
                         aliases: vec!["chat".into()],
                     }],
+                    query_semantics: Some(KvQuerySemantics {
+                        kv_block_size: 64,
+                        hash_format: KvQueryHashFormat::DynamoStandardV1 as i32,
+                    }),
                 }],
             }),
             contract_marker: RELAY_CONTRACT_MARKER,
@@ -120,16 +124,7 @@ mod tests {
             .expect("catalog update must decode");
         assert_eq!(decoded, update);
         let descriptor = &decoded.snapshot.as_ref().expect("snapshot").pools[0];
-        validate_producer_identity(descriptor.producer.as_ref().expect("producer"))
-            .expect("producer identity");
-        validate_endpoint_id(
-            descriptor
-                .serving_endpoint
-                .as_ref()
-                .expect("serving endpoint"),
-        )
-        .expect("serving endpoint");
-        validate_model_registration(&descriptor.registrations[0]).expect("registration");
+        validate_pool_descriptor(descriptor).expect("pool descriptor");
     }
 
     #[test]
