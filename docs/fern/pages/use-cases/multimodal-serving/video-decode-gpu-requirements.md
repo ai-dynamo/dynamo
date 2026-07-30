@@ -28,10 +28,12 @@ A common misconception is that datacenter GPUs have no video engines. That appli
 | B200, GB200 | Blackwell | 7 engines | none | Yes | Yes (Main, Main 10, 422 10/12) |
 | L4 | Ada Lovelace | 4 engines | 2 | Yes | Yes |
 | L40, L40S | Ada Lovelace | 3 engines | 3 | Yes | Yes |
+| RTX 6000 Ada | Ada Lovelace | 3 engines | 3 | Yes (8/10-bit) | Yes (8/10/12-bit, up to 4:4:4) |
 
 Every GPU above decodes both codecs Dynamo routes to hardware, so H.264 and H.265 video
 input works across the datacenter lineup. Hopper's NVDEC matches Turing's feature set and
-does **not** decode AV1; Blackwell adds AV1 decode.
+does **not** decode AV1; Blackwell adds AV1 decode. The Ada parts (L4, L40S, RTX 6000 Ada)
+decode AV1 as well, and unlike the datacenter accelerators they also carry NVENC.
 
 Because no datacenter GPU ships NVENC, Dynamo's video *generation* path encodes with a
 CPU VP9 encoder rather than a hardware H.264 encoder.
