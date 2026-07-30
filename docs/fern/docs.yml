@@ -325,7 +325,7 @@ redirects:
   - source: "/dynamo/user-guides/diffusion/fastvideo"
     destination: "/dynamo/dev/diffusion/text-to-video"
   - source: "/dynamo/user-guides/disaggregated-serving"
-    destination: "/dynamo/dev/kubernetes/model-deployment/disaggregated-serving"
+    destination: "/dynamo/dev/disaggregated-serving/overview"
   - source: "/dynamo/user-guides/disaggregated-serving/sizing-with-ai-configurator"
     destination: "/dynamo/dev/additional-resources/ai-configurator-reference"
   - source: "/dynamo/user-guides/dynosim"
@@ -353,11 +353,11 @@ redirects:
   - source: "/dynamo/user-guides/fault-tolerance/testing"
     destination: "/dynamo/dev/knowledge-base/design-documents/fault-tolerance/fault-tolerance-testing"
   - source: "/dynamo/user-guides/kv-cache-aware-routing"
-    destination: "/dynamo/dev/knowledge-base/modular-components/router/router-guide"
+    destination: "/dynamo/dev/routing/overview"
   - source: "/dynamo/user-guides/kv-cache-offloading"
-    destination: "/dynamo/dev/knowledge-base/modular-components/kvbm/kvbm-guide"
+    destination: "/dynamo/dev/kv-cache-offloading/kubernetes"
   - source: "/dynamo/user-guides/lo-ra-adapters"
-    destination: "/dynamo/dev/lo-ra-adapters"
+    destination: "/dynamo/dev/kubernetes/operations/lo-ra-adapters"
   - source: "/dynamo/user-guides/multimodal"
     destination: "/dynamo/dev/multimodal/overview"
   - source: "/dynamo/user-guides/multimodal/custom-vision-encoders"
@@ -742,7 +742,9 @@ redirects:
   - source: "/dynamo/dev/other-features/fastokens-tokenizer"
     destination: "/dynamo/dev/fastokens-tokenizer"
   - source: "/dynamo/dev/other-features/lo-ra-adapters"
-    destination: "/dynamo/dev/lo-ra-adapters"
+    destination: "/dynamo/dev/kubernetes/operations/lo-ra-adapters"
+  - source: "/dynamo/dev/lo-ra-adapters"
+    destination: "/dynamo/dev/kubernetes/operations/lo-ra-adapters"
   - source: "/dynamo/dev/user-guides/agents"
     destination: "/dynamo/dev/agents/overview"
   - source: "/dynamo/dev/user-guides/agents/:slug*"
@@ -849,4 +851,3 @@ js:
     strategy: beforeInteractive
 css:
   - ./main.css
-
