@@ -142,9 +142,10 @@ runs:
         REQUESTED_HF_HOME="${{ inputs.hf_home }}"
         FALLBACK_HF_HOME="${WORK_DIR}/.cache/huggingface"
         # Prefer the requested cache path when it is usable in this job container.
-        # Probe hub/ subdirectory with a touch test: HF writes into hub/ subdirs, and a
-        # UID mismatch from a prior run can leave hub/ unwritable even when the top-level
-        # directory passes a simple -w test.
+        # Probe hub/ with a touch test: HF writes into hub/ subdirs, not the top level,
+        # so -w on the parent is insufficient. The dind path (pytest/action.yml) previously
+        # ran docker without --user and wrote model files as root; those dirs are unwritable
+        # by the UID-1001 runner even though /models itself passes -w.
         _hf_hub_dir="${REQUESTED_HF_HOME}/hub"
         if
           [[ -n "${REQUESTED_HF_HOME}" ]] &&          # caller provided a preferred HF cache path

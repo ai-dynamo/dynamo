@@ -310,6 +310,7 @@ runs:
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
           --network host \
+          --user "$(id -u):$(id -g)" \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
