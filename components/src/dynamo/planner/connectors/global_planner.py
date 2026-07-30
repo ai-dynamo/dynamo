@@ -283,8 +283,6 @@ class GlobalPlannerConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        *,
-        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
         """Read ready replica counts and rollout stability from the pool's own DGD.
 
@@ -307,7 +305,6 @@ class GlobalPlannerConnector(PlannerConnector):
         return await local.get_actual_worker_counts(
             prefill_component_name=prefill_component_name,
             decode_component_name=decode_component_name,
-            check_terminating_pods=check_terminating_pods,
         )
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:

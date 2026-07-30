@@ -470,15 +470,28 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
-        (
-            prefill_count,
-            decode_count,
-            stable,
-        ) = await self.controller.get_actual_worker_counts(
-            prefill_component_name=prefill_name,
-            decode_component_name=decode_name,
-            check_terminating_pods=self.config.enable_power_awareness,
-        )
+        if self.config.enable_power_awareness:
+            if not is_power_aware_connector(self.controller):
+                raise DeploymentValidationError(
+                    [
+                        "Power awareness requires a connector that implements "
+                        "PowerAwareConnector (get_graph_deployment, "
+                        "get_component_power_configs, "
+                        "wait_for_settled_graph_deployment); "
+                        "this connector does not."
+                    ]
+                )
+            counts = await self.controller.get_actual_worker_counts(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+                check_terminating_pods=True,
+            )
+        else:
+            counts = await self.controller.get_actual_worker_counts(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+        prefill_count, decode_count, stable = counts
         if self.require_prefill:
             self._state.prefill.replicas.active = prefill_count
             self._state.prefill.replicas.expected = prefill_count if stable else None

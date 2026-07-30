@@ -63,8 +63,6 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        *,
-        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
         pass
 
@@ -106,6 +104,15 @@ class PowerAwareConnector(Protocol):
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ) -> dict:
+        ...
+
+    async def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+        *,
+        check_terminating_pods: bool = False,
+    ) -> tuple[int, int, bool]:
         ...
 
 

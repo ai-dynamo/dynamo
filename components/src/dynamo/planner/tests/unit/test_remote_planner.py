@@ -525,36 +525,6 @@ async def test_connector_get_actual_worker_counts_delegates_to_local_k8s(
     fake_local.get_actual_worker_counts.assert_awaited_once_with(
         prefill_component_name="VllmPrefillWorker",
         decode_component_name="VllmDecodeWorker",
-        check_terminating_pods=False,
-    )
-
-
-@pytest.mark.asyncio
-async def test_connector_get_actual_worker_counts_forwards_check_terminating_pods(
-    connector_runtime,
-):
-    """check_terminating_pods must be forwarded verbatim to the local connector.
-
-    The environment passes check_terminating_pods=True when power awareness is
-    on so that the pool-local K8s connector can issue the pods/list call.
-    GlobalPlannerConnector must not swallow the flag.
-    """
-    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
-    fake_local = MagicMock()
-    fake_local.get_actual_worker_counts = AsyncMock(return_value=(1, 2, True))
-    c._local_k8s_connector = fake_local
-    c._local_k8s_init_attempted = True
-
-    await c.get_actual_worker_counts(
-        prefill_component_name="p",
-        decode_component_name="d",
-        check_terminating_pods=True,
-    )
-
-    fake_local.get_actual_worker_counts.assert_awaited_once_with(
-        prefill_component_name="p",
-        decode_component_name="d",
-        check_terminating_pods=True,
     )
 
 

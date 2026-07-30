@@ -174,6 +174,90 @@ def test_gpu_discovery_failure_retains_last_observed_state():
     assert environment.deployment_state().decode.num_gpus == 4
 
 
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_legacy_connector_power_disabled():
+    """A connector with the pre-PR signature (no check_terminating_pods) must
+    not raise TypeError when enable_power_awareness is off.
+
+    Regression test: the original fix unconditionally passed
+    check_terminating_pods=False which crashes any external connector that
+    implements the old PlannerConnector.get_actual_worker_counts signature.
+    """
+
+    class _LegacyConnector:
+        async def get_actual_worker_counts(
+            self,
+            prefill_component_name=None,
+            decode_component_name=None,
+        ):
+            return 1, 2, True
+
+    controller = _controller()
+    legacy = _LegacyConnector()
+    controller.get_actual_worker_counts = legacy.get_actual_worker_counts
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=False),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    await environment._refresh_replica_counts()
+
+    assert environment.deployment_state().prefill.replicas.active == 1
+    assert environment.deployment_state().decode.replicas.active == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_power_aware_connector_receives_flag():
+    """When enable_power_awareness=True and the connector is power-aware,
+    get_actual_worker_counts must be called with check_terminating_pods=True.
+    """
+    controller = _controller()
+    controller.get_graph_deployment = MagicMock(return_value={})
+    controller.get_component_power_configs = MagicMock(return_value=(None, None))
+    controller.wait_for_settled_graph_deployment = AsyncMock(return_value={})
+    controller.get_actual_worker_counts = AsyncMock(return_value=(2, 3, True))
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=True),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    await environment._refresh_replica_counts()
+
+    controller.get_actual_worker_counts.assert_awaited_once_with(
+        prefill_component_name="prefill",
+        decode_component_name="decode",
+        check_terminating_pods=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_replica_counts_power_enabled_non_power_aware_raises():
+    """When enable_power_awareness=True but the connector is not a
+    PowerAwareConnector, _refresh_replica_counts must raise
+    DeploymentValidationError rather than forwarding check_terminating_pods
+    to a connector that cannot accept it.
+    """
+    environment = PlannerEnvironmentImpl(
+        config=_config(enable_power_awareness=True),
+        controller=_controller(),
+        require_prefill=True,
+        require_decode=True,
+    )
+    environment.deployment_state().prefill.info = WorkerInfo(k8s_name="prefill")
+    environment.deployment_state().decode.info = WorkerInfo(k8s_name="decode")
+
+    with pytest.raises(DeploymentValidationError):
+        await environment._refresh_replica_counts()
+
+
 @pytest.mark.parametrize(
     ("require_prefill", "require_decode", "missing_field"),
     [
