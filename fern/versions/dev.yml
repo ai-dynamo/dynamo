@@ -160,6 +160,9 @@ navigation:
             path: ../pages-dev/kubernetes/dgd-kv-routing.md
           - page: Gateway API
             path: ../pages-dev/kubernetes/inference-gateway.mdx
+          - page: Vanilla vLLM On-ramp
+            path: ../pages-dev/kubernetes/vanilla-vllm-onramp.mdx
+            slug: vanilla-vllm-onramp
           - page: Standalone Router
             slug: standalone-router
             path: ../pages-dev/components/router/standalone-router.md

@@ -34,8 +34,9 @@ Other Gateway implementations can work when they support the same GAIE endpoint-
 
 <Step title="Set the installation variables">
 
-Set the namespace where the Gateway and model routes will live. Keep the Dynamo version aligned with
-the platform installation.
+Set `NAMESPACE` for the model, EPP, `InferencePool`, and `HTTPRoute`. With the agentgateway install
+method the `Gateway` itself lives in `AGW_NAMESPACE` alongside its controller; the Istio method
+creates the Gateway in `NAMESPACE`. Keep the Dynamo version aligned with the platform installation.
 
 ```bash
 export NAMESPACE=my-model
@@ -63,7 +64,12 @@ The script installs:
 - GAIE CRDs.
 - agentgateway with the inference extension enabled.
 - An `AgentgatewayParameters` resource that prevents Istio sidecar injection into Gateway proxy pods.
-- A `Gateway` named `inference-gateway` in `$NAMESPACE`.
+- A `Gateway` named `inference-gateway` in `$AGW_NAMESPACE` (co-located with the agentgateway
+  controller). Its `http` listener sets `allowedRoutes.namespaces.from: All`, so `HTTPRoute` objects
+  in `$NAMESPACE` attach to it across namespaces.
+
+The workload namespace `$NAMESPACE` still holds the model, EPP, `InferencePool`, and `HTTPRoute`.
+Only the Gateway itself lives in `$AGW_NAMESPACE`.
 
 The script pins compatible dependency versions. Review it before running it when your platform team
 owns Gateway API or agentgateway lifecycle.
@@ -133,6 +139,31 @@ inference.networking.k8s.io
 
 <Step title="Verify the Gateway">
 
+The Gateway namespace depends on the install method: the agentgateway script creates it in
+`$AGW_NAMESPACE`, while the Istio flow creates it in `$NAMESPACE`.
+
+<Tabs>
+<Tab title="agentgateway">
+
+Wait for the `inference-gateway` resource to become programmed:
+
+```bash
+kubectl wait gateway/inference-gateway -n "$AGW_NAMESPACE" \
+  --for=condition=Programmed --timeout=180s
+
+kubectl get gateway inference-gateway -n "$AGW_NAMESPACE"
+```
+
+If `Programmed` remains false, inspect the Gateway and the controller:
+
+```bash
+kubectl describe gateway inference-gateway -n "$AGW_NAMESPACE"
+kubectl get pods --all-namespaces | grep agentgateway
+```
+
+</Tab>
+<Tab title="Istio">
+
 Wait for the `inference-gateway` resource to become programmed:
 
 ```bash
@@ -142,12 +173,15 @@ kubectl wait gateway/inference-gateway -n "$NAMESPACE" \
 kubectl get gateway inference-gateway -n "$NAMESPACE"
 ```
 
-If `Programmed` remains false, inspect the Gateway and the controller for your implementation:
+If `Programmed` remains false, inspect the Gateway and the controller:
 
 ```bash
 kubectl describe gateway inference-gateway -n "$NAMESPACE"
-kubectl get pods --all-namespaces | grep -E 'agentgateway|istio'
+kubectl get pods --all-namespaces | grep istio
 ```
+
+</Tab>
+</Tabs>
 
 </Step>
 
