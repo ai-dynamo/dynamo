@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.vllm.multimodal_utils.async_vision_encoder.
+"""Unit tests for the custom encoder async driver.
 
 Pin the glue contract: build / forward / close run on one actor thread; encode
 returns one tensor per raw; the preprocess barrier fails a request atomically
@@ -14,8 +14,8 @@ import threading
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.async_vision_encoder import AsyncVisionEncoder
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+from dynamo.vllm.multimodal_utils.custom_encoder import (
+    AsyncVisionEncoder,
     Preprocessed,
     VisionEncoderBackend,
 )
