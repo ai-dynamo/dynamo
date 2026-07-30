@@ -105,8 +105,8 @@ spec:
 | `workload.osl` | Expected average output sequence length | `1000` |
 | `workload.requestRate` | Target requests per second | — |
 | `workload.concurrency` | Target concurrent requests (alternative to `requestRate`) | — |
-| `sla.ttft` | Target Time To First Token, ms | — |
-| `sla.itl` | Target Inter-Token Latency, ms | — |
+| `sla.ttft` | Target Time To First Token, ms | `2000` |
+| `sla.itl` | Target Inter-Token Latency, ms | `30` |
 | `sla.e2eLatency` | Target end-to-end latency, ms. **Cannot** be combined with `ttft`/`itl`. | — |
 
 > [!NOTE]
@@ -286,18 +286,20 @@ A DGDR progresses through these phases. Profiling failures are terminal — they
 Watch progress and read profiling logs:
 
 ```bash
+NAMESPACE=your-namespace
+
 # Watch phase transitions
-kubectl get dgdr my-model -n <namespace> -w
+kubectl get dgdr my-model -n "$NAMESPACE" -w
 
 # Detailed status, conditions, and events
-kubectl describe dgdr my-model -n <namespace>
+kubectl describe dgdr my-model -n "$NAMESPACE"
 
 # Current profiling sub-phase
-kubectl get dgdr my-model -n <namespace> -o jsonpath='{.status.profilingPhase}'
+kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingPhase}'
 
 # Profiling job logs
-kubectl get pods -n <namespace> -l nvidia.com/dgdr-name=my-model
-kubectl logs -f <profiling-pod-name> -n <namespace>
+PROFILING_JOB=$(kubectl get dgdr my-model -n "$NAMESPACE" -o jsonpath='{.status.profilingJobName}')
+kubectl logs -f "job/${PROFILING_JOB}" -c profiler -n "$NAMESPACE"
 ```
 
 For the full lifecycle, conditions, and monitoring command reference, see [DGDR Reference — Lifecycle](dgdr-reference.mdx#lifecycle).
