@@ -298,7 +298,7 @@ These fields default from environment variables and are excluded from serialized
 </ParamField>
 
 <ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
-  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. No-op unless SSL verification is enabled. Must point to an existing file when set.
+  Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
 </ParamField>
 
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
@@ -373,7 +373,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
 
 <Indent>
   <ParamField path="auth" type="AuthConfig">
-    Registry authentication. An empty `trusted_sources` fails closed (every token rejected).
+    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy compatibility fallback to unauthenticated access and logs a warning. This fallback is **DEV ONLY**; do not rely on it as an intentional configuration. Select `allow_unauthenticated` explicitly for development. Production deployments must configure `static_secret`.
   </ParamField>
   <Indent>
     <ParamField path="trusted_sources" type="[]string" default="[]">
@@ -409,10 +409,10 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Maximum accepted plugin protocol version.
   </ParamField>
   <ParamField path="heartbeat_timeout_seconds" type="number" default="15.0">
-    Seconds without a heartbeat before a plugin is considered missed.
+    Reserved liveness setting. Heartbeats update registry timestamps, but no monitor currently applies this timeout or evicts plugins automatically.
   </ParamField>
   <ParamField path="heartbeat_missed_threshold" type="integer" default="2">
-    Consecutive missed heartbeats before a plugin is dropped.
+    Reserved liveness setting. Automatic missed-heartbeat eviction is not currently wired.
   </ParamField>
   <ParamField path="in_process_plugins" type="[]InProcessPluginSpec" default="[]">
     In-process plugins loaded from Python modules at startup. See [InProcessPluginSpec](#inprocesspluginspec).
@@ -528,7 +528,7 @@ One static external-plugin registration under `scheduling.external_plugins`. Rej
   Dot-paths into the pipeline context (for example `predictions`, `observations.traffic`) that must be set for the plugin to fire on a tick. Empty means no gating.
 </ParamField>
 <ParamField path="observation_window_seconds" type="number" default="0.0">
-  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds. Enforced to be greater than or equal to `scale_interval_seconds`.
+  Aggregation window for windowed observation types in `needs`. `0.0` uses `scale_interval` freshness; a positive value aggregates over the last N seconds and must be an integer multiple of `scale_interval_seconds`.
 </ParamField>
 
 ### InProcessPluginSpec
@@ -565,7 +565,7 @@ One in-process plugin under `plugin_registration.in_process_plugins`. Rejects un
   Dot-paths into the pipeline context that must be set for the plugin to fire on a tick.
 </ParamField>
 <ParamField path="observation_window_seconds" type="number" default="0.0">
-  Aggregation window for windowed observation types in `needs`. Must be 0 or greater.
+  Aggregation window for windowed observation types in `needs`. Must be `0.0` or a positive integer multiple of `scale_interval_seconds`.
 </ParamField>
 <ParamField path="kwargs" type="object" default="{}">
   Keyword arguments passed to the plugin class constructor.
