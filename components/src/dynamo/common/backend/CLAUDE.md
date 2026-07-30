@@ -108,9 +108,8 @@ Python engine authors keep the split API.)
   `Worker` or a shared utility, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
-  entry points remain untouched. The `common/backend/` entry points (e.g.
-  `sample_main.py`) are a separate path. Do not break or modify existing
-  backends when changing this module.
+  entry points remain untouched. `common/backend/` is a separate framework
+  path. Do not break or modify existing backends when changing this module.
 
 ## Request / Response Contract
 
@@ -138,7 +137,7 @@ TRT-LLM is under development.
    and `abort()` (optional)
 3. `from_args()` must parse args and return `(engine, WorkerConfig)`
 4. Create `<backend>/<backend>_main.py` calling `run(<YourEngine>)`
-5. Use `sample_engine.py` as the reference implementation
+5. Use `dynamo.tokenspeed.llm_engine` as a concrete lifecycle reference
 
 ## Disaggregated Serving
 
@@ -192,11 +191,6 @@ and `require_prefill_result` — small helpers backends call from inside
 `generate()` to avoid reinventing the same patterns. They are utilities,
 not abstractions; backends free to inline the logic when their generate
 path is shaped differently.
-
-The sample engine (`sample_engine.py`) implements the full dispatch in
-pure Python with synthetic handoff payloads — useful as a reference
-when wiring a new backend, and as a CPU-only smoke test for the
-disaggregated wire format (`examples/backends/sample/launch/disagg.sh`).
 
 ## Error Handling
 
@@ -300,9 +294,8 @@ spans should be.
 | `publisher.py` | `ComponentSnapshot` dataclass (the push payload). The `SnapshotPublisher` itself is a Rust-owned object exposed as `dynamo._core.backend.SnapshotPublisher`. |
 | `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
-| `run.py` | Common entry point -- `run(engine_cls)` used by each backend's main (e.g. `sample_main.py`) |
+| `run.py` | Common entry point -- `run(engine_cls)` used by backend entry points |
 | `logprobs.py` | Shared logprob helpers: `parse_logprob_options`, `extract_from_completion_output` (vLLM/TRT-LLM shape), `extract_from_sglang_meta` + `build_sglang_logprob_kwargs` (SGLang cumulative-array shape). The backend request handlers delegate here. |
-| `sample_engine.py` | Reference engine -- use as template and for testing |
 
 The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:
   - Lifecycle state machine (Init → Running → Stopped)

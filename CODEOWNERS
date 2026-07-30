@@ -223,7 +223,6 @@
 /lib/llm/src/local_model/                                                    @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/compute/                                                    @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/storage/                                                    @ai-dynamo/dynamo-runtime-codeowners
-/examples/backends/sample/                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/model_card.rs                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/pipeline/                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/component/                                                  @ai-dynamo/dynamo-runtime-codeowners

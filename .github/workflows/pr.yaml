@@ -37,7 +37,6 @@ jobs:
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
-      sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
@@ -317,7 +316,6 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
-    # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
     # `operator` is here because operator changes run the deploy tests, which
     # deploy the CI-built runtime image. `snapshot` is here because
     # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
@@ -325,7 +323,6 @@ jobs:
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true' ||
-      needs.changed-files.outputs.sample == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true'
@@ -669,7 +666,7 @@ jobs:
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm

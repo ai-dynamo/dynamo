@@ -416,7 +416,7 @@ lib/backend-common/
 ```
 
 The Python `Worker` shim that drives this crate from a backend's entry point
-(e.g. `dynamo.common.backend.sample_main`) lives at
+lives at
 [`components/src/dynamo/common/backend/worker.py`](../../components/src/dynamo/common/backend/worker.py).
 
 ## See Also

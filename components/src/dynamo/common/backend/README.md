@@ -22,7 +22,7 @@ guided decoding / structural tag.
 > error-handling table, and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
-all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
+all backends) from **engine logic** supplied by a concrete backend.
 
 ## Architecture
 
@@ -35,10 +35,8 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
-    +-- VllmLLMEngine          <-- vllm/llm_engine.py
-    +-- SglangLLMEngine        <-- sglang/llm_engine.py
-    +-- TrtllmLLMEngine        <-- trtllm/llm_engine.py
-    +-- SampleLLMEngine        <-- sample_engine.py
+    +-- TokenSpeedLLMEngine    <-- tokenspeed/llm_engine.py
+    +-- MyEngine               <-- custom backend implementation
 
 Worker                  <-- runtime integration (worker.py)
     - receives WorkerConfig from from_args()
@@ -48,22 +46,6 @@ Worker                  <-- runtime integration (worker.py)
     - serves generate endpoint with cancellation monitoring
     - drains prefill workers (polls engine.is_quiescent()) then calls engine.cleanup() on shutdown
 ```
-
-## Quick Start
-
-### Running the sample engine
-
-```bash
-python -m dynamo.common.backend.sample_main \
-    --model-name test-model \
-    --namespace dynamo \
-    --component sample \
-    --endpoint generate
-```
-
-This starts a backend that generates rotating token IDs. Point a frontend at
-`dynamo.sample.generate` to test the full request flow without any ML
-dependencies.
 
 ## Implementing a New Engine
 
@@ -129,13 +111,8 @@ def main():
     run(MyEngine)
 ```
 
-See `sample_engine.py` for a complete, runnable reference implementation.
-The sample engine includes synthetic multimodal handling for aggregated and
-Encode/Prefill/Decode deployments. CPU-only direct worker-handoff smokes live in
-`examples/backends/sample/launch/multimodal_agg.sh` and
-`examples/backends/sample/launch/multimodal_disagg.sh`. These smokes exercise
-distinct worker processes and TCP request transport; they intentionally bypass
-the frontend and do not claim frontend routing coverage.
+See `dynamo.tokenspeed.llm_engine` for a concrete implementation of the
+`LLMEngine` lifecycle.
 
 ## Request / Response Types
 
@@ -182,7 +159,6 @@ backend-specific cleanup:
 | vLLM | `engine_client.abort(request_id)` | `context.id()` |
 | SGLang | `tokenizer_manager.abort_request(rid=...)` | `context.trace_id` |
 | TRT-LLM | `generation_result.abort()` | Tracked per-request via `context.id()` |
-| Sample | *(no-op, default)* | — |
 
 Engines that don't support cancellation can skip overriding `abort()` —
 the default implementation is a no-op. The generation loop will still
@@ -254,21 +230,6 @@ Each backend's protocol is different:
 | **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
 | **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
 | **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. Inherits the default `is_quiescent` (None), so the prefill drain waits the full budget for transfers to finish. | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
-
-### Smoke testing without GPUs
-
-The sample backend implements the full disagg dispatch in pure Python
-with synthetic handoff payloads — no real KV transfer, but the wire
-format is exercised end-to-end. This makes it a fast CI smoke test for
-the unified path:
-
-```bash
-examples/backends/sample/launch/disagg.sh
-```
-
-Spawns the frontend plus a sample prefill worker and a sample decode
-worker; the frontend's `PrefillRouter` forwards the synthetic
-`disaggregated_params` from prefill to decode.
 
 ### Helpers
 
@@ -446,10 +407,8 @@ common/backend/
                          #   ensure_prometheus_multiproc_dir, registration)
     publisher.py         # ComponentSnapshot dataclass (push payload)
     run.py               # Common entry point: run(engine_cls)
-    sample_engine.py     # SampleLLMEngine (reference impl)
-    sample_main.py       # Entry point for sample engine
     tests/               # test_backend_bindings, test_disagg_helpers,
-                         #   test_logprobs, test_sample_engine
+                         #   test_logprobs, test_run
     CLAUDE.md            # Design notes (rationale, invariants)
 ```
 
@@ -536,8 +495,8 @@ Lifecycle and runtime:
   streaming, sourced from `dynamo.common.backend.logprobs` and used by
   both unified engines and the legacy handlers (which now delegate
   here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
-  variant. The sample engine and Rust mocker emit synthetic logprobs
-  when `output_options.logprobs` is set.
+  variant. The Rust mocker emits synthetic logprobs when
+  `output_options.logprobs` is set.
 - **Multimodal (vLLM)** — image and video inference in aggregated and
   prefill/decode deployments, frontend-rendered `mm_kwargs` transfer over
   shared memory or NIXL, stable frontend hash forwarding, CPU embedding cache,

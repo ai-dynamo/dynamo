@@ -58,9 +58,8 @@ custom backend in a `DynamoGraphDeployment` and follow the
 > **New — Dynamo's unified backend.** This guide covers the new
 > **unified backend** infrastructure in
 > [`dynamo.common.backend`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/common/backend):
-> a shared `LLMEngine` ABC that vLLM, SGLang, TRT-LLM, and a sample
-> engine already implement, and that any custom Python engine can plug
-> into the same way. For the Rust version of the same contract, use the
+> a shared `LLMEngine` ABC that any custom Python engine can implement.
+> For the Rust version of the same contract, use the
 > Rust tab on this page. For the older lower-level Python worker path (`register_model` +
 > `serve_endpoint`) — still the right choice for features the unified
 > backend does not yet cover — see
@@ -83,11 +82,6 @@ Your backend lives in its own package and **does not need to be part
 of the dynamo repository**. It depends on `ai-dynamo` from PyPI (or
 the git source) and imports `dynamo.common.backend`. The steps below
 assume you're starting a fresh package in your own repo.
-
-The reference example is the **sample engine** at
-[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
-— a complete, runnable implementation under 120 lines. Read it
-alongside this guide.
 
 **Where to look for what:**
 
@@ -473,8 +467,8 @@ async def abort(self, context: Context) -> None:
 
 For cleanup that must run on every drop path — including silent
 drops — use a `try/finally` or a context manager inside `generate`,
-not `abort`. The sample engine doesn't override `abort` because it
-has no engine-side state to release; the default is a no-op.
+not `abort`. If the engine has no state to release on cancellation,
+leave the default no-op in place.
 
 #### Python: `drain()` — optional
 
@@ -688,9 +682,9 @@ Install the dev extras (`pytest`, `pytest-asyncio`) declared in Step 1:
 pip install -e ".[dev]"
 ```
 
-The sample engine has a unit-test
-[suite](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/tests/test_engine.py)
-that you can copy as a starting point. The shape of a useful test:
+The common backend package has contract tests in
+[`test_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/tests/test_engine.py).
+The shape of a useful backend test:
 
 ```python
 import pytest
@@ -788,27 +782,6 @@ If your backend looks silent, set `DYN_LOG=info` (or
 `DYN_LOG=debug,dynamo=debug` for finer scoping) before launching —
 the framework configures `tracing` from `DYN_LOG`.
 
-### Python reference: sample engine
-
-[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
-is the canonical minimal reference. Run it as-is:
-
-```bash
-python -m dynamo.common.backend.sample_main --model-name test-model
-```
-
-It generates rotating token IDs with no ML dependencies, so it's a
-useful stand-in for AIPerf / end-to-end pipeline smoke tests. Lift
-these patterns:
-
-- `from_args` parses CLI args and returns `(engine, WorkerConfig)`
-  with no awaits.
-- `start()` returns an `EngineConfig` whose KV fields are
-  illustrative but not load-bearing (no real KV cache).
-- `generate()` polls `context.is_stopped()` between yields and
-  emits a `cancelled` terminal on observation.
-- `cleanup()` is a no-op because the engine holds no resources.
-
 ### Python checklist
 
 Before shipping:
@@ -831,8 +804,6 @@ Before shipping:
   — authoritative contract.
 - [Package README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — feature gaps, error model, request/response contract.
-- [Sample engine](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
-  — example user guide.
 - Rust tab on this page — the Rust counterpart, same contract,
   lower-level.
 

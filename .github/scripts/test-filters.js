@@ -13,6 +13,7 @@
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
  * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
+ * - Route backend-common files to Rust checks without framework E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -111,6 +112,28 @@ const testCases = [
     file: 'lib/sidecar/README.md',
     expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar README avoids Rust, Fern, and E2E checks'
+  },
+
+  // backend-common Rust and support files should avoid unrelated framework E2E
+  {
+    file: 'lib/backend-common/src/worker.rs',
+    expect: { backend_common: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'backend-common source triggers Rust checks without framework E2E'
+  },
+  {
+    file: 'lib/backend-common/Cargo.toml',
+    expect: { backend_common: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'backend-common manifest triggers Rust checks without framework E2E'
+  },
+  {
+    file: 'lib/backend-common/examples/mocker/docker-compose.yml',
+    expect: { backend_common: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'backend-common support file avoids Rust and framework E2E'
+  },
+  {
+    file: 'lib/backend-common/README.md',
+    expect: { backend_common: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'backend-common README avoids Rust, Fern, and framework E2E'
   },
 
   // Doc files should be excluded from core (negation patterns)
