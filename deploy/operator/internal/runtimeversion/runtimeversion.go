@@ -26,7 +26,9 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
-// AtLeast reports whether v is greater than or equal to minimum.
+// AtLeast reports whether v's normalized compatibility core is greater than or
+// equal to minimum. Image-tag prerelease and build suffixes are intentionally
+// excluded by ParseImageVersion before this comparison.
 func (v Version) AtLeast(minimum Version) bool {
 	if v.Major != minimum.Major {
 		return v.Major > minimum.Major

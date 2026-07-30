@@ -8,7 +8,10 @@ package runtimeversion
 import "testing"
 
 func TestVersionAtLeast(t *testing.T) {
+	t.Log("define the minimum supported runtime compatibility core")
 	minimum := Version{Major: 1, Minor: 4, Patch: 1}
+
+	t.Log("define comparisons below, at, and above the minimum")
 	tests := []struct {
 		name    string
 		version Version
@@ -25,6 +28,7 @@ func TestVersionAtLeast(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("compare the normalized runtime compatibility cores")
 			if got := tt.version.AtLeast(minimum); got != tt.want {
 				t.Fatalf("%s.AtLeast(%s) = %t, want %t", tt.version, minimum, got, tt.want)
 			}

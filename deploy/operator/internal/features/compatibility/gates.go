@@ -26,11 +26,11 @@ import (
 
 var (
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
-	// instead of Ray for multi-node deployments. Enabled for DGDs originally
-	// created by operator >= 1.0.0.
-	VLLMMultiprocessing = OriginGate{
+	// instead of Ray for multi-node deployments. It is enabled for resources
+	// originally created by operator >= 1.0.0.
+	VLLMMultiprocessing = Gate[Versions]{
 		Name:             "VLLMMultiprocessing",
-		MinOriginVersion: *semver.MustParse("1.0.0"),
+		MinOriginVersion: semver.MustParse("1.0.0"),
 	}
 
 	// Canary health check compatibility policy:
@@ -45,16 +45,17 @@ var (
 	//	  - type: FeatureGatePending
 	//	    when: the runtime gate passes but the origin gate preserves the legacy default
 
-	// CanaryHealthChecksOrigin gates the canary health-check default on the
-	// operator version that created the resource.
-	CanaryHealthChecksOrigin = OriginGate{
-		Name:             "CanaryHealthChecks",
-		MinOriginVersion: *semver.MustParse("1.4.0"),
-	}
-
-	// CanaryHealthChecksRuntime gates canary health checks on runtime support.
-	CanaryHealthChecksRuntime = RuntimeGate{
-		Name:              "CanaryHealthChecks",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 4, Patch: 0},
-	}
+	canaryHealthChecksMinOriginVersion  = semver.MustParse("1.4.0")
+	canaryHealthChecksMinRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 4, Patch: 0}
 )
+
+// CanaryHealthChecks returns the canary health-check compatibility gate for a
+// caller's concrete Gated resource type.
+func CanaryHealthChecks[T Gated](optIn Predicate[T]) Gate[T] {
+	return Gate[T]{
+		Name:              "CanaryHealthChecks",
+		MinOriginVersion:  canaryHealthChecksMinOriginVersion,
+		MinRuntimeVersion: &canaryHealthChecksMinRuntimeVersion,
+		OptIn:             optIn,
+	}
+}
