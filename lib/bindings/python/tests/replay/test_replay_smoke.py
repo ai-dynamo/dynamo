@@ -276,6 +276,54 @@ def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
         )
 
 
+def test_planner_replay_accepts_multi_shard_dynamo_trace(tmp_path):
+    trace_paths = []
+    for index in range(2):
+        trace_path = tmp_path / f"trace-{index}.jsonl"
+        trace_path.write_text(
+            json.dumps(
+                {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_end",
+                    "event_time_unix_ms": 1_010 + index * 10,
+                    "request": {
+                        "request_id": f"request-{index}",
+                        "request_received_ms": 1_000 + index * 10,
+                        "output_tokens": 2,
+                        "replay": {
+                            "trace_block_size": 64,
+                            "input_length": 64,
+                            "input_sequence_hashes": [101 + index],
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        trace_paths.append(trace_path)
+
+    planner_report = run_trace_replay(
+        trace_paths,
+        extra_engine_args=_vllm_args(),
+        num_workers=1,
+        trace_format="dynamo",
+        planner_config={
+            "mode": "agg",
+            "optimization_target": "throughput",
+            "report_interval_hours": None,
+            "live_dashboard_port": 0,
+        },
+    )
+
+    _assert_basic_report_counts(
+        planner_report.trace_report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_trace_replay_supports_distinct_trace_and_engine_block_sizes(
     tmp_path, replay_mode

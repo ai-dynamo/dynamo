@@ -97,6 +97,32 @@ Direct GMS enablement is useful for backend integration testing and
 pause/resume-style lifecycle experiments. By itself, it does not configure
 active/passive failover; use the `failover` field for the shadow engine flow.
 
+## Backend Support
+
+### GPU Memory Service
+
+| Backend | Managed Memory | Multinode | Upstream Integration |
+| :--- | :--- | :---: | :---: |
+| **vLLM** | Weights and KV | Supported | Work in progress |
+| **SGLang** | Weights and KV | Supported | Work in progress |
+| **TensorRT-LLM** | Weights | Work in progress | Work in progress |
+
+The backend integrations rely on inference-engine changes that are still being upstreamed.
+
+### Shadow Engine Failover
+
+| Backend | Single Node | Multinode | KV-Cache Reuse | Hardware Fault Tolerance |
+| :--- | :---: | :---: | :---: | :---: |
+| **vLLM** | Supported | Supported | Not supported | Not supported |
+| **SGLang** | Experimental | Experimental | Not supported | Not supported |
+| **TensorRT-LLM** | Experimental | Experimental | Not supported | Not supported |
+
+KV-cache reuse means remapping the existing cache into the standby engine so in-flight requests can
+continue after failover. Hardware fault tolerance requires placing the active and standby engines on
+disjoint hardware. Neither capability is currently supported.
+
+For the cross-feature backend overview, see [Compatibility](../reference/compatibility.mdx).
+
 ## Prerequisites
 
 - Kubernetes 1.34 or newer with DRA v1 (`resource.k8s.io/v1`) enabled.

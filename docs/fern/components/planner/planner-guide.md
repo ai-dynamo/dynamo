@@ -99,15 +99,16 @@ At startup, the planner always tries to fetch self-benchmark results from the `g
 Manual native AIC perf-model config:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    aic_perf_model:
-      hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-      system: h200_sxm
-      backend: vllm
-      prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-      decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      aic_perf_model:
+        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
+        system: h200_sxm
+        backend: vllm
+        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
 ```
 
 ### Throughput-Based Scaling Settings
@@ -138,7 +139,7 @@ features:
 | `mode` | string | `disagg` | Planner mode: `disagg`, `prefill`, `decode`, or `agg`. |
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
-| `namespace` | string | env `DYN_NAMESPACE` | Kubernetes namespace for the deployment. |
+| `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
 | `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
 
 ### Traffic Prediction Settings
@@ -244,6 +245,6 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner overview](README.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](../../design-docs/planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
-- [DGDR Examples](../../kubernetes/dgdr-examples.md) — DGDR YAML examples, sample configurations, advanced patterns
+- [DGDR Templates](../../templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

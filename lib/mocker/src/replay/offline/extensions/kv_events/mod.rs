@@ -174,7 +174,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
         }
 
         let pass_start_ms = current_time_ms;
-        let pass = worker.execute_pass(&mut collector, current_time_ms);
+        let pass = worker.execute_pass(&mut collector, current_time_ms)?;
         current_time_ms = pass.end_ms;
 
         let router_event_visibility =

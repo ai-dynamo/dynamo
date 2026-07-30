@@ -51,6 +51,9 @@ def _make_config(**parallel_overrides):
     cfg.stage_configs_path = None
     cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
+    cfg.engine_args.enable_lora = False
+    cfg.engine_args.max_cpu_loras = None
+    cfg.engine_args.max_loras = None
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return cfg
@@ -102,3 +105,49 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+    def test_lora_disabled_resolves_no_capacity(self):
+        config = _make_config()
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) is None
+
+    def test_lora_enabled_with_unset_max_loras_resolves_no_capacity_limit(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) is None
+
+    def test_lora_enabled_uses_configured_max_cpu_loras(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 3
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 3
+
+    def test_lora_enabled_falls_back_to_max_loras_when_max_cpu_loras_unset(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = None
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_uses_max_loras_even_when_max_cpu_loras_set(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 8
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_none_when_lora_disabled(self):
+        config = _make_config()
+        config.engine_args.enable_lora = False
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) is None
