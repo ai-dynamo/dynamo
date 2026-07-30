@@ -153,7 +153,8 @@ fn zero_output_completion_survives_decode_reservation_failure() {
         None,
         0.0,
         false,
-    );
+    )
+    .unwrap();
 
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].uuid, normal_uuid);

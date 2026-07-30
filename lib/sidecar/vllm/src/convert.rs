@@ -217,15 +217,19 @@ fn build_kv_parameters(
             );
             Some(serde_json::Value::Object(params))
         }
-        DisaggregationMode::Decode => Some(
-            prefill_result
+        DisaggregationMode::Decode => {
+            let mut params = prefill_result
                 .ok_or_else(|| {
                     client::invalid_argument(
                         "decode request is missing the prefill_result KV payload",
                     )
                 })?
-                .disaggregated_params,
-        ),
+                .disaggregated_params;
+            // The prefill handoff carries the NIXL side-channel port; normalize it
+            // so vLLM builds a valid ZMQ URL (see stringify_remote_port).
+            stringify_remote_port(&mut params);
+            Some(params)
+        }
         DisaggregationMode::Encode => {
             return Err(client::invalid_argument(
                 "encode mode is not supported by the vLLM sidecar",
@@ -238,6 +242,34 @@ fn build_kv_parameters(
         cache_salt: cache_salt.unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
     })
+}
+
+/// vLLM's NIXL connector builds the decode->prefill side-channel address by
+/// f-stringing `remote_port` (`f"tcp://{host}:{port}"`). The value reaches the
+/// engine through a `google.protobuf.Struct`, whose numbers are always `double`,
+/// so an integer port arrives as `5600.0` and the ZMQ URL fails to parse. Send it
+/// as a string instead — vLLM renders `5600` and only ever uses it to build that
+/// URL. Remove once vLLM coerces the port itself.
+fn stringify_remote_port(params: &mut serde_json::Value) {
+    let serde_json::Value::Object(map) = params else {
+        return;
+    };
+    // struct_to_json recovers a whole port as an integer; coerce a whole float
+    // defensively so a bare `5600.0` never slips through unmodified.
+    let port = map.get("remote_port").and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                .map(|f| f as u64)
+        })
+    });
+    if let Some(port) = port {
+        map.insert(
+            "remote_port".to_string(),
+            serde_json::Value::String(port.to_string()),
+        );
+    }
 }
 
 fn bool_extra(

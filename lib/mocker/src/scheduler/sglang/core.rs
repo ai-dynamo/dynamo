@@ -559,23 +559,52 @@ impl SglangCore {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_pass(
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.execute_pass_internal(Some(collector), now_ms)
+        self.try_execute_pass(collector, now_ms)
+            .expect("SGLang scheduler pass failed")
     }
 
+    pub(crate) fn try_execute_pass(
+        &mut self,
+        collector: &mut TraceCollector,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(Some(collector), now_ms)
+    }
+
+    #[cfg(test)]
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
-        self.execute_pass_internal(None, now_ms)
+        self.try_execute_hidden_pass(now_ms)
+            .expect("SGLang hidden scheduler pass failed")
     }
 
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(None, now_ms)
+    }
+
+    #[cfg(test)]
     pub(super) fn execute_pass_internal(
+        &mut self,
+        collector: Option<&mut TraceCollector>,
+        now_ms: f64,
+    ) -> EnginePassResult {
+        self.try_execute_pass_internal(collector, now_ms)
+            .expect("SGLang scheduler pass failed")
+    }
+
+    pub(super) fn try_execute_pass_internal(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
-    ) -> EnginePassResult {
+    ) -> anyhow::Result<EnginePassResult> {
         let mut admissions = self.promote_prebuilt_ready();
         let materialized_waiting = !self.prebuilt_ready.is_empty();
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
@@ -612,7 +641,7 @@ impl SglangCore {
         let mean_isl = admit.total_isl.checked_div(batch_size).unwrap_or(0);
         let mean_prefix = admit.total_prefix.checked_div(batch_size).unwrap_or(0);
         let prefill_time =
-            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
+            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true)?;
 
         for mut req in admit.can_run {
             if req.materialized_tokens < req.current_sequence_len() {
@@ -639,7 +668,7 @@ impl SglangCore {
             self.speculative_sampler.as_mut(),
             decode_start_ms,
             true,
-        );
+        )?;
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
@@ -727,7 +756,7 @@ impl SglangCore {
         let (accept_length_output_tokens, accept_length_decode_forwards) =
             accept_length_sample(&decode.output_signals);
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
-        EnginePassResult {
+        Ok(EnginePassResult {
             end_ms: decode.end_ms,
             completed_requests: decode
                 .output_signals
@@ -748,7 +777,7 @@ impl SglangCore {
             fpm: Some(fpm),
             accept_length_output_tokens,
             accept_length_decode_forwards,
-        }
+        })
     }
 
     fn active_kv_blocks(&self) -> u64 {
@@ -779,21 +808,23 @@ fn simulate_prefill_duration(
     mean_prefix: usize,
     config: &SglangConfig,
     apply_speedup: bool,
-) -> Duration {
+) -> anyhow::Result<Duration> {
     if batch_size == 0 || config.worker_type == WorkerType::Decode {
-        return Duration::ZERO;
+        return Ok(Duration::ZERO);
     }
 
     let prefill_time = config
         .perf_model
-        .predict_prefill_time(batch_size, mean_isl, mean_prefix);
+        .predict_prefill_time(batch_size, mean_isl, mean_prefix)?;
     let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
 
     if !apply_speedup || config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
-        return total_time;
+        return Ok(total_time);
     }
 
-    Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio)
+    Ok(Duration::from_secs_f64(
+        total_time.as_secs_f64() / config.speedup_ratio,
+    ))
 }
 
 fn debug_assert_sglang_scheduler_state(

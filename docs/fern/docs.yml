@@ -245,13 +245,13 @@ redirects:
   - source: "/dynamo/kubernetes-deployment/cloud-provider-guides/gcp/gke-setup"
     destination: "/dynamo/dev/kubernetes/installation/managed-kubernetes/gcp/gke-setup"
   - source: "/dynamo/kubernetes-deployment/deploy-models/dgdr-examples"
-    destination: "/dynamo/dev/kubernetes/auto-deployment/dgdr-examples"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgdr"
   - source: "/dynamo/kubernetes-deployment/deploy-models/dgdr-reference"
     destination: "/dynamo/dev/kubernetes/auto-deployment/dgdr-walkthrough"
   - source: "/dynamo/kubernetes-deployment/deploy-models/managing-models-with-dynamo-model"
     destination: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamo-model"
   - source: "/dynamo/kubernetes-deployment/deploy-models/model-deployment-guide"
-    destination: "/dynamo/dev/kubernetes/model-deployment/model-deployment-guide"
+    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
   - source: "/dynamo/kubernetes-deployment/model-loading/model-caching"
     destination: "/dynamo/dev/kubernetes/model-deployment/model-caching"
   - source: "/dynamo/kubernetes-deployment/model-loading/model-express"
@@ -433,6 +433,8 @@ redirects:
     destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
   - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/rust"
     destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/kubernetes/operations/cold-start-and-resiliency"
+    destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/reference/support-matrix"
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/dev/reference/feature-matrix"
@@ -538,11 +540,21 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/minikube-setup"
     destination: "/dynamo/dev/cli/installation/minikube-setup"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-deployment-guide"
-    destination: "/dynamo/dev/kubernetes/model-deployment/model-deployment-guide"
+    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
+  - source: "/dynamo/dev/kubernetes/model-deployment/model-deployment-guide"
+    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model"
     destination: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamo-model"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dgdr-reference"
     destination: "/dynamo/dev/kubernetes/auto-deployment/dgdr-walkthrough"
+  - source: "/dynamo/dev/kubernetes/auto-deployment/dgdr-examples"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgdr"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/v-llm"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/v-llm"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/tensor-rt-llm"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/sg-lang"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/sg-lang"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-caching"
     destination: "/dynamo/dev/kubernetes/model-deployment/model-caching"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/autoscaling"
@@ -783,9 +795,9 @@ footer: ./components/CustomFooter.tsx
 
 layout:
   searchbar-placement: header
-  page-width: 1376px # Formerly 1376 px
+  page-width: 1376px
   sidebar-width: 272px
-  content-width: 912px # Formerly 812 px
+  content-width: 912px
   tabs-placement: header
   hide-feedback: true
 
