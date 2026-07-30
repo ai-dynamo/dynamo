@@ -19,6 +19,10 @@ mod publication_hub;
 #[cfg(feature = "kv-dc-relay-wan")]
 mod readiness;
 mod resolution;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport_config;
 
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
@@ -35,3 +39,5 @@ pub use identity::{
     DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
     PoolIdentitySources,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+pub use transport_config::KvDcRelayTransportConfig;

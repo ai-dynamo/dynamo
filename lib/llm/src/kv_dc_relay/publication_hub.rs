@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use dynamo_kv_router::identity::PoolId;
@@ -131,6 +131,8 @@ pub(crate) enum PublicationHubError {
     Unavailable(String),
     #[error("pool {pool_id} reached its subscriber limit {limit}")]
     SubscriberLimit { pool_id: PoolId, limit: usize },
+    #[error("pool {0} subscriber exceeded its bounded publication queue")]
+    SubscriberLagged(PoolId),
     #[error("publication identity changed from {expected:?} to {actual:?}")]
     IdentityChanged {
         expected: Box<ProducerIdentity>,
@@ -169,7 +171,12 @@ struct HubSubscriber {
     sender: mpsc::Sender<QueuedFrame>,
     pending_bytes: Arc<AtomicUsize>,
     byte_limit: usize,
+    close_reason: Arc<AtomicU8>,
 }
+
+const SUBSCRIBER_ACTIVE: u8 = 0;
+const SUBSCRIBER_LAGGED: u8 = 1;
+const SUBSCRIBER_RETIRED: u8 = 2;
 
 impl HubSubscriber {
     fn try_send(&self, frame: Arc<PublicationFrame>) -> Result<(), SubscriberSendError> {
@@ -328,18 +335,22 @@ impl PublicationHub {
             PublicationHubError::Unavailable("subscriber ID space exhausted".to_string())
         })?;
         let (sender, receiver) = mpsc::channel(self.inner.config.queue_capacity);
+        let close_reason = Arc::new(AtomicU8::new(SUBSCRIBER_ACTIVE));
         state.subscribers.insert(
             subscriber_id,
             HubSubscriber {
                 sender,
                 pending_bytes: Arc::new(AtomicUsize::new(0)),
                 byte_limit: self.inner.config.queue_bytes,
+                close_reason: close_reason.clone(),
             },
         );
         Ok(PublicationHubSubscription {
             snapshot: state.snapshot.clone(),
             receiver,
             subscriber_id,
+            pool_id: self.inner.pool_id,
+            close_reason,
             hub: Arc::downgrade(&self.inner),
         })
     }
@@ -353,6 +364,13 @@ impl PublicationHub {
             lagged_subscribers: self.inner.lagged_subscribers.load(Ordering::Relaxed),
             last_error: state.last_error.clone(),
         }
+    }
+
+    pub(crate) fn retire(&self) {
+        self.inner.cancel.cancel();
+        let mut state = self.inner.state.lock();
+        state.is_ready = false;
+        close_subscribers(&mut state, SUBSCRIBER_RETIRED);
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -374,6 +392,8 @@ pub(crate) struct PublicationHubSubscription {
     snapshot: HubSnapshot,
     receiver: mpsc::Receiver<QueuedFrame>,
     subscriber_id: u64,
+    pool_id: PoolId,
+    close_reason: Arc<AtomicU8>,
     hub: Weak<PublicationHubInner>,
 }
 
@@ -383,15 +403,25 @@ impl PublicationHubSubscription {
     }
 
     pub(crate) async fn recv(&mut self) -> Result<Arc<PublicationFrame>, PublicationHubError> {
-        self.receiver
-            .recv()
-            .await
-            .map(|queued| queued.frame.clone())
-            .ok_or_else(|| {
-                PublicationHubError::Unavailable(
-                    "publication subscription requires a fresh snapshot".to_string(),
-                )
-            })
+        self.ensure_active()?;
+        let queued = self.receiver.recv().await;
+        self.ensure_active()?;
+        match queued {
+            Some(queued) => Ok(queued.frame.clone()),
+            None => Err(PublicationHubError::Unavailable(
+                "publication subscription requires a fresh snapshot".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn ensure_active(&self) -> Result<(), PublicationHubError> {
+        match self.close_reason.load(Ordering::Acquire) {
+            SUBSCRIBER_ACTIVE if !self.receiver.is_closed() => Ok(()),
+            SUBSCRIBER_LAGGED => Err(PublicationHubError::SubscriberLagged(self.pool_id)),
+            _ => Err(PublicationHubError::Unavailable(
+                "publication subscription requires a fresh snapshot".to_string(),
+            )),
+        }
     }
 }
 
@@ -416,14 +446,14 @@ async fn run_hub(mut task: HubTask) {
             let mut state = task.state.lock();
             state.is_ready = false;
             state.last_error = Some(reason.clone());
-            state.subscribers.clear();
+            close_subscribers(&mut state, SUBSCRIBER_RETIRED);
         }
         tracing::error!(pool_id = %task.pool_id, error = %reason, "KV DC Relay publication hub stopped");
         (task.terminal_failure)(reason);
     } else {
         let mut state = task.state.lock();
         state.is_ready = false;
-        state.subscribers.clear();
+        close_subscribers(&mut state, SUBSCRIBER_RETIRED);
     }
     task.stopped.cancel();
 }
@@ -484,7 +514,7 @@ async fn recover_snapshot(task: &mut HubTask) -> Result<(), PublicationHubError>
     validate_snapshot(task.actor.identity(), task.lease, &replacement)?;
     let mut state = task.state.lock();
     state.snapshot = replacement;
-    state.subscribers.clear();
+    close_subscribers(&mut state, SUBSCRIBER_RETIRED);
     drop(state);
     task.actor_deltas = subscription.deltas;
     Ok(())
@@ -596,10 +626,20 @@ fn fan_out(state: &mut HubState, frame: Arc<PublicationFrame>, lagged: &AtomicU6
             Ok(()) => true,
             Err(SubscriberSendError::Closed) => false,
             Err(SubscriberSendError::Full) => {
+                subscriber
+                    .close_reason
+                    .store(SUBSCRIBER_LAGGED, Ordering::Release);
                 lagged.fetch_add(1, Ordering::Relaxed);
                 false
             }
         });
+}
+
+fn close_subscribers(state: &mut HubState, reason: u8) {
+    for subscriber in state.subscribers.values() {
+        subscriber.close_reason.store(reason, Ordering::Release);
+    }
+    state.subscribers.clear();
 }
 
 pub(super) fn publication_lease(identity: ProducerIdentity) -> LaneLease {
@@ -737,6 +777,7 @@ mod tests {
             sender,
             pending_bytes: pending_bytes.clone(),
             byte_limit: 300,
+            close_reason: Arc::new(AtomicU8::new(SUBSCRIBER_ACTIVE)),
         };
         let frame = Arc::new(publication_codec::encode_heartbeat(identity(), 1));
         assert!(subscriber.try_send(frame.clone()).is_ok());
@@ -857,8 +898,10 @@ mod tests {
             let frame = fast.recv().await.unwrap();
             assert_eq!(frame.sequence, event_id);
         }
-        assert!(slow.recv().await.is_ok());
-        assert!(slow.recv().await.is_err());
+        assert!(matches!(
+            slow.recv().await,
+            Err(PublicationHubError::SubscriberLagged(_))
+        ));
         assert_eq!(hub.health().subscriber_count, 1);
         assert_eq!(hub.health().lagged_subscribers, 1);
 

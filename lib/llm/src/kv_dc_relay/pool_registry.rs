@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(feature = "kv-dc-relay-wan")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::identity::PoolId;
@@ -27,8 +29,8 @@ use super::identity::{
 use super::load::{PoolLoadSnapshot, PoolLoadState};
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::publication_hub::{
-    PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubSubscription,
-    TerminalFailure, publication_lease,
+    PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubHealth,
+    PublicationHubSubscription, TerminalFailure, publication_lease,
 };
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::readiness::{EndpointServingFacts, ServingReadinessSnapshot, derive_endpoint_readiness};
@@ -97,6 +99,14 @@ enum PoolHubState {
 struct PoolHubSlot {
     state: Mutex<PoolHubState>,
     changed: Notify,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PoolPublicationMetricsSnapshot {
+    pub(super) initialized_hubs: usize,
+    pub(super) ready_hubs: usize,
+    pub(super) terminal_failures: u64,
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -232,6 +242,34 @@ impl PoolHubSlot {
             PoolHubState::Retired => "retired",
         }
     }
+
+    fn metrics(&self) -> Option<PublicationHubHealth> {
+        let hub = match &*self.state.lock() {
+            PoolHubState::Ready(hub) => Some(hub.clone()),
+            PoolHubState::Vacant
+            | PoolHubState::Initializing
+            | PoolHubState::Failed(_)
+            | PoolHubState::Retired => None,
+        };
+        hub.map(|hub| hub.health())
+    }
+
+    fn is_initialized(&self) -> bool {
+        matches!(
+            &*self.state.lock(),
+            PoolHubState::Ready(_) | PoolHubState::Failed(_)
+        )
+    }
+
+    fn retire(&self) {
+        let hub = match &*self.state.lock() {
+            PoolHubState::Ready(hub) => Some(hub.clone()),
+            _ => None,
+        };
+        if let Some(hub) = hub {
+            hub.retire();
+        }
+    }
 }
 
 struct PoolReservation {
@@ -314,6 +352,8 @@ pub(super) struct PoolRegistry {
     readiness_tx: watch::Sender<ServingReadinessSnapshot>,
     #[cfg(feature = "kv-dc-relay-wan")]
     load_tx: watch::Sender<Vec<PoolLoadSnapshot>>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    publication_terminal_failures: AtomicU64,
 }
 
 impl PoolRegistry {
@@ -367,6 +407,7 @@ impl PoolRegistry {
             publication_config,
             readiness_tx,
             load_tx,
+            publication_terminal_failures: AtomicU64::new(0),
         }
     }
 
@@ -642,7 +683,7 @@ impl PoolRegistry {
         mode: PoolRetirementMode,
     ) -> bool {
         #[cfg(feature = "kv-dc-relay-wan")]
-        let Some(hub) = self.withdraw_publication_visibility(pool_id, layout_generation, mode)
+        let Some((hub, _)) = self.withdraw_publication_visibility(pool_id, layout_generation, mode)
         else {
             return false;
         };
@@ -678,7 +719,7 @@ impl PoolRegistry {
         pool_id: PoolId,
         layout_generation: u64,
         mode: PoolRetirementMode,
-    ) -> Option<Arc<PoolHubSlot>> {
+    ) -> Option<(Arc<PoolHubSlot>, bool)> {
         let mut state = self.state.lock();
         let entry = state.pools.get_mut(&pool_id)?;
         if entry.layout_generation != layout_generation {
@@ -696,7 +737,7 @@ impl PoolRegistry {
             publish_readiness_if_changed(&mut state, &self.readiness_tx);
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
-        Some(hub)
+        Some((hub, was_active))
     }
 
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -706,13 +747,19 @@ impl PoolRegistry {
         layout_generation: u64,
         reason: &str,
     ) -> bool {
-        let fenced = self
-            .withdraw_publication_visibility(pool_id, layout_generation, PoolRetirementMode::Fenced)
-            .is_some();
-        if fenced {
+        let retired = self.withdraw_publication_visibility(
+            pool_id,
+            layout_generation,
+            PoolRetirementMode::Fenced,
+        );
+        let Some((hub, was_active)) = retired else {
+            return false;
+        };
+        hub.retire();
+        if was_active {
             tracing::error!(%pool_id, layout_generation, %reason, "Fencing KV DC Relay pool after terminal generation task failure");
         }
-        fenced
+        was_active
     }
 
     pub(super) async fn remove(&self, pool_id: PoolId, layout_generation: u64) -> bool {
@@ -771,7 +818,11 @@ impl PoolRegistry {
                 return;
             };
             let reason = format!("publication hub: {reason}");
-            registry.fence_generation(pool_id, identity.layout_generation(), &reason);
+            if registry.fence_generation(pool_id, identity.layout_generation(), &reason) {
+                registry
+                    .publication_terminal_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         });
         let hub = hub_slot
             .get_or_start(
@@ -816,6 +867,28 @@ impl PoolRegistry {
     #[cfg(feature = "kv-dc-relay-wan")]
     pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
         self.load_tx.borrow().clone()
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn publication_metrics(&self) -> PoolPublicationMetricsSnapshot {
+        let hubs = self
+            .state
+            .lock()
+            .pools
+            .values()
+            .map(|entry| entry.hub.clone())
+            .collect::<Vec<_>>();
+        let mut snapshot = PoolPublicationMetricsSnapshot {
+            terminal_failures: self.publication_terminal_failures.load(Ordering::Relaxed),
+            ..PoolPublicationMetricsSnapshot::default()
+        };
+        for hub in hubs {
+            snapshot.initialized_hubs += usize::from(hub.is_initialized());
+            if let Some(health) = hub.metrics() {
+                snapshot.ready_hubs += usize::from(health.ready);
+            }
+        }
+        snapshot
     }
 
     pub(super) async fn shutdown(&self) {
