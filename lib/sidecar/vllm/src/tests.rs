@@ -525,8 +525,38 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
         let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
-        assert_eq!(decoded, handoff);
+        // Every field round-trips opaquely except remote_port, which the sidecar
+        // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
+        // Struct number would reach the engine as `20097.0`).
+        let mut expected = handoff.clone();
+        expected["remote_port"] = json!("20097");
+        assert_eq!(decoded, expected);
     }
+}
+
+#[test]
+fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
+    let component = |extra: &[&str]| {
+        let mut argv = vec![
+            "dynamo-vllm-sidecar",
+            "--vllm-endpoint",
+            "127.0.0.1:50051",
+            "--model-path",
+            "test-model",
+            "--component",
+            "custom",
+        ];
+        argv.extend_from_slice(extra);
+        VllmSidecarEngine::from_args(Some(argv.iter().map(|s| s.to_string()).collect()))
+            .expect("from_args")
+            .1
+            .component
+    };
+    // Aggregated keeps the operator-configured component.
+    assert_eq!(component(&[]), "custom");
+    // Disaggregated roles override to fixed names so the frontend can route.
+    assert_eq!(component(&["--disaggregation-mode", "prefill"]), "prefill");
+    assert_eq!(component(&["--disaggregation-mode", "decode"]), "backend");
 }
 
 #[tokio::test]

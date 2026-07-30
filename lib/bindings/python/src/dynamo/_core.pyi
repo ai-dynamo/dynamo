@@ -15,7 +15,10 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypedDict,
 )
+
+from typing_extensions import NotRequired
 
 # Import from specialized modules
 from .prometheus_metrics import RuntimeMetrics as PyRuntimeMetrics
@@ -864,6 +867,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_event_publishing_enabled: bool | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -1131,6 +1135,23 @@ class ApproxKvIndexer:
         ...
 
 
+class KvStoredEventInput(TypedDict):
+    type: Literal["stored"]
+    token_ids: List[int]
+    num_block_tokens: List[int]
+    block_hashes: List[int]
+    parent_hash: NotRequired[Optional[int]]
+    block_mm_infos: NotRequired[Optional[List[Optional[Dict[str, Any]]]]]
+    lora_name: NotRequired[Optional[str]]
+    is_eagle: NotRequired[Optional[bool]]
+    cache_salt: NotRequired[Optional[str]]
+
+
+class KvRemovedEventInput(TypedDict):
+    type: Literal["removed"]
+    block_hashes: List[int]
+
+
 class KvEventPublisher:
     """
     A KV event publisher will publish KV events corresponding to the component.
@@ -1157,7 +1178,8 @@ class KvEventPublisher:
         When zmq_endpoint is provided, the publisher subscribes to a ZMQ socket for
         incoming engine events (e.g. from SGLang/vLLM) and relays them to NATS.
 
-        When zmq_endpoint is None, events are pushed manually via publish_stored/publish_removed.
+        When zmq_endpoint is None, events are pushed manually via publish_batch,
+        publish_stored, or publish_removed.
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
@@ -1167,6 +1189,8 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
+                flushes at each submitted source-list boundary.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
         """
 
@@ -1208,6 +1232,18 @@ class KvEventPublisher:
 
         Args:
             block_hashes: List of block hashes to remove (signed 64-bit integers)
+        """
+        ...
+
+    def publish_batch(
+        self, events: Sequence[KvStoredEventInput | KvRemovedEventInput]
+    ) -> None:
+        """
+        Publish an ordered list of KV events as one processor input.
+
+        The complete list is validated before it is enqueued. Compatible
+        events are coalesced while preserving source order and the processor's
+        existing block-count limits.
         """
         ...
 
@@ -1869,6 +1905,7 @@ class KvRouterConfig:
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
+        decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
@@ -1881,6 +1918,7 @@ class KvRouterConfig:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
             overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1954,6 +1992,10 @@ class KvRouterConfig:
     def prefill_load_scale(self) -> float: ...
     @prefill_load_scale.setter
     def prefill_load_scale(self, value: float) -> None: ...
+    @property
+    def decode_active_request_weight(self) -> float: ...
+    @decode_active_request_weight.setter
+    def decode_active_request_weight(self, value: float) -> None: ...
 
     def with_overrides(
         self,
@@ -1962,6 +2004,7 @@ class KvRouterConfig:
         overlap_score_credit: Optional[float] = None,
         overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        decode_active_request_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
@@ -2052,6 +2095,7 @@ class MockEngineArgs:
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
+        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -2084,6 +2128,9 @@ class MockEngineArgs:
 
     @enable_prefix_caching.setter
     def enable_prefix_caching(self, value: bool) -> None: ...
+
+    @property
+    def g1_backend(self) -> str: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...
@@ -2537,6 +2584,7 @@ def run_mocker_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2550,6 +2598,10 @@ def run_mocker_trace_replay(
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only). When any is set, the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests; with none set, goodput is omitted.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
 
@@ -2580,106 +2632,19 @@ def run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
-
-class PlannerReplayBridge:
-    """Drives an offline replay to completion with a Python planner. The Rust
-    simulation owns the drive loop and calls back into ``planner`` once per
-    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
-    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
-
-    def __init__(
-        self,
-        trace_file: str | os.PathLike[str],
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> None: ...
-
-    @staticmethod
-    def create_disagg(
-        trace_file: str | os.PathLike[str],
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic_disagg(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
@@ -3481,6 +3446,7 @@ class backend:
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
+            default_thinking_mode: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

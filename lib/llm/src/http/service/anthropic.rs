@@ -390,6 +390,14 @@ async fn anthropic_messages(
                 format!("{e:#}"),
             );
         }
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Validation);
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                dynamo_err.message(),
+            );
+        }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
@@ -859,6 +867,31 @@ fn anthropic_sanitized_error_with_details(
         .into_response()
 }
 
+/// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
+/// error chain. Request validation surfaces `InvalidArgument`, while backends
+/// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
+/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`; both are client
+/// input errors and warrant an HTTP 400 rather than a generic 500.
+fn find_invalid_argument_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_runtime::error::DynamoError> {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && matches!(
+                dynamo_error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        {
+            return Some(dynamo_error);
+        }
+        current = error.source();
+    }
+    None
+}
+
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
 fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
@@ -967,5 +1000,23 @@ mod tests {
 
         assert_eq!(nvext.backend_instance_id, None);
         assert_eq!(nvext.decode_worker_id, None);
+    }
+
+    #[test]
+    fn anthropic_invalid_argument_is_found_through_error_context() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("invalid request")
+                .build(),
+        )
+        .context("request validation failed");
+
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(|error| error.message()),
+            Some("invalid request")
+        );
     }
 }

@@ -2067,7 +2067,7 @@ def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
 def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
     stub = _prefill_grid_stub(block_size=8)
     coordinator = SimpleNamespace(
-        find_longest_cache_hit=MagicMock(return_value=(([],), 16))
+        find_longest_cache_hit=MagicMock(return_value=(([],), 16, 0))
     )
     get_computed_blocks = MagicMock(
         side_effect=AssertionError("stats-recording lookup should not be used")

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +34,7 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::ReplayRequestHashes;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::components::{KvReplayMetadata, ReplayAdmissionMetadata};
 use crate::replay::offline::core::{
@@ -82,6 +83,7 @@ struct AdmitOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OfflinePendingRequestSnapshot {
     pub(crate) uuid: Uuid,
+    pub(crate) expected_output_tokens: Option<u32>,
     pub(crate) overlap_blocks_by_worker: Vec<(usize, u32)>,
 }
 
@@ -283,23 +285,72 @@ impl KvRouterPlacement {
     }
 }
 
-impl PlacementPolicy<DirectRequest> for KvRouterPlacement {
+trait PlacementRequestView {
+    fn metadata(&self) -> &DirectRequest;
+    fn input_length(&self) -> usize;
+    fn prompt_tokens(&self) -> Cow<'_, [u32]>;
+}
+
+impl PlacementRequestView for DirectRequest {
+    fn metadata(&self) -> &DirectRequest {
+        self
+    }
+
+    fn input_length(&self) -> usize {
+        self.tokens.len()
+    }
+
+    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
+        Cow::Borrowed(&self.tokens)
+    }
+}
+
+impl PlacementRequestView for ReplayRequestPayload {
+    fn metadata(&self) -> &DirectRequest {
+        self.metadata()
+    }
+
+    fn input_length(&self) -> usize {
+        self.input_length()
+    }
+
+    fn prompt_tokens(&self) -> Cow<'_, [u32]> {
+        match self.materialized_tokens() {
+            Some(tokens) => Cow::Borrowed(tokens),
+            None => Cow::Owned(ReplayRequestPayload::prompt_tokens(self)),
+        }
+    }
+}
+
+impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlacement {
     type Metadata = KvReplayMetadata;
     type Observation = RouterEventBatch;
 
     fn place(
         &mut self,
-        request: &DirectRequest,
+        request: &Request,
         metadata: Self::Metadata,
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<PlacementEffects> {
-        let request_id = request
+        let request_metadata = request.metadata();
+        let max_output_tokens = metadata
+            .max_output_tokens_override()
+            .map_or(request_metadata.max_output_tokens, |override_tokens| {
+                request_metadata.max_output_tokens.min(override_tokens)
+            });
+        let request_id = request_metadata
             .uuid
             .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
         let admissions = self
             .router
-            .on_request_arrival_for_session(request, metadata.into_hashes(), session_id, now_ms)?
+            .on_compact_request_arrival_for_session(
+                request,
+                max_output_tokens,
+                metadata.into_hashes(),
+                session_id,
+                now_ms,
+            )?
             .admissions;
         let mut decision = PlacementDecision::Queued;
         let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
@@ -405,6 +456,7 @@ impl OfflineReplayRouter {
         self.on_request_arrival_for_session(request, replay_hashes, None, now_ms)
     }
 
+    #[cfg(test)]
     pub(crate) fn on_request_arrival_for_session(
         &mut self,
         request: &DirectRequest,
@@ -412,7 +464,25 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
+        self.on_compact_request_arrival_for_session(
+            request,
+            request.max_output_tokens,
+            replay_hashes,
+            session_id,
+            now_ms,
+        )
+    }
+
+    fn on_compact_request_arrival_for_session<Request: PlacementRequestView>(
+        &mut self,
+        request: &Request,
+        max_output_tokens: usize,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let pending =
+            self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -456,6 +526,7 @@ impl OfflineReplayRouter {
         }
 
         let uuid = request
+            .metadata()
             .uuid
             .expect("offline replay requests must have UUIDs before router submission");
         let outcome = self.admit_request(pending, decay_now)?;
@@ -592,6 +663,7 @@ impl OfflineReplayRouter {
                     entry,
                     OfflinePendingRequestSnapshot {
                         uuid: entry.payload().uuid,
+                        expected_output_tokens: entry.payload().expected_output_tokens,
                         overlap_blocks_by_worker,
                     },
                 )
@@ -629,12 +701,15 @@ impl OfflineReplayRouter {
         self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
     }
 
-    fn build_pending_request(
+    fn build_pending_request<Request: PlacementRequestView>(
         &self,
-        request: &DirectRequest,
+        request_view: &Request,
+        max_output_tokens: usize,
         replay_hashes: Option<ReplayRequestHashes>,
         session_id: Option<String>,
     ) -> Result<PendingRequest> {
+        let request = request_view.metadata();
+        let input_length = request_view.input_length();
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
@@ -650,11 +725,15 @@ impl OfflineReplayRouter {
                     && self.tracking_hash.algorithm() == TrackingHashAlgorithm::PublicXxh3V1
                 {
                     Some(replay_hashes.sequence_hashes)
+                } else if !self.config.router_assume_kv_reuse {
+                    self.config
+                        .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 } else {
+                    let tokens = request_view.prompt_tokens();
                     self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
-                        &request.tokens,
+                        &tokens,
                         None,
                         BlockHashOptions::default(),
                         None,
@@ -663,11 +742,12 @@ impl OfflineReplayRouter {
                 (overlaps, token_seq)
             }
             None => {
-                let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
+                let tokens = request_view.prompt_tokens();
+                let overlaps = self.indexer.find_matches_for_request(&tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
-                    &request.tokens,
+                    &tokens,
                     None,
                     BlockHashOptions::default(),
                     None,
@@ -679,11 +759,11 @@ impl OfflineReplayRouter {
         Ok(PendingRequest {
             uuid,
             token_seq,
-            isl_tokens: request.tokens.len(),
+            isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
-                u32::try_from(request.max_output_tokens)
+                u32::try_from(max_output_tokens)
                     .context("max_output_tokens does not fit into u32")?,
             ),
             priority_jump,
@@ -994,8 +1074,14 @@ mod tests {
     #[test]
     fn session_identity_reaches_scheduling_request() {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let request = request(1, 7);
         let pending = router
-            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .build_pending_request(
+                &request,
+                request.max_output_tokens,
+                None,
+                Some("session-a".to_string()),
+            )
             .unwrap();
         let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
 
@@ -1025,7 +1111,12 @@ mod tests {
         );
 
         let pending = router
-            .build_pending_request(&request, Some(replay_hashes.clone()), None)
+            .build_pending_request(
+                &request,
+                request.max_output_tokens,
+                Some(replay_hashes.clone()),
+                None,
+            )
             .unwrap();
 
         assert_eq!(pending.token_seq, expected);

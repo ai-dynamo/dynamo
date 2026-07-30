@@ -41,6 +41,48 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 🔄 Upgrading Notes
 
+### Runtime version override for custom runtime images (v1.4.0+)
+
+Each `DynamoGraphDeployment` (DGD) or standalone `DynamoComponentDeployment` (DCD)
+component now resolves its Dynamo runtime compatibility version from its main container image.
+Use a semantic-version image tag such as `:1.4.0`, or set
+`runtimeVersionOverride` to the compatible Dynamo runtime version when the image uses a digest,
+custom build tag, or mutable non-semantic-version tag such as `:latest`. The override takes
+precedence over the image-derived version only when the operator selects runtime-version-specific
+flags, environment variables, and behavior. It never changes the image reference or rendered Pod:
+the configured image, including `:latest`, runs unchanged.
+
+```yaml
+components:
+  - name: worker
+    runtimeVersionOverride: 1.4.0
+    podTemplate:
+      spec:
+        containers:
+          - name: main
+            image: registry.example/my-runtime:build-20260723
+```
+
+Admission requires every new component's main-container image. In `v1beta1`, set
+`spec.components[*].podTemplate.spec.containers[name=main].image` for a DGD, or
+`spec.podTemplate.spec.containers[name=main].image` for a standalone DCD. In `v1alpha1`, set
+`spec.services.<service-name>.extraPodSpec.mainContainer.image` for a DGD, or
+`spec.extraPodSpec.mainContainer.image` for a standalone DCD. These fields were not previously
+required by Dynamo admission, but were effectively required: Kubernetes rejects the rendered Pod
+specification when its main container has no image.
+
+After upgrading the CRDs and operator, admission denies a new DGD component when its main image is
+not tagged with a semantic version and `runtimeVersionOverride` is unset. The same applies to a
+DGDR whose `spec.image` is not tagged with a semantic version. This includes digest references,
+custom tags, and `:latest`. Controller-generated standalone DCDs may omit the override.
+
+These requirements are ratcheted on updates: a pre-existing component with an unchanged missing
+pod configuration or main image remains admissible, as does an unchanged non-semantic-version
+image without an override. Adding or changing an image applies the current validation, and removing
+an existing pod configuration or main image is rejected. Changing the image to a
+non-semantic-version tag requires setting `runtimeVersionOverride` to that image's Dynamo runtime
+compatibility version in the same update.
+
 ### Bundled NATS is now disabled by default
 
 The bundled NATS subchart is no longer installed by default because Dynamo's default request and
@@ -107,7 +149,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.4.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.11 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -185,6 +227,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
+| grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
@@ -246,7 +289,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
-| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
@@ -286,7 +329,7 @@ Note: `global.*.install` controls whether the bundled subcharts are deployed. Wh
 
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation-guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/fern/kubernetes/installation-guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
