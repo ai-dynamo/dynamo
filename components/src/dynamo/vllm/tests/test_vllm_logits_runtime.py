@@ -7,7 +7,7 @@ activation that stashes serialized spec entries onto `SamplingParams`, and
 the startup registration helper.
 
 The shared spec-entry policy (generation-stage gating, serialization) is
-tested in `dynamo.common.backend.tests.test_engine`. These tests exercise
+tested in `dynamo.backend.tests.test_engine`. These tests exercise
 the vLLM realizer in isolation with mocked `SamplingParams`, so they need
 `vllm` + `torch` importable but no GPU."""
 
@@ -24,7 +24,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm.v1.sample.logits_processor")
 
-from dynamo.common.backend.engine import (  # noqa: E402
+from dynamo.backend._engine import (  # noqa: E402
     ForcedTokenSequenceSpec,
     serialize_logits_processor_entries,
 )

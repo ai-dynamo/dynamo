@@ -5,14 +5,14 @@
 DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
 tokenizer-init flip, the unified `generate` attach/skip matrix
 threaded through the shared spec entry layer in
-`dynamo.common.backend.engine`, the TRT-LLM realizer (spec entry →
+`dynamo.backend._engine`, the TRT-LLM realizer (spec entry →
 live `BaseLogitsProcessor` → `TrtllmDynamoLogitsAdapter`), the
 adapter's shape and CUDA-stream behavior, and the realizer's
 no-op-on-empty contract.
 
 Shared-layer policy itself (generation-stage gating, spec entry
 composition, env-gated spec resolver) is tested in
-`dynamo.common.backend.tests.test_engine` without GPU or tensorrt_llm.
+`dynamo.backend.tests.test_engine` without GPU or tensorrt_llm.
 These tests exercise the same policy through the unified TRT-LLM
 engine to confirm the wiring."""
 
@@ -48,7 +48,7 @@ pytestmark = [
 
 
 def test_attach_logits_processors_no_op_on_empty():
-    """The unified engine calls `attach_logits_processors` unconditionally
+    """The Backend SDK engine calls `attach_logits_processors` unconditionally
     once `logits_processors_for_request` returns its (possibly empty) list of
     entries. Empty input must not touch
     `sampling_params.logits_processor`."""
@@ -67,7 +67,7 @@ def test_attach_logits_processors_realizes_forced_token_sequence_spec():
     realization that the TRT-LLM realizer owns."""
     from unittest.mock import MagicMock
 
-    from dynamo.common.backend.engine import ForcedTokenSequenceSpec
+    from dynamo.backend._engine import ForcedTokenSequenceSpec
 
     sampling_params = MagicMock()
     entries = [ForcedTokenSequenceSpec(token_ids=(1, 2, 3), eos_token_id=2)]
@@ -84,7 +84,7 @@ def test_attach_logits_processors_realizes_python_processor_spec():
     serializable spec entry."""
     from unittest.mock import MagicMock
 
-    from dynamo.common.backend.engine import PythonProcessorSpec
+    from dynamo.backend._engine import PythonProcessorSpec
 
     sampling_params = MagicMock()
 

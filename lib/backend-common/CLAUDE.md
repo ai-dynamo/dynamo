@@ -230,7 +230,7 @@ aggregates it when present. `usage(prompt, completion)` computes
 
 - **Non-generic `Worker`, `EngineAdapter`, and `run()`.** All hold
   `Arc<dyn LLMEngine>`. This is load-bearing for the PyO3 path:
-  `components/src/dynamo/common/backend/worker.py` is a thin shim
+  `components/src/dynamo/backend/_worker.py` is a thin shim
   over `dynamo._core.backend.Worker` (this crate), so Python engines
   plug in through the same `Arc<dyn LLMEngine>` slot via a
   `PyLLMEngine` adapter.
@@ -567,7 +567,7 @@ Also available: `testing::mock_context()` and
 Shipped: `dynamo._core.backend.Worker` is a PyO3 binding that hands a
 `PyLLMEngine` (Python-implemented) into the same `Arc<dyn LLMEngine>`
 slot the Rust path uses. The Python-side
-`dynamo.common.backend.Worker` (`components/src/dynamo/common/backend/worker.py`)
+`dynamo.backend.Worker` (`components/src/dynamo/backend/_worker.py`)
 is a thin wrapper that drives this. The lifecycle state machine,
 signal handling, and graceful-shutdown orchestrator live entirely in
 this crate — Python adds no lifecycle logic.

@@ -215,10 +215,9 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
-  - components/src/dynamo/common/
-  - components/src/dynamo/common/backend/
   - components/src/dynamo/backend/
   - components/src/dynamo/sample_engine/
+  - components/src/dynamo/common/
   - components/src/dynamo/common/config_dump/
   - components/src/dynamo/common/configuration/
   - components/src/dynamo/common/lora/
@@ -669,15 +668,15 @@ shared:
   owners:
   - backend-trtllm
   - frontend
-- glob: components/src/dynamo/common/backend/metrics.py
+- glob: components/src/dynamo/backend/metrics.py
   owners:
   - runtime
   - observability
-- glob: components/src/dynamo/common/backend/publisher.py
+- glob: components/src/dynamo/backend/publisher.py
   owners:
   - runtime
   - kv-memory
-- glob: components/src/dynamo/common/backend/telemetry.py
+- glob: components/src/dynamo/backend/telemetry.py
   owners:
   - runtime
   - observability

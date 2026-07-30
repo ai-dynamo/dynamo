@@ -7,7 +7,7 @@ hook: the scheduler-side `DynamoSglangLogitProcessor` (batch-row application
 wires entries into `custom_params` / the `custom_logit_processor` kwarg.
 
 The shared spec-entry policy (gating, serialization) is tested in
-`dynamo.common.backend.tests.test_engine`. These tests exercise the SGLang
+`dynamo.backend.tests.test_engine`. These tests exercise the SGLang
 realizer with CPU tensors, so they need `sglang` + `torch` importable but no
 GPU."""
 
@@ -22,7 +22,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("sglang.srt.sampling.custom_logit_processor")
 
-from dynamo.common.backend.engine import (  # noqa: E402
+from dynamo.backend._engine import (  # noqa: E402
     ForcedTokenSequenceSpec,
     serialize_logits_processor_entries,
 )

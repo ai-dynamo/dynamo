@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import sglang as sgl
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher

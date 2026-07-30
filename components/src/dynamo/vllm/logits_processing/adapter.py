@@ -19,7 +19,7 @@ So this module is two halves:
   serialized entries onto a request's `SamplingParams`.
 
 The shared generation-stage gating and per-request freshness policy live in
-``dynamo.common.backend.engine``; this module only translates the
+``dynamo.backend._engine``; this module only translates the
 backend-neutral entries into vLLM's mechanism.
 
 API assumptions (vLLM v1, ~0.11+; not introspectable in CI without a GPU):
@@ -47,7 +47,7 @@ from vllm.v1.sample.logits_processor import (
     RequestLogitsProcessor,
 )
 
-from dynamo.common.backend.engine import (
+from dynamo.backend._engine import (
     ForcedTokenSequenceSpec,
     LogitsProcessorEntry,
     deserialize_logits_processor_entries,

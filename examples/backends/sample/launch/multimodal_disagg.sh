@@ -45,7 +45,7 @@ done
 echo "Running direct Encode -> Prefill -> Decode multimodal handoff smoke with $MODEL_NAME"
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.common.backend.sample_main \
+python3 -m dynamo.sample_engine \
   --model-name "$MODEL_NAME" \
   --namespace "$NAMESPACE" \
   --component "$ENCODE_COMPONENT" \
@@ -54,7 +54,7 @@ python3 -m dynamo.common.backend.sample_main \
   "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-python3 -m dynamo.common.backend.sample_main \
+python3 -m dynamo.sample_engine \
   --model-name "$MODEL_NAME" \
   --namespace "$NAMESPACE" \
   --component "$PREFILL_COMPONENT" \
@@ -64,7 +64,7 @@ python3 -m dynamo.common.backend.sample_main \
   "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
-python3 -m dynamo.common.backend.sample_main \
+python3 -m dynamo.sample_engine \
   --model-name "$MODEL_NAME" \
   --namespace "$NAMESPACE" \
   --component "$DECODE_COMPONENT" \

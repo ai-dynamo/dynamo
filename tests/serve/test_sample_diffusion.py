@@ -26,7 +26,7 @@ sample_diffusion_configs = {
             pytest.mark.gpu_0,
             pytest.mark.timeout(300),
             pytest.mark.pre_merge,
-            pytest.mark.unified,
+            pytest.mark.backend,
         ],
         model="sample-diffusion-model",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -56,7 +56,7 @@ def test_sample_diffusion_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
 ):
-    """Smoke test for the raw-media (DiffusionEngine) path through the unified
+    """Smoke test for the raw-media (DiffusionEngine) path through the Backend SDK
     Worker: frontend -> RawEngineAdapter -> SampleDiffusionEngine, served at
     /v1/images/generations. CPU-only; no model download (name-only worker)."""
     config = dataclasses.replace(

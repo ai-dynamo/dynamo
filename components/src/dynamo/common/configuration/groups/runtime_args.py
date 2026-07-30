@@ -50,7 +50,7 @@ class DynamoRuntimeConfig(ConfigBase):
     media_output_fs_url: str = "file:///tmp/dynamo_media"
     media_output_http_url: Optional[str] = None
     # Raw `--health-check-payload` value (JSON object string or `@/path/to/file.json`).
-    # Honored only by the unified backend's `Worker`, where it overrides the engine's
+    # Honored only by the Backend SDK's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
     # Worker-side request admission/rejection knobs. Disabled (None) by
@@ -315,7 +315,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Override the runtime health-check canary payload. Accepts a JSON "
             'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
             "or '@/path/to/payload.json'. Takes precedence over the engine's "
-            "default health_check_payload(). Unified backend only.",
+            "default health_check_payload(). Backend SDK only.",
         )
 
         # Worker-side request admission/rejection. Defaults to None (disabled);

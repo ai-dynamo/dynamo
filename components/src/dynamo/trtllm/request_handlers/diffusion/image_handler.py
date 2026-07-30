@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.common.protocols.image_protocol import (
     ImageData,
     ImageNvExt,

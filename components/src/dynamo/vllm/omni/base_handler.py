@@ -17,7 +17,7 @@ try:
 except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params

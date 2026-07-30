@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pre-merge CPU integration test for the unified-backend canary pipeline."""
+"""Pre-merge CPU integration test for the Backend SDK canary pipeline."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ MODEL = "Qwen/Qwen3-0.6B"
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.integration,
-    pytest.mark.unified,
+    pytest.mark.backend,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.model(MODEL),
@@ -53,7 +53,7 @@ def _wait_ready(url: str, deadline_s: float) -> None:
 
 def _sample_config(mode: str) -> EngineConfig:
     return EngineConfig(
-        name=f"unified-canary-{mode}",
+        name=f"backend-canary-{mode}",
         directory=SAMPLE_DIR,
         script_name="disagg.sh" if mode == "disagg" else "agg.sh",
         script_args=["--model-name", MODEL],
@@ -67,7 +67,7 @@ def _sample_config(mode: str) -> EngineConfig:
 
 @pytest.mark.parametrize("mode", ["agg", "disagg"])
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_unified_canary_marks_endpoints_ready(
+def test_backend_canary_marks_endpoints_ready(
     mode: str,
     request: Any,
     runtime_services_dynamic_ports,  # noqa: ARG001
@@ -98,7 +98,7 @@ def test_unified_canary_marks_endpoints_ready(
 
 
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_unified_canary_honors_operator_override(
+def test_backend_canary_honors_operator_override(
     request: Any,
     runtime_services_dynamic_ports,  # noqa: ARG001
     dynamo_dynamic_ports,

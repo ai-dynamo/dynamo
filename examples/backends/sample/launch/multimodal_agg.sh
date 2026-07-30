@@ -43,7 +43,7 @@ done
 echo "Running direct aggregated-worker multimodal handoff smoke with $MODEL_NAME"
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python3 -m dynamo.common.backend.sample_main \
+python3 -m dynamo.sample_engine \
   --model-name "$MODEL_NAME" \
   --namespace "$NAMESPACE" \
   --component "$COMPONENT" \

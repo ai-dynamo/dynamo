@@ -19,7 +19,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.unified,
+    pytest.mark.backend,
     pytest.mark.timeout(270),
 ]
 

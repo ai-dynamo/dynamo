@@ -33,9 +33,10 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
-from dynamo._core import Client, Context
-from dynamo.common.backend import logprobs as _shared_logprobs
-from dynamo.common.backend.engine import is_generation_stage
+from dynamo._core import Client
+from dynamo.backend import Context
+from dynamo.backend import logprobs as _shared_logprobs
+from dynamo.backend._engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag

@@ -47,7 +47,7 @@ from typing import Any, AsyncGenerator, Callable, Optional, Sequence
 
 import numpy as np
 
-from dynamo._core import Context
+from dynamo.backend import Context
 
 logger = logging.getLogger(__name__)
 

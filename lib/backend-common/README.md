@@ -5,21 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend covers aggregated and
+> **Work in progress.** The Backend SDK covers aggregated and
 > disaggregated (prefill/decode) inference, metrics + Prometheus
 > bridging, KV event publishing, KV-aware (DP-rank) routing,
 > health-check canaries, OpenTelemetry tracing, request-side
 > guided decoding, and both completion-side and prompt-side
 > logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
 > routes (pause/resume, profiling, weight updates), text-in-text-out,
-> and snapshot/CRIU are still on the non-unified path. See the
-> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
+> and snapshot/CRIU are still on the legacy path. See the
+> [Python package README](../../components/src/dynamo/backend/README.md#feature-gaps)
 > for the per-engine matrix. The Python `Worker`
-> ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
+> ([`dynamo.backend`](../../components/src/dynamo/backend/))
 > is a thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
-> [Writing Unified Backends](../../docs/development/unified-backends.md)
+> [Writing a Backend with the Backend SDK](../../docs/development/backend-sdk.md)
 > and choose the Rust tab.
 > This README is the in-tree reference: trait shape, file layout,
 > disaggregation contract, error taxonomy, and the conformance kit.
@@ -94,7 +94,7 @@ lives at
 cargo run --release -- --help
 ```
 
-See the [walkthrough](../../docs/development/unified-backends.md) and choose
+See the [walkthrough](../../docs/development/backend-sdk.md) and choose
 the Rust tab for how to set up the crate (Cargo.toml, `tokio_unstable` cfg
 flag, toolchain pin) and write the engine.
 
@@ -150,7 +150,7 @@ fn main() -> anyhow::Result<()> {
 
 See [`examples/mocker/src/engine.rs`](examples/mocker/src/engine.rs)
 for a complete, runnable reference and the
-[walkthrough](../../docs/development/unified-backends.md) for the
+[walkthrough](../../docs/development/backend-sdk.md) for the
 Rust step-by-step including Cargo.toml, `tokio_unstable` cfg, and the
 conformance kit.
 
@@ -256,7 +256,7 @@ Mid-stream errors have two equivalent terminal forms:
   pure message-level failures. Loses the typed `BackendError` variant.
 
 A tiny helper per backend keeps call sites clean — see the
-[guide's Rust Step 6](../../docs/development/unified-backends.md) for the
+[guide's Rust Step 6](../../docs/development/backend-sdk.md) for the
 `invalid_arg` pattern.
 
 ## Conformance Kit
@@ -416,17 +416,17 @@ lib/backend-common/
 ```
 
 The Python `Worker` shim that drives this crate from a backend's entry point
-(e.g. `dynamo.common.backend.sample_main`) lives at
-[`components/src/dynamo/common/backend/worker.py`](../../components/src/dynamo/common/backend/worker.py).
+(e.g. `dynamo.sample_engine`) lives at
+[`components/src/dynamo/backend/_worker.py`](../../components/src/dynamo/backend/_worker.py).
 
 ## See Also
 
-- [Writing Unified Backends](../../docs/development/unified-backends.md)
+- [Writing a Backend with the Backend SDK](../../docs/development/backend-sdk.md)
   — step-by-step walkthrough; choose the Rust tab.
 - [`CLAUDE.md`](CLAUDE.md) — design notes (rationale, invariants,
   Phase 2 PyO3 plans).
 - [Mocker example](examples/mocker/) — reference engine + compose stack.
-- [Python sibling](../../components/src/dynamo/common/backend/README.md)
-  — `dynamo.common.backend`, the Python ABC layered over this crate.
+- [Python sibling](../../components/src/dynamo/backend/README.md)
+  — `dynamo.backend`, the Python ABC layered over this crate.
 - [DEP #8251](https://github.com/ai-dynamo/dynamo/issues/8251) —
   Backend Interface proposal and ongoing status.

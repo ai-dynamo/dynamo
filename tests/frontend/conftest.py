@@ -38,7 +38,7 @@ def pytest_ignore_collect(collection_path, config):
     # missing (e.g. pre-commit env that only installs lint deps).
     # find_spec on a dotted name imports the parent and raises ModuleNotFoundError
     # if it doesn't exist, so guard the opentelemetry.proto lookup.
-    if filename == "test_unified_worker_otlp_export.py":
+    if filename == "test_backend_worker_otlp_export.py":
         if importlib.util.find_spec("grpc") is None:
             return True
         try:
@@ -338,15 +338,15 @@ def start_services_with_mocker(
         yield frontend_port
 
 
-class SampleUnifiedWorkerProcess(ManagedProcess):
-    """Unified-backend sample worker (`dynamo.common.backend.sample_main`).
+class SampleBackendWorkerProcess(ManagedProcess):
+    """Backend SDK sample worker (`dynamo.sample_engine`).
 
-    CPU-only Python reference engine that exercises the unified backend's
+    CPU-only Python reference engine that exercises the Backend SDK's
     `Worker.run()` path — the same code path real backends (vllm/trtllm/
     sglang) go through. Useful for tests that need to validate the unified
     Worker/EngineAdapter pipeline without a GPU.
 
-    Mirrors `MockerWorkerProcess` but uses the unified entry point. Accepts
+    Mirrors `MockerWorkerProcess` but uses the Backend SDK entry point. Accepts
     `extra_env` for tests that need to inject telemetry / tracing env vars
     (e.g. `OTEL_EXPORT_ENABLED=1`, `DYN_LOGGING_JSONL=1`).
     """
@@ -370,7 +370,7 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
         command = [
             "python3",
             "-m",
-            "dynamo.common.backend.sample_main",
+            "dynamo.sample_engine",
             "--model-name",
             model_name,
             "--component",
@@ -405,7 +405,7 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,
-            straggler_commands=["-m dynamo.common.backend.sample_main"],
+            straggler_commands=["-m dynamo.sample_engine"],
             log_dir=log_dir,
         )
 

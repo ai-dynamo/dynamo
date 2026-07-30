@@ -9,7 +9,7 @@ from typing import Optional, Union
 
 import torch
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )

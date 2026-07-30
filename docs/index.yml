@@ -410,8 +410,8 @@ navigation:
             contents:
               - page: Custom Backend Overview
                 path: development/custom-backend.md
-              - page: Writing Unified Backends
-                path: development/unified-backends.md
+              - page: Backend SDK
+                path: development/backend-sdk.md
               - page: Python Workers (lower-level)
                 path: development/backend-guide.md
               - page: Runtime Containers

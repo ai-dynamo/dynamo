@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test for unified-backend workers' OTLP exporter pipeline.
+"""Regression test for Backend SDK workers' OTLP exporter pipeline.
 
 Where the JSONL smoke test only asserts the tracing subscriber
 installed, this test asserts spans actually travel over OTLP/gRPC to a
@@ -19,7 +19,7 @@ import pytest
 import requests
 
 from tests.frontend.conftest import (
-    SampleUnifiedWorkerProcess,
+    SampleBackendWorkerProcess,
     wait_for_http_completions_ready,
 )
 from tests.frontend.test_request_tracing_logs import _send_chat_completions
@@ -77,14 +77,14 @@ def _send_chat_completions_with_headers(
     )
 
 
-def test_unified_worker_exports_engine_generate_span_over_otlp(
+def test_backend_worker_exports_engine_generate_span_over_otlp(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_tokenizers,
     otlp_collector,
 ):
-    """Aggregated unified worker must export the `engine.generate` span
+    """Aggregated Backend SDK worker must export the `engine.generate` span
     over OTLP to the collector — proves the full export pipeline works,
     not just the subscriber install.
     """
@@ -98,7 +98,7 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
-        "OTEL_SERVICE_NAME": "dynamo-unified-worker-test",
+        "OTEL_SERVICE_NAME": "dynamo-backend-worker-test",
     }
 
     ports = dynamo_dynamic_ports
@@ -111,7 +111,7 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
         extra_env=otel_env,
         terminate_all_matching_process_names=False,
     ):
-        with SampleUnifiedWorkerProcess(
+        with SampleBackendWorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
@@ -170,7 +170,7 @@ def test_unsampled_traceparent_does_not_export_spans_over_otlp(
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
-        "OTEL_SERVICE_NAME": "dynamo-unified-worker-unsampled-test",
+        "OTEL_SERVICE_NAME": "dynamo-backend-worker-unsampled-test",
     }
 
     ports = dynamo_dynamic_ports
@@ -183,7 +183,7 @@ def test_unsampled_traceparent_does_not_export_spans_over_otlp(
         extra_env=otel_env,
         terminate_all_matching_process_names=False,
     ):
-        with SampleUnifiedWorkerProcess(
+        with SampleBackendWorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
@@ -246,7 +246,7 @@ def test_traceidratio_sampler_controls_otlp_exports(
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
-        "OTEL_SERVICE_NAME": f"dynamo-unified-worker-sampler-{sampler_arg}",
+        "OTEL_SERVICE_NAME": f"dynamo-backend-worker-sampler-{sampler_arg}",
         "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
         "OTEL_TRACES_SAMPLER_ARG": sampler_arg,
         "OTEL_BSP_SCHEDULE_DELAY": "1000",
@@ -262,7 +262,7 @@ def test_traceidratio_sampler_controls_otlp_exports(
         extra_env=otel_env,
         terminate_all_matching_process_names=False,
     ):
-        with SampleUnifiedWorkerProcess(
+        with SampleBackendWorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,
@@ -316,7 +316,7 @@ def test_disagg_decode_span_links_to_prefill_span(
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
-        "OTEL_SERVICE_NAME": "dynamo-unified-disagg-test",
+        "OTEL_SERVICE_NAME": "dynamo-backend-disagg-test",
     }
 
     ports = dynamo_dynamic_ports
@@ -332,7 +332,7 @@ def test_disagg_decode_span_links_to_prefill_span(
         extra_env=otel_env,
         terminate_all_matching_process_names=False,
     ):
-        with SampleUnifiedWorkerProcess(
+        with SampleBackendWorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=prefill_system_port,
@@ -342,7 +342,7 @@ def test_disagg_decode_span_links_to_prefill_span(
             extra_env=otel_env,
             worker_id="sample-prefill",
         ):
-            with SampleUnifiedWorkerProcess(
+            with SampleBackendWorkerProcess(
                 request,
                 frontend_port=frontend_port,
                 system_port=decode_system_port,

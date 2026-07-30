@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
-from dynamo._core import Context
+from dynamo.backend import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
