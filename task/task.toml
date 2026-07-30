@@ -1,0 +1,38 @@
+artifacts = []  # paths the verifier reads from the agent (e.g. ["/app/output.json"]) — must be above the first [section]
+
+[task]
+name = "dynamo/your-task-name"  # required format: org/name (Harbor needs the slash); name part lowercase kebab-case, <=3 words
+description = ""                 # one-line summary of the task
+
+[metadata]
+# --- Pre-seeded for you when this repo was created — DO NOT EDIT ---
+category = "Regulated Knowledge Work and Business Operations"                      # diversity category, assigned to your task by the Dynamo team
+subcategory = "Finance and quantitative workflows"                   # diversity subcategory, assigned by the Dynamo team
+# --- Fixed for this dataset — LEAVE AS-IS ---
+model_tested = "Opus-4.8"           # difficulty-benchmarking model (do not change)
+agent_tested = "Terminus-2"        # difficulty-benchmarking agent (do not change)
+# --- You fill these in ---
+# task_objective / artifact_type: pick from .dynamo/diversity-taxonomy.toml (lowercase snake_case).
+task_objective = []                # e.g. ["implement", "debug"]
+artifact_type = []                 # e.g. ["codebase", "configuration_file"]
+expert_time_estimate_hours = 0     # best-case hours for a focused domain expert with the intended insight
+difficulty_explanation = ""        # why this task is hard for agents and humans
+solution_explanation = ""          # high-level approach and key insights
+verification_explanation = ""      # how the tests verify correctness
+
+[verifier]
+timeout_sec = 120.0                # increase based on your test suite's runtime demands
+# Canonical TB2: the verifier runs in the environment image (no separate tests/Dockerfile).
+# Harbor overlays tests/ at verify time; leave environment_mode unset for this shared model.
+
+[agent]
+timeout_sec = 120.0                # raise for hard tasks — agents may run for many minutes or hours
+
+[environment]
+build_timeout_sec = 600.0          # max seconds for the Docker build
+cpus = 1                           # increase for parallel/compute-heavy workloads
+memory_mb = 2048                   # increase for large datasets or in-memory processing
+storage_mb = 10240                 # increase for tasks with large files or build artifacts
+gpus = 0                           # max 1, expect H100
+allow_internet = true              # open internet is available to the agent
+mcp_servers = []                   # optional MCP servers to expose to the agent
