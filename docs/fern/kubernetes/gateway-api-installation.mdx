@@ -101,8 +101,7 @@ If Istio sidecars mediate traffic from the Gateway proxy to the EPP Service, ena
 
 ```bash
 helm upgrade -i dynamo-platform \
-  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "$DYNAMO_VERSION" \
+  "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${DYNAMO_VERSION}.tgz" \
   --namespace "$DYNAMO_SYSTEM_NAMESPACE" \
   --reuse-values \
   --set dynamo.serviceMesh.enabled=true \

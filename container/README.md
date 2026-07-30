@@ -484,6 +484,8 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
 cargo build --locked --features dynamo-llm/block-manager --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
+# Add `--features request-trace-s3` to enable the S3 request-trace sink
+# (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -
 # 3b. ai-dynamo (Python namespace packages: dynamo.frontend, dynamo.sglang, ...)
 uv pip install --no-deps -e /workspace
@@ -544,6 +546,8 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 
 # 4. Compile code
 cargo build --locked --features dynamo-llm/block-manager --workspace
+# Add `--features request-trace-s3` to enable the S3 request-trace sink
+# (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)

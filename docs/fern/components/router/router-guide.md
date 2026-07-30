@@ -69,7 +69,7 @@ For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guid
 
 ### Standalone Router
 
-You can also run the KV router as a standalone service (without the Dynamo frontend) for disaggregated serving (e.g., routing to prefill workers), multi-tier architectures, or any scenario requiring intelligent KV cache-aware routing decisions. See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
+You can also run the KV router as a standalone service without the Dynamo frontend for disaggregated serving, multi-tier architectures, or custom routing pipelines. See [Standalone Router](standalone-router.md) for the Fern guide.
 
 #### Frontend-Embedded vs. Standalone Router
 
@@ -78,7 +78,7 @@ You can also run the KV router as a standalone service (without the Dynamo front
 | **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
 | **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, advanced disaggregated prefill routing, custom pipelines |
 
-The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
+The standalone router does not include the HTTP frontend and does not expose `/v1/chat/completions`. It exposes routing endpoints through the Dynamo runtime and, when configured, router metrics through the system status server.
 
 ## Deployment Modes
 
