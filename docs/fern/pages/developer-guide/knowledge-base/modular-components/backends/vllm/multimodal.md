@@ -28,8 +28,9 @@ This document provides a comprehensive guide for multimodal inference using the 
 > video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
 > (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
 > decode engine and a container granted the `video` driver capability — see
-> [Video Decode GPU Requirements](video-decode-gpu-requirements.md). Only `http`
-> and `https` video URLs are hardware-decoded; `file://` and `data:` are not.
+> [Video Decode GPU Requirements](video-decode-gpu-requirements.md). `http`,
+> `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
+> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 
