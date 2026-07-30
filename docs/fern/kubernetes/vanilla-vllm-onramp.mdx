@@ -286,6 +286,14 @@ containers:
         port: http
 ```
 
+<Warning>
+If your workers run as non-root, set `runAsUser` to a UID that exists in the image's
+`/etc/passwd` — `2000` (the `vllm` user) for `vllm/vllm-openai`. While configuring its compile
+cache, PyTorch resolves the running UID through `getpass.getuser()`, so an arbitrary UID with no
+passwd entry fails that lookup and vLLM exits on import before parsing any argument. The on-ramp
+itself adds no requirement here: the image runs as root by default and needs no such change.
+</Warning>
+
 To tokenize each routing request, the Dynamo EPP calls vLLM's
 `/v1/chat/completions/render` endpoint through a stable Service URL. This is not a separate renderer
 deployment; the endpoint runs on the same vLLM pods that serve inference requests. Reuse an existing
