@@ -275,7 +275,7 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-tracing.mdx) for
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
-  Comma-separated sinks: `file`, `stderr`, `nats`, and `otel`.
+  Comma-separated sinks: `file`, `stderr`, `nats`, `otel`, and `s3`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_FILE_PATH" type="string" default="/tmp/dynamo-request-trace">
@@ -312,6 +312,26 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-tracing.mdx) for
 
 <ParamField path="DYN_REQUEST_TRACE_FILE_ROLL_LINES" type="integer">
   Optional gzip roll threshold in records.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
+  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`; startup fails if unset.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
+  Region override for the `s3` sink. When unset the AWS SDK resolves the region from the environment, profile, or IMDS.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">
+  Object key prefix for the `s3` sink. When unset, records land at the bucket root. Keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES" type="integer" default="67108864">
+  Batch roll threshold for the `s3` sink in uncompressed bytes. When the pending batch reaches this size it is gzipped and uploaded as one object.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS" type="integer" default="10000">
+  Periodic flush interval for the `s3` sink in milliseconds. A partial batch is uploaded when this elapses so low-volume traces still reach S3.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">
