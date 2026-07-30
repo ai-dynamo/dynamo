@@ -81,10 +81,7 @@ sglang = [
 ]
 
 mocker = [
-    # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    # Cap below 0.10: the 0.10 SDK/CLI API and AIC Rust engine wire-format
-    # broke the profiler; lift the cap when the 0.10 migration lands.
-    "aiconfigurator>=0.9.0,<0.10.0",
+    "aiconfigurator-core==0.11.0.dev20260728",
 ]
 
 [project.entry-points.pytest11]
@@ -126,9 +123,6 @@ packages = [
     "components/src/dynamo",
 ]
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
 # this is only to allow you to run codespell interactively
@@ -164,7 +158,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator", "aiconfigurator_core"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -298,6 +292,7 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
+    "mocker: marks tests for the mocker component",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
@@ -467,6 +462,8 @@ module = [
     "pydantic_core",
     "aiconfigurator",
     "aiconfigurator.*",
+    "aiconfigurator_core",
+    "aiconfigurator_core.*",
     "soundfile",
     "soundfile.*",
     "librosa",

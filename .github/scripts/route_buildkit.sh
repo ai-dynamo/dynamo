@@ -146,7 +146,10 @@ fi
 # --- CONFIGURATION ---
 NAMESPACE="buildkit"
 PORT="1234"
-MAX_POD_CHECK=10
+# Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
+# maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
+# never discovered and sit idle while builds queue on the pods below it.
+MAX_POD_CHECK=${MAX_POD_CHECK:-16}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
