@@ -62,7 +62,12 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             return
 
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
-        self.inner.publish(self.dp_rank, kv_used_blocks=active_decode_blocks)
+        num_waiting = getattr(scheduler_stats, "num_waiting_reqs", None)
+        self.inner.publish(
+            self.dp_rank,
+            kv_used_blocks=active_decode_blocks,
+            num_waiting_reqs=int(num_waiting) if num_waiting is not None else None,
+        )
 
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, self.num_gpu_block)
@@ -76,7 +81,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         )
 
     def init_publish(self) -> None:
-        self.inner.publish(self.dp_rank, kv_used_blocks=0)
+        self.inner.publish(self.dp_rank, kv_used_blocks=0, num_waiting_reqs=0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
