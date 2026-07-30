@@ -75,6 +75,8 @@ type Message string
 const (
 	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
 	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
+
+	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // rbacManager interface for managing RBAC resources
@@ -2568,47 +2570,68 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Process each component - SyncResource handles create, update, and delete via toDelete flag.
+	// Process each component. The DGD controller owns the adapter lifecycle and
+	// identity, while the adapter owns its replica count after creation.
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
-		// Check if scaling adapter is enabled for this component (disabled by default).
-		scalingAdapterEnabled := component.ScalingAdapter != nil
-
-		// Get current replicas (default to 1 if not set)
-		currentReplicas := int32(1)
-		if component.Replicas != nil {
-			currentReplicas = *component.Replicas
+		adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
+		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      adapterName,
+				Namespace: dynamoDeployment.Namespace,
+			},
 		}
 
-		// Use SyncResource to handle creation/updates/deletion
-		// When toDelete=true, SyncResource will delete the existing resource if it exists
-		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
-			adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
-			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
-					Namespace: dynamoDeployment.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
-						consts.KubeLabelDynamoComponent:           componentName,
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-					Replicas: currentReplicas,
-					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:        dynamoDeployment.Name,
-						ServiceName: componentName,
-					},
-				},
+		if component.ScalingAdapter == nil {
+			if err := r.Delete(ctx, adapter); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				logger.Error(err, "Failed to delete DynamoGraphDeploymentScalingAdapter", "component", componentName)
+				return err
 			}
-			// Return toDelete=true if scaling adapter is not enabled
-			return adapter, !scalingAdapterEnabled, nil
+			logger.Info("Deleted DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+				"Deleted scaling adapter %s for component %s", adapterName, componentName)
+			continue
+		}
+
+		initialReplicas := ptr.Deref(component.Replicas, int32(1))
+		operation, err := controllerutil.CreateOrPatch(ctx, r.Client, adapter, func() error {
+			if adapter.Labels == nil {
+				adapter.Labels = map[string]string{}
+			}
+			adapter.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+			adapter.Labels[consts.KubeLabelDynamoComponent] = componentName
+			adapter.Spec.DGDRef = nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
+				Name:        dynamoDeployment.Name,
+				ServiceName: componentName,
+			}
+
+			// The DGD replica count seeds a new adapter. Once created, the
+			// adapter is the sole source of truth for desired replicas.
+			if adapter.GetResourceVersion() == "" {
+				adapter.Spec.Replicas = initialReplicas
+			}
+
+			return controllerutil.SetControllerReference(dynamoDeployment, adapter, r.Scheme())
 		})
 
 		if err != nil {
-			logger.Error(err, "Failed to sync DynamoGraphDeploymentScalingAdapter", "component", componentName)
+			logger.Error(err, "Failed to reconcile DynamoGraphDeploymentScalingAdapter", "component", componentName)
 			return err
+		}
+
+		switch operation {
+		case controllerutil.OperationResultCreated:
+			logger.Info("Created DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterCreated",
+				"Created scaling adapter %s for component %s", adapterName, componentName)
+		case controllerutil.OperationResultUpdated:
+			logger.Info("Updated DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterUpdated",
+				"Updated scaling adapter %s for component %s", adapterName, componentName)
 		}
 	}
 
@@ -2748,6 +2771,15 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		dgdComponentPodIndex,
+		dgdComponentPodIndexValues,
+	); err != nil {
+		return fmt.Errorf("register DGD component Pod index: %w", err)
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
@@ -2762,6 +2794,11 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 				GenericFunc: func(ge event.GenericEvent) bool { return true },
 			}),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
+			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
@@ -2851,6 +2888,82 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func isDGDManagedWorkerPod(obj client.Object) bool {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return false
+	}
+	labels := pod.GetLabels()
+	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
+		labels[consts.KubeLabelDynamoComponent] != "" &&
+		labels[consts.KubeLabelDynamoSelector] != "" &&
+		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
+}
+
+func dgdComponentPodIndexValues(obj client.Object) []string {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return nil
+	}
+	labels := pod.GetLabels()
+	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
+	componentName := labels[consts.KubeLabelDynamoComponent]
+	if dgdName == "" || componentName == "" {
+		return nil
+	}
+	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
+}
+
+func dgdComponentPodIndexValue(dgdName, componentName string) string {
+	// Both inputs are label values, which cannot contain '/', so this encoding
+	// is collision-free.
+	return dgdName + "/" + componentName
+}
+
+// dgdWorkerPodEventPredicate admits only events that can change whether a
+// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// membership; updates matter only when membership or terminality changes. A
+// deletion timestamp alone leaves the pod non-terminal and does not enqueue.
+func dgdWorkerPodEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldManaged := isDGDManagedWorkerPod(e.ObjectOld)
+			newManaged := isDGDManagedWorkerPod(e.ObjectNew)
+			if oldManaged != newManaged {
+				return true
+			}
+			if !newManaged {
+				return false
+			}
+			oldPod := e.ObjectOld.(*corev1.Pod)
+			newPod := e.ObjectNew.(*corev1.Pod)
+			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
+				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				return true
+			}
+			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Request {
+	if !isDGDManagedWorkerPod(obj) {
+		return nil
+	}
+	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
 }
 
 func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {

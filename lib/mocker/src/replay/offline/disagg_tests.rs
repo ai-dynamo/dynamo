@@ -10,7 +10,7 @@ use super::super::entrypoints::{
     run_trace_workload_collect,
 };
 use super::super::extensions::kv_events::HandoffDisaggRuntime;
-use super::super::planner_hook::PlannerTickDecision;
+use super::super::scaling::{ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot};
 use super::*;
 use crate::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
@@ -18,19 +18,22 @@ use crate::common::protocols::{
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
 
-struct CaptureOnceHook {
+struct CaptureOncePolicy {
     at_ms: f64,
-    captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+    captured: Rc<RefCell<Option<ReplayScalingSnapshot>>>,
 }
 
-impl PlannerHook for CaptureOnceHook {
+impl ReplayScalingPolicy for CaptureOncePolicy {
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
         Ok(self.at_ms)
     }
 
-    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
-        *self.captured.borrow_mut() = Some(metrics);
-        Ok(PlannerTickDecision::default())
+    fn on_tick(
+        &mut self,
+        snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        *self.captured.borrow_mut() = Some(snapshot);
+        Ok(ReplayScalingDecision::default())
     }
 }
 
@@ -289,7 +292,7 @@ fn request(
 }
 
 #[test]
-fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
+fn scaling_tick_emits_idle_fpm_for_both_disagg_pools() {
     let mut config = disagg_config();
     config.num_prefill_workers = 1;
     config.num_decode_workers = 1;
@@ -299,7 +302,7 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
     )
     .unwrap();
     let captured = Rc::new(RefCell::new(None));
-    let hook = CaptureOnceHook {
+    let policy = CaptureOncePolicy {
         at_ms: 2_000.0,
         captured: Rc::clone(&captured),
     };
@@ -313,14 +316,14 @@ fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
         ReplayRouterMode::RoundRobin,
     )
     .unwrap()
-    .with_planner_hook(Box::new(hook))
+    .with_scaling_policy(Box::new(policy))
     .run()
     .unwrap();
 
     let metrics = captured
         .borrow_mut()
         .take()
-        .expect("planner tick must fire");
+        .expect("scaling tick must fire");
     assert_eq!(metrics.now_ms, 2_000.0);
     for snapshots in [&metrics.prefill_fpm, &metrics.decode_fpm] {
         assert_eq!(snapshots.len(), 1);
@@ -707,6 +710,61 @@ fn test_source_release_waits_for_destination_activation() {
     }
 }
 
+#[test]
+fn same_timestamp_destination_activation_precedes_next_decode_drive() {
+    let config = disagg_config();
+    let uuid = Uuid::from_u128(1);
+    let pending =
+        crate::replay::normalize_trace_requests(vec![request(1, 128, 2, 0.0)], 1.0).unwrap();
+    let (collector, stats) = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        pending,
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_per_request_records(true)
+    .run()
+    .unwrap();
+
+    let transitions = &stats.transition_log;
+    let reserved = transition_index(transitions, DisaggTransition::DestinationReserved { uuid });
+    let activated = transition_index(transitions, DisaggTransition::DestinationActivated { uuid });
+    let admitted = transition_index(transitions, DisaggTransition::DecodeAdmitted { uuid });
+    let next_quiesced = transitions
+        .iter()
+        .enumerate()
+        .skip(activated + 1)
+        .find_map(|(index, transition)| {
+            (*transition == DisaggTransition::DecodeDriveQuiesced).then_some(index)
+        })
+        .expect("decode coordinator must quiesce after processing activated work");
+    let completed = transition_index(transitions, DisaggTransition::RequestMarkedDone { uuid });
+    assert!(
+        !transitions[reserved + 1..activated].contains(&DisaggTransition::DecodeDriveQuiesced),
+        "same-timestamp activation must be drained before the next decode drive: {transitions:?}"
+    );
+    assert!(reserved < activated);
+    assert!(activated < admitted);
+    assert!(admitted < next_quiesced);
+    assert!(admitted < completed);
+
+    let report = collector.finish();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.per_request.len(), 1);
+    assert_eq!(
+        report.per_request[0].destination_reserved_ms,
+        report.per_request[0].destination_activated_ms,
+        "destination activation must wake the decode coordinator at the same timestamp"
+    );
+    assert_eq!(
+        report.per_request[0].terminal_status,
+        ReplayTerminalStatus::Completed
+    );
+}
+
 #[rstest::rstest]
 #[case(EngineType::Vllm)]
 #[case(EngineType::Sglang)]
@@ -1059,7 +1117,10 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let report = run_trace_with_details(
             &transfer_timing_config(engine_type, KvTransferTimingMode::DestinationMissing, 2),
-            vec![request(1, 64, 1, 0.0), request(2, 64, 2, 1_000.0)],
+            // Two full blocks leave one reusable block after vLLM's required
+            // final-block recompute. A one-block prompt correctly reports
+            // zero reuse and would not exercise this test's source-hit path.
+            vec![request(1, 128, 1, 0.0), request(2, 128, 2, 1_000.0)],
             None,
             ReplayRouterMode::RoundRobin,
         );
@@ -1073,7 +1134,7 @@ fn source_only_reuse_does_not_reduce_destination_missing_transfer() {
 
         assert!(measured.reused_input_tokens > 0);
         assert_eq!(measured.decode_reused_input_tokens, Some(0));
-        assert!(transfer_span >= 64.0 && transfer_span - 64.0 < 1.0);
+        assert!(transfer_span >= 128.0 && transfer_span - 128.0 < 1.0);
     }
 }
 

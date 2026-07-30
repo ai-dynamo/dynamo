@@ -103,7 +103,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/fern/kubernetes/quickstart.mdx)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -121,7 +121,7 @@ docker build -f container/rendered.Dockerfile .
 
 ### Planner Perf Model Bootstrap (SLA Planner Only)
 
-The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/fern/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## Usage
 
@@ -264,7 +264,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable [request migration](../../../../docs/fern/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -274,13 +274,13 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/kubernetes/README.md)
-- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/kubernetes/installation-guide.md)
-- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/components/planner/planner-guide.md)
-- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/components/planner/global-planner.md)
-- **Examples**: [Deployment Examples](../../../../docs/getting-started/examples.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/components/router/README.md)
+- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/kubernetes/dgd-guide.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/fern/kubernetes/quickstart.mdx)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/kubernetes/installation-guide.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/components/planner/global-planner.md)
+- **Kubernetes Templates**: [vLLM Deployment Templates](../../../../docs/fern/templates/vllm.mdx)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/design-docs/disagg-serving.md), [KV-Aware Routing](../../../../docs/fern/components/router/README.md)
 
 ## Troubleshooting
 
@@ -292,4 +292,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/fern/kubernetes/quickstart.mdx).

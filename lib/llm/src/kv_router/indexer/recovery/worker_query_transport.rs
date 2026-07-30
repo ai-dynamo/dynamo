@@ -17,7 +17,7 @@ use dynamo_runtime::{
 use futures::StreamExt;
 
 #[async_trait]
-pub(super) trait WorkerQueryTransport: Send + Sync {
+pub(crate) trait WorkerQueryTransport: Send + Sync {
     async fn query_worker(
         &self,
         worker_id: WorkerId,

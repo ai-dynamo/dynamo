@@ -80,6 +80,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Validate Fern configuration
+      working-directory: docs/fern
       run: fern check
 
   fern-broken-links:
@@ -97,6 +98,7 @@ jobs:
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Check for broken links
+      working-directory: docs/fern
       run: fern docs broken-links
 
   operator:
@@ -107,12 +109,17 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        fetch-depth: 0  # clustertest derives its alpha version from v1.3.0
     - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
     - name: Run operator checks
       uses: ./.github/actions/check-deploy-component
       with:
         component: operator
         platform: linux/amd64
+    - name: Run operator envtests
+      working-directory: deploy/operator
+      run: make envtest
 
   snapshot:
     needs: changed-files
@@ -184,6 +191,10 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run Mocker AIC feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-mocker --features aic-forward-pass -- --nocapture
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -254,6 +265,14 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Run Mocker AIC feature clippy
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps -p dynamo-mocker --features aic-forward-pass --all-targets -- -D warnings
+    - name: Run Python bindings AIC feature clippy
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
     - name: Run KVBM offload Mooncake trace clippy
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

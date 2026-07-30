@@ -363,6 +363,11 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if dynamo_args.dyn_default_thinking_mode is not None:
+        runtime_config.set_engine_specific(
+            "default_thinking_mode",
+            json.dumps(dynamo_args.dyn_default_thinking_mode),
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
@@ -376,6 +381,7 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank

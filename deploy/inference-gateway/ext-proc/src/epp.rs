@@ -133,11 +133,12 @@ impl Router {
         let model_manager = Arc::new(ModelManager::new());
 
         let decode_router = model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -224,12 +225,10 @@ impl Router {
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
             cache_namespace,
@@ -1079,6 +1078,7 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            reservation_id: None,
         })
     }
 
