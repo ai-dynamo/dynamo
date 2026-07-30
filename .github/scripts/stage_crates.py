@@ -45,7 +45,14 @@ EXCLUDE_PATH_SUBSTRINGS = ("/bindings/", "/examples/", "/deploy/")
 # crate depends on. kvbm-consolidator pins its own 1.2.0, so the version gate would
 # (correctly) abort the release; it is a leaf, so excluding it is closure-safe.
 EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
-RETRYABLE = re.compile(r"HTTP/2|stream error|INTERNAL_ERROR|connection error|timed out|\b(429|50[0-9])\b")
+# Artifactory < 7.148 rejects the `Content-Type: application/octet-stream` header
+# cargo >= 1.96 sends on publish with a 415 (JFrog RTDEV-83141, rust-lang/cargo#17086),
+# so the upload runs on the last pre-header toolchain. Remove once
+# artifactory.nvidia.com runs Artifactory 7.148+.
+PUBLISH_TOOLCHAIN = "1.95.0"
+# No bare "HTTP/2" alternation here: cargo dumps the raw status line ("HTTP/2 415")
+# on every HTTP error, which made deterministic 4xx failures retry as transient.
+RETRYABLE = re.compile(r"stream error|INTERNAL_ERROR|connection error|timed out|\b(429|50[0-9])\b")
 ALREADY = re.compile(r"already exists|409 Conflict|already uploaded")
 # Sparse-index propagation lag after publishing a dep — retried before failing.
 DEP_NOT_INDEXED = re.compile(r"no matching package named")
@@ -216,7 +223,7 @@ def publish(manifest: str, alias: str, env: dict) -> str:
     # failure — the caller records it and continues (fail-soft).
     for attempt in range(1, 4):
         r = subprocess.run(
-            ["cargo", "publish", "--allow-dirty", "--no-verify",
+            ["cargo", f"+{PUBLISH_TOOLCHAIN}", "publish", "--allow-dirty", "--no-verify",
              "--manifest-path", manifest, "--registry", alias],
             env=env, capture_output=True, text=True,
         )
@@ -350,6 +357,14 @@ def main() -> int:
     env = dict(os.environ)
     env[f"CARGO_REGISTRIES_{args.registry.upper()}_TOKEN"] = f"Bearer {token}"
     env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} --cfg tokio_unstable".strip()
+    # Only the upload PUT runs on PUBLISH_TOOLCHAIN (--no-verify skips compilation);
+    # cargo check/update stay on the workspace's rust-toolchain.toml toolchain.
+    r = subprocess.run(["rustup", "toolchain", "install", "--profile", "minimal",
+                        "--no-self-update", PUBLISH_TOOLCHAIN], env=env)
+    if r.returncode != 0:
+        print(f"::error::rustup install of publish toolchain {PUBLISH_TOOLCHAIN} failed",
+              file=sys.stderr)
+        return 1
     # Resync Cargo.lock after the stage-version rewrite; fail loudly here rather
     # than as a confusing publish error later.
     if stage_version:

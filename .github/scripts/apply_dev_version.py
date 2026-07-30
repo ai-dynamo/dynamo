@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -87,6 +88,26 @@ CONTAINER_TOKENS = {
     "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner", "snapshot",
 }
 HELM_TOKENS = {"platform", "snapshot"}
+
+# Container token -> the NGC repo release.yml actually publishes at :<version>.
+# Used by --image-refs to rewrite the `my-registry`/`my-tag` placeholders in docs,
+# examples and deploy manifests ONLY for images this release publishes, so the tree
+# never advertises a tag that will not exist.
+# The `-efa` tokens are deliberately ABSENT: they publish <repo>:<version>-efa, so an
+# EFA-only selection must leave the plain <repo>:<version> references alone.
+# Images with no token (fastvideo-runtime, epp-image, nixlbench, tensorrt-llm, dynamo)
+# are never published by release.yml, so their placeholders stay placeholders.
+IMAGE_REF_TOKENS = {
+    "vllm-runtime": "vllm-runtime",
+    "sglang-runtime": "sglang-runtime",
+    "trtllm-runtime": "tensorrtllm-runtime",
+    "frontend": "dynamo-frontend",
+    "operator": "kubernetes-operator",
+    "planner": "dynamo-planner",
+    "snapshot": "snapshot-agent",
+}
+GA_REGISTRY = "nvcr.io/nvidia/ai-dynamo"
+PLACEHOLDER_REGISTRY = "my-registry"
 
 # .devN is a PRE-release (sorts before X.Y.Z) -> SemVer '-devN'; .postN is a
 # post-release -> SemVer build metadata '+postN'. Both keep PEP 440 form for Python.
@@ -299,6 +320,107 @@ def _current_image_tag(path: Path, repo: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _tracked_files(root: Path) -> list[Path]:
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True,
+                         capture_output=True, text=True).stdout
+    files = []
+    for rel in out.split("\0"):
+        if not rel or rel.startswith(".github/"):
+            # .github holds the release tooling itself — rewriting it would corrupt
+            # the very placeholder patterns this step relies on.
+            continue
+        p = root / rel
+        if p.is_file() and not p.is_symlink():
+            files.append(p)
+    return files
+
+
+def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
+                       old_version: str) -> tuple[int, int]:
+    """Point first-party image references at the GA registry + release version —
+    but ONLY for images this release actually publishes.
+
+    Rewrites, per selected image:
+        my-registry/<img>:my-tag        -> <GA>/<img>:<new>
+        <GA>/<img>:my-tag               -> <GA>/<img>:<new>   (tag-only placeholder)
+        <GA>/<img>:<old>                -> <GA>/<img>:<new>   (re-cut at a new version)
+
+    Anything not in the selection keeps its placeholder, so a container-only release
+    can never ship a doc telling users to pull an image that was never built.
+    Returns (files_changed, refs_rewritten)."""
+    images = sorted({IMAGE_REF_TOKENS[t] for t in containers if t in IMAGE_REF_TOKENS})
+    if not images:
+        print("rewrite_image_refs: no publishable image selected; placeholders left intact",
+              file=sys.stderr)
+        return (0, 0)
+
+    # old_version comes from Cargo.toml, i.e. the SemVer form (1.3.0+post1,
+    # 1.3.1-dev0), but image tags carry the PEP 440 form (1.3.0.post1, 1.3.1.dev0).
+    # Match BOTH or a re-cut off a .devN/.postN branch silently leaves every image
+    # reference pinned to the previous release.
+    old_literals = ["my-tag"]
+    if old_version and old_version != new_version:
+        old_pep = re.sub(r"[-+](dev|post)", r".\1", old_version)
+        for t in dict.fromkeys((old_version, old_pep)):
+            if t and t != new_version:
+                old_literals.append(t)
+    tag_alt = "|".join(re.escape(t) for t in old_literals)
+    reg_alt = f"(?:{re.escape(PLACEHOLDER_REGISTRY)}|{re.escape(GA_REGISTRY)})"
+    # The tag must END here: `(?![\w.-])` refuses to match a PREFIX of a longer tag.
+    # Without it `:1.3.0` would also match inside `:1.3.0-nemotron`, `:1.2.0-efa`,
+    # `:1.3.0-cuda13` and `:1.4.0.dev1`, rewriting them to a bare version and
+    # silently destroying the variant suffix.
+    pats = [
+        (img, re.compile(rf"{reg_alt}/{re.escape(img)}:(?:{tag_alt})(?![\w.-])"), f"{GA_REGISTRY}/{img}:{new_version}")
+        for img in images
+    ]
+    # Untagged prose references (`my-registry/vllm-runtime` with no `:tag`) still
+    # move to the GA registry — but only for selected images, so an unpublished
+    # image is never given a real registry path. Runs after the tagged patterns,
+    # which have already consumed the `<reg>/<img>:<tag>` forms.
+    pats += [
+        (img, re.compile(rf"{re.escape(PLACEHOLDER_REGISTRY)}/{re.escape(img)}(?![\w.:-])"), f"{GA_REGISTRY}/{img}")
+        for img in images
+    ]
+
+    files_changed = refs = 0
+    for path in _tracked_files(root):
+        try:
+            text = original = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue  # binary or unreadable — nothing to substitute
+        # Fast path — must test every literal the regex can match, including the
+        # PEP 440 spelling of the old version and the untagged placeholder registry.
+        if not any(t in text for t in old_literals) and PLACEHOLDER_REGISTRY not in text:
+            continue
+        for _img, pat, repl in pats:
+            text, n = pat.subn(repl, text)
+            refs += n
+        if text != original:
+            path.write_text(text)
+            files_changed += 1
+
+    print(f"rewrite_image_refs: {refs} reference(s) in {files_changed} file(s) -> "
+          f"{GA_REGISTRY}/<image>:{new_version} for {images}", file=sys.stderr)
+
+    # Advisory only: a re-cut of a branch that previously shipped a wider selection
+    # legitimately still carries those older refs, so warn rather than fail.
+    unselected = sorted(set(IMAGE_REF_TOKENS.values()) - set(images))
+    stale = []
+    for path in _tracked_files(root):
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for img in unselected:
+            if f"{GA_REGISTRY}/{img}:{new_version}" in text:
+                stale.append(f"{path.relative_to(root)} -> {img}")
+    if stale:
+        print(f"::warning::{len(stale)} reference(s) point at unselected image(s) at "
+              f"{new_version}: {stale[:8]}{' …' if len(stale) > 8 else ''}", file=sys.stderr)
+    return (files_changed, refs)
+
+
 def _parse_subset(spec: str, universe: set[str]) -> set[str]:
     spec = (spec or "all").strip()
     if spec == "all":
@@ -312,7 +434,8 @@ def _parse_subset(spec: str, universe: set[str]) -> set[str]:
     return sel
 
 
-def set_release_version(root: Path, new_version: str, containers: set[str], helm: set[str]) -> None:
+def set_release_version(root: Path, new_version: str, containers: set[str], helm: set[str],
+                        image_refs: bool = False) -> None:
     old = _workspace_version(root)
     semver = _semver_form(new_version)
 
@@ -324,7 +447,10 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
         print(f"set_release_version: skip {rel} (absent at this source ref)", file=sys.stderr)
         return False
 
-    # Package identity -- always bumped (the version wheels/crates/images carry).
+    # Package identity -- ALWAYS bumped, regardless of the wheels/crates selection:
+    # the containers embed wheels built from this tree, so a container-only release
+    # still needs the workspace/pyproject versions stamped or the shipped image would
+    # carry the previous version. (wheels/crates are intentionally not passed in.)
     for rel in PYPROJECT_TARGETS:
         if rel == "pyproject.toml" or _exists(rel):
             set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
@@ -355,6 +481,10 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
         set_helm_values_tag(path, repo, tag)
     print(f"set_release_version: {old} -> py={new_version} semver={semver} "
           f"containers={sorted(containers)} helm={sorted(helm)}", file=sys.stderr)
+    # Docs / examples / deploy manifests: selection-gated so the release branch never
+    # advertises an image tag this release does not publish.
+    if image_refs:
+        rewrite_image_refs(root, new_version, containers, old)
 
 
 def main() -> int:
@@ -367,6 +497,10 @@ def main() -> int:
                     help="normalized container subset (all|none|csv) gating image-tag bumps")
     ap.add_argument("--helm", default="all",
                     help="helm chart subset (all|none|csv of platform,snapshot) gating chart bumps")
+    ap.add_argument("--image-refs", action="store_true",
+                    help="also point the my-registry/my-tag placeholders in docs, examples and "
+                         "deploy manifests at the GA registry + release version — only for images "
+                         "in --containers; unselected images keep their placeholder")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -374,7 +508,7 @@ def main() -> int:
     if args.set_version:
         containers = _parse_subset(args.containers, CONTAINER_TOKENS)
         helm = _parse_subset(args.helm, HELM_TOKENS)
-        set_release_version(root, args.set_version, containers, helm)
+        set_release_version(root, args.set_version, containers, helm, image_refs=args.image_refs)
         return 0
 
     if not args.suffix:

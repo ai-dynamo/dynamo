@@ -368,6 +368,8 @@ jobs:
       # and floating :nightly tags are dropped: same image, not worth a second scan).
       # Forwarded to GitLab as STAGED_CONTAINERS for nspect registration.
       staged_containers: ${{ steps.copy_images.outputs.staged_containers }}
+      # Comma-separated chart:version actually pushed to the NGC helm registry.
+      staged_helm: ${{ steps.helm_push.outputs.staged_helm }}
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -735,7 +737,10 @@ jobs:
           [ "${fail}" -eq 0 ] || { echo "::error::chart/image coherence check failed"; exit 1; }
 
       - name: Package and push Helm charts to NGC
-        if: env.NIGHTLY != 'true'
+        id: helm_push
+        # Skip entirely when no chart is selected — otherwise the step installs the
+        # push plugin and adds credentialed repos just to push nothing.
+        if: ${{ env.NIGHTLY != 'true' && env.HELM_SUBSET != 'none' }}
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
@@ -763,6 +768,7 @@ jobs:
           # snapshot + dynamo-platform, mirroring the rcs/dynamo helm runbook.
           # Only the selected charts are pushed (token = chart dir name);
           # nightly/rc default to both (HELM_SUBSET defaults to 'all').
+          STAGED_HELM=""
           for CHART_DIR in deploy/helm/charts/platform deploy/helm/charts/snapshot; do
             TOKEN="$(basename "${CHART_DIR}")"
             if [ "${HELM_SUBSET:-all}" != "all" ]; then
@@ -779,7 +785,10 @@ jobs:
             echo "Pushing ${CHART_FILE} to NGC Helm registry..."
             helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
             echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+            STAGED_HELM="${STAGED_HELM:+${STAGED_HELM},}${CHART_NAME}:${HELM_CHART_VERSION}"
           done
+          # Consumed by GitLab (STAGED_HELM) for exact nSpect chart registration.
+          echo "staged_helm=${STAGED_HELM}" >> "${GITHUB_OUTPUT}"
 
           helm repo remove "${REPO_ALIAS}"
 
@@ -789,6 +798,8 @@ jobs:
           HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
           SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
           FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
+          STAGED_CONTAINERS: ${{ steps.copy_images.outputs.staged_containers }}
+          STAGED_HELM: ${{ steps.helm_push.outputs.staged_helm }}
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
           if [[ "${NIGHTLY}" == "true" ]]; then
@@ -809,44 +820,48 @@ jobs:
           echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          # Mirror the NGC_NAME_SUFFIX logic used in the copy step so the summary
-          # advertises the actual repos that were pushed to.
-          NGC_NAME_SUFFIX=""
-          if [[ "${NIGHTLY}" == "true" ]]; then
-            NGC_NAME_SUFFIX="-nightly"
-          fi
-          echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
+          # Report what ACTUALLY landed, not a hardcoded full-release list: a partial
+          # selection must not produce a summary claiming images it never published.
+          echo "### Images published this run" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13 - default, bare tag + explicit -cuda13 alias):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          if [[ "${NIGHTLY}" == "true" ]]; then
+          if [ -n "${STAGED_CONTAINERS}" ]; then
+            echo "${STAGED_CONTAINERS}" | tr ',' '\n' | sed 's/^/- `/; s/$/`/' >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            if [[ "${NIGHTLY}" == "true" ]]; then
+              echo "_Each runtime image above also published as \`-cuda13\` plus the floating \`:nightly\` / \`:nightly-cuda13\` tags._" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "_Each runtime image above also published as a \`-cuda13\` digest alias._" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "_No container images published (selection: \`${CONTAINER_SUBSET:-all}\`)._" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "### Helm charts published this run" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Operator image:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Planner image:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${STAGED_HELM}" ]; then
+              echo "${STAGED_HELM}" | tr ',' '\n' | sed 's/^/- `/; s/$/`/' >> $GITHUB_STEP_SUMMARY
+            else
+              echo "_No charts published (selection: \`${HELM_SUBSET:-all}\`)._" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
+
+      # Runs last so charts still publish first. On-demand only: the operator named
+      # an explicit image set, so a partially-copied set must not report success and
+      # let GitLab open promotion MRs for images that never landed. rc/nightly keep
+      # their historical warn-and-continue behavior (a floating-tag hiccup there must
+      # not block the GitLab trigger, which requires this job to succeed).
+      - name: Fail on partially staged container selection (on-demand)
+        if: ${{ env.ON_DEMAND == 'true' && env.CONTAINER_SUBSET != 'none' }}
+        env:
+          FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
+        run: |
+          set -euo pipefail
+          if [ "${FAILED_COUNT:-0}" -ne 0 ]; then
+            echo "::error::${FAILED_COUNT} selected container image(s) failed to copy to NGC — see 'Copy images to NGC'. Re-run with a fresh rc_round once fixed."
+            exit 1
+          fi
+          echo "All selected container images copied."
 
   # ============================================================================
   # ARTIFACTORY STAGING: extract wheels from the dynamo-runtime image in ECR
@@ -1121,6 +1136,13 @@ jobs:
           done
 
           echo "staged_wheels=${STAGED_WHEELS}" >> "$GITHUB_OUTPUT"
+
+          # A subset that matched no wheel in the image would otherwise upload
+          # nothing and still report success.
+          if [ -z "${STAGED_WHEELS}" ]; then
+            echo "::error::wheel subset '${WHEEL_SUBSET:-all}' matched no wheels in the runtime image; nothing was uploaded"
+            exit 1
+          fi
 
   # ARTIFACTORY STAGING: publish workspace crates to the Artifactory cargo registry
   # (from ARTIFACTORY_CARGO_INDEX), dependency-ordered. Artifactory only, never crates.io.
@@ -1419,6 +1441,7 @@ jobs:
           STAGED_CRATES:        ${{ needs.stage-crates-artifactory.outputs.staged_crates }}
           STAGED_CONTAINERS:    ${{ needs.release-publish.outputs.staged_containers }}
           STAGED_WHEELS:        ${{ needs.stage-wheels-artifactory.outputs.staged_wheels }}
+          STAGED_HELM:          ${{ needs.release-publish.outputs.staged_helm }}
           # success|partial|failed|skipped (crate staging is fail-soft; empty
           # output = died before the publish step, treated as failed).
           CRATES_STATUS:        ${{ needs.stage-crates-artifactory.result == 'skipped' && 'skipped' || needs.stage-crates-artifactory.outputs.crates_status || 'failed' }}
@@ -1515,6 +1538,7 @@ jobs:
             --form-string "variables[STAGED_CRATES]=${STAGED_CRATES}" \
             --form-string "variables[STAGED_CONTAINERS]=${STAGED_CONTAINERS}" \
             --form-string "variables[STAGED_WHEELS]=${STAGED_WHEELS}" \
+            --form-string "variables[STAGED_HELM]=${STAGED_HELM}" \
             --form-string "variables[CRATES_STATUS]=${CRATES_STATUS}" \
             --form-string "variables[ENABLE_PULSE_SCAN]=true" \
             --form-string "variables[ENABLE_WHEEL_SCAN]=true" \
