@@ -23,8 +23,8 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
-    SchedulingResponse,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, OverloadedWorkerProvider,
+    SchedulingContext, SchedulingRequest, SchedulingResponse,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -66,7 +66,7 @@ enum AdmissionCommand {
     },
     SelectWithoutAdmission {
         request: SchedulingRequest,
-        resp_tx: oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>,
+        resp_tx: oneshot::Sender<Result<AdvisorySchedulingResponse, KvSchedulerError>>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -514,7 +514,7 @@ impl<
     pub async fn select_without_admission(
         &self,
         request: SchedulingRequest,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         request.eligibility().validate_pinned_worker_allowed()?;
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -576,33 +576,6 @@ impl<
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.supports_overlap_refresh
-    }
-
-    pub(crate) fn worker_is_prefill_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        decay_now: Instant,
-        threshold: f64,
-    ) -> Option<bool> {
-        let active_tokens = self.slots.active_tokens(decay_now);
-        let workers = self.workers_with_configs.borrow();
-        let config = workers.get(&worker.worker_id)?;
-        let capacity = config
-            .max_num_batched_tokens()
-            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS) as f64;
-        Some(active_tokens.get(&worker).copied().unwrap_or(0) as f64 > threshold * capacity)
-    }
-
-    pub(crate) fn projected_decode_load_exceeds(
-        &self,
-        worker: WorkerWithDpRank,
-        projected_blocks: usize,
-        threshold: f64,
-    ) -> Option<bool> {
-        let workers = self.workers_with_configs.borrow();
-        let config = workers.get(&worker.worker_id)?;
-        let capacity = config.total_kv_blocks()? as f64;
-        Some(projected_blocks as f64 > threshold * capacity)
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -976,16 +949,44 @@ impl<
         &self,
         request: &mut SchedulingRequest,
         decay_now: Instant,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
-        let (selection, selected_worker_tiers) =
-            self.select_worker_for_request(request, decay_now)?;
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        request.worker_loads = self
+            .slots
+            .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
-        Ok(SchedulingResponse {
-            best_worker: selection.worker,
-            effective_overlap_blocks: selection.effective_overlap_blocks,
-            cached_tokens: selection.cached_tokens,
-            selected_worker_tiers,
-            potential_decode_blocks: selection.potential_decode_blocks,
+        let workers = self.workers_with_configs.borrow();
+        let overloaded_worker_ids = self
+            .overloaded_worker_provider
+            .as_ref()
+            .and_then(|provider| provider());
+        let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+        let selection =
+            self.selector
+                .select_worker(&workers, request, eligibility, self.block_size)?;
+        let config = workers
+            .get(&selection.worker.worker_id)
+            .expect("selected worker config must exist");
+        let selected_worker_tiers = request
+            .overlap
+            .selected_worker_tiers(selection.worker, config);
+        let worker_load = request.worker_load_for(selection.worker);
+
+        Ok(AdvisorySchedulingResponse {
+            selected_worker_load: AdvisoryWorkerLoad {
+                active_prefill_tokens: worker_load.active_prefill_tokens,
+                prefill_token_capacity: config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
+                    as usize,
+                total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+            },
+            response: SchedulingResponse {
+                best_worker: selection.worker,
+                effective_overlap_blocks: selection.effective_overlap_blocks,
+                cached_tokens: selection.cached_tokens,
+                selected_worker_tiers,
+                potential_decode_blocks: selection.potential_decode_blocks,
+            },
         })
     }
 

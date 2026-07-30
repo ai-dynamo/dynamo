@@ -186,23 +186,26 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await?;
-        let (worker, overlap_blocks, cached_tokens, potential_decode_blocks) = match outcome {
-            crate::kv_router::FindBestMatchOutcome::Routed {
-                worker,
-                overlap_blocks,
-                cached_tokens,
-                potential_decode_blocks,
-                ..
-            } => (
-                worker,
-                overlap_blocks,
-                cached_tokens,
-                potential_decode_blocks,
-            ),
-            crate::kv_router::FindBestMatchOutcome::QueueRejected { .. } => {
-                return Ok(None);
-            }
-        };
+        let (worker, overlap_blocks, cached_tokens, potential_decode_blocks, decode_load) =
+            match outcome {
+                crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    cached_tokens,
+                    potential_decode_blocks,
+                    selected_worker_load,
+                    ..
+                } => (
+                    worker,
+                    overlap_blocks,
+                    cached_tokens,
+                    potential_decode_blocks,
+                    selected_worker_load,
+                ),
+                crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { .. } => {
+                    return Ok(None);
+                }
+            };
 
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
@@ -238,11 +241,7 @@ impl PrefillRouter {
         let decode_busy = if policy_says_bypass {
             self.conditional_disagg_decode_busy_threshold
                 .and_then(|threshold| {
-                    decode_router.projected_decode_load_exceeds(
-                        worker,
-                        usize::try_from(potential_decode_blocks).ok()?,
-                        threshold,
-                    )
+                    decode_load.decode_load_exceeds(potential_decode_blocks, threshold)
                 })
         } else {
             None
@@ -368,14 +367,13 @@ impl PrefillRouter {
             .await
             .ok()?;
 
-        let worker = match outcome {
-            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => worker,
-            crate::kv_router::FindBestMatchOutcome::QueueRejected { .. } => return Some(true),
-        };
-
-        router
-            .chooser
-            .worker_is_prefill_busy(worker, tokio::time::Instant::now(), threshold)
+        match outcome {
+            crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
+                selected_worker_load,
+                ..
+            } => Some(selected_worker_load.prefill_load_exceeds(threshold)),
+            crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { .. } => Some(true),
+        }
     }
 }
 

@@ -18,8 +18,8 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, OverloadedWorkerProvider, PotentialLoad,
+    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -312,7 +312,7 @@ where
     pub async fn select_without_admission(
         &self,
         request: ScheduleRequest,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         let (request, _block_hashes) = self.make_scheduling_request(request, None);
         self.queue.select_without_admission(request).await
     }
@@ -509,26 +509,6 @@ where
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.queue.supports_overlap_refresh()
-    }
-
-    pub fn worker_is_prefill_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        decay_now: Instant,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.queue
-            .worker_is_prefill_busy(worker, decay_now, threshold)
-    }
-
-    pub fn projected_decode_load_exceeds(
-        &self,
-        worker: WorkerWithDpRank,
-        projected_blocks: usize,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.queue
-            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     pub fn worker_type(&self) -> &'static str {

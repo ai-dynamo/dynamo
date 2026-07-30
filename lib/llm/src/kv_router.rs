@@ -143,10 +143,34 @@ pub enum FindBestMatchOutcome {
     },
 }
 
+/// For probes that return best-match routing decisions plus selected-worker
+/// scheduler-load snapshots, without admitting the request into scheduler state.
+/// `FindBestMatchInnerOutcome` keeps this advisory shape internal so admitted
+/// routing can keep using `FindBestMatchOutcome` unchanged.
+pub enum FindBestMatchAdvisoryOutcome {
+    Routed {
+        worker: WorkerWithDpRank,
+        overlap_blocks: u32,
+        effective_overlap_blocks: f64,
+        cached_tokens: usize,
+        potential_decode_blocks: u64,
+        selected_worker_load: scheduling::AdvisoryWorkerLoad,
+        routing_hashes: Option<RoutingDecisionHashes>,
+    },
+    QueueRejected {
+        rejection: scheduling::QueueRejection,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FindBestMatchAdmission {
     WithAdmission { track_lifecycle: bool },
     WithoutAdmission,
+}
+
+pub(super) enum FindBestMatchInnerOutcome {
+    WithAdmission(FindBestMatchOutcome),
+    WithoutAdmission(FindBestMatchAdvisoryOutcome),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -675,28 +699,35 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
-        self.find_best_match_details_with_policy_class_inner(
-            context_id,
-            tokens,
-            block_mm_infos,
-            router_config_override,
-            update_states,
-            return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            FindBestMatchAdmission::WithAdmission {
-                track_lifecycle: false,
-            },
-        )
-        .await
+        match self
+            .find_best_match_details_with_policy_class_inner(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                return_routing_hashes,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_id,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: false,
+                },
+            )
+            .await?
+        {
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+                unreachable!("with-admission routing returned advisory outcome")
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -717,27 +748,34 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> anyhow::Result<FindBestMatchOutcome> {
-        self.find_best_match_details_with_policy_class_inner(
-            context_id,
-            tokens,
-            block_mm_infos,
-            router_config_override,
-            false,
-            return_routing_hashes,
-            lora_name,
-            cache_namespace,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            FindBestMatchAdmission::WithoutAdmission,
-        )
-        .await
+    ) -> anyhow::Result<FindBestMatchAdvisoryOutcome> {
+        match self
+            .find_best_match_details_with_policy_class_inner(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                false,
+                return_routing_hashes,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_id,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                FindBestMatchAdmission::WithoutAdmission,
+            )
+            .await?
+        {
+            FindBestMatchInnerOutcome::WithoutAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithAdmission(_) => {
+                unreachable!("without-admission routing returned admitted outcome")
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -760,32 +798,30 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-    ) -> anyhow::Result<FindBestMatchOutcome> {
+    ) -> anyhow::Result<FindBestMatchInnerOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states
-            && matches!(
-                admission,
-                FindBestMatchAdmission::WithAdmission {
-                    track_lifecycle: true
+        let mode = match admission {
+            FindBestMatchAdmission::WithAdmission { track_lifecycle }
+                if update_states && track_lifecycle =>
+            {
+                ScheduleMode::TrackedWithLifecycle {
+                    request_id: context_id.expect("validated above").to_string(),
                 }
-            ) {
-            ScheduleMode::TrackedWithLifecycle {
-                request_id: context_id.expect("validated above").to_string(),
             }
-        } else if update_states {
-            ScheduleMode::Tracked {
-                request_id: context_id.expect("validated above").to_string(),
+            FindBestMatchAdmission::WithAdmission { .. } if update_states => {
+                ScheduleMode::Tracked {
+                    request_id: context_id.expect("validated above").to_string(),
+                }
             }
-        } else {
-            ScheduleMode::QueryOnly {
+            FindBestMatchAdmission::WithAdmission { .. }
+            | FindBestMatchAdmission::WithoutAdmission => ScheduleMode::QueryOnly {
                 request_id: context_id.map(str::to_string),
-            }
+            },
         };
-
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
@@ -881,26 +917,35 @@ where
             routing_constraints,
             shared_cache_hits,
         };
-        let response_result = match admission {
-            FindBestMatchAdmission::WithAdmission { .. } => {
-                self.scheduler
-                    .schedule_request(schedule_request)
-                    .instrument(tracing::info_span!("kv_router.schedule"))
-                    .await
-            }
-            FindBestMatchAdmission::WithoutAdmission => {
-                self.scheduler
-                    .select_without_admission(schedule_request)
-                    .instrument(tracing::info_span!("kv_router.select_without_admission"))
-                    .await
-            }
-        };
-        let response = match response_result {
-            Ok(response) => response,
-            Err(KvSchedulerError::QueueRejected(rejection)) => {
-                return Ok(FindBestMatchOutcome::QueueRejected { rejection });
-            }
-            Err(error) => return Err(map_scheduler_error(error)),
+        let (response, selected_worker_load) = match admission {
+            FindBestMatchAdmission::WithAdmission { .. } => match self
+                .scheduler
+                .schedule_request(schedule_request)
+                .instrument(tracing::info_span!("kv_router.schedule"))
+                .await
+            {
+                Ok(response) => (response, None),
+                Err(KvSchedulerError::QueueRejected(rejection)) => {
+                    return Ok(FindBestMatchInnerOutcome::WithAdmission(
+                        FindBestMatchOutcome::QueueRejected { rejection },
+                    ));
+                }
+                Err(error) => return Err(map_scheduler_error(error)),
+            },
+            FindBestMatchAdmission::WithoutAdmission => match self
+                .scheduler
+                .select_without_admission(schedule_request)
+                .instrument(tracing::info_span!("kv_router.select_without_admission"))
+                .await
+            {
+                Ok(advisory) => (advisory.response, Some(advisory.selected_worker_load)),
+                Err(KvSchedulerError::QueueRejected(rejection)) => {
+                    return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
+                        FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
+                    ));
+                }
+                Err(error) => return Err(map_scheduler_error(error)),
+            },
         };
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
@@ -939,14 +984,30 @@ where
             "find_best_match completed"
         );
 
-        Ok(FindBestMatchOutcome::Routed {
-            worker: response.best_worker,
-            overlap_blocks: response.effective_overlap_blocks.round() as u32,
-            effective_overlap_blocks: response.effective_overlap_blocks,
-            cached_tokens: response.cached_tokens,
-            potential_decode_blocks: response.potential_decode_blocks as u64,
-            routing_hashes,
-        })
+        match admission {
+            FindBestMatchAdmission::WithAdmission { .. } => Ok(
+                FindBestMatchInnerOutcome::WithAdmission(FindBestMatchOutcome::Routed {
+                    worker: response.best_worker,
+                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                    effective_overlap_blocks: response.effective_overlap_blocks,
+                    cached_tokens: response.cached_tokens,
+                    potential_decode_blocks: response.potential_decode_blocks as u64,
+                    routing_hashes,
+                }),
+            ),
+            FindBestMatchAdmission::WithoutAdmission => Ok(
+                FindBestMatchInnerOutcome::WithoutAdmission(FindBestMatchAdvisoryOutcome::Routed {
+                    worker: response.best_worker,
+                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                    effective_overlap_blocks: response.effective_overlap_blocks,
+                    cached_tokens: response.cached_tokens,
+                    potential_decode_blocks: response.potential_decode_blocks as u64,
+                    selected_worker_load: selected_worker_load
+                        .expect("without-admission selection returns advisory load"),
+                    routing_hashes,
+                }),
+            ),
+        }
     }
 
     /// Give these tokens, find the worker with the best match in its KV cache.
@@ -1070,26 +1131,6 @@ where
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
         self.scheduler.pending_isl_tokens()
-    }
-
-    pub(crate) fn worker_is_prefill_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        decay_now: tokio::time::Instant,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.scheduler
-            .worker_is_prefill_busy(worker, decay_now, threshold)
-    }
-
-    pub(crate) fn projected_decode_load_exceeds(
-        &self,
-        worker: WorkerWithDpRank,
-        projected_blocks: usize,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.scheduler
-            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     fn prefill_load_hint_for(

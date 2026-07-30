@@ -6,8 +6,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -326,7 +326,7 @@ where
     pub async fn select_without_admission(
         &self,
         request: ScheduleRequest,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.inner.select_without_admission(request).await
     }
 
@@ -356,26 +356,6 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.inner.pending_isl_tokens()
-    }
-
-    pub fn worker_is_prefill_busy(
-        &self,
-        worker: WorkerWithDpRank,
-        decay_now: tokio::time::Instant,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.inner
-            .worker_is_prefill_busy(worker, decay_now, threshold)
-    }
-
-    pub fn projected_decode_load_exceeds(
-        &self,
-        worker: WorkerWithDpRank,
-        projected_blocks: usize,
-        threshold: f64,
-    ) -> Option<bool> {
-        self.inner
-            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     pub fn worker_type(&self) -> &'static str {

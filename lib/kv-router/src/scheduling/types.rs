@@ -78,6 +78,34 @@ pub struct SchedulingResponse {
     pub potential_decode_blocks: usize,
 }
 
+#[derive(Debug)]
+pub struct AdvisorySchedulingResponse {
+    pub response: SchedulingResponse,
+    pub selected_worker_load: AdvisoryWorkerLoad,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdvisoryWorkerLoad {
+    pub active_prefill_tokens: usize,
+    pub prefill_token_capacity: usize,
+    pub total_kv_blocks: Option<usize>,
+}
+
+impl AdvisoryWorkerLoad {
+    pub fn prefill_load_exceeds(&self, threshold: f64) -> bool {
+        self.active_prefill_tokens as f64 > threshold * self.prefill_token_capacity as f64
+    }
+
+    pub fn decode_load_exceeds(
+        &self,
+        potential_decode_blocks: u64,
+        threshold: f64,
+    ) -> Option<bool> {
+        let total_kv_blocks = self.total_kv_blocks?;
+        Some(potential_decode_blocks as f64 > threshold * total_kv_blocks as f64)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ScheduleMode {
     QueryOnly {
