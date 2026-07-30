@@ -672,9 +672,15 @@ jobs:
             echo "- \`tensorrtllm-runtime-nightly:${NGC_VERSION_TAG}-efa\`${TE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\` / \`vllm-runtime:nightly-efa\`${VE_NOTE}" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\` / \`sglang-runtime:nightly-efa\`${SE_NOTE}" >> $GITHUB_STEP_SUMMARY
-            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\` / \`tensorrtllm-runtime:nightly-efa\`${TE_NOTE}" >> $GITHUB_STEP_SUMMARY
+            # Core runtime aliases stage whenever the (release-gating) runtime
+            # build succeeded — never annotate them with the EFA build's fate;
+            # the EFA alias is staged fail-soft and carries its own note.
+            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:nightly-efa\`${VE_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly-efa\`${SE_NOTE}" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:nightly-efa\`${TE_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`kubernetes-operator:nightly\`${OP_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-planner:nightly\`${PL_NOTE}" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-frontend:nightly\`${FE_NOTE}" >> $GITHUB_STEP_SUMMARY
