@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -24,6 +26,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.sglang,
+    pytest.mark.core,
 ]
 
 
@@ -161,3 +164,38 @@ def test_region_requires_rw_allocator(build_impl, tag):
     with pytest.raises(RuntimeError, match=rf"requires '{tag}' to be RW"):
         with impl.region(tag, enable_cpu_backup=False):
             pass
+
+
+@pytest.mark.timeout(30)
+def test_setup_gms_enables_memory_saver_and_returns_model_loader():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from types import SimpleNamespace
+
+from gpu_memory_service.integrations.sglang import setup_gms
+
+server_args = SimpleNamespace(
+    enable_memory_saver=False,
+    enable_weights_cpu_backup=False,
+    enable_draft_weights_cpu_backup=False,
+    model_loader_extra_config={},
+)
+assert server_args.enable_memory_saver is False
+
+loader = setup_gms(server_args)
+
+from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
+
+assert server_args.enable_memory_saver is True
+assert loader is GMSModelLoader
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
