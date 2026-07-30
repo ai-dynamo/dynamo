@@ -22,6 +22,10 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot_agent_poc:
+        description: 'Test only: build and push the amd64 snapshot-agent at this commit'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -125,6 +129,68 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # SNAPSHOT AGENT POC (build-only)
+  # ============================================================================
+
+  snapshot-agent-poc:
+    needs: [init]
+    if: inputs.build_snapshot_agent_poc
+    name: Snapshot Agent PoC
+    runs-on: prod-builder-v3
+    timeout-minutes: 60
+    env:
+      ACR_IMAGE_BASE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Initialize Dynamo builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: linux/amd64
+
+      - name: Log in to ACR
+        uses: ./.github/actions/docker-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Build and push Snapshot Agent
+        working-directory: deploy/snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --builder "${BUILDER_NAME}" \
+            --progress plain \
+            --platform linux/amd64 \
+            --target agent \
+            --push \
+            --provenance mode=max \
+            --metadata-file "${GITHUB_WORKSPACE}/snapshot-agent-metadata.json" \
+            --tag "${ACR_IMAGE_BASE}:${GITHUB_SHA}-snapshot-agent" \
+            --build-context snapshot=../snapshot \
+            --build-context operator=../operator \
+            --build-context compliance=../../container/compliance \
+            --build-arg "BASELINE_SBOM_FILE=cuda-dl-base@8315e245" \
+            --file Dockerfile \
+            .
+
+      - name: Record image digest
+        shell: bash
+        run: jq -er '."containerimage.digest"' snapshot-agent-metadata.json
+
+      - name: Upload BuildKit metadata
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: snapshot-agent-${{ github.sha }}
+          path: snapshot-agent-metadata.json
+          retention-days: 30
+
+  # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
 
@@ -194,7 +260,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, snapshot-agent-poc, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
