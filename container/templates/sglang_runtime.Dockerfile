@@ -132,12 +132,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 {% if context.sglang.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# SGLang runtime dependency stack.
+# SGLang runtime dependency stack. google-crc32c is imported eagerly by the MX
+# sglang loader (>=0.5.0) and is not in the SGLang base image, so install it
+# alongside; the import check below fails the build on any future --no-deps gap.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     export PIP_CACHE_DIR=/root/.cache/pip; \
     pip install --break-system-packages --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    pip install --break-system-packages "google-crc32c>=1.5.0"; \
+    python3 -c "import modelexpress.engines.sglang"
 {% endif %}
 {% endif %}
 {% endif %}
