@@ -74,9 +74,11 @@ Each row has a dedicated must-pass test in
 
 The standalone `build_auth_validator` factory treats
 `AuthConfig.trusted_sources=[]` as fail-closed. The Planner orchestrator keeps a
-legacy development fallback: an empty list installs
-`AllowUnauthenticatedAuth` and logs a warning. Production configurations should
-explicitly select `static_secret`.
+legacy compatibility fallback: an empty list installs
+`AllowUnauthenticatedAuth` and logs a warning. This fallback is **DEV ONLY**;
+do not rely on it as an intentional configuration. Select
+`allow_unauthenticated` explicitly for development. Production configurations
+must select `static_secret`.
 
 ## Protocol versioning
 

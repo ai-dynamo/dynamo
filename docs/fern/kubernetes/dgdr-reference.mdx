@@ -492,7 +492,7 @@ These fields default from environment variables and are excluded from serialized
 
 <Indent>
   <ParamField path="auth" type="AuthConfig">
-    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy development-mode unauthenticated fallback and logs a warning. Production deployments should explicitly configure `static_secret`.
+    Registry authentication. In the Planner process, an empty `trusted_sources` activates a legacy compatibility fallback to unauthenticated access and logs a warning. This fallback is **DEV ONLY**; do not rely on it as an intentional configuration. Select `allow_unauthenticated` explicitly for development. Production deployments must configure `static_secret`.
   </ParamField>
   <Indent>
     <ParamField path="trusted_sources" type="[]string" default="[]">
