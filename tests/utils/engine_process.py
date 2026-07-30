@@ -64,6 +64,11 @@ class EngineConfig:
     timeout: int = 600
     delayed_start: int = 0
     health_check_workers: bool = False
+    # How many worker system ports (DYN_SYSTEM_PORT1..N) the launch script
+    # actually binds. The port fixture may allocate more than the script uses
+    # (num_system_ports is sized for the largest config in the module), so the
+    # health check must not probe beyond this count.
+    health_check_worker_count: int = 2
     health_check_funcs: List[Any] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
@@ -206,11 +211,17 @@ class EngineProcess(ManagedProcess):
         # fixtures for ALL tests, so we gate on health_check_workers (only
         # set by same-gpu disagg configs) to avoid health-checking ports
         # that don't serve /health in regular multi-GPU tests.
+        #
+        # Only probe DYN_SYSTEM_PORT1..health_check_worker_count: the fixture
+        # allocates num_system_ports for the largest config in the module
+        # (e.g. 4 for disaggregated_router), so a greedy scan of every
+        # DYN_SYSTEM_PORT* var would wait forever on ports no process binds.
         delayed = config.delayed_start
         worker_checks: list[tuple] = []
         if config.health_check_workers:
-            for key, val in sorted(env.items()):
-                if key.startswith("DYN_SYSTEM_PORT") and val.isdigit():
+            for idx in range(1, config.health_check_worker_count + 1):
+                val = env.get(f"DYN_SYSTEM_PORT{idx}", "")
+                if val.isdigit():
                     worker_checks.append((f"http://localhost:{val}/health", None))
             if worker_checks:
                 delayed = 0
