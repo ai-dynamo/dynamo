@@ -723,12 +723,21 @@ impl AcceptBackoff {
     /// schedule is reset either way. A suppressed recovery keeps its count
     /// rather than discarding it, so the next emitted summary — on either
     /// path — still accounts for every failure observed.
-    fn record_success(&mut self, now: std::time::Instant) -> Option<u64> {
-        self.current_delay = self.initial_delay;
+    ///
+    /// The clock is passed as a closure rather than an `Instant` so that the
+    /// steady-state accept — every ordinary connection, and this listener opens
+    /// one per request — takes the early return below without reading a clock
+    /// at all.
+    fn record_success(&mut self, now: impl FnOnce() -> std::time::Instant) -> Option<u64> {
         if !self.in_backoff {
+            // Outside an episode `current_delay` already equals `initial_delay`,
+            // because the `record_success` that closed the previous episode set
+            // it. There is nothing to reset and nothing to log.
             return None;
         }
+        self.current_delay = self.initial_delay;
         self.in_backoff = false;
+        let now = now();
 
         let due = match self.last_log_at {
             None => true,
@@ -818,7 +827,7 @@ async fn tcp_listener(
         // todo - add counter for outgoing bytes
         let (stream, _addr) = match listener.accept().await {
             Ok((stream, _addr)) => {
-                if let Some(suppressed) = accept_backoff.record_success(std::time::Instant::now()) {
+                if let Some(suppressed) = accept_backoff.record_success(std::time::Instant::now) {
                     tracing::warn!(
                         suppressed_failures = suppressed,
                         "tcp accept recovered from file-descriptor exhaustion"
@@ -2572,7 +2581,7 @@ mod tests {
             "precondition: delay should have grown, {grown:?} vs {first:?}"
         );
 
-        backoff.record_success(now);
+        backoff.record_success(|| now);
 
         let after_recovery = backoff.record_exhaustion(now).delay;
         assert_eq!(
@@ -2607,7 +2616,7 @@ mod tests {
 
         // The recovery lands inside that same window, so it must stay silent.
         assert_eq!(
-            backoff.record_success(t0),
+            backoff.record_success(|| t0),
             None,
             "a recovery inside the log window must not emit"
         );
@@ -2615,7 +2624,7 @@ mod tests {
         // Flap back into the episode; still inside the window, still silent.
         backoff.record_exhaustion(t0);
         assert_eq!(
-            backoff.record_success(t0),
+            backoff.record_success(|| t0),
             None,
             "a flapping listener must not emit a recovery line per accept"
         );
@@ -2624,9 +2633,24 @@ mod tests {
         // failure suppressed meanwhile, rather than having discarded them.
         backoff.record_exhaustion(t0);
         assert_eq!(
-            backoff.record_success(t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
+            backoff.record_success(|| t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
             Some(4),
             "after the window elapses the recovery emits with the rolled-forward count"
+        );
+
+        // A success outside an episode is silent and leaves the schedule at its
+        // initial delay. That invariant is what lets the steady-state accept
+        // return before reading a clock: there is provably nothing to reset.
+        let t1 = t0 + ACCEPT_BACKOFF_LOG_INTERVAL * 2;
+        assert_eq!(
+            backoff.record_success(|| t1),
+            None,
+            "steady-state accepts must never emit a recovery line"
+        );
+        assert_eq!(
+            backoff.record_exhaustion(t1).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
+            "a success outside an episode must leave the schedule at its initial delay"
         );
     }
 
@@ -2767,7 +2791,7 @@ mod tests {
         drop(accepted);
 
         // Recovery resets the schedule, as the loop's Ok(..) arm does.
-        backoff.record_success(std::time::Instant::now());
+        backoff.record_success(std::time::Instant::now);
         assert_eq!(
             backoff.record_exhaustion(std::time::Instant::now()).delay,
             ACCEPT_BACKOFF_INITIAL_DELAY,
