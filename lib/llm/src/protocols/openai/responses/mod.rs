@@ -999,21 +999,7 @@ pub fn chat_completion_to_response(
     let mut output = Vec::new();
 
     if let Some(choice) = choice {
-        // Handle structured tool calls
-        if let Some(tool_calls) = choice.message.tool_calls {
-            for tc in &tool_calls {
-                output.push(OutputItem::FunctionCall(FunctionToolCall {
-                    arguments: tc.function.arguments.clone(),
-                    call_id: tc.id.clone(),
-                    namespace: None,
-                    name: tc.function.name.clone(),
-                    id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-                    status: Some(OutputStatus::Completed),
-                }));
-            }
-        }
-
-        // Map reasoning_content to a Reasoning output item
+        // Map reasoning_content to a Reasoning output item.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
             && params.reasoning_summary_requested()
@@ -1027,6 +1013,20 @@ pub fn chat_completion_to_response(
                 encrypted_content: None,
                 status: Some(OutputStatus::Completed),
             }));
+        }
+
+        // Handle structured tool calls
+        if let Some(tool_calls) = choice.message.tool_calls {
+            for tc in &tool_calls {
+                output.push(OutputItem::FunctionCall(FunctionToolCall {
+                    arguments: tc.function.arguments.clone(),
+                    call_id: tc.id.clone(),
+                    namespace: None,
+                    name: tc.function.name.clone(),
+                    id: Some(format!("fc_{}", Uuid::new_v4().simple())),
+                    status: Some(OutputStatus::Completed),
+                }));
+            }
         }
 
         // Handle text content -- also parse <tool_call> blocks from models
@@ -2956,6 +2956,38 @@ thinking
                 text: "summary".into(),
             })]
         );
+    }
+
+    #[test]
+    fn test_reasoning_summary_precedes_structured_tool_calls() {
+        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+
+        let mut chat_resp = make_chat_resp_with_reasoning("look up the weather");
+        chat_resp.inner.choices[0].message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
+            id: "call_weather".into(),
+            r#type: FunctionType::Function,
+            function: dynamo_protocols::types::FunctionCall {
+                name: "get_weather".into(),
+                arguments: r#"{"location":"SF"}"#.into(),
+            },
+        }]);
+        let params = ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..Default::default()
+        };
+
+        let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [
+                OutputItem::Reasoning(_),
+                OutputItem::FunctionCall(_),
+                OutputItem::Message(_)
+            ]
+        ));
     }
 
     #[test]
