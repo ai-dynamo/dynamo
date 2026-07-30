@@ -12,7 +12,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    decode:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode

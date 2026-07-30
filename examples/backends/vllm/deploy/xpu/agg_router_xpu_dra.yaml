@@ -48,7 +48,7 @@ spec:
             # Enable KV Router for intelligent worker selection
             - name: DYN_ROUTER_MODE
               value: kv
-    decode:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
