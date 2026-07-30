@@ -46,6 +46,53 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
     fi
 
+# Build the frontend Python environment separately so AIConfigurator can be
+# compiled from its immutable Git revision without shipping Git, Cargo, or a C
+# toolchain in the final frontend image.
+FROM ${FRONTEND_IMAGE} AS frontend_python_deps
+
+ARG PYTHON_VERSION
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/cargo/bin:${PATH}"
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        git \
+        git-lfs \
+        patchelf \
+        pkg-config \
+        python${PYTHON_VERSION}-dev \
+    && git lfs install --system \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+COPY --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
+
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv venv /opt/dynamo/venv --python ${PYTHON_VERSION} && \
+    uv pip install \
+        --requirement /tmp/requirements.common.txt \
+        --requirement /tmp/requirements.frontend.txt
+
+# benchmarks also declares aiconfigurator-core, so install it while the same
+# source-build toolchain is available.
+RUN --mount=type=bind,source=./benchmarks,target=/tmp/benchmarks \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra \
+        UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install /tmp/benchmarks
+
 FROM ${FRONTEND_IMAGE} AS pre_frontend
 
 ARG PYTHON_VERSION
@@ -58,9 +105,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libstdc++6 \
         # required for verification of GPG keys
         gnupg2 \
-        # required for installing dependencies from git repositories
-        git \
-        git-lfs \
         # compliance audit bootstraps syft over HTTPS
         curl \
         # Python runtime - required for virtual environment to work
@@ -110,23 +154,9 @@ COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/pyt
 # crick wheel pre-built in the crick_builder stage; see comment near the top.
 COPY --chown=dynamo: --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
 
-# Create virtual environment
-RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-# Install runtime dependencies (common + frontend).
-# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
-# plus AIC core for the experimental router-side prefill-load model.
-# Test and dev dependencies are NOT installed here — they go in the test and dev images.
-RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
-    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install \
-        --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.frontend.txt
+# The dependency builder carries the source-build toolchains; this stage receives
+# only the completed environment.
+COPY --chown=dynamo:0 --from=frontend_python_deps /opt/dynamo/venv /opt/dynamo/venv
 
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -154,10 +184,7 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
             exit 1; \
         fi; \
         uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install .
+    fi
 
 # Setup environment for all users
 USER root
