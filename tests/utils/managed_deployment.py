@@ -117,6 +117,20 @@ class ServiceSpec:
     def _sidecar_container(self, create: bool = False) -> Optional[dict]:
         return self._find_container(self._sidecar_container_name(), create=create)
 
+    def _non_main_checkpoint_target_container(self) -> Optional[dict]:
+        checkpoint = self._spec.get("experimental", {}).get("checkpoint", {})
+        target_name = checkpoint.get("targetContainerName")
+        if not target_name or target_name == "main":
+            return None
+
+        target = self._find_container(target_name)
+        if target is None:
+            raise ValueError(
+                f"v1beta1 component {self.name!r} checkpoint targetContainerName "
+                f"{target_name!r} does not name a podTemplate container"
+            )
+        return target
+
     # ----- Image -----
     @property
     def image(self) -> Optional[str]:
@@ -188,7 +202,34 @@ class ServiceSpec:
         self._spec["envs"] = value
 
     def add_pvc_mount(self, pvc_name: str, mount_point: str) -> None:
-        """Add a service-level volumeMount for a PVC declared in ``spec.pvcs``. Idempotent."""
+        """Mount a PVC on this service/component. Idempotent."""
+        if self._schema == SCHEMA_V1BETA1:
+            checkpoint_target = self._non_main_checkpoint_target_container()
+            pod_spec = self._spec.setdefault("podTemplate", {}).setdefault("spec", {})
+            volumes = pod_spec.setdefault("volumes", [])
+            if not any(volume.get("name") == pvc_name for volume in volumes):
+                volumes.append(
+                    {
+                        "name": pvc_name,
+                        "persistentVolumeClaim": {"claimName": pvc_name},
+                    }
+                )
+
+            container = self._main_container(create=True)
+            assert container is not None
+            cache_containers = [container]
+            if checkpoint_target is not None:
+                cache_containers.append(checkpoint_target)
+                env = checkpoint_target.setdefault("env", [])
+                if not any(item.get("name") == "HF_HOME" for item in env):
+                    env.append({"name": "HF_HOME", "value": mount_point})
+
+            for cache_container in cache_containers:
+                mounts = cache_container.setdefault("volumeMounts", [])
+                if not any(mount.get("name") == pvc_name for mount in mounts):
+                    mounts.append({"name": pvc_name, "mountPath": mount_point})
+            return
+
         mounts = self._spec.setdefault("volumeMounts", [])
         if not any(m.get("name") == pvc_name for m in mounts):
             mounts.append({"name": pvc_name, "mountPoint": mount_point})
@@ -495,10 +536,23 @@ class DeploymentSpec:
         self, pvc_name: str, mount_point: str = "/models"
     ) -> None:
         """Reference a pre-existing PVC and mount it at ``mount_point`` on every
-        service, with ``HF_HOME`` pointed at it so models come from the shared cache
-        instead of HuggingFace. Idempotent; used by CI via --model-cache-pvc.
+        service/component, with ``HF_HOME`` pointed at it so models come from the
+        shared cache instead of HuggingFace. Idempotent; used by CI via
+        --model-cache-pvc.
         """
         spec = self._deployment_spec["spec"]
+        if self._schema == SCHEMA_V1BETA1:
+            services = self.services
+            for service in services:
+                service._non_main_checkpoint_target_container()
+
+            env = spec.setdefault("env", [])
+            if not any(item.get("name") == "HF_HOME" for item in env):
+                env.append({"name": "HF_HOME", "value": mount_point})
+            for service in services:
+                service.add_pvc_mount(pvc_name, mount_point)
+            return
+
         pvcs = spec.setdefault("pvcs", [])
         if not any(p.get("name") == pvc_name for p in pvcs):
             pvcs.append({"name": pvc_name, "create": False})
