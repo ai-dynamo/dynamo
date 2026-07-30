@@ -87,7 +87,7 @@ impl SglangSidecarEngine {
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_mode(disaggregation_mode).to_string(),
+            component: disaggregation_mode.discovery_component().to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
@@ -418,14 +418,6 @@ fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoErr
         mode => Err(client::protocol_error(format!(
             "unsupported SGLang disaggregation_mode `{mode}`"
         ))),
-    }
-}
-
-fn component_for_mode(mode: DisaggregationMode) -> &'static str {
-    if mode.is_prefill() {
-        "prefill"
-    } else {
-        "backend"
     }
 }
 

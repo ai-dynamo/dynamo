@@ -69,7 +69,7 @@ impl ReplayWorkerCore {
         &mut self,
         collector: &mut TraceCollector,
         now_ms: f64,
-    ) -> EnginePassResult {
-        self.core.execute_pass(collector, now_ms)
+    ) -> anyhow::Result<EnginePassResult> {
+        self.core.try_execute_pass(collector, now_ms)
     }
 }
