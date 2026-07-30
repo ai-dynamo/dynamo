@@ -36,8 +36,19 @@ For the shared vLLM/TensorRT-LLM core, `g1_backend` selects the GPU-tier block m
 - `kvbm` uses the KVBM logical block manager and its lineage-aware inactive pool.
 - `native` uses Mocker's self-contained physical block-pool model.
 
+When `g1_backend` is unset, Mocker selects `native` unless `num_g2_blocks`,
+`num_g3_blocks`, or `enable_g4_storage` enables a lower tier. Lower-tier configuration
+automatically selects `kvbm`. An explicit `g1_backend: native` conflicts with lower-tier
+configuration and fails validation; omit `g1_backend` to select KVBM automatically or set it to
+`kvbm`.
+
 Both managers model G1 capacity, prefix reuse, request ownership, eviction, and router-visible KV
-events. The SGLang core uses its own token-pool and radix-cache implementation.
+events. Their event visibility and allocation timing can differ, which can change KV-router
+decisions and numeric replay results. Set `g1_backend` explicitly when comparing a new run with a
+baseline created under a specific manager.
+
+The SGLang core uses its own token-pool and radix-cache implementation. It ignores `g1_backend` and
+does not support KVBM lower-tier offload.
 
 ## Timing Sources
 

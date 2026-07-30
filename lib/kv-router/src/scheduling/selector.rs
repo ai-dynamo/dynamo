@@ -238,8 +238,16 @@ impl DefaultWorkerSelector {
             self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
+        // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
+        // spawns without the caller's request span, so the logging layer cannot attach
+        // `x_request_id`/`trace_id` to them. Stamp the identity the row needs to be self-joining:
+        // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
+        // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
+        // inside the macro so they cost nothing when DEBUG is disabled.
         if shared_beyond > 0 {
             tracing::debug!(
+                request_id = request.mode.request_id().unwrap_or("-"),
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -253,6 +261,8 @@ impl DefaultWorkerSelector {
             );
         } else {
             tracing::debug!(
+                request_id = request.mode.request_id().unwrap_or("-"),
+                worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
@@ -300,6 +310,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         }
 
         let request_blocks = request.request_blocks(block_size);
+        // Borrowed, never allocated; bridges the winner row to `[ROUTING] Best`.
+        let request_id = request.mode.request_id().unwrap_or("-");
 
         let weights = LogitWeights {
             overlap_score_credit: request
@@ -344,6 +356,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
             tracing::info!(
+                request_id,
                 "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
                 self.worker_type,
                 worker.worker_id,
@@ -501,6 +514,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         if self.worker_type == "decode" {
             tracing::info!(
                 router_mode = "kv",
+                request_id,
                 worker_id = best_worker.worker_id,
                 worker_type = %self.worker_type,
                 dp_rank = ?best_worker.dp_rank,
@@ -529,6 +543,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         tracing::info!(
             router_mode = "kv",
+            request_id,
             worker_id = best_worker.worker_id,
             worker_type = %self.worker_type,
             dp_rank = ?best_worker.dp_rank,
