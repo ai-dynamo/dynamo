@@ -3,7 +3,8 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   snapshot -> snapshot-agent build and test
+#   snapshot -> snapshot-agent build/test + all-framework DynamoCheckpoint deploy tests
+#   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's DynamoCheckpoint suite
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
@@ -13,10 +14,11 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore
+#   examples, ignore, sidecar
 
 all:
   - '**'
@@ -37,6 +39,8 @@ docs:
   - '.agents/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
+  # Sidecar documentation is not part of the Fern docs site.
+  - '!lib/sidecar/**'
 
 examples:
   - 'recipes/**'
@@ -68,6 +72,7 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
+  - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
@@ -80,6 +85,10 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_skills.py'
+  # CODEOWNERS generation tooling (data + scripts). Validated by its own
+  # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
+  - '.github/codeowners/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -104,6 +113,7 @@ core:
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
+  - 'components/src/dynamo/kv_dc_relay/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
@@ -114,6 +124,7 @@ core:
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -122,6 +133,9 @@ core:
   # Negation patterns MUST come after positive patterns — micromatch processes
   # patterns left-to-right, so negations only filter matches accumulated by
   # preceding patterns. Placing them first has no effect.
+  # Rust sidecars have their own classification and do not use the framework
+  # container or E2E pipelines triggered by `core`.
+  - '!lib/sidecar/**'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
@@ -132,7 +146,7 @@ operator:
   - 'deploy/operator/.*'
   # Operator imports the local snapshot module.
   - 'deploy/snapshot/**'
-  - 'docs/kubernetes/api-reference.md'
+  - 'docs/fern/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
@@ -145,6 +159,19 @@ snapshot:
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+
+# Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
+# that framework's DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator
+# deps) without forcing the other backends' checkpoint suites.
+snapshot_vllm:
+  - 'components/src/dynamo/vllm/snapshot.py'
+
+snapshot_sglang:
+  - 'components/src/dynamo/sglang/snapshot.py'
+
+snapshot_trtllm:
+  - 'components/src/dynamo/trtllm/snapshot.py'
+  - 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py'
 
 power_agent:
   - *ci
@@ -173,9 +200,14 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  - 'aisimulate/**'
+  - 'examples/aisimulate/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'deploy/power-agent/**'
   - 'deploy/helm/charts/power-agent/**'
+
+sidecar:
+  - 'lib/sidecar/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
@@ -189,7 +221,7 @@ vllm:
 sglang:
   - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
-  - 'components/src/dynamo/sglang/**'
+  - 'components/src/dynamo/sglang*/**'
   - 'container/templates/sglang_*'
   - 'container/deps/sglang/**'
   - '!**/*.md'
@@ -221,14 +253,19 @@ frontend:
   - '*.lock'
   - 'container/deps/*'
   - 'container/compliance/**'
+  - 'components/src/dynamo/kv_dc_relay/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'tests/frontend/router_aic_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  # Sidecars are standalone Rust binaries and are not part of the frontend
+  # image or its E2E test pipeline.
+  - '!lib/sidecar/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -238,6 +275,9 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  # Sidecar protobuf contracts are compiled by crate build scripts and need the
+  # same workspace checks as sidecar Rust sources.
+  - 'lib/sidecar/**/*.proto'
 
 benchmarks:
   - 'benchmarks/**'

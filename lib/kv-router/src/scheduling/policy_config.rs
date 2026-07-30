@@ -8,9 +8,8 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{QueueAdmissionConfig, config::RouterQueuePolicy};
+use super::config::RouterQueuePolicy;
 
-const DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC: f64 = 16.0;
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
 #[derive(Debug, Error)]
@@ -35,7 +34,6 @@ pub enum RouterPolicyConfigError {
 pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
-    pub queue_admission: Option<QueueAdmissionConfig>,
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
@@ -117,7 +115,6 @@ impl PolicyProfile {
         let class = PolicyClassConfig {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
-            queue_admission: None,
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
@@ -296,8 +293,6 @@ struct RawPolicyClassConfig {
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
-    #[serde(default)]
-    queue_admission: Option<QueueAdmissionConfig>,
     quantum: usize,
     #[serde(default)]
     prefill_busy_threshold: Option<usize>,
@@ -326,7 +321,6 @@ fn resolve_profile(
     let mut names = HashSet::with_capacity(profile.policy_classes.len());
     let mut classes = Vec::with_capacity(profile.policy_classes.len());
     let mut bindings = Vec::with_capacity(profile.policy_classes.len());
-    let mut has_queue_admission = false;
     for raw in profile.policy_classes {
         let resolved = resolve_policy_class(raw, &resolved_buckets.indices, location)?;
         if !names.insert(resolved.config.name.clone()) {
@@ -334,14 +328,6 @@ fn resolve_profile(
                 "{location} contains duplicate policy class {:?}",
                 resolved.config.name
             )));
-        }
-        if resolved.config.queue_admission.is_some() {
-            if has_queue_admission {
-                return Err(RouterPolicyConfigError::Validation(format!(
-                    "{location} must contain at most one capacity-reserving queue_admission class"
-                )));
-            }
-            has_queue_admission = true;
         }
         classes.push(resolved.config);
         bindings.push(resolved.binding);
@@ -463,12 +449,6 @@ fn resolve_policy_class(
             raw.name
         )));
     }
-    if raw.queue_admission.is_some() && raw.queue_policy != RouterQueuePolicy::Fcfs {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} queue_admission requires queue_policy fcfs",
-            raw.name
-        )));
-    }
     if raw
         .prefill_busy_threshold_frac
         .is_some_and(|value| !value.is_finite() || value < 0.0)
@@ -502,21 +482,13 @@ fn resolve_policy_class(
             )));
         }
     };
-
-    let (prefill_busy_threshold, prefill_busy_threshold_frac) =
-        match (raw.prefill_busy_threshold, raw.prefill_busy_threshold_frac) {
-            (None, None) => (None, Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)),
-            thresholds => thresholds,
-        };
-
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
-            queue_admission: raw.queue_admission,
             quantum: raw.quantum,
-            prefill_busy_threshold,
-            prefill_busy_threshold_frac,
+            prefill_busy_threshold: raw.prefill_busy_threshold,
+            prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
@@ -636,6 +608,7 @@ models:
         policy_family: latency
         cache_bucket: uncached
         quantum: 4
+        prefill_busy_threshold_frac: 0.0
 "#,
         )
         .unwrap();
@@ -643,9 +616,12 @@ models:
         let exact = config.resolve_profile(Some("exact-model"), Some(3.0), RouterQueuePolicy::Wspt);
         assert_eq!(exact.classes().len(), 2);
         assert_eq!(exact.default_class().name, "model-cached");
-        assert_eq!(
-            exact.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
+        assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
+        assert!(!exact.default_class().queueing_enabled());
+        assert!(
+            exact
+                .class(exact.resolve_class_index(None, usize::MAX))
+                .queueing_enabled()
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
         assert_eq!(
@@ -702,107 +678,6 @@ models:
             fallback.default_class().queue_policy,
             RouterQueuePolicy::Wspt
         );
-    }
-
-    #[test]
-    fn accepts_session_aware_admission_with_fcfs() {
-        let config = RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents
-    queue_policy: fcfs
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-        )
-        .unwrap();
-
-        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
-        let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        assert!(matches!(
-            agents.queue_admission,
-            Some(QueueAdmissionConfig::SessionAware {})
-        ));
-    }
-
-    #[test]
-    fn synthetic_profile_has_no_queue_admission() {
-        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
-        assert!(profile.default_class().queue_admission.is_none());
-    }
-
-    #[test]
-    fn rejects_duplicate_or_invalid_queue_admission() {
-        for (yaml, expected) in [
-            (
-                r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_policy: wspt
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-                "queue_admission requires queue_policy fcfs",
-            ),
-            (
-                r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents-a
-    queue_admission:
-      type: session_aware
-    quantum: 1
-  - name: agents-b
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-                "at most one capacity-reserving queue_admission class",
-            ),
-            (
-                r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_admission:
-      type: session_aware
-      pause_threshold: 0.7
-    quantum: 1
-"#,
-                "unknown field",
-            ),
-        ] {
-            let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err();
-            assert!(error.to_string().contains(expected), "{error}");
-        }
     }
 
     #[test]
@@ -1000,10 +875,7 @@ policy_classes:
             "custom_priority",
             "explicit classes intentionally bypass cache classification"
         );
-        assert_eq!(
-            root.default_class().prefill_busy_threshold_frac,
-            Some(DEFAULT_PREFILL_BUSY_THRESHOLD_FRAC)
-        );
+        assert_eq!(root.default_class().prefill_busy_threshold_frac, Some(16.0));
 
         let model = config.resolve_profile(
             Some("example/large-model"),

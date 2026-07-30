@@ -20,11 +20,13 @@ from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
+    ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
     _client_wants_separate_reasoning,
@@ -35,6 +37,7 @@ from .sglang_prepost import (
     detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
     extract_mm_urls,
@@ -143,6 +146,7 @@ _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
+_w_default_thinking_mode: str | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -192,10 +196,12 @@ def _init_worker(
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
     chat_template: str | None = None,
+    default_thinking_mode: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
+    global _w_default_thinking_mode
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -203,6 +209,7 @@ def _init_worker(
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
+    _w_default_thinking_mode = default_thinking_mode
 
 
 def _preprocess_worker(
@@ -218,6 +225,7 @@ def _preprocess_worker(
         reasoning_parser_name=_w_reasoning_parser_name,
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
+        default_thinking_mode=_w_default_thinking_mode,
     )
 
     n = request.get("n", 1)
@@ -231,6 +239,7 @@ def _preprocess_worker(
         eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
+        pre.reasoning_parser,
         require_reasoning=_guided_tool_choice_requires_reasoning(
             request, pre.force_reasoning
         ),
@@ -256,6 +265,7 @@ def _build_dynamo_preproc(
     eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
@@ -311,11 +321,11 @@ def _build_dynamo_preproc(
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            # Preserve special tokens only when a tool-call parser is
-            # actually active — the parser needs delimiter tokens
-            # (e.g. <|tool_call|>) to detect calls. Mirrors the
-            # post-processor's _skip_special_tokens logic.
-            "skip_special_tokens": tool_call_parser is None,
+            # Preserve special tokens when a parser is active so delimiters
+            # remain visible. Mirrors the post-processor's decode behavior.
+            "skip_special_tokens": (
+                tool_call_parser is None and reasoning_parser is None
+            ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
@@ -323,8 +333,12 @@ def _build_dynamo_preproc(
         "routing": request.get("routing"),
     }
 
-    # Forward multimodal URLs so the backend handler can load the media.
-    mm_data = extract_mm_urls(request.get("messages", []))
+    try:
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data, mm_uuids = extract_mm_urls(request.get("messages", []))
+        reject_unsupported_multimodal_uuids(mm_uuids)
+    except ValueError as exc:
+        raise PreprocessError(str(exc)) from exc
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
@@ -350,6 +364,7 @@ class SglangProcessor:
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
         stream_interval: int = 1,
+        default_thinking_mode: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -373,6 +388,7 @@ class SglangProcessor:
         self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
+        self.default_thinking_mode = default_thinking_mode
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -429,6 +445,7 @@ class SglangProcessor:
                 reasoning_parser_name=self.reasoning_parser_name,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
+                default_thinking_mode=self.default_thinking_mode,
             )
 
             if self.debug_perf:
@@ -453,6 +470,7 @@ class SglangProcessor:
                 self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                pre.reasoning_parser,
                 require_reasoning=_guided_tool_choice_requires_reasoning(
                     request, pre.force_reasoning
                 ),
@@ -575,7 +593,8 @@ class SglangProcessor:
             cumulative_output_tokens = 0
             # Rust postprocessor is bypassed on this path, so emit the multimodal
             # content-part counts here too (else frontend metrics report zero media).
-            _mm_counts = extract_mm_urls(request.get("messages", [])) or {}
+            _mm_counts, _ = extract_mm_urls(request.get("messages", []))
+            _mm_counts = _mm_counts or {}
             image_count = len(_mm_counts.get("image_url", []))
             video_count = len(_mm_counts.get("video_url", []))
             audio_count = len(_mm_counts.get("audio_url", []))
@@ -779,11 +798,14 @@ class SglangEngineFactory:
             self.reasoning_parser_name
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
         if reasoning_parser_name:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
+        if default_thinking_mode:
+            logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -804,6 +826,7 @@ class SglangEngineFactory:
                     self.trust_remote_code,
                     template_force_reasoning,
                     chat_template,
+                    default_thinking_mode,
                 ),
             )
             futures = [
@@ -839,6 +862,7 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+            default_thinking_mode=default_thinking_mode,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

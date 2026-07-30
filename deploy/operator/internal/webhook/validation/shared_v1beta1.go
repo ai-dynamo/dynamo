@@ -20,13 +20,13 @@ package validation
 import (
 	"context"
 	"fmt"
-	"os"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,9 +36,11 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx      context.Context
-	mgr      ctrl.Manager
-	warnings admission.Warnings
+	ctx                                context.Context
+	mgr                                ctrl.Manager
+	warnings                           admission.Warnings
+	runtimeVersionSource               runtimeVersionValidationSource
+	allowMissingRuntimeVersionOverride bool
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -50,10 +52,12 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
+// grovePathway and validateInferencePoolAvailability are supplied by the owning resource.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 	grovePathway bool,
+	validateInferencePoolAvailability bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -72,8 +76,10 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
-		if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
+		if validateInferencePoolAvailability {
+			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
+			}
 		}
 		if spec.IsMultinode() {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "EPP component cannot be multinode"))
@@ -118,6 +124,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
 		)...)
+	}
+
+	// Validate runtime compatibility against the source-version fields.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 
 	return allErrs
@@ -216,7 +236,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	}
 
 	if experimental.Checkpoint != nil && experimental.Checkpoint.Enabled &&
-		experimental.GPUMemoryService != nil && os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) != "1" {
+		experimental.GPUMemoryService != nil && !features.MustGateFrom(v.ctx).Enabled(features.GMSSnapshot) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("checkpoint"),
 			"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
@@ -279,14 +299,18 @@ func (v *sharedValidation) validateFailoverSpec(
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
 // gms may be nil because checkpoint validates that sibling relationship.
 func (v *sharedValidation) validateComponentCheckpointConfig(
-	checkpoint *nvidiacomv1beta1.ComponentCheckpointConfig,
+	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
-	if checkpoint.Job == nil {
-		return nil
+	var allErrs field.ErrorList
+	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
 	}
-	return v.validateComponentCheckpointJobConfig(checkpoint.Job, fldPath.Child("job"), gms)
+	if checkpointConfig.Job == nil {
+		return allErrs
+	}
+	return append(allErrs, v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)...)
 }
 
 // validateComponentCheckpointJobConfig validates job. job and fldPath must not be nil.
@@ -315,12 +339,13 @@ func (v *sharedValidation) validateComponentCheckpointJobConfig(
 }
 
 // validateDynamoComponentDeploymentSharedSpecUpdate validates a component update.
-// newComponent, oldComponent, and fldPath must not be nil.
+// newComponent, oldComponent, and fldPath must not be nil; ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 	canModifyReplicas bool,
+	ownerKind schema.GroupKind,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
@@ -345,12 +370,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.TopologyConstraint,
 			oldComponent.TopologyConstraint,
 			topologyPath,
+			ownerKind,
 		)...)
 	} else if oldComponent.TopologyConstraint != nil {
 		allErrs = append(allErrs, field.Invalid(
 			topologyPath,
 			newComponent.TopologyConstraint,
-			"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints",
+			fmt.Sprintf("is immutable and cannot be added, removed, or changed after creation; delete and recreate the %s to change topology constraints", ownerKind.Kind),
 		))
 	}
 
@@ -359,6 +385,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Experimental,
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
+			ownerKind,
 		)...)
 	} else if oldComponent.Experimental != nil {
 		oldGMS := gpuMemoryServiceForExperimental(oldComponent.Experimental)
@@ -366,7 +393,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("experimental", "gpuMemoryService", "mode"),
 				nil,
-				"the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+				fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 			))
 		}
 		oldFailover := failoverForExperimental(oldComponent.Experimental)
@@ -374,7 +401,23 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("experimental", "failover"),
 				nil,
-				"inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			))
+		}
+	}
+
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		if newImage == "" && oldImage != "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
 			))
 		}
 	}
@@ -382,11 +425,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 }
 
 // validateTopologyConstraintUpdate validates a topology constraint update.
-// newConstraint and fldPath must not be nil; oldConstraint may be nil for an addition.
+// newConstraint and fldPath must not be nil; oldConstraint may be nil for an addition and ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateTopologyConstraintUpdate(
 	newConstraint *nvidiacomv1beta1.TopologyConstraint,
 	oldConstraint *nvidiacomv1beta1.TopologyConstraint,
 	fldPath *field.Path,
+	ownerKind schema.GroupKind,
 ) field.ErrorList {
 	if oldConstraint != nil && newConstraint.PackDomain == oldConstraint.PackDomain {
 		return nil
@@ -394,16 +438,17 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 	return field.ErrorList{field.Invalid(
 		fldPath,
 		newConstraint,
-		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints",
+		fmt.Sprintf("is immutable and cannot be added, removed, or changed after creation; delete and recreate the %s to change topology constraints", ownerKind.Kind),
 	)}
 }
 
 // validateExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
+	ownerKind schema.GroupKind,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
@@ -412,7 +457,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("gpuMemoryService", "mode"),
 			k8sptr.Deref(newGMS, nvidiacomv1beta1.GPUMemoryServiceSpec{}).Mode,
-			"the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 
@@ -422,7 +467,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover"),
 			newFailover,
-			"inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 	if isInterPodFailover(newFailover) && isInterPodFailover(oldFailover) &&
@@ -430,7 +475,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			"is immutable for inter-pod GMS failover; delete and recreate the DynamoGraphDeployment to change it",
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 	return allErrs

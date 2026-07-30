@@ -57,9 +57,8 @@ func (h *DynamoModelHandler) ValidateCreate(ctx context.Context, obj runtime.Obj
 
 	logger.Info("validate create", "name", model.Name, "namespace", model.Namespace)
 
-	// Create validator and perform validation
-	validator := NewDynamoModelValidator(model)
-	return validator.Validate()
+	validator := NewDynamoModelValidator()
+	return validator.Validate(model)
 }
 
 // ValidateUpdate validates a DynamoModel update request.
@@ -84,24 +83,8 @@ func (h *DynamoModelHandler) ValidateUpdate(ctx context.Context, oldObj, newObj 
 		return nil, err
 	}
 
-	// Create validator and perform validation
-	validator := NewDynamoModelValidator(newModel)
-
-	// Validate stateless rules
-	warnings, err := validator.Validate()
-	if err != nil {
-		return warnings, err
-	}
-
-	// Validate stateful rules (immutability)
-	updateWarnings, err := validator.ValidateUpdate(oldModel)
-	if err != nil {
-		return updateWarnings, err
-	}
-
-	// Combine warnings
-	warnings = append(warnings, updateWarnings...)
-	return warnings, nil
+	validator := NewDynamoModelValidator()
+	return validator.ValidateUpdate(oldModel, newModel)
 }
 
 // ValidateDelete validates a DynamoModel delete request.

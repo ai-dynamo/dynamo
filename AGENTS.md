@@ -31,12 +31,18 @@ to it — edit only the canonical copy. Reach for the right group first:
 **For developing Dynamo:**
 
 - `debug-session` — structured bug investigation with a persistent worklog
-- `dep-create` / `dep-status` / `dep-update` — create, track, and advance DEPs
+- `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
+- `dep-status` — check DEP status and list DEPs by lifecycle state or area
+- `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
+- `fern-components` — Fern MDX component library and usage guidance
+- `fern-navigation` — Fern navigation and site-structure configuration guidance
+- `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
 
@@ -46,10 +52,12 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-troubleshoot` — diagnose failed or unhealthy deployments
 
 **Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
-`description` is third person and states what the skill does and when to use it; include
-`license: Apache-2.0` and a `metadata:` block with `author` and `tags`. Changes under
-`.agents/skills/` are validated by NVSkills CI — a maintainer comments `/nvskills-ci` on
-the PR.
+`description` is third person, states what the skill does and when to use it, and is at
+most 1024 characters; include `license: Apache-2.0` and a `metadata:` block with `author`
+and `tags`. List the skill in this section — the index must match `.agents/skills/`
+exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
+`validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
+a maintainer comments `/nvskills-ci` on the PR.
 
 ## Ecosystem
 
@@ -71,8 +79,8 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/AGENTS.md) |
+| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -80,7 +88,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/contribution-guide.md).
+devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/contribution-guide.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -128,19 +136,23 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
+  routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
+  coverage and `CODEOWNERS`↔`areas.yaml` drift. See
+  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/contribution-guide.md) for the full workflow
+See [`docs/contribution-guide.md`](docs/fern/contribution-guide.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/AGENTS.md) and the
-[documentation style guide](docs/documentation-style-guide.md): SPDX headers, Fern
+[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[documentation style guide](docs/fern/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.

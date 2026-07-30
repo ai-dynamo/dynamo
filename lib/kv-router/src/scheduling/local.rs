@@ -111,6 +111,7 @@ where
             worker_type,
             monitor_worker_configs,
         )
+        .expect("synthetic policy profile is valid")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -128,7 +129,18 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
+        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
+            Arc::clone(&slots),
+            workers_with_configs.clone(),
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+        )?);
+
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
@@ -166,16 +178,6 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
-            Arc::clone(&slots),
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-        ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
         let queue_periodic_updates = Arc::clone(&queue);
@@ -221,13 +223,13 @@ where
             }
         });
 
-        Self {
+        Ok(Self {
             slots,
             queue,
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
-        }
+        })
     }
 
     pub async fn schedule_request(
@@ -235,6 +237,9 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let lifecycle_lease = self
+            .queue
+            .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -279,13 +284,18 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        self.queue
-            .enqueue_with_block_hashes(request, block_hashes)
+        let mut lifecycle_lease = self
+            .queue
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
             .await;
 
-        resp_rx
+        let response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        if let Some(lease) = lifecycle_lease.as_mut() {
+            lease.disarm();
+        }
+        response
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -434,6 +444,15 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request only when its worker is already registered, so a request
+    /// racing worker removal cannot lazily recreate the removed worker/rank.
+    pub async fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -561,7 +580,7 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile(
             slots,
             workers_with_configs,

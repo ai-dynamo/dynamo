@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -99,19 +100,21 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the default image, or empty string when the operator version
-// is unknown (e.g. local dev builds), in which case the user must provide spec.image explicitly.
+// defaultImageFor returns the default image with a canonical semver tag, or an
+// empty string when the operator version cannot be parsed.
 func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.OperatorVersion == "" || d.OperatorVersion == "unknown" {
+	version, err := semver.NewVersion(d.OperatorVersion)
+	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%s:%s", defaultImage, d.OperatorVersion)
+	return fmt.Sprintf("%s:%s", defaultImage, version.String())
 }
 
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.
 func (d *DGDRDefaulter) RegisterWithManager(mgr manager.Manager) error {
+	defaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
 	webhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, d).
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, defaulter).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdrDefaultingWebhookPath, webhook)
 	return nil

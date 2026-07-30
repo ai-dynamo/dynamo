@@ -13,6 +13,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,6 +69,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		},
 	)
 	mutator.scheme = scheme
+	ctx := features.WithGate(context.Background(), features.Gates{Checkpoint: true})
 
 	t.Run("ready checkpoint restore-shapes pod create", func(t *testing.T) {
 		pod := checkpointCandidatePod("worker-checkpoint")
@@ -77,7 +79,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
 		}}
 
-		resp := mutator.Handle(context.Background(), req)
+		resp := mutator.Handle(ctx, req)
 		require.True(t, resp.Allowed)
 		require.NotEmpty(t, resp.Patches)
 
@@ -110,7 +112,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
 		}}
 
-		resp := mutator.Handle(context.Background(), req)
+		resp := mutator.Handle(ctx, req)
 		require.True(t, resp.Allowed)
 		assert.Empty(t, resp.Patches)
 	})
@@ -123,7 +125,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
 		}}
 
-		resp := mutator.Handle(context.Background(), req)
+		resp := mutator.Handle(ctx, req)
 		require.True(t, resp.Allowed)
 		assert.Empty(t, resp.Patches)
 	})
@@ -137,7 +139,7 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
 		}}
 
-		resp := mutator.Handle(context.Background(), req)
+		resp := mutator.Handle(ctx, req)
 		require.True(t, resp.Allowed)
 		assert.Empty(t, resp.Patches)
 	})

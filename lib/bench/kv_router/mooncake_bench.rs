@@ -8,6 +8,7 @@ mod mooncake_shared;
 
 use clap::{Parser, Subcommand};
 use dynamo_bench::kv_router_common::args::CommonArgs;
+use dynamo_bench::kv_router_common::issuer::pin_current_thread_to_cpus;
 use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
@@ -15,8 +16,8 @@ use dynamo_kv_router::{
     ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
 };
 use mooncake_open_loop::{
-    OpenLoopConfig, OpenLoopResult, parse_cpu_list, pin_current_thread_to_cpus,
-    prepare_mooncake_corpus, prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
+    OpenLoopConfig, OpenLoopResult, parse_cpu_list, prepare_mooncake_corpus,
+    prepare_open_loop_trial, run_open_loop, validate_cpu_partition,
 };
 use mooncake_shared::{
     MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
@@ -170,12 +171,6 @@ struct Args {
     #[clap(long)]
     approx: bool,
 
-    /// Output path for the shard-size CSV produced when `shard-metrics` feature
-    /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
-    /// Omit or leave empty to disable shard-size sampling.
-    #[clap(long, default_value = "")]
-    shard_metrics_csv: String,
-
     /// Number of independent benchmark trials to run over the same generated
     /// benchmark input. Each trial builds a fresh indexer.
     #[clap(long, default_value = "1")]
@@ -219,9 +214,6 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     }
     if args.find_matches_concurrency != 0 {
         anyhow::bail!("corrected Mooncake replay does not support --find-matches-concurrency");
-    }
-    if !args.shard_metrics_csv.is_empty() {
-        anyhow::bail!("corrected Mooncake replay does not support shard sampling");
     }
     if !args.common.sweep && args.benchmark_runs != 1 {
         anyhow::bail!("repetitions must use fresh processes; invoke one trial per process");
@@ -407,6 +399,9 @@ fn print_open_loop_result(result: &OpenLoopResult) {
         result.issue_span_ns as f64 / 1e6,
         result.drain_ns as f64 / 1e6,
     );
+    if !result.backend_timing_report.is_empty() {
+        println!("{}", result.backend_timing_report);
+    }
 }
 
 fn open_loop_output_path(base: &str, backend: &str, duration_ms: Option<u64>) -> String {

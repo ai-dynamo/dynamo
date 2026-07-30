@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,9 @@ pub struct RequestTracePayload {
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
+    /// Allowlisted HTTP request headers (`DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_request_headers: Option<Arc<BTreeMap<String, String>>>,
     pub payload_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_drop_reason: Option<String>,
@@ -384,6 +388,7 @@ mod tests {
                 model: "test-model".to_string(),
                 request: Some(Arc::new(request)),
                 response: Some(Arc::new(response)),
+                http_request_headers: None,
                 payload_complete: true,
                 payload_drop_reason: None,
             }),
@@ -403,6 +408,55 @@ mod tests {
         );
         assert!(value.get("schema_version").is_none());
         assert!(value.get("audit_complete").is_none());
+    }
+
+    #[test]
+    fn payload_serializes_http_request_headers_and_omits_when_absent() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-request-id".to_string(), "abc-123".to_string());
+        let record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestPayload,
+            event_time_unix_ms: 1_100,
+            event_source: Some(RequestTraceEventSource::Dynamo),
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: Some(RequestTracePayload {
+                request_id: "req-h".to_string(),
+                endpoint: "openai.chat_completion".to_string(),
+                model: "test-model".to_string(),
+                request: None,
+                response: None,
+                http_request_headers: Some(Arc::new(headers)),
+                payload_complete: true,
+                payload_drop_reason: None,
+            }),
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            value["payload"]["http_request_headers"]["x-request-id"],
+            "abc-123"
+        );
+
+        let roundtrip: RequestTraceRecord = serde_json::from_value(value).unwrap();
+        let headers = roundtrip
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.http_request_headers.as_ref())
+            .expect("headers survive deserialization");
+        assert_eq!(
+            headers.get("x-request-id").map(String::as_str),
+            Some("abc-123")
+        );
+
+        let mut bare = record;
+        if let Some(payload) = bare.payload.as_mut() {
+            payload.http_request_headers = None;
+        }
+        let value = serde_json::to_value(&bare).unwrap();
+        assert!(value["payload"].get("http_request_headers").is_none());
     }
 
     #[test]

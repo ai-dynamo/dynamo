@@ -75,12 +75,21 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, Clone)]
 pub enum ScheduleMode {
-    QueryOnly { request_id: Option<String> },
-    Tracked { request_id: String },
+    QueryOnly {
+        request_id: Option<String>,
+    },
+    /// Tracks worker state; the caller releases it with `free`.
+    Tracked {
+        request_id: String,
+    },
+    TrackedWithLifecycle {
+        request_id: String,
+    },
 }
 
 impl ScheduleMode {
@@ -103,18 +112,32 @@ impl ScheduleMode {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { request_id } => request_id.as_deref(),
-            Self::Tracked { request_id } => Some(request_id),
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
+                Some(request_id)
+            }
         }
     }
 
     pub fn is_tracked(&self) -> bool {
-        matches!(self, Self::Tracked { .. })
+        matches!(
+            self,
+            Self::Tracked { .. } | Self::TrackedWithLifecycle { .. }
+        )
+    }
+
+    pub(crate) fn lifecycle_request_id(&self) -> Option<&str> {
+        match self {
+            Self::TrackedWithLifecycle { request_id } => Some(request_id),
+            Self::QueryOnly { .. } | Self::Tracked { .. } => None,
+        }
     }
 
     pub fn tracked_request_id(&self) -> Option<&str> {
         match self {
             Self::QueryOnly { .. } => None,
-            Self::Tracked { request_id } => Some(request_id),
+            Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
+                Some(request_id)
+            }
         }
     }
 }
@@ -260,6 +283,16 @@ impl SchedulingRequest {
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
         self.isl_tokens.div_ceil(block_size as usize) as u64
+    }
+
+    pub(crate) fn potential_decode_blocks_after_admission(
+        &self,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+    ) -> usize {
+        self.worker_load_for(worker)
+            .potential_decode_blocks()
+            .saturating_add(self.request_blocks(block_size) as usize)
     }
 
     pub(crate) fn response_is_closed(&self) -> bool {

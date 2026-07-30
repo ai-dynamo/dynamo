@@ -13,16 +13,15 @@ import uuid
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
-import nats
 import requests
 
 from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
 from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
-    _nats_server,
     assert_event_dumps_equal,
     get_runtime,
     managed_runtime,
+    parse_sse_json_chunks,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
@@ -32,6 +31,11 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.router_logs import (
+    parse_kv_event_diagnostics,
+    select_kv_event_diagnostics,
+    wait_for_kv_event_diagnostics,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -227,6 +231,127 @@ def _test_router_basic(
         logger.info(f"Successfully completed {num_requests} requests")
 
 
+def _test_kv_event_publisher_disabled_diagnostic(
+    *,
+    frontend,
+    engine_workers,
+    diagnostic_workers,
+    frontend_port: int,
+    test_payload: dict,
+    model_name: str,
+    expected_worker_role: str,
+    expected_requirement: str,
+    expected_rank_count: int,
+    unexpected_worker_roles: tuple[str, ...] = (),
+    expected_total_diagnostics: int = 1,
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+):
+    """Assert an explicit disabled publisher is diagnosed without blocking serving."""
+
+    worker_groups = (
+        list(engine_workers)
+        if isinstance(engine_workers, (list, tuple))
+        else [engine_workers]
+    )
+    expected_num_workers = sum(group.num_workers for group in worker_groups)
+
+    async def discover_diagnostic_worker_ids() -> set[int]:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+        try:
+            endpoint = runtime.endpoint(
+                f"{diagnostic_workers.namespace}."
+                f"{diagnostic_workers.component_name}.generate"
+            )
+            return set(
+                await poll_for_worker_instances(
+                    endpoint,
+                    diagnostic_workers.num_workers,
+                )
+            )
+        finally:
+            runtime.shutdown()
+
+    expected_worker_ids = asyncio.run(discover_diagnostic_worker_ids())
+    expected_serving_endpoint = (
+        f"{diagnostic_workers.namespace}/"
+        f"{diagnostic_workers.component_name}/generate"
+    )
+    expected_dp_ranks = ",".join(str(rank) for rank in range(expected_rank_count))
+
+    frontend_url = f"http://localhost:{frontend_port}"
+    asyncio.run(
+        wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=expected_num_workers,
+            timeout=120,
+            test_payload=test_payload,
+            engine_workers=worker_groups,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+    )
+
+    diagnostics = wait_for_kv_event_diagnostics(
+        frontend,
+        diagnostic_code="kv_event_publisher_disabled",
+        expected_count=expected_total_diagnostics,
+        worker_role=expected_worker_role,
+        timeout_s=10,
+    )
+    diagnostic = diagnostics[-1]
+    assert diagnostic.model == model_name
+    assert diagnostic.worker_role == expected_worker_role
+    assert diagnostic.requirement == expected_requirement
+    assert diagnostic.worker_id in expected_worker_ids
+    assert diagnostic.serving_endpoint == expected_serving_endpoint
+    assert diagnostic.kv_event_publishing_enabled is False
+    assert diagnostic.waited_ms == 0
+    assert diagnostic.rank_count == expected_rank_count
+    assert diagnostic.dp_ranks == expected_dp_ranks
+
+    async def assert_inference_succeeds() -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{frontend_url}/v1/chat/completions",
+                json=test_payload,
+            ) as response:
+                body = await response.text()
+                assert response.status == 200, (
+                    "inference must continue when KV event publishing is disabled; "
+                    f"status={response.status}, body={body}"
+                )
+
+    asyncio.run(assert_inference_succeeds())
+
+    final_diagnostics = parse_kv_event_diagnostics(frontend.read_logs())
+    disabled_diagnostics = select_kv_event_diagnostics(
+        final_diagnostics,
+        diagnostic_code="kv_event_publisher_disabled",
+    )
+    assert len(disabled_diagnostics) == expected_total_diagnostics, (
+        "expected exactly one disabled-publisher diagnostic per worker lifecycle "
+        f"after successful inference, got {disabled_diagnostics}"
+    )
+    for worker_role in unexpected_worker_roles:
+        for diagnostic_code in (
+            "kv_event_publisher_disabled",
+            "kv_event_source_not_observed",
+        ):
+            unexpected = select_kv_event_diagnostics(
+                final_diagnostics,
+                diagnostic_code=diagnostic_code,
+                worker_role=worker_role,
+            )
+            assert not unexpected, (
+                f"worker role {worker_role!r} does not require KV events, but "
+                f"emitted {diagnostic_code!r} diagnostics: {unexpected}"
+            )
+
+
 def _test_router_override_router_config(
     endpoint: str,
     engine_workers,
@@ -350,17 +475,14 @@ def _test_router_two_routers(
     test_payload: dict,
     num_requests: int,
     store_backend: str = "etcd",
-    skip_consumer_verification: bool = False,
 ):
-    """Test two KV routers with alternating requests and consumer lifecycle verification.
+    """Test two KV routers with alternating requests.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
 
     This test:
     1. Starts two KV routers on different ports
     2. Sends requests alternating between the two routers
-    3. Verifies that both routers create durable consumers (unless skipped)
-    4. Verifies consumers are cleaned up when routers exit (unless skipped)
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -370,10 +492,6 @@ def _test_router_two_routers(
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        skip_consumer_verification: Skip JetStream consumer verification (for NATS Core mode).
-
-    Raises:
-        AssertionError: If consumer lifecycle verification fails
     """
     kv_routers = []
 
@@ -426,96 +544,7 @@ def _test_router_two_routers(
             f"Successfully completed {num_requests} requests across {len(router_ports)} routers"
         )
 
-        # Verify durable consumers lifecycle
-        async def verify_consumer_lifecycle():
-            logger.info("Verifying durable consumers lifecycle")
-
-            # Construct the stream name from the workers namespace
-            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            stream_name = f"{slugified}-kv-events"
-
-            logger.info(f"Checking consumers for stream: {stream_name}")
-
-            # Connect to NATS and list consumers
-            nc = await nats.connect(servers=_nats_server())
-            try:
-                js = nc.jetstream()
-
-                # List consumers - should have 2 (one for each router process)
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-                assert (
-                    len(consumer_names) == 2
-                ), f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
-                logger.info("✓ Verified 2 durable consumers exist (one per router)")
-
-                # Kill the first router process
-                logger.info(f"Killing first router on port {router_ports[0]}")
-                kv_routers[0].__exit__(None, None, None)
-
-                # Poll until one consumer remains (up to 5s)
-                for _ in range(25):
-                    consumer_infos = await js.consumers_info(stream_name)
-                    if len(list(consumer_infos)) == 1:
-                        break
-                    await asyncio.sleep(0.2)
-
-                # Verify only 1 consumer remains
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router1, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 1
-                ), f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 1 durable consumer remains after killing first router"
-                )
-
-                # Kill the second router process
-                logger.info(f"Killing second router on port {router_ports[1]}")
-                kv_routers[1].__exit__(None, None, None)
-
-                # Poll until no consumers remain (up to 5s)
-                for _ in range(25):
-                    consumer_infos = await js.consumers_info(stream_name)
-                    if len(list(consumer_infos)) == 0:
-                        break
-                    await asyncio.sleep(0.2)
-
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router2, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 0
-                ), f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 0 durable consumers remain after killing both routers"
-                )
-
-            finally:
-                await nc.close()
-
-        # Run consumer lifecycle verification (skip for NATS Core mode)
-        if skip_consumer_verification:
-            logger.info("Skipping JetStream consumer verification (NATS Core mode)")
-            # Clean up routers manually since we're not doing consumer verification
-            for kv_router in kv_routers:
-                kv_router.__exit__(None, None, None)
-        else:
-            asyncio.run(verify_consumer_lifecycle())
-
-        # Clear the kv_routers list since we've already cleaned them up
-        kv_routers = []
-
     finally:
-        # Clean up any remaining routers (in case of error before consumer verification)
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
 
@@ -524,23 +553,36 @@ def _test_session_affinity(
     engine_workers,
     block_size: int,
     request,
-    frontend_port: int,
+    router_ports: list[int],
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
 ):
-    """Verify one frontend keeps each session on its initially selected worker."""
-    with FrontendRouterProcess(
-        request,
-        block_size,
-        frontend_port,
-        engine_workers.namespace,
-        store_backend,
-        router_mode="kv",
-        min_initial_workers=engine_workers.num_workers,
-        event_plane="nats",
-        session_affinity_ttl_secs=300,
+    """Verify replica affinity overrides conflicting per-frontend KV placement."""
+    with (
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[0],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ),
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[1],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ),
     ):
-        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
 
         async def run_test() -> None:
             runtime = get_runtime(store_backend, "nats")
@@ -553,14 +595,15 @@ def _test_session_affinity(
             assert len(worker_ids) >= 2
             worker_a, worker_b = worker_ids[:2]
 
-            await wait_for_frontend_ready(
-                frontend_url=f"http://localhost:{frontend_port}",
-                expected_num_workers=engine_workers.num_workers,
-                timeout=120,
-                engine_workers=engine_workers,
-                store_backend=store_backend,
-                request_plane="nats",
-            )
+            for port in router_ports:
+                await wait_for_frontend_ready(
+                    frontend_url=f"http://localhost:{port}",
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
+                    request_plane="nats",
+                )
 
             suffix = uuid.uuid4().hex
             prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
@@ -587,6 +630,7 @@ def _test_session_affinity(
 
             async def send(
                 client: aiohttp.ClientSession,
+                url: str,
                 request_payload: dict[str, Any],
                 headers: dict[str, str] | None = None,
             ) -> tuple[int, int]:
@@ -597,13 +641,8 @@ def _test_session_affinity(
                     assert response.status == 200, body
 
                 worker_info = None
-                for line in body.splitlines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        continue
-                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                for chunk in parse_sse_json_chunks(body):
+                    candidate = chunk.get("nvext", {}).get("worker_id")
                     if candidate:
                         worker_info = candidate
 
@@ -615,12 +654,13 @@ def _test_session_affinity(
 
             async def wait_for_prefix_target(
                 client: aiohttp.ClientSession,
+                url: str,
                 content: str,
                 expected: tuple[int, int],
             ) -> None:
                 for _ in range(50):
                     if (
-                        await send(client, payload(content, query_only=True))
+                        await send(client, url, payload(content, query_only=True))
                         == expected
                     ):
                         return
@@ -641,26 +681,56 @@ def _test_session_affinity(
             }
 
             async with aiohttp.ClientSession() as client:
-                assert await send(client, payload(prefix_a), proposal_a) == (
+                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
                     worker_a,
                     0,
                 )
-                assert await send(client, payload(prefix_b), proposal_b) == (
+                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
                     worker_b,
                     0,
                 )
 
-                await wait_for_prefix_target(client, prefix_a, (worker_a, 0))
-                await wait_for_prefix_target(client, prefix_b, (worker_b, 0))
+                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
 
-                assert await send(client, payload(prefix_b), session_a_headers) == (
-                    worker_a,
-                    0,
-                )
-                assert await send(client, payload(prefix_a), session_b_headers) == (
-                    worker_b,
-                    0,
-                )
+                deadline = time.monotonic() + 10
+                observed_b = None
+                observed_a = None
+                while time.monotonic() < deadline:
+                    observed_b = await send(
+                        client,
+                        urls[0],
+                        payload(prefix_a, query_only=True),
+                        session_b_headers,
+                    )
+                    observed_a = await send(
+                        client,
+                        urls[1],
+                        payload(prefix_b, query_only=True),
+                        session_a_headers,
+                    )
+                    if observed_b == (worker_b, 0) and observed_a == (worker_a, 0):
+                        break
+
+                    assert await send(
+                        client, urls[0], payload(prefix_a), session_a_headers
+                    ) == (worker_a, 0)
+                    assert await send(
+                        client, urls[1], payload(prefix_b), session_b_headers
+                    ) == (worker_b, 0)
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        "replica affinity did not converge before the deadline: "
+                        f"frontend 1 observed {observed_b}, frontend 2 observed {observed_a}"
+                    )
+
+                assert await send(
+                    client, urls[0], payload(prefix_a), session_b_headers
+                ) == (worker_b, 0)
+                assert await send(
+                    client, urls[1], payload(prefix_b), session_a_headers
+                ) == (worker_a, 0)
 
         asyncio.run(run_test())
 
@@ -722,7 +792,6 @@ def _test_remote_indexer_decisions(
             router_predicted_ttl_secs: Optional[float] = None,
         ):
             kv_router_config = KvRouterConfig(
-                router_snapshot_threshold=20,
                 use_kv_events=use_kv_events,
                 router_track_prefill_tokens=True,
                 serve_indexer=serve_indexer,
@@ -1122,40 +1191,19 @@ def _test_router_query_instance_id(
                         f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
                     )
 
-                    # Parse the SSE response to extract the first chunk with nvext data
-                    # New format: nvext contains worker_id and token_ids
-                    sse_parts = full_response.split("\n\n")
                     worker_id_info = None
                     token_list = None
 
-                    for part in sse_parts:
-                        part = part.strip()
-                        if not part or not part.startswith("data:"):
-                            continue
+                    for chunk in parse_sse_json_chunks(full_response):
+                        logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
 
-                        data_str = part.split("data:", 1)[1].strip()
-                        if data_str == "[DONE]":
-                            continue
-
-                        try:
-                            chunk = json.loads(data_str)
-                            logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
-
-                            # Extract nvext data containing worker_id and token_ids
-                            nvext = chunk.get("nvext", {})
-                            if nvext:
-                                if "worker_id" in nvext:
-                                    worker_id_info = nvext["worker_id"]
-                                    logger.info(
-                                        f"Found worker_id info: {worker_id_info}"
-                                    )
-                                if "token_ids" in nvext:
-                                    token_list = nvext["token_ids"]
-                                    logger.info(
-                                        f"Found token_ids: {len(token_list)} tokens"
-                                    )
-                        except json.JSONDecodeError:
-                            continue
+                        nvext = chunk.get("nvext", {})
+                        if "worker_id" in nvext:
+                            worker_id_info = nvext["worker_id"]
+                            logger.info(f"Found worker_id info: {worker_id_info}")
+                        if "token_ids" in nvext:
+                            token_list = nvext["token_ids"]
+                            logger.info(f"Found token_ids: {len(token_list)} tokens")
 
                     # Validate worker_id info
                     assert (
@@ -1235,19 +1283,20 @@ def _parse_frontend_rejection_metric(
     return 0
 
 
-def _verify_frontend_rejection_metrics(
+def _get_frontend_rejection_metric(
     frontend_port: int,
     model_name: str,
     endpoint: str,
-    expected_count: int,
-) -> None:
-    """Verify frontend rejection metrics by scraping the /metrics endpoint.
+) -> int:
+    """Read the frontend rejection counter from the /metrics endpoint.
 
     Args:
         frontend_port: Port where the frontend /metrics is served
         model_name: The model name label value
         endpoint: The endpoint label value (e.g. "chat_completions")
-        expected_count: Expected rejection count to match exactly
+
+    Returns:
+        The current rejection count
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
     try:
@@ -1258,9 +1307,17 @@ def _verify_frontend_rejection_metrics(
             f"Failed to fetch frontend metrics from {metrics_url}: {e}"
         ) from e
 
-    metric_count = _parse_frontend_rejection_metric(
-        metrics_response.text, model_name, endpoint
-    )
+    return _parse_frontend_rejection_metric(metrics_response.text, model_name, endpoint)
+
+
+def _verify_frontend_rejection_metrics(
+    frontend_port: int,
+    model_name: str,
+    endpoint: str,
+    expected_count: int,
+) -> None:
+    """Verify frontend rejection metrics by scraping the /metrics endpoint."""
+    metric_count = _get_frontend_rejection_metric(frontend_port, model_name, endpoint)
     logger.info(f"Frontend rejection metric: model_rejection_total={metric_count}")
     assert metric_count == expected_count, (
         f"Frontend model_rejection_total ({metric_count}) does not match "
@@ -1283,12 +1340,17 @@ def _probe_overload_529_and_assert(
     asserts:
     1. At least one request is rejected with 529 (the threshold gates the pool)
     2. No other status codes appear
-    3. The frontend ``model_rejection_total`` metric matches the 529 count
+    3. The frontend ``model_rejection_total`` metric increases by the 529 count
 
     Successes are not required: a single overload-shaped request can exceed the
     threshold before dispatch, so an all-529 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    model_name = test_payload.get("model", "")
+    # Read after readiness because its retries can contribute unrelated 529s.
+    initial_rejection_count = _get_frontend_rejection_metric(
+        frontend_port, model_name, "chat_completions"
+    )
     test_payload_529 = {
         **test_payload,
         "max_tokens": max_tokens,
@@ -1298,6 +1360,7 @@ def _probe_overload_529_and_assert(
 
     async def exhaust_resources_and_verify_529():
         stop_event = asyncio.Event()
+        observed_statuses = []
 
         async with aiohttp.ClientSession() as session:
             tasks = []
@@ -1305,25 +1368,28 @@ def _probe_overload_529_and_assert(
             async def send_request(req_id, payload):
                 try:
                     async with session.post(url, json=payload) as response:
-                        if response.status == 200:
+                        status = response.status
+                        observed_statuses.append(status)
+
+                        if status == 200:
                             logger.info("Request %s accepted", req_id)
                             await stop_event.wait()
-                            return response.status
+                            return status
 
-                        if response.status == 529:
+                        if status == 529:
+                            stop_event.set()
                             body = await response.text()
                             logger.info("Request %s got expected 529: %s", req_id, body)
-                            stop_event.set()
-                            return response.status
+                            return status
 
                         body = await response.text()
                         logger.info(
                             "Request %s got unexpected status %s: %s",
                             req_id,
-                            response.status,
+                            status,
                             body,
                         )
-                        return response.status
+                        return status
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -1357,22 +1423,16 @@ def _probe_overload_529_and_assert(
                         logger.error("Timed out waiting for overload 529")
             finally:
                 stop_event.set()
-                # Drain quickly and count only requests that received a status.
-                # This does not race the rejection-metric assertion: a 529 is
-                # returned synchronously by send_request (so every rejected
-                # request is in `done`, never `pending`), and the accepted (200)
-                # requests unblock from stop_event and return immediately. Any
-                # task still pending here received no HTTP status yet — cancelling
-                # it can neither drop a counted 529 nor desync model_rejection_total
-                # (which only counts emitted 529s). Some configs (e.g. slow decode
-                # with large max_tokens) leave such in-flight requests, so we must
-                # not block on or fail them.
+                # Statuses are recorded when headers arrive, so cancelling a task
+                # that is still draining its body cannot drop an observed 529.
                 done, pending = await asyncio.wait(tasks, timeout=5)
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
 
-            return [t.result() for t in done]
+            return observed_statuses
 
     results = asyncio.run(exhaust_resources_and_verify_529())
 
@@ -1395,9 +1455,11 @@ def _probe_overload_529_and_assert(
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
 
     # Verify rejection metrics from frontend /metrics endpoint
-    model_name = test_payload.get("model", "")
     _verify_frontend_rejection_metrics(
-        frontend_port, model_name, "chat_completions", num_rejected
+        frontend_port,
+        model_name,
+        "chat_completions",
+        initial_rejection_count + num_rejected,
     )
 
     logger.info(
@@ -1425,9 +1487,9 @@ def _test_router_overload_529(
     Uses limited resources to intentionally trigger the overload condition.
 
     Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
-    1. At least one request succeeds (routed before busy state propagates)
+    1. Every observed response is either 200 or 529
     2. At least one request is rejected with 529 (worker busy)
-    3. The frontend model_rejection_total metric matches the observed 529 count
+    3. The frontend model_rejection_total increase matches the observed 529 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -1824,9 +1886,9 @@ def _test_router_indexers_sync(
     num_workers: int,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    event_plane: str | None = None,
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
-    durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_indexer_b_url: Optional[str] = None,
@@ -1835,13 +1897,12 @@ def _test_router_indexers_sync(
     """Test that two KV routers have synchronized indexer states after processing requests.
 
     Assumes engine_workers are already initialized. This test:
-    1. Creates first KvRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
-    2. Creates second KvRouter (with its own runtime, should sync from NATS snapshot)
+    1. Creates first KvRouter (with its own runtime) and sends 25 requests
+    2. Creates second KvRouter (with its own runtime, which recovers from workers)
     3. Sends 25 requests to second router
-    4. Verifies NATS object store contains the snapshot
-    5. Dumps states from both routers and compares them (should be identical)
+    4. Dumps states from both routers and compares them (should be identical)
 
-    This validates that the snapshot mechanism works and routers can sync state from NATS.
+    This validates that routers can recover and synchronize state from worker-local indexers.
 
     When test_nats_interruption=True (requires nats_server and request_plane="tcp"):
     - After first router sends 25 requests, NATS is stopped
@@ -1859,9 +1920,9 @@ def _test_router_indexers_sync(
         num_workers: Expected number of workers
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
+        event_plane: Event plane to use ("nats" or "zmq"). Defaults to runtime behavior.
         test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
         nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
-        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1871,13 +1932,7 @@ def _test_router_indexers_sync(
 
     # Use async to manage the test flow
     async def run_test(runtime_stack):
-        # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(
-            router_snapshot_threshold=20,
-            durable_kv_events=durable_kv_events,
-            router_event_threads=router_event_threads,
-        )
-        event_plane = "nats" if durable_kv_events else None
+        kv_router_config = KvRouterConfig(router_event_threads=router_event_threads)
 
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
@@ -2045,36 +2100,7 @@ def _test_router_indexers_sync(
                 model_name,
             )
 
-        # Wait for snapshot to be available before creating second router.
-        # In JetStream mode, the background task may purge acknowledged messages
-        # from the stream before the snapshot upload completes. Poll the object
-        # store so Router 2 can reliably download the snapshot on startup.
-        if durable_kv_events:
-            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            bucket_name = f"{slugified}-radix-bucket"
-            nc = await nats.connect(servers=_nats_server())
-            try:
-                js = nc.jetstream()
-                for attempt in range(50):
-                    try:
-                        obj_store = await js.object_store(bucket_name)
-                        await obj_store.get("radix-state")
-                        logger.info(
-                            f"Snapshot available in object store (attempt {attempt + 1})"
-                        )
-                        break
-                    except Exception:
-                        await asyncio.sleep(0.1)
-                else:
-                    assert False, (
-                        f"Snapshot not found in bucket '{bucket_name}' after 50 attempts (5s). "
-                        f"Router 1 sent 25 requests with snapshot_threshold=20, snapshot should exist."
-                    )
-            finally:
-                await nc.close()
-        else:
-            await asyncio.sleep(1)
+        await asyncio.sleep(1)
 
         if standalone_indexer_url and standalone_indexer_b_url:
             logger.info(
@@ -2177,55 +2203,6 @@ def _test_router_indexers_sync(
         logger.info("Waiting for final synchronization")
         await asyncio.sleep(2)
 
-        # Verify NATS object store bucket was created with snapshot
-        # Skip for NATS interruption test (restarts fresh) and non-durable modes
-        if not test_nats_interruption and durable_kv_events:
-            # Mirror the Rust bucket naming logic from subscriber.rs:
-            # component.subject() -> "namespace.{ns}.component.{comp}"
-            # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
-            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            expected_bucket = f"{slugified}-radix-bucket"
-            expected_file = "radix-state"
-
-            logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
-            snapshot_verified = False
-
-            # Connect to NATS and check object store. This honors per-test NATS instances
-            # started by fixtures (xdist-safe) instead of assuming localhost:4222.
-            nc = await nats.connect(servers=_nats_server())
-            try:
-                js = nc.jetstream()
-                obj_store = await js.object_store(expected_bucket)
-
-                # Try to get the expected file
-                try:
-                    result = await obj_store.get(expected_file)
-                    logger.info(
-                        f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
-                        f"(size: {len(result.data) if result.data else 0} bytes)"
-                    )
-                    snapshot_verified = True
-                except Exception as e:
-                    logger.error(
-                        f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
-                    )
-            except Exception as e:
-                logger.error(f"Error checking NATS object store: {e}")
-            finally:
-                await nc.close()
-
-            # Assert that snapshot was created (threshold=20, sent 25 requests)
-            if not snapshot_verified:
-                assert False, (
-                    f"Expected snapshot to be created in bucket '{expected_bucket}' with file '{expected_file}'. "
-                    f"Router sent 25 requests with snapshot_threshold=20, so snapshot should have been triggered."
-                )
-        else:
-            logger.info(
-                "Skipping NATS object store verification (NATS was restarted fresh for interruption test)"
-            )
-
         # Dump states from all sources
         logger.info("Dumping states from all sources")
         state1_json = await kv_router1.dump_events()
@@ -2262,33 +2239,6 @@ def _test_router_indexers_sync(
                     "Standalone A, Standalone B"
                 )
 
-        # Verify NATS consumers are created (while routers are still alive)
-        # Skip for NATS interruption test (restarts fresh) and non-durable modes
-        if not test_nats_interruption and durable_kv_events:
-            logger.info("Verifying NATS consumers exist for both routers")
-            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            stream_name = f"{slugified}-kv-events"
-
-            nc = await nats.connect(servers=_nats_server())
-            try:
-                js = nc.jetstream()
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-                assert len(consumer_names) == 2, (
-                    f"Expected 2 durable consumers (one per router), "
-                    f"found {len(consumer_names)}: {consumer_names}"
-                )
-                logger.info("✓ Verified 2 durable consumers exist (one per router)")
-            finally:
-                await nc.close()
-        else:
-            logger.info(
-                "Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)"
-            )
-
     async def test_sync():
         with contextlib.ExitStack() as runtime_stack:
             await run_test(runtime_stack)
@@ -2307,7 +2257,6 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
-    durable_kv_events: bool = False,
     router_aic_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
 ):
@@ -2331,7 +2280,6 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
         router_aic_config: Optional AIC router perf-model config for frontend KV routing.
 
     Raises:
@@ -2345,7 +2293,6 @@ def _test_router_decisions_disagg(
         decode_workers.namespace,
         store_backend,
         request_plane=request_plane,
-        durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
         router_aic_config=router_aic_config,
     ):
@@ -2417,39 +2364,16 @@ def _test_router_decisions_disagg(
                         decode_wid = None
                         timing_info = None
 
-                        async for line in response.content:
-                            if not line:
-                                continue
-
-                            line_str = line.decode("utf-8", errors="replace").strip()
-                            if not line_str.startswith("data:"):
-                                continue
-
-                            data_str = line_str[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-
-                            try:
-                                data = json.loads(data_str)
-                                # Check for nvext in the response
-                                nvext = data.get("nvext", {})
-                                if nvext:
-                                    worker_id_info = nvext.get("worker_id", {})
-                                    if worker_id_info:
-                                        if "prefill_worker_id" in worker_id_info:
-                                            prefill_wid = worker_id_info[
-                                                "prefill_worker_id"
-                                            ]
-                                        if "decode_worker_id" in worker_id_info:
-                                            decode_wid = worker_id_info[
-                                                "decode_worker_id"
-                                            ]
-                                    # Timing info appears in final chunk
-                                    if "timing" in nvext:
-                                        timing_info = nvext["timing"]
-
-                            except json.JSONDecodeError:
-                                continue
+                        body = await response.text()
+                        for data in parse_sse_json_chunks(body):
+                            nvext = data.get("nvext", {})
+                            worker_id_info = nvext.get("worker_id", {})
+                            if "prefill_worker_id" in worker_id_info:
+                                prefill_wid = worker_id_info["prefill_worker_id"]
+                            if "decode_worker_id" in worker_id_info:
+                                decode_wid = worker_id_info["decode_worker_id"]
+                            if "timing" in nvext:
+                                timing_info = nvext["timing"]
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
@@ -2488,7 +2412,7 @@ def _test_router_decisions_disagg(
 
         # Verify prefix reuse behavior.
         #
-        # In JetStream (KV events enabled) mode, the router learns cache state from KV events.
+        # With KV events enabled, the router learns cache state asynchronously.
         # With the TCP request plane, we can observe a transient on the *first* request where
         # the second request is routed before the first request's KV "stored" events have been
         # fully ingested. After ingestion, routing stabilizes.
@@ -2704,9 +2628,7 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                     endpoint=prefill_endpoint,
                     block_size=block_size,
                     kv_router_config=KvRouterConfig(
-                        router_snapshot_threshold=20,
                         use_kv_events=True,
-                        durable_kv_events=False,
                         router_event_threads=4,
                         router_track_prefill_tokens=True,
                         router_prefill_load_model="none",
@@ -2803,7 +2725,6 @@ def _test_router_decisions(
     test_dp_rank: bool = False,
     block_size: int = 8,
     use_kv_events: bool = True,
-    durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_selector_url: Optional[str] = None,
@@ -2833,14 +2754,12 @@ def _test_router_decisions(
         block_size: KV cache block size. Defaults to 8.
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
-        durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix logic
     """
 
-    # Create KvRouterConfig with lower snapshot threshold for testing
     # Use async to manage the test flow
     async def test_sync():
         # If standalone indexer mode, launch workers one-by-one and register.
@@ -2852,9 +2771,7 @@ def _test_router_decisions(
         expected_num_instances = engine_workers.num_workers
 
         kv_router_config = KvRouterConfig(
-            router_snapshot_threshold=20,
             use_kv_events=use_kv_events,
-            durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
             router_track_prefill_tokens=True,
             router_prefill_load_model=(
@@ -3189,7 +3106,6 @@ def _test_router_cache_salt_isolation(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=KvRouterConfig(
-                    router_snapshot_threshold=20,
                     use_kv_events=True,
                     router_event_threads=4,
                 ),

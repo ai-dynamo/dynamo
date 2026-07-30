@@ -23,6 +23,7 @@ jobs:
     environment: external_collaborator
     permissions:
       issues: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - name: Check for trusted contributor
@@ -55,7 +56,7 @@ jobs:
           script: |
             const { REPOSITORY, CONTRIBUTOR } = process.env
 
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,

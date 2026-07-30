@@ -188,6 +188,15 @@ overrides:
     license: LicenseRef-Intel-ISSL
     source: "Intel Simplified Software License — https://www.intel.com/content/www/us/en/developer/articles/license/end-user-license-agreement.html"
 
+  # --- Intel XPU Manager dpkg ---
+  # The upstream xpu-smi deb does not install a Debian copyright file that the
+  # dpkg generator can parse, but the Intel xpumanager project and package
+  # sources are MIT licensed.
+  - ecosystem: dpkg
+    name: xpu-smi
+    license: MIT
+    source: "Intel XPU Manager upstream LICENSE — https://github.com/intel/xpumanager/blob/master/LICENSE"
+
   # --- NVIDIA CUDA Toolkit dpkgs ---
   # Apt-installed CUDA components from the NVIDIA repo. Their copyright files
   # reference /usr/share/common-licenses/GPL-3 because some bundled GDB-related
@@ -308,6 +317,7 @@ overrides:
   # --- Misc dpkg packages with parser-miss UNKNOWN ---
   # Verified upstream license; parser couldn't extract from the copyright file shape.
   - { ecosystem: dpkg, name: openssl,           license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
+  - { ecosystem: dpkg, name: libssl-dev,        license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
   - { ecosystem: dpkg, name: libpcap0.8t64,     license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpcap0.8-dev,    license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpython3-stdlib, license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
@@ -346,6 +356,8 @@ overrides:
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
+  - { ecosystem: python, name: helion,                    license: "BSD-3-Clause",  source: "PyTorch Helion — https://github.com/pytorch/helion/blob/main/LICENSE" }
+  - { ecosystem: python, name: hpc-ops,                   license: "MIT AND BSD-3-Clause",  source: "Tencent HPC-Ops and bundled CUTLASS — https://github.com/Tencent/hpc-ops/blob/main/LICENSE.txt" }
   - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
   - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
   - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }
@@ -357,8 +369,10 @@ overrides:
   - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
   - { ecosystem: python, name: mscclpp,                   license: "MIT",       source: "MSCCL++ upstream — https://github.com/microsoft/mscclpp/blob/main/LICENSE" }
   - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
-  - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-core, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu12, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs — CUDA 12 variant split wheel introduced in 4.6.0; same NVIDIA proprietary license as nvidia-cutlass-dsl" }
   - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
@@ -1010,3 +1024,10 @@ overrides:
   - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
   - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
   - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
+
+  # --- Plotly Kaleido image-export stack (dynamo-planner; PyPI metadata has
+  #     empty license_expression + no classifiers, so the generator reports
+  #     UNKNOWN — resolved from upstream LICENSE) ---
+  - { ecosystem: python, name: kaleido,       license: "MIT", source: "Plotly Kaleido — https://github.com/plotly/kaleido/blob/main/LICENSE.txt (MIT)" }
+  - { ecosystem: python, name: choreographer, license: "MIT", source: "Plotly Choreographer — https://github.com/plotly/choreographer/blob/main/LICENSE.md (MIT)" }
+  - { ecosystem: python, name: logistro,      license: "MIT", source: "GeoPozo logistro — https://github.com/geopozo/logistro/blob/main/LICENSE (MIT)" }

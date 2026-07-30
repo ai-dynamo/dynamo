@@ -313,11 +313,12 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session identity**: SGLang 0.5.14 does not support passive session-aware radix
-  ownership. Do not pass `agent_context.session_id` as `session_params.id`;
-  SGLang treats that field as an explicit session lifecycle and rejects IDs that
-  were not created through `open_session`. Session headers remain available for
-  tracing and router affinity.
+- **Session identity**: SGLang 0.5.15 supports passive session-aware radix
+  ownership through the top-level `session_id` request field, but Dynamo does
+  not forward `agent_context.session_id` to it yet. Do not pass that value as
+  `session_params.id`; SGLang treats that field as an explicit session lifecycle
+  and rejects IDs that were not created through `open_session`. Session headers
+  remain available for tracing and router affinity.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -354,7 +355,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (--disaggregation-mode=encode)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`

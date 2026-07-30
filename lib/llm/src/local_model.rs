@@ -46,18 +46,14 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    value.is_some_and(dynamo_runtime::config::is_truthy)
 }
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
+    model_aliases: Vec<String>,
     endpoint_id: Option<EndpointId>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
@@ -97,6 +93,7 @@ impl Default for LocalModelBuilder {
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
+            model_aliases: Default::default(),
             endpoint_id: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
@@ -133,6 +130,11 @@ impl LocalModelBuilder {
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
+        self
+    }
+
+    pub fn model_aliases(&mut self, aliases: Vec<String>) -> &mut Self {
+        self.model_aliases = aliases;
         self
     }
 
@@ -338,6 +340,9 @@ impl LocalModelBuilder {
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
             card.router_config = self.router_config.clone();
+            if !self.model_aliases.is_empty() {
+                card.set_aliases(self.model_aliases.clone());
+            }
 
             return Ok(LocalModel {
                 card,
@@ -391,6 +396,9 @@ impl LocalModelBuilder {
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
         card.router_config = self.router_config.clone();
+        if !self.model_aliases.is_empty() {
+            card.set_aliases(self.model_aliases.clone());
+        }
 
         Ok(LocalModel {
             card,
@@ -435,6 +443,33 @@ pub struct LocalModel {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
+}
+
+/// Register a Model Deployment Card via the discovery system.
+/// Derives the LoRA suffix from card.lora and constructs the DiscoverySpec.
+/// Derive LoRA suffix from an optional adapter name.
+/// Returns None if lora_name is None, otherwise returns a slugified version of the name.
+pub fn derive_lora_suffix(lora_name: Option<&str>) -> Option<String> {
+    lora_name.map(|name| Slug::slugify(name).to_string())
+}
+
+pub async fn register_model_card(
+    endpoint: &Endpoint,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<()> {
+    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
+    let model_suffix = derive_lora_suffix(lora_name);
+
+    let discovery = endpoint.drt().discovery();
+    let spec = DiscoverySpec::from_model_with_suffix(
+        endpoint.component().namespace().name().to_string(),
+        endpoint.component().name().to_string(),
+        endpoint.name().to_string(),
+        card,
+        model_suffix,
+    )?;
+    let _instance = discovery.register(spec).await?;
+    Ok(())
 }
 
 impl LocalModel {
@@ -581,10 +616,8 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
-        // Compute model_suffix from lora_name if present
-        let model_suffix = lora_info
-            .as_ref()
-            .map(|info| Slug::slugify(&info.name).to_string());
+        let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
+        let model_suffix = derive_lora_suffix(lora_name);
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -622,16 +655,7 @@ impl LocalModel {
         }
 
         // Register the Model Deployment Card via discovery interface
-        // The model_suffix (for LoRA) will be appended AFTER the instance_id
-        let discovery = endpoint.drt().discovery();
-        let spec = DiscoverySpec::from_model_with_suffix(
-            endpoint.component().namespace().name().to_string(),
-            endpoint.component().name().to_string(),
-            endpoint.name().to_string(),
-            &self.card,
-            model_suffix,
-        )?;
-        let _instance = discovery.register(spec).await?;
+        register_model_card(endpoint, &self.card).await?;
 
         Ok(())
     }
@@ -753,7 +777,7 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = derive_lora_suffix(lora_name);
         let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
