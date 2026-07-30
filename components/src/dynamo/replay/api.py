@@ -83,23 +83,31 @@ def run_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
     }
     if planner_config is not None:
-        # Planner replay is offline-only and Mooncake-only; reject controls the
+        # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
         # offline planner run (matches the CLI's guardrails).
         if replay_mode != "offline":
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        if trace_format != "mooncake":
+        if trace_format not in ("mooncake", "dynamo"):
             raise ValueError(
-                "planner_config replay only supports trace_format='mooncake'"
+                "planner_config replay only supports trace_format='mooncake' or 'dynamo'"
             )
         if report_jsonl_path is not None:
             raise ValueError("report_jsonl_path is not supported with planner_config")
         if max_sim_time_ms is not None:
             raise ValueError("max_sim_time_ms is not supported with planner_config")
-        if len(trace_files) != 1:
-            raise ValueError("planner_config replay requires exactly one trace file")
+        if trace_format != "dynamo" and len(trace_files) != 1:
+            raise ValueError(
+                f"planner_config replay with trace_format={trace_format!r} "
+                "requires exactly one trace file"
+            )
+        if trace_format == "dynamo" and not trace_files:
+            raise ValueError(
+                "planner_config replay with trace_format='dynamo' "
+                "requires at least one trace file"
+            )
         from dynamo.replay.main import _planner_replay_adapter
 
         adapter_scope = _planner_replay_adapter(
