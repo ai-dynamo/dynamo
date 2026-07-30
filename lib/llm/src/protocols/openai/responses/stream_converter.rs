@@ -14,8 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionToolCall, IncompleteDetails, InputTokenDetails, Instructions,
-    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    AssistantRole, ErrorObject, FunctionToolCall, IncompleteDetails, InputTokenDetails,
+    Instructions, OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
     OutputTextContent, OutputTokenDetails, ReasoningItem, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
     ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
@@ -706,6 +706,57 @@ impl ResponseStreamConverter {
         output.into_iter().map(|(_, item)| item).collect()
     }
 
+    fn close_open_message_item(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        output_status: OutputStatus,
+    ) {
+        if !self.message_started {
+            return;
+        }
+
+        let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
+            sequence_number: self.next_seq(),
+            item_id: self.message_item_id.clone(),
+            output_index: self.message_output_index,
+            content_index: 0,
+            text: self.accumulated_text.clone(),
+            logprobs: Some(vec![]),
+        });
+        events.push(self.make_sse_event(&text_done));
+
+        let part_done =
+            ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
+                sequence_number: self.next_seq(),
+                item_id: self.message_item_id.clone(),
+                output_index: self.message_output_index,
+                content_index: 0,
+                part: OutputContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            });
+        events.push(self.make_sse_event(&part_done));
+
+        let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            sequence_number: self.next_seq(),
+            output_index: self.message_output_index,
+            item: OutputItem::Message(OutputMessage {
+                id: self.message_item_id.clone(),
+                content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                    text: self.accumulated_text.clone(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                })],
+                role: AssistantRole::Assistant,
+                phase: None,
+                status: output_status,
+            }),
+        });
+        events.push(self.make_sse_event(&item_done));
+    }
+
     /// Emit remaining output completion events and `response.completed` at stream end.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
@@ -720,50 +771,7 @@ impl ResponseStreamConverter {
         // whether the still-open reasoning item completed or was truncated.
         self.append_reasoning_done_events(events, output_status);
 
-        // Close text message if it was started
-        if self.message_started {
-            let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
-                sequence_number: self.next_seq(),
-                item_id: self.message_item_id.clone(),
-                output_index: self.message_output_index,
-                content_index: 0,
-                text: self.accumulated_text.clone(),
-                logprobs: Some(vec![]),
-            });
-            events.push(self.make_sse_event(&text_done));
-
-            let part_done =
-                ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
-                    sequence_number: self.next_seq(),
-                    item_id: self.message_item_id.clone(),
-                    output_index: self.message_output_index,
-                    content_index: 0,
-                    part: OutputContent::OutputText(OutputTextContent {
-                        text: self.accumulated_text.clone(),
-                        annotations: vec![],
-                        logprobs: Some(vec![]),
-                    }),
-                });
-            events.push(self.make_sse_event(&part_done));
-
-            let item_done =
-                ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
-                    sequence_number: self.next_seq(),
-                    output_index: self.message_output_index,
-                    item: OutputItem::Message(OutputMessage {
-                        id: self.message_item_id.clone(),
-                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                            text: self.accumulated_text.clone(),
-                            annotations: vec![],
-                            logprobs: Some(vec![]),
-                        })],
-                        role: AssistantRole::Assistant,
-                        phase: None,
-                        status: output_status,
-                    }),
-                });
-            events.push(self.make_sse_event(&item_done));
-        }
+        self.close_open_message_item(events, output_status);
 
         // Fallback for backends that end the transport without a finish-reason chunk.
         self.append_pending_function_call_done_events(events);
@@ -785,17 +793,28 @@ impl ResponseStreamConverter {
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(&mut self, error: ErrorObject) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
-        self.append_error_events(&mut events);
+        self.append_error_events(error, &mut events);
         events
     }
 
     /// Append error events when the stream ends due to a backend error.
-    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_error_events(
+        &mut self,
+        error: ErrorObject,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let output_status = self.output_status();
+        self.append_reasoning_done_events(events, output_status);
+        self.close_open_message_item(events, output_status);
+        self.append_pending_function_call_done_events(events);
+
+        let mut response = self.make_response(Status::Failed, self.completed_output());
+        response.error = Some(error);
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
-            response: self.make_response(Status::Failed, vec![]),
+            response,
         });
         events.push(self.make_sse_event(&failed));
     }
