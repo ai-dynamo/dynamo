@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import time
 from typing import TypeVar
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
@@ -29,6 +30,8 @@ from gpu_memory_service.core.protocol import (
 
 T = TypeVar("T")
 
+_STARTUP_CONNECT_RETRY_INTERVAL = 0.1
+
 
 class _GMSClientSession:
     """One connected, handshaken GMS socket session."""
@@ -40,11 +43,18 @@ class _GMSClientSession:
         expected_identity: tuple[str, str] | None = None,
     ):
         self._lock = threading.RLock()
-        self._socket: socket.socket | None = socket.socket(
-            socket.AF_UNIX, socket.SOCK_STREAM
-        )
+        self._socket: socket.socket | None = None
         try:
-            self._socket.connect(path)
+            # Only startup socket availability is retried; handshake failures propagate.
+            while True:
+                self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    self._socket.connect(path)
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    self._socket.close()
+                    self._socket = None
+                    time.sleep(_STARTUP_CONNECT_RETRY_INTERVAL)
             send_message(self._socket, HandshakeRequest(lock_type, expected_identity))
             response, received_fd = receive_message(self._socket)
             handshake = self._decode(
@@ -55,9 +65,10 @@ class _GMSClientSession:
             )
             self._granted_lock_type = handshake.lock_type
             self._identity = (handshake.server_nonce, handshake.gpu_uuid)
-        except Exception:
-            self._socket.close()
-            self._socket = None
+        except (Exception, KeyboardInterrupt):
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
             raise
 
     @property

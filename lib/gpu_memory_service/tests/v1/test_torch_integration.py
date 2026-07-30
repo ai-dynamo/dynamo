@@ -133,6 +133,7 @@ def test_copy_out_preserves_tensorimpls_and_nonparameter_aliases() -> None:
 @pytest.mark.integration
 @pytest.mark.gpu_1
 @pytest.mark.skipif(not HAS_CUDA, reason="CUDA is required")
+@pytest.mark.timeout(180)
 def test_real_cuda_allocator_and_dual_domain_lifecycle() -> None:
     """Use a subprocess because Torch allocator callbacks are process-global."""
     code = textwrap.dedent(

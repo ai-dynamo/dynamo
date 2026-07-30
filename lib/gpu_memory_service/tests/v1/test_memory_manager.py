@@ -16,6 +16,31 @@ from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 
 
+def test_latch_preserves_operational_failure_when_disconnect_fails() -> None:
+    class FailingSession:
+        lock_type = GrantedLockType.RW
+
+        def allocate(self, allocation_id: str, aligned_size: int) -> None:
+            raise RuntimeError("allocation failed")
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    manager = GMSClientMemoryManager("unused", FakeVMM(granularity=64), 0)
+    manager._session = FailingSession()
+
+    with pytest.raises(
+        RuntimeError,
+        match="GMS mapping creation failed: allocation failed",
+    ) as original:
+        manager.create_mapping(1)
+
+    assert manager._session is None
+    with pytest.raises(RuntimeError) as latched:
+        manager.connect(RequestedLockType.RW)
+    assert latched.value is original.value
+
+
 @pytest.mark.timeout(10)
 def test_same_client_manager_preserves_weights_and_recreates_kv(
     tmp_path,

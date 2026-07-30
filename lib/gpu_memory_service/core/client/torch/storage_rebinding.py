@@ -16,7 +16,7 @@ def tensor_storage_byte_bounds(tensor: "torch.Tensor") -> tuple[int, int]:
     element_size = int(tensor.element_size())
     start = int(tensor.storage_offset())
     end = start
-    for size, stride in zip(tensor.shape, tensor.stride()):
+    for size, stride in zip(tensor.shape, tensor.stride(), strict=True):
         extent = (int(size) - 1) * int(stride)
         start += min(extent, 0)
         end += max(extent, 0)
