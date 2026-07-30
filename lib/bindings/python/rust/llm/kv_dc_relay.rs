@@ -131,12 +131,7 @@ impl KvDcRelay {
         }
 
         #[cfg(feature = "kv-dc-relay-wan")]
-        let transport = match (
-            bind,
-            tls_server_cert,
-            tls_server_key,
-            tls_client_ca,
-        ) {
+        let transport = match (bind, tls_server_cert, tls_server_key, tls_client_ca) {
             (Some(bind), Some(tls_server_cert), Some(tls_server_key), Some(tls_client_ca)) => {
                 let bind = bind.parse().map_err(|error| {
                     PyValueError::new_err(format!("invalid KV DC Relay bind address: {error}"))

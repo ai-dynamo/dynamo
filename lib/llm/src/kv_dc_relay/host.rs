@@ -1730,21 +1730,19 @@ async fn retire_endpoint_pool(
             }
         }
     };
+    #[cfg(feature = "kv-dc-relay-wan")]
     let teardown = async {
-        #[cfg(feature = "kv-dc-relay-wan")]
+        load_cancel.cancel();
+        let (result, load_result) = tokio::join!(actor_teardown, load_task);
+        if let Err(error) = load_result
+            && !error.is_cancelled()
         {
-            load_cancel.cancel();
-            let (result, load_result) = tokio::join!(actor_teardown, load_task);
-            if let Err(error) = load_result
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, %pool_id, "KV DC Relay load collector failed during pool retirement");
-            }
-            result
+            tracing::warn!(%error, %pool_id, "KV DC Relay load collector failed during pool retirement");
         }
-        #[cfg(not(feature = "kv-dc-relay-wan"))]
-        actor_teardown.await
+        result
     };
+    #[cfg(not(feature = "kv-dc-relay-wan"))]
+    let teardown = actor_teardown;
     let result = withdraw_drain_and_remove_pool(
         pools,
         pool_id,
