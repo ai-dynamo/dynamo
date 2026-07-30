@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 
@@ -103,6 +104,48 @@ def test_nvdec_available_false_when_import_raises_runtime(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     assert nd.nvdec_available() is False
+
+
+def _force_import_failure(monkeypatch, exc):
+    monkeypatch.delenv(nd.DISABLE_ENV, raising=False)
+    monkeypatch.delitem(sys.modules, "PyNvVideoCodec", raising=False)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "PyNvVideoCodec":
+            raise exc
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_installed_but_unimportable_warns_about_video_capability(monkeypatch, caplog):
+    """A misconfigured container must not fail silently.
+
+    The wheel being present but unimportable means libnvcuvid is missing -- the
+    container was not granted the 'video' driver capability. That silently costs
+    H.264/H.265 decode, which the codec-compliant images cannot do in software,
+    so it has to be visible above debug level.
+    """
+    _force_import_failure(monkeypatch, RuntimeError("libnvcuvid.so.1: not found"))
+    monkeypatch.setattr(
+        nd.importlib.util, "find_spec", lambda name: object()
+    )  # wheel IS installed
+    with caplog.at_level(logging.WARNING):
+        assert nd.nvdec_available() is False
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert "video" in caplog.text and "NVIDIA_DRIVER_CAPABILITIES" in caplog.text
+
+
+def test_absent_wheel_stays_quiet(monkeypatch, caplog):
+    """CPU-only images legitimately have no wheel; that must not warn."""
+    _force_import_failure(monkeypatch, ImportError("No module named PyNvVideoCodec"))
+    monkeypatch.setattr(nd.importlib.util, "find_spec", lambda name: None)
+    with caplog.at_level(logging.WARNING):
+        assert nd.nvdec_available() is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_should_use_nvdec_routes_only_h264_hevc(monkeypatch):

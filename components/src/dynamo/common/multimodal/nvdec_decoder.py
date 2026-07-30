@@ -31,6 +31,7 @@ the actionable "unsupported codec" error.
 from __future__ import annotations
 
 import functools
+import importlib.util
 import logging
 import os
 import tempfile
@@ -118,11 +119,28 @@ def nvdec_available() -> bool:
             warnings.simplefilter("ignore")
             import PyNvVideoCodec  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        # ImportError when the wheel is absent; RuntimeError when the wheel is
-        # present but the NVDEC/NVENC driver libs are not loadable -- the
-        # container must expose NVIDIA_DRIVER_CAPABILITIES=...,video for
-        # libnvcuvid/libnvidia-encode. Either way, fall back to software decode.
-        logger.debug("PyNvVideoCodec unavailable (%s); NVDEC decode disabled", exc)
+        # Two very different situations reach here, and they need different
+        # log levels. The wheel being absent is normal on CPU-only images, so
+        # it stays at debug. The wheel being *installed* but unimportable is a
+        # misconfiguration -- almost always a container that did not request
+        # the "video" driver capability, so libnvcuvid is not mounted -- and it
+        # silently costs H.264/H.265 decode, which the codec-compliant images
+        # have no software fallback for. That deserves a warning; keeping it at
+        # debug is how this class of failure goes unnoticed.
+        if importlib.util.find_spec("PyNvVideoCodec") is None:
+            logger.debug(
+                "PyNvVideoCodec is not installed; NVDEC decode disabled (%s)", exc
+            )
+        else:
+            logger.warning(
+                "PyNvVideoCodec is installed but failed to import (%s); NVDEC "
+                "hardware decode is DISABLED. This usually means the container "
+                "was not given the 'video' driver capability, so libnvcuvid is "
+                "unavailable -- set NVIDIA_DRIVER_CAPABILITIES to include "
+                "'video'. H.264/H.265 video input has no software decoder in "
+                "the codec-compliant images and will fail until this is fixed.",
+                exc,
+            )
         return False
     return True
 
