@@ -87,7 +87,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 
 # benchmarks also declares aiconfigurator-core, so install it while the same
 # source-build toolchain is available.
-RUN --mount=type=bind,source=./benchmarks,target=/tmp/benchmarks \
+RUN --mount=type=bind,source=./benchmarks,target=/tmp/benchmarks,rw \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra \
         UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \

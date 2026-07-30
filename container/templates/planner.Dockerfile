@@ -48,8 +48,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
-    && chown -R dynamo:0 /home/dynamo /opt/dynamo /workspace \
-    && chmod -R g+w /home/dynamo/.cache /opt/dynamo /workspace
+    && chown -R dynamo:0 /home/dynamo /opt/dynamo /workspace "${RUSTUP_HOME}" "${CARGO_HOME}" \
+    && chmod -R g+w /home/dynamo/.cache /opt/dynamo /workspace "${RUSTUP_HOME}" "${CARGO_HOME}"
 
 ENV HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
