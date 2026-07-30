@@ -28,7 +28,11 @@ For the latest pre-deployment check instructions, see the [main branch version o
 Run the pre-deployment check before deploying Dynamo:
 
 ```bash
+# For NVIDIA GPU clusters (default)
 ./pre-deployment-check.sh
+
+# For CPU-only clusters
+# ./pre-deployment-check.sh --device cpu
 ```
 
 ## What it checks
@@ -45,7 +49,7 @@ The script performs few checks and provides a detailed summary:
   - Provides a sample command to set a StorageClass as default
   - References the official Kubernetes documentation for detailed guidance
 
-### 3. Cluster GPU Resources
+### 3. Cluster GPU Resources (skipped for CPU device type)
 - Checks for GPU-enabled nodes in the cluster using label `nvidia.com/gpu.present=true`
 
 ## Sample Output
@@ -157,7 +161,7 @@ To remove the default annotation from a StorageClass:
 kubectl patch storageclass <storage-class-name> -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
 ```
 
-### No GPU Nodes Found
+### No GPU Nodes Found (NVIDIA)
 If no GPU nodes are found, ensure your cluster has nodes with the `nvidia.com/gpu.present=true` label.
 
 ### No StorageClasses Available
