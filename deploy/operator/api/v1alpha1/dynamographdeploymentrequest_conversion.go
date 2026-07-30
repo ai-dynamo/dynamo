@@ -490,7 +490,11 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 	if src.Resources != nil {
 		idx := dgdrProfilerContainerIndex(podSpec.Containers)
 		if idx < 0 {
-			podSpec.Containers = append(podSpec.Containers, corev1.Container{Name: dgdrProfilerContainerName})
+			// Leave Name empty: this container is a projection of alpha
+			// profilingConfig.resources, not an explicit beta override. An empty
+			// name becomes a truly empty Container after resource stripping in
+			// dgdrHubOnlyProfilingJob, so spoke→hub does not emit dgdr-spec.
+			podSpec.Containers = append(podSpec.Containers, corev1.Container{})
 			idx = len(podSpec.Containers) - 1
 		}
 		podSpec.Containers[idx].Resources = *src.Resources
@@ -764,12 +768,10 @@ func dgdrHubOnlyProfilingJob(src *batchv1.JobSpec) *batchv1.JobSpec {
 	save := src.DeepCopy()
 	if idx := dgdrProfilerContainerIndex(save.Template.Spec.Containers); idx >= 0 {
 		save.Template.Spec.Containers[idx].Resources = corev1.ResourceRequirements{}
-		// A container that only carries the synthetic profiler name (from
-		// projecting v1alpha1 profilingConfig.resources) is not hub-only
-		// state — treat it as empty so spoke→hub does not emit dgdr-spec.
-		c := save.Template.Spec.Containers[idx]
-		if apiequality.Semantic.DeepEqual(c, corev1.Container{}) ||
-			apiequality.Semantic.DeepEqual(c, corev1.Container{Name: dgdrProfilerContainerName}) {
+		// Only drop truly empty containers. An explicit beta `name: profiler`
+		// entry must remain as hub list matching/order context after its
+		// resources are projected into alpha.
+		if apiequality.Semantic.DeepEqual(save.Template.Spec.Containers[idx], corev1.Container{}) {
 			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, idx, idx+1)
 		}
 	}
@@ -793,7 +795,8 @@ func mergeDGDRHubOnlyProfilingJob(dst *batchv1.JobSpec, restored *batchv1.JobSpe
 	if hasResources {
 		idx := dgdrProfilerContainerIndex(dst.Template.Spec.Containers)
 		if idx < 0 {
-			dst.Template.Spec.Containers = append(dst.Template.Spec.Containers, corev1.Container{Name: dgdrProfilerContainerName})
+			// Same unnamed synthetic projection as projectProfilingConfigToProfilingJob.
+			dst.Template.Spec.Containers = append(dst.Template.Spec.Containers, corev1.Container{})
 			idx = len(dst.Template.Spec.Containers) - 1
 		}
 		dst.Template.Spec.Containers[idx].Resources = resources

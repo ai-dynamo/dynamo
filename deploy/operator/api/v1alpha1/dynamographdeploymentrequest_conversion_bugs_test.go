@@ -263,7 +263,7 @@ func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
 			}},
 			wantRestored: []corev1.Container{
 				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
-				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+				{Resources: updatedProfilerResources},
 			},
 		},
 		{
@@ -276,6 +276,18 @@ func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
 			wantRestored: []corev1.Container{
 				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
 				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+			},
+		},
+		{
+			name: "profiler before sidecar",
+			containers: []corev1.Container{
+				{Name: dgdrProfilerContainerName, Resources: profilerResources},
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+			},
+			wantSpokeResources: &profilerResources,
+			wantRestored: []corev1.Container{
+				{Name: dgdrProfilerContainerName, Resources: updatedProfilerResources},
+				{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
 			},
 		},
 	}
@@ -320,6 +332,88 @@ func TestBugDGDRProfilingJobResourcesFollowContainerName(t *testing.T) {
 				t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestBugDGDRProfilerFirstHubRoundTripPreservesOrder(t *testing.T) {
+	profilerResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+	}
+	sidecarResources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+	}
+	wantContainers := []corev1.Container{
+		{Name: dgdrProfilerContainerName, Resources: profilerResources},
+		{Name: dgdrOutputCopierContainerName, Resources: sidecarResources},
+	}
+
+	t.Log("Start from a profiler-first v1beta1 override list")
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Overrides: &v1beta1.OverridesSpec{
+				ProfilingJob: &batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: wantContainers},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Convert hub → spoke → hub without changing alpha fields")
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	t.Log("Verify profiler-first ordering and resources survive the round trip")
+	if restored.Spec.Overrides == nil || restored.Spec.Overrides.ProfilingJob == nil {
+		t.Fatal("profilingJob override = nil, want profiler-first containers")
+	}
+	got := restored.Spec.Overrides.ProfilingJob.Template.Spec.Containers
+	if diff := cmp.Diff(wantContainers, got); diff != "" {
+		t.Fatalf("profiling containers mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBugDGDRAlphaResourcesRoundTripOmitsPrivateAnnotation(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+
+	t.Log("Start from alpha-only profilingConfig.resources")
+	spoke := &DynamoGraphDeploymentRequest{
+		Spec: DynamoGraphDeploymentRequestSpec{
+			ProfilingConfig: ProfilingConfigSpec{
+				Resources: &resources,
+			},
+		},
+	}
+
+	t.Log("Convert spoke → hub → spoke")
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if _, ok := hub.Annotations[annDGDRSpec]; ok {
+		t.Fatalf("hub annotations[%q] = %q, want absent for alpha-only resources", annDGDRSpec, hub.Annotations[annDGDRSpec])
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	t.Log("Verify resources round-trip without introducing nvidia.com/dgdr-spec")
+	if diff := cmp.Diff(&resources, restored.Spec.ProfilingConfig.Resources); diff != "" {
+		t.Fatalf("profilingConfig.resources mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := restored.Annotations[annDGDRSpec]; ok {
+		t.Fatalf("spoke annotations[%q] present after round trip, want absent", annDGDRSpec)
 	}
 }
 
