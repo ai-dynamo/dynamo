@@ -307,6 +307,11 @@ pub mod llm {
     /// back to 529.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
+    /// Emit an SSE comment at this interval while a streaming response has no
+    /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
+    /// disabled.
+    pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -870,6 +875,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::DYN_LORA_MCF_CONFIG,
+            llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
