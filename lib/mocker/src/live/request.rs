@@ -7,8 +7,9 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-use crate::common::handoff::HandoffId;
 use crate::common::protocols::OutputSignal;
+
+use super::handoff::DestinationCancellation;
 
 #[derive(Default)]
 pub(super) struct RequestRoutes {
@@ -31,13 +32,13 @@ enum RequestState {
     Closed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub(super) enum RequestCancellation {
     Request,
-    Destination(HandoffId),
+    Destination(DestinationCancellation),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 struct RequestLifecycle {
     state: RequestState,
     cancellation: RequestCancellation,
@@ -118,7 +119,7 @@ impl RequestRoute {
         self.lifecycle_tx.send_if_modified(|lifecycle| {
             if lifecycle.state == RequestState::Active {
                 lifecycle.state = RequestState::Cancelling;
-                cancellation = Some(lifecycle.cancellation);
+                cancellation = Some(lifecycle.cancellation.clone());
                 return true;
             }
             false

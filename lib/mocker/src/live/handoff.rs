@@ -76,6 +76,13 @@ impl HandoffRoute {
     fn shutdown(&self) {
         self.event_tx.lock().unwrap().take();
     }
+
+    fn is_latest_generation(&self, routes: &HandoffRoutes) -> bool {
+        match routes.last_by_id.get(&self.handoff_id) {
+            Some(current) => current.value().0 == self.generation,
+            None => false,
+        }
+    }
 }
 
 impl Drop for HandoffRoute {
@@ -142,6 +149,11 @@ impl LiveEngine {
             .handoff_routes
             .last_by_id
             .insert(handoff_id, (route.generation, Arc::downgrade(&route)));
+        if self.inner.cancel.is_cancelled() {
+            route.shutdown();
+            remove_handoff_route(&self.inner.handoff_routes, &route);
+            bail!("live Mocker engine is not running");
+        }
         Ok((
             LiveHandoffControl {
                 engine: Arc::downgrade(&self.inner),
@@ -194,7 +206,9 @@ impl LiveHandoffControl {
         LiveEngine { inner: engine }
             .submit_prepared(
                 registration,
-                PreparedSubmission::Destination(self.route.handoff_id),
+                PreparedSubmission::Destination(DestinationCancellation {
+                    route: Arc::clone(&self.route),
+                }),
                 Some(command_guard),
             )
             .await
@@ -283,12 +297,45 @@ impl LiveHandoffControl {
                 "handoff {:?} control belongs to an earlier registration",
                 self.route.handoff_id
             ),
-            None if allow_unregistered => Ok(()),
+            None if allow_unregistered
+                && self.route.is_latest_generation(&engine.handoff_routes) =>
+            {
+                Ok(())
+            }
+            None if allow_unregistered => bail!(
+                "handoff {:?} control belongs to an earlier registration",
+                self.route.handoff_id
+            ),
             None => bail!(
                 "handoff {:?} lifecycle route is no longer registered",
                 self.route.handoff_id
             ),
         }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct DestinationCancellation {
+    route: Arc<HandoffRoute>,
+}
+
+impl DestinationCancellation {
+    pub(super) fn handoff_id(&self) -> HandoffId {
+        self.route.handoff_id
+    }
+
+    pub(super) async fn cancel(
+        &self,
+        command_tx: &mpsc::Sender<crate::scheduler::SchedulerCommandEnvelope>,
+    ) -> anyhow::Result<bool> {
+        let _command_guard = self.route.command_lock.clone().lock_owned().await;
+        let Some(routes) = self.route.routes.upgrade() else {
+            return Ok(false);
+        };
+        if !self.route.is_latest_generation(&routes) {
+            return Ok(false);
+        }
+        super::cancel_destination(command_tx, self.route.handoff_id).await
     }
 }
 
