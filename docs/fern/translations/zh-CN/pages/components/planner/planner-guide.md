@@ -66,7 +66,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：使用 Rust 引擎性能模型，并以 ttft_ms/itl_ms 为目标扩缩容。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 Planner 自有的引擎查询层和 `aiconfigurator-core` wheel，以 ttft_ms/itl_ms 为目标扩缩容。 |
 
 当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 

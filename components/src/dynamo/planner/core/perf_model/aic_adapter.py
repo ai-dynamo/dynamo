@@ -29,6 +29,7 @@ from dynamo.planner.core.perf_model.engine_query import (
     AicCoreEnginePerfModel,
     EngineCapacityRequest,
     EnginePerfLimits,
+    WorkerType,
 )
 from dynamo.planner.core.types import EngineCapabilities
 
@@ -89,7 +90,7 @@ class PlannerEnginePerfModel:
     def __init__(
         self,
         *,
-        worker_type: str,
+        worker_type: WorkerType,
         config: PlannerConfig,
         capabilities: Optional[EngineCapabilities],
     ) -> None:
@@ -98,6 +99,8 @@ class PlannerEnginePerfModel:
         self._capabilities = capabilities
         self._engine_model: Optional[AicCoreEnginePerfModel] = None
         self._engine_model_key: Optional[tuple[Any, ...]] = None
+        # Retained history is canonical; pending marks that the active engine
+        # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
         self._retained_iterations: list[list[ForwardPassMetrics]] = []
         self._avg_isl = _MovingAverage(config.max_num_fpm_samples)
@@ -146,11 +149,6 @@ class PlannerEnginePerfModel:
                 diagnostics.get("readiness", "unknown"),
             )
             self._engine_model_key = model_key
-            if self._pending_iterations:
-                self._engine_model.tune_with_fpms(self._pending_iterations)
-                self._pending_iterations.clear()
-            elif self._retained_iterations:
-                self._engine_model.tune_with_fpms(self._retained_iterations)
         except _ENGINE_MODEL_INIT_EXCEPTIONS as e:
             logger.warning(
                 "Failed to initialize AIC engine perf model for %s; "
@@ -160,6 +158,21 @@ class PlannerEnginePerfModel:
             )
             self._engine_model = None
             self._engine_model_key = None
+            return
+
+        try:
+            if self._retained_iterations:
+                self._engine_model.tune_with_fpms(self._retained_iterations)
+                self._pending_iterations.clear()
+        except _ENGINE_MODEL_EXCEPTIONS as e:
+            if not self._pending_iterations:
+                self._pending_iterations = list(self._retained_iterations)
+            logger.warning(
+                "Initialized AIC engine perf model for %s, but replaying retained "
+                "observations failed; keeping the model available: %s",
+                self._worker_type,
+                e,
+            )
 
     def _engine_diagnostics(self) -> dict[str, Any]:
         if self._engine_model is None:
@@ -210,7 +223,8 @@ class PlannerEnginePerfModel:
 
     def _build_options(self) -> dict[str, int]:
         values = self._limit_values()
-        assert values is not None
+        if values is None:
+            raise ValueError("engine limits must be available before building options")
         max_num_batched_tokens, max_num_seqs, max_kv_tokens = values
         return {
             "max_observations": self._config.max_num_fpm_samples,
@@ -360,6 +374,8 @@ class PlannerEnginePerfModel:
         self._remember_iterations(iterations)
         if self._engine_model is not None:
             try:
+                # A failed replay may have partially mutated this model. Only a
+                # fresh model may replay retained history without duplication.
                 self._engine_model.tune_with_fpms(iterations)
             except _ENGINE_MODEL_EXCEPTIONS as e:
                 logger.warning("AIC perf model tuning failed: %s", e)
@@ -472,7 +488,7 @@ class PlannerEnginePerfModel:
         include_queued_decode: bool = False,
         add_next_request: bool = True,
     ) -> Optional[float]:
-        """Estimate next-request TTFT from queued prefill work.
+        """Estimate next-request TTFT in seconds from queued prefill work.
 
         FPM v1 queued prefill does not know KV reuse. The planner applies the
         router-provided prefix-cache discount before calling the engine model.
@@ -510,7 +526,7 @@ class PlannerEnginePerfModel:
         include_queued_prefill_as_kv: bool = False,
         add_next_request: bool = True,
     ) -> Optional[float]:
-        """Estimate next-request ITL from scheduled decode work.
+        """Estimate next-request ITL in seconds from scheduled decode work.
 
         AIC query failures are treated as unavailable estimates so load
         scaling can skip the current tick.
@@ -560,8 +576,8 @@ class PlannerEnginePerfModel:
         accept_length = max(1.0, float(accept_length))
         try:
             request = EngineCapacityRequest(
-                isl=int(math.ceil(isl)),
-                osl=max(1, int(math.ceil(osl))),
+                isl=math.ceil(isl),
+                osl=max(1, math.ceil(osl)),
                 ttft_sla_s=_ms_to_seconds(ttft_sla_ms),
                 itl_sla_s=_ms_to_seconds(itl_sla_ms),
                 e2e_latency_sla_s=_ms_to_seconds(e2e_latency_sla_ms),
@@ -724,7 +740,7 @@ class PlannerEnginePerfModel:
     def _ceil_nonnegative(value: float) -> int:
         if value <= 0:
             return 0
-        return int(math.ceil(value))
+        return math.ceil(value)
 
 
 def _ms_to_seconds(value: Optional[float]) -> Optional[float]:

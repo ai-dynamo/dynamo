@@ -15,9 +15,11 @@ import math
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
+from aiconfigurator_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -25,14 +27,6 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-
-try:
-    from aiconfigurator_core.sdk import (
-        RustForwardPassPerfModel as AicForwardPassPerfModel,
-    )
-except ImportError:  # pragma: no cover - dependencies are installed separately.
-    AicForwardPassPerfModel: Any = None
-
 
 MAX_CAPACITY_SEARCH_CANDIDATES = 128
 MAX_KV_HIT_RATE_DISCOUNT = 0.95
@@ -223,10 +217,6 @@ class AicCoreEnginePerfModel:
         options: dict[str, int],
         attention_dp_size: int,
     ) -> AicCoreEnginePerfModel:
-        if AicForwardPassPerfModel is None:
-            raise ImportError(
-                "aiconfigurator-core is required for Planner performance modeling"
-            )
         if aic_config is None:
             model = AicForwardPassPerfModel.from_regression(options)
         else:
@@ -285,8 +275,7 @@ class AicCoreEnginePerfModel:
                 breakpoints.add(plan.full_chunks + 1)
 
         total_s = 0.0
-        sorted_breakpoints = sorted(breakpoints)
-        for start, end in zip(sorted_breakpoints, sorted_breakpoints[1:]):
+        for start, end in pairwise(sorted(breakpoints)):
             repeat_count = end - start
             chunk_metrics: list[ForwardPassMetrics] = []
             for snapshot, plan in zip(metrics_by_rank, plans, strict=True):

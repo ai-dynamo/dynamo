@@ -93,14 +93,14 @@ def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
         ),
     )
 
-    prefill_ms = prefill_model.estimate_queued_prefill_time(
+    prefill_s = prefill_model.estimate_queued_prefill_time(
         [prefill_fpm], max_num_batched_tokens=4096, add_next_request=False
     )
-    decode_ms = decode_model.estimate_scheduled_decode_itl(
+    decode_s = decode_model.estimate_scheduled_decode_itl(
         [decode_fpm], add_next_request=False
     )
-    assert prefill_ms is not None and prefill_ms > 0.0
-    assert decode_ms is not None and decode_ms > 0.0
+    assert prefill_s is not None and prefill_s > 0.0
+    assert decode_s is not None and decode_s > 0.0
 
     prefill_capacity = prefill_model.find_engine_capacity_rps(
         isl=1024, osl=128, ttft_sla_ms=10_000.0
