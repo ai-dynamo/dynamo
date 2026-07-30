@@ -165,7 +165,7 @@ def build_mixed_embeds(
     return prompt_embeds, out_token_ids, is_token_ids
 
 
-class _LinearEmbedsAdapter(CustomEncoderAdapter):
+class LinearEmbedsAdapter(CustomEncoderAdapter):
     """Build mixed ``EmbedsPrompt`` inputs for a text-only decoder."""
 
     def __init__(

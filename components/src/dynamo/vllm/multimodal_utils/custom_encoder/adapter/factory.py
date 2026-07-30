@@ -9,7 +9,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.base import (
     CustomEncoderAdapter,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
-    _LinearEmbedsAdapter,
+    LinearEmbedsAdapter,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
     VisionEncoderBackend,
@@ -29,4 +29,4 @@ def create_custom_encoder_adapter(
     """
 
     del vllm_config
-    return _LinearEmbedsAdapter(backend, model_config, engine_args)
+    return LinearEmbedsAdapter(backend, model_config, engine_args)
