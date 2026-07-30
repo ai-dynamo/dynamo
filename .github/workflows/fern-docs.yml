@@ -484,8 +484,9 @@ jobs:
 
       # The global theme overrides the project `css:`/`js:` and the custom
       # `footer:`, so any component relying on main.css publishes unstyled.
-      # Previews delete the theme, so this cannot be caught before merge --
-      # assert it against the live site instead. Retries cover CDN propagation.
+      # Previews are themed too now, so this should be caught before merge --
+      # this is the backstop that proves it on the site people actually read.
+      # Retries cover CDN propagation.
       - name: Verify published pages carry their component CSS
         if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
         run: python3 source-checkout/docs/fern/scripts/check_published_styles.py

@@ -86,6 +86,11 @@ repos:
       language: system
       files: ^docs/fern/(main\.css|components/CustomFooter\.tsx|scripts/sync_site_css\.py)$
       pass_filenames: false
+    - id: check-style-components
+      name: Check *Styles.tsx CSS template literals
+      entry: python3 docs/fern/scripts/check_style_components.py
+      language: system
+      files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
