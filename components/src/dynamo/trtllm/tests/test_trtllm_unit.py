@@ -172,6 +172,7 @@ def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog)
     ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_events_and_metrics is True
+    assert config.legacy_publish_events_and_metrics is True
     assert config.use_kv_events is True
     assert any(
         "--publish-events-and-metrics is deprecated" in r.message
@@ -194,6 +195,7 @@ def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
     ):
         config = parse_args([])
     assert config.publish_events_and_metrics is True
+    assert config.legacy_publish_events_and_metrics is True
     assert config.use_kv_events is True
     assert os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] == "true"
     assert any(
@@ -458,13 +460,32 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
+@pytest.mark.parametrize(
+    ("publish_flag", "expected_perf_metrics"),
+    [
+        ("--publish-kv-events", False),
+        ("--publish-events-and-metrics", True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
-    """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
+async def test_init_llm_worker_engine_args_without_overrides(
+    monkeypatch, publish_flag, expected_perf_metrics
+):
+    """The new KV-event flag is decoupled while the legacy flag stays combined."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
 
-    config = parse_args(["--model", "fake-model"])
+    if publish_flag == "--publish-events-and-metrics":
+        with pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ):
+            config = parse_args(["--model", "fake-model", publish_flag])
+    else:
+        config = parse_args(["--model", "fake-model", publish_flag])
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
@@ -486,6 +507,12 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
         engine_args = exc_info.value.engine_args
         assert engine_args["max_num_tokens"] == config.max_num_tokens
         assert engine_args["max_batch_size"] == config.max_batch_size
+        if expected_perf_metrics:
+            assert engine_args["return_perf_metrics"] is True
+            assert engine_args["enable_iter_perf_stats"] is True
+        else:
+            assert "return_perf_metrics" not in engine_args
+            assert "enable_iter_perf_stats" not in engine_args
 
 
 @pytest.mark.asyncio

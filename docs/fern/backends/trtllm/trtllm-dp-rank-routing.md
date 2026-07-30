@@ -62,13 +62,33 @@ CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
   --model-path <MODEL_PATH> \
   --tensor-parallel-size 2 \
   --enable-attention-dp \
-  --publish-events-and-metrics
+  --publish-kv-events
 
 # Frontend with KV routing
 python3 -m dynamo.frontend --router-mode kv
 ```
 
 The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
+
+`--publish-kv-events` only enables KV-event generation and publication. It does not enable TensorRT-LLM's performance collectors or its `return_perf_metrics` and `enable_iter_perf_stats` engine options. Enable performance collection explicitly when needed, either in the YAML file passed to `--extra-engine-args`:
+
+```yaml
+return_perf_metrics: true
+enable_iter_perf_stats: true
+```
+
+or with an `--override-engine-args` JSON object:
+
+```bash
+--override-engine-args \
+  '{"return_perf_metrics": true, "enable_iter_perf_stats": true}'
+```
+
+For one compatibility release, the deprecated
+`--publish-events-and-metrics` flag retains its previous combined behavior:
+it enables KV-event publication and both TensorRT-LLM performance options.
+Migrate without changing behavior by using `--publish-kv-events` together
+with the explicit engine settings above.
 
 > [!NOTE]
 > Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.
