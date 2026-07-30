@@ -12,8 +12,8 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery and forwards engine events into the Dynamo event
-plane. The Dynamo request plane connects directly to the engine's native gRPC
-service.
+plane. Today, requests also pass through the sidecar. The target design routes
+requests directly to the engine's native gRPC service.
 
 ## Design Goals
 
@@ -36,15 +36,18 @@ flowchart LR
     S[Dynamo Sidecar] <-->|Native gRPC| E[Inference Engine]
   end
   S -->|Discovery and Event planes| F
-  F -->|Request plane<br/>Native gRPC| E
+  F -->|Request plane*<br/>Native gRPC| E
 ```
 
-The frontend and router resolve the engine endpoint through discovery, then
-send requests directly to the engine. The sidecar stays off the request path
-and uses the engine's native gRPC service for metadata and event integration
-with Dynamo's discovery and event planes.
+<sup>*</sup> The direct request path is the target design. Today, requests pass
+through the sidecar.
 
-## Responsibilities
+In the target design, the frontend and router resolve the engine endpoint
+through discovery, then send requests directly to the engine. The sidecar stays
+off the request path and uses the engine's native gRPC service for metadata and
+event integration with Dynamo's discovery and event planes.
+
+## Target Responsibilities
 
 | Layer | Responsibility |
 |---|---|
