@@ -25,19 +25,12 @@
  *   DOM access is inside useEffect and guarded, so SSR renders an empty frame
  *   and hydration wires up the player. dispose() runs on unmount.
  *
- * USAGE (import — ambient JSX is unsupported, per the RecipeStyles note). The
- * backticks below stand in for the double quotes the real page uses, for the
- * reason spelled out in RecipeStyles.tsx — a quoted non-relative specifier in a
- * comment still triggers Fern's `npx rolldown` bundling:
- *   import { TerminalDemo } from `@/components/TerminalDemo`;
- *
- *   <TerminalDemo
- *     src="/dynamo/assets/dynamo-demo.cast"
- *     startAt={0}
- *     endAt={18}          // play only the first 18s of a long recording, then loop
- *     idleTimeLimit={2}   // compress dead air so pauses feel snappy
- *     speed={1.2}
- *   />
+ * USAGE:
+ *   The page-usage example lives in README.md, for the reason recorded there.
+ *   Ambient JSX is unsupported, so the component must be imported. Props:
+ *     startAt / endAt     play only a slice; endAt loops back to startAt
+ *     idleTimeLimit       cap any idle gap in seconds; kills dead air
+ *     speed               above 1 plays faster
  *
  * GETTING THE CAST (deferred — not wired to a page yet):
  *   The recording lives on asciinema.org, not in the repo. Pull it local:

@@ -3,44 +3,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fail on imports that make Fern shell out to rolldown during a docs build.
 
-Fern's `experimental.mdx-components` bundler regex-scans every .js/.jsx/.ts/.tsx
-file under docs/fern/components for import/export/require specifiers. Anything
-that is neither relative (./, ../) nor in Fern's allowlist (react, react-dom,
-@mdx-js/react, next) is treated as a third-party dependency, and Fern runs
-
-    npx --quiet --yes rolldown@<pinned> -c <config>
-
-once per offending file. That is a registry download on every docs build, and it
-is the direct cause of the intermittent preview failures:
+Fern's `experimental.mdx-components` bundler scans every .js/.jsx/.ts/.tsx file
+under docs/fern/components for import specifiers. Anything neither relative
+(./, ../) nor in its allowlist is treated as a third-party dependency, and Fern
+runs `npx rolldown` once per offending file — a registry download on every docs
+build, and the direct cause of intermittent preview failures:
 
     rolldown exited with code 127 / sh: 1: rolldown: not found
     rolldown exited with code 1 / ERR_MODULE_NOT_FOUND ... _npx/.../rolldown/...
 
-The scan does not skip comments, so a docblock usage example such as
+Fern's scan is a regex over raw text and does not skip comments, so a docblock
+usage example is indistinguishable from a real dependency. That is why usage
+examples live in components/README.md instead: markdown is outside the scan.
 
-    import { RecipeStyles } from "@/components/RecipeStyles";
+This check reads the same raw text Fern does, comments included, so it catches
+an example that slips back into a docblock. SPECIFIER is transcribed from
+fern-api rather than approximated: a looser pattern matching any quoted string
+after an import/export keyword fires on ordinary value exports such as
+`export const KIND = "all"`, which is why the real one insists on `from` or a
+directly quoted specifier.
 
-is enough to trigger it even though no component actually depends on anything
-outside the allowlist. Write such examples with backticks around the specifier
-instead of quotes, and say so in the surrounding comment.
-
-If a component ever needs a real third-party dependency, this check has to be
-revisited together with a package.json + node_modules for the docs project —
-which is exactly what Fern's error message asks for.
-
-The constants below are transcribed from fern-api's own bundler, so they are
-only correct for one release of it. DERIVED_FROM_FERN records which, and the
-run below refuses to report a clean tree when docs/fern/fern.config.json has
-moved past it — a stale allowlist fails closed but silently, which is the worst
-of both.
-
-To re-derive after a Fern bump:
+Being a transcription, it is only correct for one release. DERIVED_FROM_FERN
+records which, and the scan refuses to report a clean tree once
+docs/fern/fern.config.json moves past it — a stale pattern fails closed but
+silently, which is the worst outcome for a gate. To re-derive after a bump:
 
     npm pack fern-api@<version> && tar xzf fern-api-<version>.tgz
     grep -o 'TZu=\\[[^]]*\\]' package/cli.cjs     # the allowlist
     grep -o 'SGm="[^"]*"' package/cli.cjs        # the pinned rolldown version
 
 then update SPECIFIER, ALLOWLIST and DERIVED_FROM_FERN together.
+
+If a component ever genuinely needs a third-party dependency, this check has to
+be revisited alongside a package.json and node_modules for the docs project,
+which is what Fern's error message asks for.
 """
 
 from __future__ import annotations
@@ -51,7 +47,9 @@ import sys
 from pathlib import Path
 
 FERN_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = FERN_ROOT.parents[1]
+# Not FERN_ROOT.parents[1]: that raises IndexError at import time if the script
+# is ever run from a shallower path, before check_derivation can say why.
+REPO_ROOT = next(iter(FERN_ROOT.parents[1:2]), FERN_ROOT)
 COMPONENTS = FERN_ROOT / "components"
 FERN_CONFIG = FERN_ROOT / "fern.config.json"
 SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
@@ -69,6 +67,7 @@ SPECIFIER = re.compile(
     r"""|require\(\s*["']([^"'\n]+)["']\s*\)""",
     re.MULTILINE | re.ASCII,
 )
+# Fern resolves these itself and never bundles them.
 ALLOWLIST = {"react", "react-dom", "@mdx-js/react", "next"}
 
 
@@ -92,7 +91,7 @@ def pinned_fern_version() -> str | None:
 
 
 def check_derivation() -> int:
-    """Refuse to vouch for a tree when the constants predate the Fern in use."""
+    """Refuse to vouch for a tree when SPECIFIER predates the Fern in use."""
     if not FERN_CONFIG.is_file():
         print(
             f"check_component_imports: expected {FERN_CONFIG} — the script has "
@@ -133,20 +132,15 @@ def offenders(text: str) -> list[str]:
     return found
 
 
-# The two cases this check exists for are the first two: a quoted specifier in a
-# comment must be caught, a backticked one must not. The rest pin the allowlist
-# and the import()/require() branches of SPECIFIER.
+# The first case is the one this check exists for: an example in a comment is
+# what broke docs previews, and Fern cannot tell it from a real dependency.
 CASES: list[tuple[str, str, list[str]]] = [
     (
-        "quoted specifier in a comment",
+        "usage example in a comment",
         ' *   import { Foo } from "@/components/Foo";',
         ["@/components/Foo"],
     ),
-    (
-        "backtick example in a comment",
-        " *   import { Foo } from `@/components/Foo`;",
-        [],
-    ),
+    ("real third-party import", 'import x from "some-pkg";', ["some-pkg"]),
     ("relative import", 'import { Foo } from "./Foo";', []),
     ("parent-relative import", 'import { Foo } from "../shared/Foo";', []),
     ("allowlisted bare package", 'import { useState } from "react";', []),
@@ -164,6 +158,13 @@ CASES: list[tuple[str, str, list[str]]] = [
         'import "@scope/pkg";\nimport { X } from "@scope/pkg";',
         ["@scope/pkg"],
     ),
+    ("prose with no specifier", " * We import the styles at build time.", []),
+    # Value exports carrying string literals are the reason SPECIFIER insists on
+    # `from` or a directly quoted specifier. A looser pattern flags all three of
+    # these, which is how install-selector-data.ts and releases.data.ts fail.
+    ("value export of a string", 'export const KIND = "all";', []),
+    ("value export of an object", 'export const V = { channel: "stable" };', []),
+    ("value export of a list", 'export const TAGS = ["sglang", "container"];', []),
     # Pins re.ASCII. Without it Python treats the accented letter as a word
     # character, [^\w.] fails to match, and the specifier is missed — while
     # Fern, whose \w is ASCII-only, bundles the file.
@@ -173,6 +174,8 @@ CASES: list[tuple[str, str, list[str]]] = [
         ["@scope/pkg"],
     ),
 ]
+
+USAGE = "usage: check_component_imports.py [--test]"
 
 
 def run_tests() -> int:
@@ -186,9 +189,6 @@ def run_tests() -> int:
             failed += 1
     print(f"\n{len(CASES) - failed}/{len(CASES)} passed")
     return 1 if failed else 0
-
-
-USAGE = "usage: check_component_imports.py [--test]"
 
 
 def main() -> int:
@@ -212,16 +212,16 @@ def main() -> int:
         if not found:
             continue
         failures += 1
-        rel = path.relative_to(REPO_ROOT)
         print(
-            f"{rel}: Fern will bundle this file with rolldown because it reads "
-            f"{', '.join(found)} as a third-party import.",
+            f"{path.relative_to(REPO_ROOT)}: Fern will bundle this file with "
+            f"rolldown because it reads {', '.join(found)} as a third-party import.",
             file=sys.stderr,
         )
     if failures:
         print(
-            "\nIf the specifier is inside a comment, quote it with backticks "
-            "instead. If it is real code, see this script's docstring.",
+            "\nUsage examples belong in docs/fern/components/README.md, where "
+            "Fern's scan cannot see them. A real dependency needs the wider fix "
+            "in this script's docstring.",
             file=sys.stderr,
         )
         return 1

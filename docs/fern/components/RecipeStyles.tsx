@@ -11,20 +11,14 @@
  * constraint, CSS injected this exact way.
  *
  * Server component (no "use client"); registered via docs.yml
- * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
- * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
- * fern/ root and is rewritten to a relative path at publish time:
+ * `experimental.mdx-components: ./components`. It must be imported — ambient
+ * use renders "Unsupported JSX tag" — then placed once, right after the
+ * frontmatter, on every recipe/benchmark page and the two landing READMEs.
  *
- *   import { RecipeStyles } from `@/components/RecipeStyles`;
- *
- * The backticks above stand in for the double quotes the real page uses. Fern's
- * mdx-components bundler regex-scans this file for imports without skipping
- * comments, so a quoted non-relative specifier — even inside a comment — makes
- * it shell out to `npx rolldown` for a per-build network fetch that flakes CI.
- * scripts/check_component_imports.py enforces this; see its docstring.
- *
- * Then place <RecipeStyles /> once, right after the frontmatter, on every
- * recipe/benchmark page (and the two landing READMEs).
+ * The page-usage example lives in README.md, not here. Fern's bundler scans
+ * this file for import specifiers without skipping comments, so an example in
+ * a docblock reads as a real dependency and makes it shell out to npx
+ * rolldown on every build. Markdown is outside that scan.
  */
 const RECIPE_CSS = `
 /* Dark-mode variable re-bind.
