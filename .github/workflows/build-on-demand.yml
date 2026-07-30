@@ -142,7 +142,7 @@ jobs:
       - name: Checkout build ref
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify immutable product tree
@@ -174,6 +174,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          dynamo_version=$(sed -n \
+            '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+            "${GITHUB_WORKSPACE}/Cargo.toml")
+          dynamo_version=${dynamo_version%%[-+]*}
           docker buildx build \
             --builder "${BUILDER_NAME}" \
             --progress plain \
@@ -185,7 +189,7 @@ jobs:
             --tag "${ACR_IMAGE_BASE}:${PRODUCT_SHA}-vllm-placeholder" \
             --build-context snapshot=../snapshot \
             --build-context operator=../operator \
-            --build-arg "BASE_IMAGE=${ACR_IMAGE_BASE}:${GITHUB_SHA}-vllm-runtime" \
+            --build-arg "BASE_IMAGE=${ACR_IMAGE_BASE}:${dynamo_version}-ci-${GITHUB_SHA}-vllm-runtime" \
             --file Dockerfile \
             .
 
