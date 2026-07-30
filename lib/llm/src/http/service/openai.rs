@@ -428,30 +428,32 @@ impl ErrorMessage {
         }
     }
 
-    /// Implementers should only be able to throw 400-499 errors.
+    /// Convert a backend-supplied [`HttpError`] into a client response.
+    ///
+    /// Parse first, then triage: a code outside the HTTP status space cannot
+    /// escape into the response and falls back to a sanitized 500. Otherwise
+    /// [`SanitizedError::for_backend_status`] — the single source of truth for
+    /// the status → variant mapping, already used by the streaming preflight
+    /// and the Anthropic surface — decides the category. Backend 5xx statuses
+    /// round-trip so clients can distinguish a deliberate overload signal (529)
+    /// from a generic 500; only the body is sanitized, since a backend message
+    /// may carry internal paths or details.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
-        // 499 is part of the 4xx range but its body can carry cancellation
-        // context (queue paths, context IDs) — sanitize separately.
-        if err.code == 499 {
-            return ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, err.message);
-        }
-        // Backend-supplied messages are only forwarded for the documented 4xx
-        // range; for 5xx or codes outside the HTTP space the message may
-        // contain internal paths/details and is kept server-side only.
-        if err.code < 400 || err.code >= 500 {
+        let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
-        }
-        match StatusCode::from_u16(err.code) {
-            Ok(code) => (
-                code,
+        };
+        match SanitizedError::for_backend_status(status) {
+            Some(variant) => ErrorMessage::sanitized_with_details(variant, err.message),
+            // 4xx (non-499): protocol contract — forward backend message as-is.
+            None => (
+                status,
                 Json(ErrorMessage {
                     message: err.message,
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
+                    error_type: map_error_code_to_error_type(status),
+                    code: status.as_u16(),
                     details: None,
                 }),
             ),
-            Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
         }
     }
 }
@@ -3977,11 +3979,17 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths.
-        for code in [399u16, 500, 501] {
+        // forwarded to the client — they may include internal paths. The
+        // *status*, by contrast, round-trips for 5xx so clients can tell a
+        // deliberate load-shed signal from a generic internal error; codes
+        // outside the 4xx/5xx range are still coerced to 500. This matches
+        // the streaming path's 503 round-trip
+        // (`test_check_for_backend_error_with_503_preserves_status`).
+        for (code, expected_status) in [(399u16, 500u16), (500, 500), (501, 501)] {
             let err = http_error_from_engine(code).unwrap_err();
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.0.as_u16(), expected_status, "status for {code}");
+            assert_eq!(response.1.code, expected_status, "body code for {code}");
             assert_eq!(response.1.message, "Internal server error");
             assert!(
                 !response.1.message.contains("custom error message"),
@@ -4004,6 +4012,60 @@ mod tests {
         assert_eq!(response.1.message, "Request cancelled");
         assert!(!response.1.message.contains("abc-123"));
         assert!(!response.1.message.contains("/srv/queue.py"));
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_529_overload_status() {
+        // A backend that deliberately load-sheds with 529 must remain
+        // distinguishable from a genuine internal error: the status and code
+        // survive and the wire type classifies as overload. The body is still
+        // sanitized, because the backend message may carry internal paths.
+        let err = HttpError {
+            code: 529,
+            message: "site overloaded at /srv/pool.py:12".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert!(
+            !response.1.message.contains("/srv/pool.py"),
+            "client response must not include the backend-supplied path"
+        );
+        assert!(
+            !response.1.message.contains("site overloaded"),
+            "client response must not include the backend-supplied HttpError message"
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_529_classifies_as_overload_for_metrics() {
+        // Observability half of the same bug: while the status was squashed to
+        // 500 the metric recorded Internal, hiding load-shedding behind generic
+        // internal errors.
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 529,
+            message: "site overloaded".to_string(),
+        });
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_rejects_out_of_range_code() {
+        // Codes outside the HTTP status space cannot escape into the response;
+        // they fall back to a sanitized 500.
+        let err = HttpError {
+            code: 1000,
+            message: "bogus status from /srv/backend.py:7".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.code, 500);
+        assert_eq!(response.1.message, "Internal server error");
+        assert!(!response.1.message.contains("/srv/backend.py"));
     }
 
     #[test]
