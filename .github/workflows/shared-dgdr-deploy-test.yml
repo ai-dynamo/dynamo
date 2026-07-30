@@ -33,19 +33,10 @@ on:
         required: false
 
 jobs:
-  dgdr-deploy-test:
-    name: CPU / ${{ matrix.suite }}
+  ensure-vcluster:
+    name: Ensure vCluster
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - validation
-          - profiling
-          - lifecycle
-    env:
-      DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -72,6 +63,28 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+  dgdr-deploy-test:
+    name: CPU / ${{ matrix.suite }}
+    needs: ensure-vcluster
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - validation
+          - profiling
+          - lifecycle
+    env:
+      DGDR_NAMESPACE: dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Connect to vCluster
         id: connect-vcluster
