@@ -165,7 +165,7 @@ navigation:
             path: kubernetes/inference-gateway.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: components/router/router-guide.md
+            path: components/router/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
@@ -287,7 +287,7 @@ navigation:
             path: cli/kv-routing.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: components/router/router-guide.md
+            path: components/router/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
