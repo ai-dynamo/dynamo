@@ -583,16 +583,24 @@ sglang_configs = {
             )
         ],
     ),
-    "video_agg_qwen_nvdec": SGLangConfig(
+    "video_e_pd_qwen_nvdec": SGLangConfig(
         # H.264/H.265 video input decoded on the GPU by NVDEC, which is the only
-        # video decoder in the shipped image -- so unlike video_agg_qwen above
-        # this installs nothing and exercises what a deployment actually gets.
-        # It is also the only end-to-end cover for the video_metadata shim in
+        # video decoder in the shipped image -- so unlike the cases above this
+        # installs nothing and exercises what a deployment actually gets. It is
+        # the only end-to-end cover for the video_metadata shim in
         # encode_worker_handler, which SGLang's pre-decoded-frame path needs.
-        # Both codecs run against one deployment to avoid a second model load.
-        name="video_agg_qwen_nvdec",
+        #
+        # Must be the E/PD topology: NVDEC is wired into the encode worker, and
+        # the aggregated path hands the URL to SGLang, which resolves and decodes
+        # it internally with no interception point.
+        #
+        # Must also be a qwen2-family model. Qwen3-VL is in
+        # _NVDEC_UNSAFE_MODEL_TYPES (its preprocessing cannot take pre-decoded
+        # frames), so NVDEC is deliberately skipped for it and the request would
+        # fall back to the URL path, which has no decoder here.
+        name="video_e_pd_qwen_nvdec",
         directory=sglang_dir,
-        script_name="agg_vision.sh",
+        script_name="multimodal_epd.sh",
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
@@ -605,18 +613,30 @@ sglang_configs = {
                     "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
                 ),
             ),
-            # Same model and bounds as video_agg_qwen above.
-            pytest.mark.profiled_vram_gib(20.5),
-            pytest.mark.requested_sglang_kv_tokens(8736),
-            pytest.mark.timeout(390),
+            pytest.mark.timeout(420),
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen2-VL-7B-Instruct",
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
         script_args=[
-            "--model-path",
-            "Qwen/Qwen2-VL-7B-Instruct",
+            "--model",
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+            "--single-gpu",
+            "--multimodal-embedding-cache-capacity-gb",
+            "0.1",
         ],
-        timeout=360,
+        timeout=420,
+        env={
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # The clips come from the image_server over plain http on localhost,
+            # which the URL policy rejects by default. Without this the encode
+            # worker refuses the URL before NVDEC sees it and falls back to the
+            # URL path, which has no decoder in this image.
+            "DYN_MM_ALLOW_INTERNAL": "1",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(

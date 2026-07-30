@@ -16,12 +16,24 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
 > [!IMPORTANT]
-> **Video input is limited to H.264 and H.265.** The runtime image ships no software
-> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
-> (VP8, VP9, AV1) has a decoder available. NVDEC requires a GPU with a video decode
-> engine and a container granted the `video` driver capability — see
-> [Video Decode GPU Requirements](video-decode-gpu-requirements.md). `file://` sources
-> additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
+> **Video input is limited to H.264 and H.265, and requires a separate encode
+> worker.** The runtime image ships no software video decoder, so these codecs are
+> decoded on the GPU by NVDEC and no other codec (VP8, VP9, AV1) has a decoder
+> available.
+>
+> Hardware decode is wired into the encode worker
+> (`--disaggregation-mode encode`, as used by `multimodal_epd.sh`). In an
+> aggregated deployment SGLang resolves and decodes the media URL itself, so
+> Dynamo never sees the bytes and cannot route them to NVDEC — video input is
+> therefore unavailable in aggregated deployments of this image.
+>
+> Video is also skipped for model types whose preprocessing cannot accept
+> pre-decoded frames (the Qwen3-VL family); use a Qwen2-family vision model.
+>
+> NVDEC requires a GPU with a video decode engine and a container granted the
+> `video` driver capability — see
+> [Video Decode GPU Requirements](video-decode-gpu-requirements.md). `file://`
+> sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 >
 > Video is additionally skipped for model types whose preprocessing cannot accept
 > pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL path,
