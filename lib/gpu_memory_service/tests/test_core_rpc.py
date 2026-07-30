@@ -47,6 +47,23 @@ def _connect_in_thread(path: str, lock_type: RequestedLockType):
 
 
 @pytest.mark.timeout(10)
+def test_client_waits_for_server_startup(tmp_path) -> None:
+    path = str(tmp_path / "gms.sock")
+    result, connected, client_thread = _connect_in_thread(path, RequestedLockType.RW)
+    assert not connected.wait(0.1)
+    assert client_thread.is_alive()
+
+    _manager, server, server_thread = _serve(path, FakeVMM(granularity=64))
+    try:
+        assert connected.wait(5)
+        result.pop().close()
+        client_thread.join(timeout=5)
+        assert not client_thread.is_alive()
+    finally:
+        _stop(server, server_thread)
+
+
+@pytest.mark.timeout(10)
 def test_rw_close_waits_for_epoch_release(tmp_path, monkeypatch) -> None:
     path = str(tmp_path / "gms.sock")
     vmm = FakeVMM(granularity=64)
@@ -91,6 +108,15 @@ def test_socket_sessions_commit_share_prioritize_writer_and_release_on_disconnec
     vmm = FakeVMM(granularity=64)
     manager, server, server_thread = _serve(path, vmm)
     first_writer = _GMSClientSession(path, RequestedLockType.RW)
+    handle_request = manager.handle_request
+
+    def raise_oserror(*_args) -> None:
+        raise OSError("manager failed")
+
+    monkeypatch.setattr(manager, "handle_request", raise_oserror)
+    with pytest.raises(RuntimeError, match="manager failed"):
+        first_writer.allocate("failed", 64)
+    monkeypatch.setattr(manager, "handle_request", handle_request)
     first_writer.allocate("aborted", 64)
 
     writer_waiting = threading.Event()

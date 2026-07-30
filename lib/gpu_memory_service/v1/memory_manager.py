@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -21,6 +22,8 @@ from gpu_memory_service.core.client.memory_manager import (
     unmap_mapping,
 )
 from gpu_memory_service.core.client.session import _GMSClientSession
+
+logger = logging.getLogger(__name__)
 
 _SessionFactory = Callable[
     [str, RequestedLockType, tuple[str, str] | None],
@@ -258,7 +261,13 @@ class GMSClientMemoryManager:
             raise self._failure
 
     def _latch(self, message: str, cause: Exception) -> RuntimeError:
-        self.disconnect()
         if self._failure is None:
             self._failure = RuntimeError(f"{message}: {cause}")
+        session = self._session
+        self._session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                logger.exception("GMS disconnect failed after operational failure")
         return self._failure

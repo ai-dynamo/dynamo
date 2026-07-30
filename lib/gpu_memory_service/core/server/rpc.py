@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import socketserver
@@ -22,6 +23,8 @@ from gpu_memory_service.core.protocol import (
 from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.lease import socket_is_alive
 from gpu_memory_service.core.server.sessions import ServerSession
+
+logger = logging.getLogger(__name__)
 
 
 class _GMSRequestHandler(socketserver.BaseRequestHandler):
@@ -58,7 +61,8 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
             while True:
                 try:
                     request = self._receive()
-                except EOFError:
+                except EOFError as exc:
+                    logger.debug("GMS client disconnected: %s", exc)
                     return
                 export_fd = -1
                 try:
@@ -67,23 +71,36 @@ class _GMSRequestHandler(socketserver.BaseRequestHandler):
                             "handshake is valid only as the first message"
                         )
                     response, export_fd = manager.handle_request(session, request)
-                    send_message(self.request, response, export_fd)
                 except Exception as exc:
-                    try:
-                        send_message(
-                            self.request,
-                            ErrorResponse(
-                                str(exc),
-                                out_of_memory=isinstance(exc, MemoryError),
-                            ),
+                    if isinstance(exc, (MemoryError, RuntimeError)):
+                        logger.log(
+                            logging.WARNING
+                            if isinstance(exc, MemoryError)
+                            else logging.DEBUG,
+                            "GMS request failed: %s",
+                            exc,
                         )
-                    except Exception:
-                        return
+                    else:
+                        logger.exception("Unexpected GMS request failure")
+                    response = ErrorResponse(
+                        str(exc),
+                        out_of_memory=isinstance(exc, MemoryError),
+                    )
+                try:
+                    send_message(self.request, response, export_fd)
+                except OSError as exc:
+                    logger.debug("GMS client disconnected: %s", exc)
+                    return
+                except Exception:
+                    logger.exception("Failed to send GMS response")
+                    return
                 finally:
                     if export_fd >= 0:
                         os.close(export_fd)
+        except (EOFError, OSError) as exc:
+            logger.debug("GMS client disconnected: %s", exc)
         except Exception:
-            return
+            logger.exception("Unexpected GMS connection failure")
         finally:
             if session is not None:
                 self.server.manager.close(session)

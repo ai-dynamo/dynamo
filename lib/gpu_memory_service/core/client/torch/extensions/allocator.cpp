@@ -60,12 +60,20 @@ my_malloc(ssize_t size, int device, void* stream)
   PyGILState_STATE gstate = PyGILState_Ensure();
 
   PyObject* args = Py_BuildValue("(niK)", size, device, (unsigned long long)stream);
+  if (!args) {
+    PyErr_Print();
+    PyGILState_Release(gstate);
+    return nullptr;
+  }
   PyObject* result = PyObject_CallObject(cb.malloc_cb, args);
   Py_DECREF(args);
 
   void* ptr = nullptr;
   if (result && PyLong_Check(result)) {
-    ptr = (void*)PyLong_AsUnsignedLongLong(result);
+    unsigned long long address = PyLong_AsUnsignedLongLong(result);
+    if (!PyErr_Occurred()) {
+      ptr = (void*)address;
+    }
   }
   Py_XDECREF(result);
 
@@ -88,6 +96,11 @@ my_free(void* ptr, ssize_t size, int device, void* stream)
   PyGILState_STATE gstate = PyGILState_Ensure();
 
   PyObject* args = Py_BuildValue("(KniK)", (unsigned long long)ptr, size, device, (unsigned long long)stream);
+  if (!args) {
+    PyErr_Print();
+    PyGILState_Release(gstate);
+    return;
+  }
   PyObject* result = PyObject_CallObject(cb.free_cb, args);
   Py_DECREF(args);
   Py_XDECREF(result);
