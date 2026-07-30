@@ -160,7 +160,7 @@ navigation:
             path: ../pages-dev/kubernetes/inference-gateway.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: ../pages-dev/components/router/router-guide.md
+            path: ../pages-dev/components/router/standalone-router.md
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
         collapsed: true
@@ -273,7 +273,7 @@ navigation:
             path: ../pages-dev/cli/kv-routing.mdx
           - page: Standalone Router
             slug: standalone-router
-            path: ../pages-dev/components/router/router-guide.md
+            path: ../pages-dev/components/router/standalone-router.md
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
         collapsed: true
@@ -402,13 +402,6 @@ navigation:
             path: ../pages-dev/reasoning/README.md
           - page: Troubleshooting Tool Calls
             path: ../pages-dev/tool-calling/troubleshooting.md
-      - section: Fastokens Tokenizer
-        collapsed: true
-        icon: gauge
-        path: ../pages-dev/features/tokenizer/README.md
-        contents:
-          - page: Overview
-            path: ../pages-dev/features/tokenizer/README.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -830,6 +823,9 @@ navigation:
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: ../pages-dev/features/multimodal/custom-vision-encoder.md
+          - page: FastTokens Tokenizer
+            slug: fastokens-tokenizer
+            path: ../pages-dev/features/tokenizer/README.md
           - section: Writing Custom Backends
             contents:
               - page: Custom Backend Overview
@@ -896,7 +892,7 @@ navigation:
       - page: Compatibility
         path: ../pages-dev/reference/compatibility.mdx
       - page: Examples
-        path: ../pages-dev/getting-started/examples.md
+        path: ../pages-dev/reference/examples.md
       - page: Release Artifacts
         path: ../pages-dev/reference/release-artifacts.mdx
       - section: Releases
