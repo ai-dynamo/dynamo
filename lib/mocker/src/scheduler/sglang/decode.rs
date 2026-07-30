@@ -110,7 +110,7 @@ fn check_decode_mem_for_burst(
         };
 
         let mut req = running.remove(idx);
-        kv_manager.retract(std::mem::take(&mut req.kv_lease));
+        kv_manager.retract_in_place(&mut req.kv_lease);
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
         retracted.push(req);
@@ -297,7 +297,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 req.allocated_tokens += config.block_size;
             }
             let token_id = req.next_output_token();
-            req.append_output_token(token_id);
+            req.append_output_token(token_id, config.block_size);
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;

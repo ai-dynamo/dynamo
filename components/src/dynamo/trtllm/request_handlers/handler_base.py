@@ -28,7 +28,6 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
@@ -61,6 +60,7 @@ from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativ
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
+    get_compatible_global_disagg_request_id,
 )
 from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
@@ -751,7 +751,7 @@ class HandlerBase(BaseGenerativeHandler):
             else:
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only",
-                    disagg_request_id=get_global_disagg_request_id(
+                    disagg_request_id=get_compatible_global_disagg_request_id(
                         self.disagg_machine_id
                     ),
                 )
@@ -760,8 +760,8 @@ class HandlerBase(BaseGenerativeHandler):
             # ep_disaggregated_params, so the PYTHON transceiver can track
             # requests across prefill/decode workers.
             if disaggregated_params.disagg_request_id is None:
-                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
-                    self.disagg_machine_id
+                disaggregated_params.disagg_request_id = (
+                    get_compatible_global_disagg_request_id(self.disagg_machine_id)
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:

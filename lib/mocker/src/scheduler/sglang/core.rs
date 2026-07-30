@@ -7,6 +7,8 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::cache::radix_cache::KvPageId;
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -63,8 +65,7 @@ impl ReservedSglangDecode {
     fn activate(self, kv_manager: &mut SglangKvManager, block_size: usize) -> SglangRequest {
         let Self { mut request, kv } = self;
         let allocated_tokens = kv.allocated_tokens;
-        let alloc = kv_manager.activate_destination(kv, request.prompt_tokens());
-        request.kv_lease = alloc.lease;
+        kv_manager.activate_destination_lease(kv, request.prompt_len(), &mut request.kv_lease);
         request.materialized_tokens = request.prompt_len();
         request.allocated_tokens = allocated_tokens;
         request.debug_assert_invariants(block_size);
@@ -242,7 +243,7 @@ impl SglangCore {
                 {
                     anyhow::bail!("destination handoff {handoff_id:?} is already active");
                 }
-                let request = SglangRequest::from(request);
+                let request = self.build_request(request);
                 let prompt_footprint = request
                     .prompt_len()
                     .div_ceil(self.config.block_size)
@@ -322,7 +323,9 @@ impl SglangCore {
         {
             self.destination_reservation_attempts += 1;
         }
-        let reservation = self.kv_manager.reserve_destination(request.prompt_tokens());
+        let reservation = self
+            .kv_manager
+            .reserve_destination_lease(request.kv_lease.page_hashes(), request.prompt_len());
         self.pending_destinations.mark_front_attempted(generation);
         let Some(kv) = reservation else {
             return Vec::new();
@@ -363,7 +366,7 @@ impl SglangCore {
     }
 
     fn submit(&mut self, request: DirectRequest) -> anyhow::Result<Uuid> {
-        let request = SglangRequest::from(request);
+        let request = self.build_request(request);
         if self.request_is_active(request.uuid) {
             anyhow::bail!("request {} is already active", request.uuid);
         }
@@ -371,6 +374,19 @@ impl SglangCore {
         let uuid = request.uuid;
         self.waiting.push_back(request);
         Ok(uuid)
+    }
+
+    fn build_request(&self, request: DirectRequest) -> SglangRequest {
+        let max_output_tokens = request
+            .output_token_ids
+            .as_ref()
+            .map_or(request.max_output_tokens, Vec::len);
+        let output_storage_hint = self.config.output_storage_hint(
+            request.tokens.len(),
+            max_output_tokens,
+            request.output_token_ids.is_some(),
+        );
+        SglangRequest::new(request, self.config.block_size, output_storage_hint)
     }
 
     fn complete_source(&mut self, request: SglangRequest) {
@@ -531,10 +547,10 @@ impl SglangCore {
     }
 
     #[cfg(test)]
-    pub(crate) fn destination_indices(&self, handoff_id: HandoffId) -> Vec<usize> {
+    pub(crate) fn destination_pages(&self, handoff_id: HandoffId) -> Vec<KvPageId> {
         self.destination_holds
             .get(handoff_id)
-            .map(|reservation| reservation.kv.indices())
+            .map(|reservation| reservation.kv.pages())
             .unwrap_or_default()
     }
 
@@ -543,6 +559,27 @@ impl SglangCore {
         self.prebuilt_ready
             .iter()
             .find(|request| request.uuid == uuid)
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_storage_capacities(&self, uuid: Uuid) -> Option<(usize, usize)> {
+        self.waiting
+            .iter()
+            .chain(&self.prebuilt_ready)
+            .chain(&self.running)
+            .find(|request| request.uuid == uuid)
+            .or_else(|| {
+                self.pending_destinations
+                    .payloads()
+                    .find(|request| request.uuid == uuid)
+            })
+            .or_else(|| {
+                self.destination_holds
+                    .payloads()
+                    .map(|reservation| &reservation.request)
+                    .find(|request| request.uuid == uuid)
+            })
+            .map(SglangRequest::storage_capacities)
     }
 
     fn bump_capacity_generation(&mut self) {
