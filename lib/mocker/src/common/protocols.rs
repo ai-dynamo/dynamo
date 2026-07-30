@@ -327,7 +327,7 @@ impl PrefillCost {
         &self,
         new_tokens: Option<usize>,
         perf_model: &PerfModel,
-    ) -> f64 {
+    ) -> anyhow::Result<f64> {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
         let isl = self.cached_tokens + tokens;
         perf_model.predict_prefill_time(1, isl, self.cached_tokens)
@@ -1004,6 +1004,16 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "block_size_zero",
             "block_size must be greater than 0".to_string(),
+        ));
+    }
+
+    if matches!(args.engine_type, EngineType::Vllm | EngineType::Trtllm) && args.block_size < 2 {
+        return Err(mock_engine_args_validation_error(
+            "shared_scheduler_block_size_too_small",
+            format!(
+                "the vLLM/TRT-LLM scheduler requires block_size to be at least 2 for engine_type={:?}, got block_size={}",
+                args.engine_type, args.block_size,
+            ),
         ));
     }
 
@@ -2157,6 +2167,50 @@ mod tests {
     fn test_normalized_sglang_defaults_block_size_to_one() {
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Sglang)
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.block_size, 1);
+    }
+
+    #[test]
+    fn test_normalized_shared_scheduler_rejects_block_size_one_for_every_backend() {
+        for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+            let args_for = |g1_backend| {
+                MockEngineArgs::builder()
+                    .engine_type(engine_type)
+                    .g1_backend(g1_backend)
+                    .block_size(1)
+                    .build()
+                    .unwrap()
+            };
+            let explicit_native = args_for(G1Backend::Native);
+            let explicit_kvbm = args_for(G1Backend::Kvbm);
+            let mut unset = explicit_native.clone();
+            unset.g1_backend = None;
+            let mut automatic_kvbm = unset.clone();
+            automatic_kvbm.num_g2_blocks = Some(1);
+
+            for args in [explicit_native, explicit_kvbm, unset, automatic_kvbm] {
+                let error = args.normalized().unwrap_err();
+                let message = error.to_string();
+                assert!(
+                    message.contains(
+                        "the vLLM/TRT-LLM scheduler requires block_size to be at least 2"
+                    ),
+                    "engine_type={engine_type:?}, error={error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalized_sglang_accepts_block_size_one() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(1)
             .build()
             .unwrap()
             .normalized()

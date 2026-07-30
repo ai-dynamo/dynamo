@@ -36,11 +36,12 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
 - `lib/mocker/src/replay/offline/state.rs`
   Per-worker wrapper around `EngineCore`, including optional KV event capture.
 - `lib/mocker/src/replay/offline/events.rs`
-  `SimulationEvent` + `SimulationEventKind` priority-queue types used by the multi-worker harness.
+  `SimulationEvent`, `SimulationEventKind`, and worker-completion payload types used by the multi-worker harness.
 - `lib/mocker/src/replay/offline/core.rs`
   Small `ReplayWorkerCore` wrapper used by the single-worker path.
 - `lib/mocker/src/replay/offline/runtime_utils.rs`
-  Shared helpers used by `agg.rs` and `disagg.rs`: `WorkerCompletionPayload`, event scheduling, `next_timestamp`.
+  Shared helpers used by `agg.rs` and `disagg.rs`: event scheduling,
+  `ReadyWorkerCompletions`, and `next_timestamp`.
 - `lib/mocker/src/replay/offline/progress.rs`
   `ReplayProgress`, the indicatif-based progress bar used by the harnesses.
 - `lib/mocker/src/replay/offline/components/`
@@ -48,7 +49,7 @@ Offline replay starts in `lib/mocker/src/replay/offline/mod.rs`.
   - `router.rs` — `OfflineReplayRouter` (synchronous in-process router, KV + round-robin modes) and `OfflineRouterSnapshot`.
   - `engine.rs` — `EngineComponent`, `EngineEffects`, `EnginePassMode` wrappers around `EngineCore`.
   - `admission.rs` — admission queue and trace/workload request gating.
-  - `types.rs` — `WorkerAdmission`, `RouterEffects`, `ScheduledWorkerCompletion`, `TrafficAccumulator`, `TrafficStats`, `ReplayMode`.
+  - `types.rs` — `WorkerAdmission`, `RouterEffects`, `ScheduledWorkerCompletions`, `TrafficAccumulator`, `TrafficStats`, `ReplayMode`.
   - `mod.rs` — re-exports.
 
 ## Single-Worker Fast Path
@@ -142,20 +143,22 @@ So offline replay is not a toy simulator. It reuses the real per-pass mocker sch
 The multi-worker and disagg harnesses use `SimulationEvent` from `lib/mocker/src/replay/offline/events.rs` as a min-time priority queue implemented with `BinaryHeap`. The event itself is a small struct carrying the scheduled timestamp, a sequence number for tie-breaking, and a typed payload:
 
 ```rust
-pub(crate) struct SimulationEvent {
-    pub(crate) at_ms: f64,
-    pub(crate) seq_no: u64,
-    pub(crate) kind: SimulationEventKind,
+pub(in crate::replay::offline) struct SimulationEvent {
+    pub(in crate::replay::offline) at_ms: f64,
+    pub(in crate::replay::offline) seq_no: u64,
+    pub(in crate::replay::offline) kind: SimulationEventKind,
 }
 
-pub(crate) enum SimulationEventKind {
+pub(in crate::replay::offline) enum SimulationEventKind {
     WorkerCompletion { stage, worker_idx, completed_requests, output_signals, kv_events },
+    WorkerCompletionBatch { payloads },
     DecodeHandoff { uuid },
     WorkerReady { stage, worker_id },
 }
 ```
 
 - `WorkerCompletion` is emitted after a worker pass is executed and applied when the harness clock reaches `pass.end_ms`. It carries the `stage` (`Aggregated`, `Prefill`, or `Decode`), `worker_idx`, `completed_requests`, `output_signals`, and router-visible `kv_events`.
+- `WorkerCompletionBatch` stores the ordered rank payloads for one positive-duration attention-DP epoch in a single heap event. Each payload is still applied independently in rank order.
 - `DecodeHandoff` is used by the disaggregated harness to move a request from prefill to decode at the same logical timestamp (see below).
 - `WorkerReady` marks the point at which a worker returns to the admission pool after a pass completes.
 

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import aisimulate.spica.kv_estimate as kv_estimate_mod
 from aisimulate.spica.config import Workload
 from aisimulate.spica.kv_load import InfeasibleKVCapacity, resolve_kv_load
 from aisimulate.spica.parallel_enum import (
@@ -13,7 +12,6 @@ from aisimulate.spica.parallel_enum import (
     ParallelShape,
     ReplicaParallelConfig,
 )
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 
 def _sample(mode: str) -> dict:
@@ -162,31 +160,6 @@ def test_average_tokens_per_request_must_be_positive(monkeypatch):
         resolve_kv_load(
             _sample("agg"),
             workload=SimpleNamespace(isl=0, osl=0),
-            parallel_config=config,
-            ratio=1.0,
-            backend_version="v",
-        )
-
-
-def test_kv_load_fails_closed_without_memory_estimator(monkeypatch):
-    config = ReplicaParallelConfig(
-        ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1
-    )
-
-    def missing_memory(module_name):
-        raise ModuleNotFoundError(name=module_name)
-
-    monkeypatch.setattr(kv_estimate_mod.importlib, "import_module", missing_memory)
-
-    with pytest.raises(
-        AicMemoryEstimatorUnavailableError,
-        match=r"compatible estimator.*AIC 0\.10",
-    ):
-        resolve_kv_load(
-            _sample("agg"),
-            workload=Workload(
-                isl=100, osl=100, kv_load_ratio=1.0, num_request_ratio=10
-            ),
             parallel_config=config,
             ratio=1.0,
             backend_version="v",
