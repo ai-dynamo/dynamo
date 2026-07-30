@@ -552,6 +552,15 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
+        if let Some(parameters) = &tool.function.parameters
+            && !parameters.is_object()
+        {
+            anyhow::bail!(
+                "Function parameters at index {} for \"{}\" must be a JSON Schema object",
+                i,
+                tool.function.name,
+            );
+        }
     }
     Ok(())
 }

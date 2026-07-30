@@ -63,7 +63,8 @@ pub(crate) trait LiveBoundaryCore {
         None
     }
 
-    fn execute_live_pass(&mut self, scheduler_start: &Instant) -> LivePassExecution;
+    fn execute_live_pass(&mut self, scheduler_start: &Instant)
+    -> anyhow::Result<LivePassExecution>;
 
     fn output_delivery_failed(&mut self, _signals: Vec<OutputSignal>) {}
 
@@ -231,7 +232,7 @@ async fn run_live_scheduler<C: LiveBoundaryCore>(
 
         let iteration_start = Instant::now();
         let metrics_before = core.live_metrics();
-        let execution = core.execute_live_pass(&scheduler_start);
+        let execution = core.execute_live_pass(&scheduler_start)?;
         let mut pending = publisher.capture_pass(execution.pass);
         let zero_progress =
             execution.duration.is_zero() && !pending.made_progress_since(&metrics_before);

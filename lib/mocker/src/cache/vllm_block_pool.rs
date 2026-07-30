@@ -114,16 +114,79 @@ impl VllmBlockPool {
             return self.reserve_fresh(fresh);
         }
 
-        let hits = prefix
-            .iter()
-            .map(|hash| {
-                let Some(id) = self.first_copy(*hash) else {
-                    panic!("authorized prefix hash {hash} is no longer resident")
-                };
-                (*hash, id)
-            })
-            .collect::<Vec<_>>();
+        self.reserve_exact_prefix(prefix.iter().copied(), prefix.len() + fresh)
+    }
 
+    /// Resolve and pin the longest resident prefix from `candidates`, then
+    /// reserve the remaining entries as fresh capacity in one traversal.
+    pub(crate) fn reserve_resident_prefix(
+        &mut self,
+        candidates: impl IntoIterator<Item = SequenceHash>,
+        total: usize,
+    ) -> Option<ReserveOutcome> {
+        let mut candidates = candidates.into_iter();
+        let Some(first_hash) = candidates.next() else {
+            return self.reserve_fresh(total);
+        };
+        assert!(total > 0, "prefix candidates exceed layout");
+        let Some(first_id) = self.first_copy(first_hash) else {
+            return self.reserve_fresh(total);
+        };
+
+        let mut hits = vec![(first_hash, first_id)];
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                break;
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
+    /// Pin an already-authorized prefix and reserve the remaining entries.
+    ///
+    /// Unlike [`Self::reserve_resident_prefix`], every candidate must still be
+    /// resident. A missing hash means the caller's synchronous prefix
+    /// authorization changed before allocation committed.
+    pub(crate) fn reserve_exact_prefix<I>(
+        &mut self,
+        candidates: I,
+        total: usize,
+    ) -> Option<ReserveOutcome>
+    where
+        I: IntoIterator<Item = SequenceHash>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mut candidates = candidates.into_iter();
+        let candidate_count = candidates.len();
+        let Some(first_hash) = candidates.next() else {
+            return self.reserve_fresh(total);
+        };
+        assert!(candidate_count <= total, "prefix candidates exceed layout");
+        let Some(first_id) = self.first_copy(first_hash) else {
+            panic!("authorized prefix hash {first_hash} is no longer resident")
+        };
+        let mut hits = Vec::with_capacity(candidate_count);
+        hits.push((first_hash, first_id));
+
+        for hash in candidates {
+            assert!(hits.len() < total, "prefix candidates exceed layout");
+            let Some(id) = self.first_copy(hash) else {
+                panic!("authorized prefix hash {hash} is no longer resident")
+            };
+            hits.push((hash, id));
+        }
+        let fresh = total - hits.len();
+        self.reserve_hits(hits, fresh)
+    }
+
+    fn reserve_hits(
+        &mut self,
+        hits: Vec<(SequenceHash, BlockCopyId)>,
+        fresh: usize,
+    ) -> Option<ReserveOutcome> {
         let free = self.free_capacity();
         let needed_evictions = fresh.saturating_sub(free);
         if needed_evictions > 0 {
@@ -187,14 +250,12 @@ impl VllmBlockPool {
     pub(crate) fn activate_prefix(
         &mut self,
         reservation: &mut BlockReservation,
-    ) -> Vec<BlockCopyId> {
+    ) -> std::vec::IntoIter<(SequenceHash, BlockCopyId)> {
         let prefix = std::mem::take(&mut reservation.prefix);
-        let mut ids = Vec::with_capacity(prefix.len());
-        for (hash, id) in prefix {
+        for &(hash, id) in &prefix {
             self.activate_pin(id, hash);
-            ids.push(id);
         }
-        ids
+        prefix.into_iter()
     }
 
     pub(crate) fn allocate_private(&mut self, reservation: &mut BlockReservation) -> BlockCopyId {
@@ -605,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "authorized prefix hash 9 is no longer resident")]
+    fn exact_prefix_reports_missing_hash() {
+        let mut pool = VllmBlockPool::new(1);
+        let _ = pool.reserve_exact_prefix([9], 1);
+    }
+
+    #[test]
+    fn empty_exact_prefix_reserves_fresh_without_prefix_storage() {
+        let mut pool = VllmBlockPool::new(3);
+        let outcome = pool
+            .reserve_exact_prefix(std::iter::empty(), 3)
+            .expect("fresh capacity should fit");
+
+        assert_eq!(outcome.reservation.prefix.capacity(), 0);
+        assert_eq!(outcome.reservation.fresh_len(), 3);
+        pool.cancel(outcome.reservation);
+    }
+
+    #[test]
+    fn cold_resident_prefix_reserves_fresh_without_prefix_storage() {
+        let mut pool = VllmBlockPool::new(3);
+        let outcome = pool
+            .reserve_resident_prefix([7, 8, 9], 3)
+            .expect("fresh capacity should fit");
+
+        assert_eq!(outcome.reservation.prefix.capacity(), 0);
+        assert_eq!(outcome.reservation.fresh_len(), 3);
+        pool.cancel(outcome.reservation);
+    }
+
+    #[test]
     fn duplicate_hashes_consume_distinct_capacity_but_share_visibility() {
         let mut pool = VllmBlockPool::new(2);
         let mut first = reserve(&mut pool, &[], 1).reservation;
@@ -632,6 +724,26 @@ mod tests {
 
         assert!(pool.reserve(&[9], 1).is_none());
         assert_eq!(pool.num_active(), 0);
+        assert_eq!(pool.num_inactive(), 1);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn resident_prefix_stops_at_first_miss_and_reserves_fresh_suffix() {
+        let mut pool = VllmBlockPool::new(2);
+        let mut seed = reserve(&mut pool, &[], 1).reservation;
+        let id = pool.allocate_private(&mut seed);
+        assert!(pool.cache_private(id, 7));
+        pool.release(id);
+
+        let outcome = pool
+            .reserve_resident_prefix([7, 9], 2)
+            .expect("one resident prefix plus one fresh block should fit");
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.reservation.len(), 2);
+        assert_eq!(outcome.reservation.fresh_len(), 1);
+        assert_eq!(outcome.reservation.prefix.capacity(), 1);
+        pool.cancel(outcome.reservation);
         assert_eq!(pool.num_inactive(), 1);
         pool.assert_lru_consistent();
     }
@@ -721,7 +833,10 @@ mod tests {
         pool.release(id);
 
         let mut activation = reserve(&mut pool, &[7], 0).reservation;
-        assert_eq!(pool.activate_prefix(&mut activation), vec![id]);
+        assert_eq!(
+            pool.activate_prefix(&mut activation).collect::<Vec<_>>(),
+            vec![(7, id)]
+        );
         pool.cancel(activation);
         assert_eq!(pool.num_inactive(), 0);
         pool.assert_lru_consistent();

@@ -65,3 +65,4 @@ pub(crate) use g1_manager::DestinationReservation;
 pub use g1_manager::G1Manager;
 pub use kvbm_backend::KvManager;
 pub use sglang_backend::SglangKvManager;
+pub(crate) use vllm_backend::BlockRequestLease;
