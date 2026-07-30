@@ -7,8 +7,8 @@ subtitle: Decode image inputs concurrently in the Rust frontend and transfer pix
 
 Parallel media decoding moves image fetching, base64 decoding, and image
 decompression from the inference backend to the NVIDIA Dynamo Rust frontend.
-The frontend schedules media items on a CPU worker pool and transfers the
-decoded pixel buffers to the backend through NIXL.
+The frontend decodes images concurrently on a CPU worker pool and transfers
+the decoded pixel buffers to the backend through NIXL.
 
 The backend still runs its model-specific multimodal processor and vision
 encoder. This feature changes where image input is decoded; it does not skip
@@ -18,9 +18,12 @@ vision encoding.
 
 | Input modality | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
-| Image | Supported | Supported | Supported |
+| Image | Agg | Agg | Agg, E/PD |
 | Video | Not supported | Not supported | Not supported |
 | Audio | Not supported | Not supported | Not supported |
+
+`Agg` refers to an aggregated worker. `E/PD` refers to a separate encode
+worker paired with a combined prefill and decode worker.
 
 This matrix describes parallel media decoding, not the overall multimodal
 support of each backend. A backend can support video or audio by decoding it on
@@ -41,16 +44,12 @@ Parallel media decoding can also be combined with the [embedding
 cache](embedding-cache.md). Frontend decoding reduces image input processing
 work, while the embedding cache can skip vision encoding for repeated images.
 
-Do not expect this feature to improve text-only requests or workloads dominated
-by model inference. Measure the image fetch and decode path before enabling it
-when preprocessing is not an observed bottleneck.
-
 ## How It Works
 
 For each request, the frontend:
 
 1. Fetches the image URL or decodes the base64 data URL.
-2. Schedules image decompression on the Rayon CPU worker pool.
+2. Decodes images concurrently on a CPU worker pool.
 3. Registers the decoded pixel buffer with NIXL.
 4. Sends the buffer descriptor to the selected backend worker.
 
@@ -63,13 +62,11 @@ Add `--frontend-decoding` to the backend worker command. Do not add the flag to
 `dynamo.frontend`; the backend advertises the decoder configuration when it
 registers the model.
 
-| Backend | Worker flags | Environment variable |
-| --- | --- | --- |
-| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md) | `--enable-multimodal --frontend-decoding` | `DYN_VLLM_FRONTEND_DECODING=1` |
-| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md) | `--frontend-decoding` | `DYN_SGL_FRONTEND_DECODING=1` |
-| [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md) | `--enable-multimodal --frontend-decoding` | `DYN_TRTLLM_FRONTEND_DECODING=1` |
-
-The CLI flag takes precedence over the corresponding environment variable.
+| Backend | Worker flags |
+| --- | --- |
+| [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md) | `--enable-multimodal --frontend-decoding` |
+| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md) | `--frontend-decoding` |
+| [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md) | `--enable-multimodal --frontend-decoding` |
 
 ## Requirements and Limitations
 
@@ -81,9 +78,3 @@ The CLI flag takes precedence over the corresponding environment variable.
 - To fetch images from trusted internal IP addresses or ports, set
   `DYN_MM_ALLOW_INTERNAL=1` on the backend worker. Direct IP addresses and
   nonstandard ports are blocked by default.
-- For vLLM, do not combine `--frontend-decoding` with
-  `--custom-encoder-class`. The custom encoder consumes image URLs rather than
-  frontend-decoded pixel buffers.
-- For SGLang, do not combine `--frontend-decoding` with
-  `--disaggregation-mode=encode` or `--dedicated-mm-encoder`. Dedicated encode
-  workers require the original image URLs.
