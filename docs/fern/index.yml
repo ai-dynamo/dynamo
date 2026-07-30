@@ -168,9 +168,6 @@ navigation:
           - page: Vanilla vLLM On-ramp
             path: pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx
             slug: vanilla-vllm-onramp
-          - page: Standalone Router
-            slug: standalone-router
-            path: pages/kubernetes/kv-aware-routing/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
