@@ -63,10 +63,11 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			Model:     "meta-llama/Llama-3.1-8B",
-			Backend:   "vllm",
-			AutoApply: true,
-			UseMocker: true,
+			Model:                  "meta-llama/Llama-3.1-8B",
+			Backend:                "vllm",
+			RuntimeVersionOverride: "1.2.3",
+			AutoApply:              true,
+			UseMocker:              true,
 			ProfilingConfig: ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
 				OutputPVC:     "output-pvc",
@@ -112,10 +113,11 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:     "Qwen/Qwen3-32B",
-			Backend:   v1beta1.BackendTypeVllm,
-			AutoApply: &autoApplyFalse,
-			Image:     "nvcr.io/nvidia/dynamo:0.3.2",
+			Model:                  "Qwen/Qwen3-32B",
+			Backend:                v1beta1.BackendTypeVllm,
+			AutoApply:              &autoApplyFalse,
+			Image:                  "nvcr.io/nvidia/dynamo:custom",
+			RuntimeVersionOverride: "1.2.3",
 			SLA: &v1beta1.SLASpec{
 				TTFT: &ttft,
 				ITL:  &itl,
@@ -165,6 +167,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
+	}
+	if dst.Spec.RuntimeVersionOverride != src.Spec.RuntimeVersionOverride {
+		t.Errorf("RuntimeVersionOverride: got %q, want %q", dst.Spec.RuntimeVersionOverride, src.Spec.RuntimeVersionOverride)
 	}
 
 	// ProfilerImage → Image
