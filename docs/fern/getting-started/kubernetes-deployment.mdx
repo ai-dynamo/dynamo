@@ -14,6 +14,13 @@ The DGD is the deployment artifact that ultimately serves traffic, regardless of
 whether you start from a tuned manifest, copy a template, generate one, or write the
 resource directly.
 
+<Warning>
+**Experimental sidecar launch mode.** A DGD can run a stock inference engine
+server beside a CPU-only Dynamo sidecar in the same pod. See
+[Sidecar Backends](../design-docs/sidecar-backends.md) for supported backends,
+topologies, and framework-specific deployment examples.
+</Warning>
+
 ## Create a DGD
 
 Choose the starting point that best matches your model, hardware, and desired level
