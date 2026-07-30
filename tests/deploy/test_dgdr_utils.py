@@ -134,6 +134,7 @@ def test_manifest_explicitly_trusts_known_remote_model(
             namespace="test-namespace",
             image="test",
             backend=backend,
+            mocker=False,
         )
     )
 
@@ -146,6 +147,21 @@ def test_manifest_explicitly_trusts_known_remote_model(
         assert worker["extraPodSpec"]["mainContainer"]["args"] == [
             "--trust-remote-code"
         ]
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_manifest_does_not_pass_real_backend_args_to_mocker(backend: str) -> None:
+    manager = SimpleNamespace(
+        config=DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            backend=backend,
+        )
+    )
+
+    dgdr = dgdr_tests.manifest(manager, "mocker")
+
+    assert "overrides" not in dgdr["spec"]
 
 
 @pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
