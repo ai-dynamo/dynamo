@@ -118,6 +118,17 @@ spec:
               value: /tmp
             - name: HF_HOME
               value: /tmp/huggingface
+            # The image has no /etc/passwd entry for UID 1000, so PyTorch's cache
+            # setup dies at import: getpass.getuser() falls through its env-var
+            # lookups to pwd.getpwuid(1000) and raises KeyError. Naming the user in
+            # the environment satisfies that lookup without an image change; the
+            # cache dirs keep torch.compile/Triton artifacts somewhere writable.
+            - name: USER
+              value: vllm
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /tmp/torchinductor
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton
           resources:
             requests:
               nvidia.com/gpu: "1"
