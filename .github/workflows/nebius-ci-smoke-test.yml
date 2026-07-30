@@ -35,10 +35,37 @@ jobs:
           KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig-nebius.yaml"
           cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
           chmod 600 "${KUBECONFIG_PATH}"
+
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" config view -o json |
+            jq --arg context "${KUBE_CONTEXT}" '
+              . as $config
+              | ($config.contexts[] | select(.name == $context)) as $selected
+              | ($config.clusters[] | select(.name == $selected.context.cluster)) as $cluster
+              | ($config.users[] | select(.name == $selected.context.user)) as $user
+              | {
+                  context: {
+                    name: $selected.name,
+                    cluster: $selected.context.cluster,
+                    user: $selected.context.user
+                  },
+                  cluster: {
+                    name: $cluster.name,
+                    server: $cluster.cluster.server,
+                    tlsServerName: $cluster.cluster["tls-server-name"]
+                  },
+                  user: {
+                    name: $user.name,
+                    hasClientCertificate: ($user.user["client-certificate-data"] != null),
+                    hasExecPlugin: ($user.user.exec != null)
+                  }
+                }
+            '
+
           kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
           echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "${GITHUB_ENV}"
 
-          kubectl get namespace "${KUBE_NAMESPACE}"
+          kubectl get namespace kube-system "${KUBE_NAMESPACE}" \
+            -o custom-columns='NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp'
           kubectl get priorityclass ci-nightly-high-priority
           kubectl get clusterpolicy deploy-test-pod-policy
           kubectl get nodes \
