@@ -697,6 +697,8 @@ redirects:
     destination: "/dynamo/dev/kubernetes/kv-aware-routing/gateway-api"
   - source: "/dynamo/dev/kubernetes/model-deployment/kv-aware-routing"
     destination: "/dynamo/dev/kubernetes/kv-aware-routing/overview"
+  - source: "/dynamo/dev/kubernetes/kv-aware-routing/standalone-router"
+    destination: "/dynamo/dev/kubernetes/kv-aware-routing/overview"
   - source: "/dynamo/dev/kubernetes/operations/cli-tools/sizing-with-ai-configurator"
     destination: "/dynamo/dev/kubernetes/disaggregated-serving/size-with-ai-configurator"
   - source: "/dynamo/dev/kubernetes/operations/cli-tools/benchmarking-with-ai-perf"

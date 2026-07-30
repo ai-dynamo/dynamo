@@ -163,9 +163,6 @@ navigation:
             path: kubernetes/dgd-kv-routing.md
           - page: Gateway API
             path: kubernetes/inference-gateway.mdx
-          - page: Standalone Router
-            slug: standalone-router
-            path: components/router/standalone-router.md
 
       - section: Disaggregated Serving
         icon: arrows-split-up-and-left
