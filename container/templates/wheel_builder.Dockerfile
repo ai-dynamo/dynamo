@@ -73,13 +73,14 @@ COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list
 
-# Fetch UCX patch
-RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
+ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c058b87 \
+    https://github.com/intel/xpumanager/releases/download/v1.3.6/xpu-smi_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb \
+    /tmp/xpu-smi.deb
 
-# Install Intel GPU runtime packages
-RUN apt update -y && \
-    apt-get install -y intel-opencl-icd  \
-    libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+# Install xpu-smi without explicitly changing the Intel compute runtime stack.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
@@ -204,9 +205,12 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
+# Install uv package manager, ahead of the copy manylinux bundles in
+# /usr/local/bin. See dynamo_base.Dockerfile for why it gets its own directory.
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
+
 {% if device == "xpu" or device == "cpu" %}
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}
 {% else %}
 ENV CUDA_PATH=/usr/local/cuda \
@@ -221,7 +225,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
 # pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
 # imports yaml at module scope); the system python3 doesn't ship it.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
@@ -369,9 +373,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     git clone https://github.com/openucx/ucx.git && \
     cd ucx &&  \
     git checkout $NIXL_UCX_REF &&	 \
-    if [ "$DEVICE" = "xpu" ]; then \
-    git apply --ignore-whitespace /tmp/ucx.patch; \
-    fi && \
+    # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
+    # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
+    # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
     ./autogen.sh &&      \
     if [ "$DEVICE" = "xpu" ]; then \
      ./contrib/configure-release     \
@@ -486,7 +490,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "AWS SDK C++"
 {% endif %}
 
-
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
@@ -508,7 +511,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
@@ -532,7 +535,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # image, after the Dynamo wheels so Python-only changes do not invalidate the
 # expensive Rust build layers above.
 COPY aisimulate/ /opt/dynamo/aisimulate/
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
     uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate
@@ -616,7 +619,7 @@ COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% if device == "cuda" %}
 # Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
@@ -708,7 +711,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
@@ -732,7 +735,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \

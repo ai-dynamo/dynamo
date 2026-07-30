@@ -13,6 +13,10 @@
 //! the caller — live replay feeds wall-clock time, offline replay feeds
 //! virtual time.
 
+#[cfg(feature = "replay-bench")]
+use std::cmp::Reverse;
+#[cfg(feature = "replay-bench")]
+use std::collections::BinaryHeap;
 use std::future::Future;
 use std::net::TcpListener;
 use std::pin::Pin;
@@ -166,6 +170,84 @@ pub(crate) enum G2RouterEvent {
     Removed { seq_hash: RouterSequenceHash },
 }
 
+#[cfg(feature = "replay-bench")]
+fn g2_router_event_hash(event: &G2RouterEvent) -> RouterSequenceHash {
+    match event {
+        G2RouterEvent::Stored(metadata) => metadata.seq_hash,
+        G2RouterEvent::Removed { seq_hash } => *seq_hash,
+    }
+}
+
+#[cfg(feature = "replay-bench")]
+fn order_g2_router_events(router_events: &mut Vec<G2RouterEvent>) {
+    let event_count = router_events.len();
+    let mut events = std::mem::take(router_events)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let mut stored_by_hash = FxHashMap::default();
+    for (index, event) in events.iter().enumerate() {
+        let Some(G2RouterEvent::Stored(metadata)) = event else {
+            continue;
+        };
+        stored_by_hash.entry(metadata.seq_hash).or_insert(index);
+    }
+
+    let mut successors = vec![Vec::new(); event_count];
+    let mut incoming_edges = vec![0; event_count];
+    for (index, event) in events.iter().enumerate() {
+        let Some(G2RouterEvent::Stored(metadata)) = event else {
+            continue;
+        };
+        let Some(parent_hash) = metadata.parent_hash else {
+            continue;
+        };
+        let Some(&parent_index) = stored_by_hash.get(&parent_hash) else {
+            continue;
+        };
+        if parent_index == index {
+            continue;
+        }
+        successors[parent_index].push(index);
+        incoming_edges[index] += 1;
+    }
+
+    let mut ready = BinaryHeap::new();
+    for (index, event) in events.iter().enumerate() {
+        if incoming_edges[index] == 0 {
+            ready.push(Reverse((
+                g2_router_event_hash(event.as_ref().unwrap()),
+                index,
+            )));
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(event_count);
+    while let Some(Reverse((_, index))) = ready.pop() {
+        ordered.push(events[index].take().unwrap());
+        for successor in successors[index].drain(..) {
+            incoming_edges[successor] -= 1;
+            if incoming_edges[successor] == 0 {
+                ready.push(Reverse((
+                    g2_router_event_hash(events[successor].as_ref().unwrap()),
+                    successor,
+                )));
+            }
+        }
+    }
+
+    if ordered.len() < event_count {
+        let mut remaining = events
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, event)| event.map(|event| (index, event)))
+            .collect::<Vec<_>>();
+        remaining.sort_by_key(|(index, event)| (g2_router_event_hash(event), *index));
+        ordered.extend(remaining.into_iter().map(|(_, event)| event));
+    }
+    *router_events = ordered;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AdvanceAcknowledgement(u64);
 
@@ -308,6 +390,7 @@ impl MockOffloadEngine {
             .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
+            .ordered_transfer_starts(cfg!(feature = "replay-bench"))
             .build();
 
         let mut engine_builder = OffloadEngine::builder(leader.clone())
@@ -448,6 +531,8 @@ impl MockOffloadEngine {
                 }
             }
         }
+        #[cfg(feature = "replay-bench")]
+        order_g2_router_events(&mut router_events);
         router_events
     }
 
@@ -1640,6 +1725,30 @@ mod tests {
             .expect("allocate G1 slots");
         assert!(evicted.is_empty());
         (manager, slots)
+    }
+
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn replay_router_event_order_preserves_parent_chain() {
+        let stored = |seq_hash, parent_hash| {
+            G2RouterEvent::Stored(G2BlockEventMetadata {
+                seq_hash,
+                parent_hash,
+                local_hash: None,
+                token_ids: None,
+            })
+        };
+        let mut events = vec![
+            stored(10, Some(100)),
+            stored(50, None),
+            stored(100, None),
+            stored(1, Some(10)),
+        ];
+
+        order_g2_router_events(&mut events);
+
+        let seq_hashes = events.iter().map(g2_router_event_hash).collect::<Vec<_>>();
+        assert_eq!(seq_hashes, vec![50, 100, 10, 1]);
     }
 
     #[tokio::test]

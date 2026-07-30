@@ -2353,7 +2353,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 req.num_tokens - 1,
             )
             return max(per_group_hits, default=0)
-        _, cached_tokens = coordinator.find_longest_cache_hit(
+        _, cached_tokens, _ = coordinator.find_longest_cache_hit(
             req.block_hashes,
             req.num_tokens - 1,
         )

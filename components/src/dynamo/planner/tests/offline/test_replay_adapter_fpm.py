@@ -50,7 +50,7 @@ def _agg_config_sla() -> PlannerConfig:
 
 
 def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
-    """A bridge FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
+    """A replay FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
         "worker_id": worker_id,
         "dp_rank": dp_rank,
@@ -108,6 +108,33 @@ def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
 
 def _orch_agg_config_sla() -> PlannerConfig:
     return _agg_config_sla()
+
+
+def test_replay_adapter_uses_injected_engine_protocol_and_owns_cleanup():
+    class _Engine:
+        def __init__(self):
+            self.closed = False
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 5.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("tick is not needed by this ownership test")
+
+        async def shutdown(self):
+            self.closed = True
+
+    engine = _Engine()
+    adapter = ReplayPlannerAdapter(
+        PlannerConfig(mode="agg"),
+        capabilities=_agg_caps(),
+        engine=engine,
+    )
+
+    with adapter:
+        assert adapter.initial_tick_ms() == 5_000.0
+
+    assert engine.closed
 
 
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
@@ -290,3 +317,37 @@ def test_merge_traffic_weights_ratio_fields_by_native_counts():
     assert merged["hit_rate_count"] == 100
     assert merged["accept_length_forward_count"] == 100
     assert merged["avg_isl"] == pytest.approx(100.0)
+
+
+def test_merge_traffic_keeps_offered_count_separate_from_completion_samples():
+    a = {
+        "num_req": 100,
+        "duration_s": 1.0,
+        "avg_isl": 10.0,
+        "avg_osl": 20.0,
+        "shape_count": 1,
+        "avg_ttft_ms": 1_000.0,
+        "ttft_count": 1,
+        "avg_itl_ms": 10.0,
+        "itl_count": 1,
+    }
+    b = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 200.0,
+        "shape_count": 9,
+        "avg_ttft_ms": 2_000.0,
+        "ttft_count": 9,
+        "avg_itl_ms": 20.0,
+        "itl_count": 9,
+    }
+
+    merged = _merge_traffic(a, b)
+
+    assert merged["num_req"] == 101
+    assert merged["shape_count"] == 10
+    assert merged["avg_isl"] == pytest.approx(91.0)
+    assert merged["avg_osl"] == pytest.approx(182.0)
+    assert merged["avg_ttft_ms"] == pytest.approx(1_900.0)
+    assert merged["avg_itl_ms"] == pytest.approx(19.0)
