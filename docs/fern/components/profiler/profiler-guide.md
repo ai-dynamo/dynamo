@@ -329,7 +329,8 @@ Profiles your model by creating real test deployments in Kubernetes and measurin
 - **GPU Requirements**: Full access to test different parallelization mappings
 - **Backends**: vLLM, SGLang, TensorRT-LLM
 
-AIPerf-based profiling is the default behavior. Use `searchStrategy: thorough` for comprehensive real-engine profiling:
+AIPerf-based profiling is the opt-in thorough strategy. Use
+`searchStrategy: thorough` for comprehensive real-engine profiling:
 
 ```yaml
 spec:
@@ -477,7 +478,7 @@ features:
     min_endpoint: 2                            # Minimum endpoints to maintain
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
-    load_predictor: linear                     # Load prediction method
+    load_predictor: arima                      # Load prediction method
 ```
 
 > [!NOTE]
@@ -528,7 +529,11 @@ overrides:
       # ... your base DGD spec
 ```
 
-The profiler uses the DGD config as a **base template**, then optimizes it based on your SLA targets.
+The override does not define or extend the profiler's candidate topology. With
+`searchStrategy: thorough`, the profiler merges it into each generated
+benchmark candidate before measurement and into the interpolation deployment.
+For every search strategy, the profiler also merges it into the final generated
+DGD.
 
 ## Integration
 
@@ -553,7 +558,7 @@ The Profiler generates interpolation data that the SLA Planner uses for autoscal
 When using DGDR, the Dynamo Operator:
 
 1. Creates profiling jobs automatically
-2. Stores profiler output in ConfigMaps (`dgdr-output-<name>` and, when thorough profile data is needed, `planner-profile-data`)
+2. Stores profiler output in ConfigMaps (`dgdr-output-<name>` and, when thorough profile data is needed, `planner-profile-data-XXXX`, where the suffix is generated)
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
 
@@ -623,26 +628,28 @@ spec:
   autoApply: true
 ```
 
-With thorough sweeping, profiling still runs against the real backend to collect performance data and stores it in `planner-profile-data`. With rapid sweeping, the mocker uses AIC performance-model flags instead of a profile-data ConfigMap. Useful for large-scale experiments, testing Planner behavior, and validating configurations.
+With thorough sweeping, profiling still runs against the real backend to collect performance data and, when a consumer needs it, stores it in a generated `planner-profile-data-XXXX` ConfigMap. With rapid sweeping, the mocker uses AIC performance-model flags instead of a profile-data ConfigMap. Useful for large-scale experiments, testing Planner behavior, and validating configurations.
 
 ### Accessing Profiling Artifacts
 
 By default, profiler output is stored in ConfigMaps. For detailed artifacts (plots, logs, raw data), attach a PVC via overrides:
 
 ```yaml
-overrides:
-  profilingJob:
-    template:
-      spec:
-        volumes:
-        - name: profiling-output
-          persistentVolumeClaim:
-            claimName: "dynamo-pvc"
+spec:
+  overrides:
+    profilingJob:
+      template:
+        spec:
+          containers: []    # required placeholder; inherits operator containers
+          volumes:
+            - name: profiling-output
+              persistentVolumeClaim:
+                claimName: dynamo-pvc
 ```
 
 **ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration
-- `planner-profile-data`: Profiling data for Planner and mocker consumers (JSON). Only created for thorough sweeping when profile data is needed.
+- `planner-profile-data-XXXX`: Profiling data for Planner and mocker consumers (JSON), with a generated suffix. Only created for thorough sweeping when profile data is needed.
 
 **PVC artifacts (optional):**
 - Performance plots (PNGs)
@@ -673,9 +680,11 @@ The profiler generates plots to visualize performance data:
 - `selected_decode_interpolation/decode_itl_interplation.png`: ITL vs KV usage and context length
 - `selected_decode_interpolation/decode_throughput_interpolation.png`: Throughput vs KV usage and context length
 
-## Runtime Profiling (SGLang)
+## Runtime Profiling
 
-SGLang workers expose profiling endpoints for runtime performance analysis:
+SGLang and vLLM workers expose profiling endpoints for runtime performance
+analysis. SGLang accepts `output_dir`, `start_step`, and `num_steps`; vLLM
+accepts the optional `profile_prefix` field instead:
 
 ```bash
 # Start profiling
@@ -687,6 +696,14 @@ curl -X POST http://localhost:9090/engine/control/start_profile \
 
 # Stop profiling
 curl -X POST http://localhost:9090/engine/control/stop_profile
+```
+
+For vLLM, start profiling with a prefix:
+
+```bash
+curl -X POST http://localhost:9090/engine/control/start_profile \
+  -H "Content-Type: application/json" \
+  -d '{"profile_prefix": "dynamo-profile"}'
 ```
 
 View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto.dev/), or TensorBoard.
