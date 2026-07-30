@@ -93,7 +93,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 3. `profile_results_dir` 中的 NPZ/JSON fallback data
 4. 没有 pre-deployment data 时的 live FPM regression warmup
 
-Rust perf shim 可以使用原生 AIC 估算和在线 FPM tuning。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
+Planner 直接调用 `aiconfigurator_core.sdk.RustForwardPassPerfModel`，获取原生 AIC 估算、在线校正和回归回退。Planner 自有的引擎查询层据此前向计算抽象推导 queue drain、TTFT、ITL 和 capacity。KV hit rate 和 speculative accept length 等 runtime metadata 会作为输入特征使用，而不是作为持久 correction-factor flags。
 
 ### Step 4: Proposal 和 Lower Bound
 

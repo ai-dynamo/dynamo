@@ -2348,7 +2348,6 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
- "aiconfigurator-core",
  "anyhow",
  "bytes",
  "dashmap",

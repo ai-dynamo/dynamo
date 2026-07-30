@@ -120,8 +120,9 @@ cd lib/bindings/python
 maturin develop --uv --release --features aic-forward-pass,mocker-kvbm-offload
 ```
 
-`RustEnginePerfModel` is importable from `dynamo._core` only when the feature is compiled in. The
-real-replay integration tests skip when it is absent.
+The feature enables the mocker's native AIC latency callback used by real replay. Planner
+performance queries use the `aiconfigurator-core` Python wheel directly and do not use a
+`dynamo._core` engine-performance binding.
 
 After replacing the example's placeholder `workload.trace_path`, run the search:
 

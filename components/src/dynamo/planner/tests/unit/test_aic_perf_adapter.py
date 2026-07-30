@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for planner-side Rust perf shim adapter decisions."""
-
-import json
+"""Unit tests for Planner's AIC core performance-model adapter."""
 
 import pytest
 
@@ -18,8 +16,8 @@ except ImportError:
 
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model import rust_adapter
-from dynamo.planner.core.perf_model.rust_adapter import PlannerEnginePerfModel
+from dynamo.planner.core.perf_model import aic_adapter
+from dynamo.planner.core.perf_model.aic_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
 pytestmark = [
@@ -30,31 +28,7 @@ pytestmark = [
 ]
 
 
-class _FakeLimits:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-class _FakeOptions:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-class _FakeAicConfig:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-class _FakeOptimizationTarget:
-    Throughput = "throughput"
-
-
-class _FakeCapacityRequest:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
-class _FakeRustFactory:
+class _FakeEngineFactory:
     next_model = None
     last_kwargs = None
 
@@ -65,7 +39,7 @@ class _FakeRustFactory:
         return cls.next_model
 
 
-class _FakeRustModel:
+class _FakeEngineModel:
     def __init__(self, *, diagnostics, queued_prefill_time=None, capacity=None):
         self._diagnostics = diagnostics
         self._queued_prefill_time = queued_prefill_time
@@ -74,7 +48,7 @@ class _FakeRustModel:
         self.capacity_requests = []
 
     def diagnostics(self):
-        return json.dumps(self._diagnostics)
+        return self._diagnostics
 
     def tune_with_fpms(self, iterations):
         self.tuned_iterations.extend(iterations)
@@ -92,28 +66,22 @@ class _FakeCapacity:
         self,
         *,
         rps,
-        itl_ms=None,
-        ttft_ms=None,
-        e2e_latency_ms=None,
+        itl_s=None,
+        ttft_s=None,
+        e2e_latency_s=None,
         eligible=True,
     ):
         self.rps = rps
-        self.itl_ms = itl_ms
-        self.ttft_ms = ttft_ms
-        self.e2e_latency_ms = e2e_latency_ms
+        self.itl_s = itl_s
+        self.ttft_s = ttft_s
+        self.e2e_latency_s = e2e_latency_s
         self.eligible = eligible
 
 
-def _install_fake_rust(monkeypatch, fake_model: _FakeRustModel) -> None:
-    _FakeRustFactory.next_model = fake_model
-    _FakeRustFactory.last_kwargs = None
-    monkeypatch.setattr(rust_adapter, "_RUST_SHIM_AVAILABLE", True)
-    monkeypatch.setattr(rust_adapter, "AicEngineConfig", _FakeAicConfig)
-    monkeypatch.setattr(rust_adapter, "EnginePerfLimits", _FakeLimits)
-    monkeypatch.setattr(rust_adapter, "EngineCapacityRequest", _FakeCapacityRequest)
-    monkeypatch.setattr(rust_adapter, "OptimizationTarget", _FakeOptimizationTarget)
-    monkeypatch.setattr(rust_adapter, "RustEnginePerfOptions", _FakeOptions)
-    monkeypatch.setattr(rust_adapter, "RustEnginePerfModel", _FakeRustFactory)
+def _install_fake_engine(monkeypatch, fake_model: _FakeEngineModel) -> None:
+    _FakeEngineFactory.next_model = fake_model
+    _FakeEngineFactory.last_kwargs = None
+    monkeypatch.setattr(aic_adapter, "AicCoreEnginePerfModel", _FakeEngineFactory)
 
 
 def _config(
@@ -188,8 +156,8 @@ def _decode_fpm(
     )
 
 
-def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
-    fake = _FakeRustModel(
+def test_aic_diagnostics_gate_sufficient_data(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "fallback_regression",
             "readiness": "insufficient_data",
@@ -198,7 +166,7 @@ def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="prefill",
         config=_config(),
@@ -211,8 +179,8 @@ def test_rust_diagnostics_gate_sufficient_data(monkeypatch):
     assert model.has_sufficient_data()
 
 
-def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
-    fake = _FakeRustModel(
+def test_missing_capability_fields_use_engine_query_defaults(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "fallback_regression",
             "readiness": "insufficient_data",
@@ -221,7 +189,7 @@ def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
 
     PlannerEnginePerfModel(
         worker_type="prefill",
@@ -229,13 +197,11 @@ def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
         capabilities=EngineCapabilities(max_num_batched_tokens=2048),
     )
 
-    assert _FakeRustFactory.last_kwargs is not None
-    limits = _FakeRustFactory.last_kwargs["limits"]
-    assert limits.kwargs == {
-        "max_num_batched_tokens": 2048,
-        "max_num_seqs": rust_adapter.DEFAULT_MAX_NUM_SEQS,
-        "max_kv_tokens": rust_adapter.DEFAULT_MAX_KV_TOKENS,
-    }
+    assert _FakeEngineFactory.last_kwargs is not None
+    limits = _FakeEngineFactory.last_kwargs["limits"]
+    assert limits.max_num_batched_tokens == 2048
+    assert limits.max_num_seqs == aic_adapter.DEFAULT_MAX_NUM_SEQS
+    assert limits.max_kv_tokens == aic_adapter.DEFAULT_MAX_KV_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -251,7 +217,7 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
     config_nextn,
     expected_nextn,
 ):
-    fake = _FakeRustModel(
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -260,7 +226,7 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
 
     PlannerEnginePerfModel(
         worker_type="decode",
@@ -268,13 +234,13 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
         capabilities=_caps(speculative_nextn=capability_nextn),
     )
 
-    assert _FakeRustFactory.last_kwargs is not None
-    aic_config = _FakeRustFactory.last_kwargs["aic_config"]
-    assert aic_config.kwargs["extra"] == {"nextn": expected_nextn}
+    assert _FakeEngineFactory.last_kwargs is not None
+    aic_config = _FakeEngineFactory.last_kwargs["aic_config"]
+    assert aic_config["nextn"] == int(expected_nextn)
 
 
 def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch):
-    first = _FakeRustModel(
+    first = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -283,7 +249,7 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, first)
+    _install_fake_engine(monkeypatch, first)
     model = PlannerEnginePerfModel(
         worker_type="decode",
         config=_config(),
@@ -293,7 +259,7 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch
     model.add_observations({("w0", 0): fpm})
     assert first.tuned_iterations == [[fpm]]
 
-    second = _FakeRustModel(
+    second = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -302,18 +268,18 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch
             "last_warning": None,
         }
     )
-    _FakeRustFactory.next_model = second
+    _FakeEngineFactory.next_model = second
 
     model.update_capabilities(_caps(speculative_nextn=3))
 
-    assert _FakeRustFactory.last_kwargs is not None
-    aic_config = _FakeRustFactory.last_kwargs["aic_config"]
-    assert aic_config.kwargs["extra"] == {"nextn": "3"}
+    assert _FakeEngineFactory.last_kwargs is not None
+    aic_config = _FakeEngineFactory.last_kwargs["aic_config"]
+    assert aic_config["nextn"] == 3
     assert second.tuned_iterations == [[fpm]]
 
 
-def test_rust_none_result_remains_unavailable(monkeypatch):
-    fake = _FakeRustModel(
+def test_aic_none_result_remains_unavailable(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -323,7 +289,7 @@ def test_rust_none_result_remains_unavailable(monkeypatch):
         },
         queued_prefill_time=None,
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="prefill",
         config=_config(min_observations=1),
@@ -339,8 +305,8 @@ def test_rust_none_result_remains_unavailable(monkeypatch):
     assert result is None
 
 
-def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
-    fake = _FakeRustModel(
+def test_flat_bootstrap_fpms_skip_aic_tuning_for_attention_dp(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -349,7 +315,7 @@ def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="prefill",
         config=_config(dp=2, min_observations=1),
@@ -364,7 +330,7 @@ def test_flat_bootstrap_fpms_skip_rust_tuning_for_attention_dp(monkeypatch):
 
 
 def test_capacity_request_passes_kv_hit_rate(monkeypatch):
-    fake = _FakeRustModel(
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -373,7 +339,7 @@ def test_capacity_request_passes_kv_hit_rate(monkeypatch):
             "last_warning": None,
         }
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="aggregated",
         config=_config(min_observations=1),
@@ -382,11 +348,11 @@ def test_capacity_request_passes_kv_hit_rate(monkeypatch):
 
     assert model.find_engine_capacity_rps(isl=1000, osl=100, kv_hit_rate=0.4) is None
     assert fake.capacity_requests
-    assert fake.capacity_requests[0].kwargs["kv_hit_rate"] == 0.4
+    assert fake.capacity_requests[0].kv_hit_rate == 0.4
 
 
 def test_prefill_capacity_does_not_pass_accept_length(monkeypatch):
-    fake = _FakeRustModel(
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -394,9 +360,9 @@ def test_prefill_capacity_does_not_pass_accept_length(monkeypatch):
             "correction_ready_buckets": 0,
             "last_warning": None,
         },
-        capacity=_FakeCapacity(rps=10.0, ttft_ms=100.0),
+        capacity=_FakeCapacity(rps=10.0, ttft_s=0.1),
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="prefill",
         config=_config(min_observations=1),
@@ -410,13 +376,13 @@ def test_prefill_capacity_does_not_pass_accept_length(monkeypatch):
         accept_length=2.0,
     )
 
-    assert "accept_length" not in fake.capacity_requests[0].kwargs
+    assert fake.capacity_requests[0].accept_length == 1.0
     assert capacity is not None
     assert capacity.rps == 10.0
 
 
-def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
-    fake = _FakeRustModel(
+def test_decode_capacity_passes_accept_length_to_engine_model(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -424,9 +390,9 @@ def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
             "correction_ready_buckets": 0,
             "last_warning": None,
         },
-        capacity=_FakeCapacity(rps=200.0, itl_ms=25.0),
+        capacity=_FakeCapacity(rps=200.0, itl_s=0.025),
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="decode",
         config=_config(min_observations=1),
@@ -440,15 +406,15 @@ def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
         accept_length=2.0,
     )
 
-    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
-    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
+    assert fake.capacity_requests[0].itl_sla_s == 0.03
+    assert fake.capacity_requests[0].accept_length == 2.0
     assert capacity is not None
     assert capacity.rps == 200.0
     assert capacity.itl_ms == 25.0
 
 
-def test_agg_capacity_passes_accept_length_to_rust(monkeypatch):
-    fake = _FakeRustModel(
+def test_agg_capacity_passes_accept_length_to_engine_model(monkeypatch):
+    fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",
             "readiness": "ready",
@@ -456,9 +422,9 @@ def test_agg_capacity_passes_accept_length_to_rust(monkeypatch):
             "correction_ready_buckets": 0,
             "last_warning": None,
         },
-        capacity=_FakeCapacity(rps=100.0, ttft_ms=10.0, itl_ms=25.0),
+        capacity=_FakeCapacity(rps=100.0, ttft_s=0.01, itl_s=0.025),
     )
-    _install_fake_rust(monkeypatch, fake)
+    _install_fake_engine(monkeypatch, fake)
     model = PlannerEnginePerfModel(
         worker_type="aggregated",
         config=_config(min_observations=1),
@@ -478,8 +444,8 @@ def test_agg_capacity_passes_accept_length_to_rust(monkeypatch):
         accept_length=2.0,
     )
 
-    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
-    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
+    assert fake.capacity_requests[0].itl_sla_s == 0.03
+    assert fake.capacity_requests[0].accept_length == 2.0
     assert capacity is not None
     assert capacity.rps == 100.0
     assert capacity.itl_ms == 25.0

@@ -33,7 +33,7 @@ Planner tuning happens at two levels, and it helps to keep them separate:
 | `throughput` (default) | Static thresholds on queue depth and KV-cache utilization | No | No |
 | `latency` | Same as `throughput`, but scales up earlier and tolerates less queuing | No | No |
 | `load` | User-defined prefill queue-token and decode KV-utilization thresholds | No | No |
-| `sla` | Rust engine performance model targeting specific TTFT/ITL values | Yes | Recommended |
+| `sla` | Planner engine queries backed directly by the AIC core wheel, targeting specific TTFT/ITL values | Yes | Recommended |
 
 **Reach for each when:**
 

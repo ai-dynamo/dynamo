@@ -16,7 +16,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Rust engine performance shim with native AIC estimates when available, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the `aiconfigurator-core` Python wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
@@ -73,7 +73,7 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: Rust engine perf model scaling with ttft_ms/itl_ms targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AIC core performance modeling with `ttft_ms`/`itl_ms` targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
@@ -92,7 +92,7 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
-SLA mode uses the Rust engine performance shim. If `aic_perf_model` is present, the planner initializes the shim with native AIC model identity and engine limits. Unsupported native AIC configs automatically fall back to observed-FPM regression in the shim. If `aic_perf_model` is absent, the shim starts as an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
+SLA mode uses a Planner-owned engine-query layer. If `aic_perf_model` is present, the Planner passes the native AIC model identity and engine limits directly to `aiconfigurator_core.sdk.RustForwardPassPerfModel`. Unsupported native AIC configs automatically fall back to the wheel's observed-FPM regression model. If `aic_perf_model` is absent, the wheel starts an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
 
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIC is available or enough live FPMs have warmed the regression fallback.
 
