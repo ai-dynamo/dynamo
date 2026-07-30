@@ -26,6 +26,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
+from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 
 pytestmark = [
@@ -273,6 +274,22 @@ def _mode_config(mode, **overrides):
     return SimpleNamespace(**base)
 
 
+def _apply_outcome(*targets, proposed=None):
+    if proposed is None:
+        proposed = {
+            target.sub_component_type
+            for target in targets
+            if target.replicas is not None
+        }
+    return SimpleNamespace(
+        execute_action="apply",
+        final_proposal=SimpleNamespace(targets=list(targets)),
+        proposed_components=frozenset(
+            ComponentKey(sub_component_type=component) for component in proposed
+        ),
+    )
+
+
 def test_final_boundary_clamps_prefill_mode():
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
@@ -324,12 +341,7 @@ def test_final_boundary_clamps_merged_proposal_regardless_of_source():
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=400),
     )
     adapter = _bare_adapter(_mode_config("agg", total_gpu_power_limit=1200), caps)
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[SimpleNamespace(sub_component_type="decode", replicas=6)]
-        ),
-    )
+    outcome = _apply_outcome(SimpleNamespace(sub_component_type="decode", replicas=6))
     wc = WorkerCounts(ready_num_decode=2, expected_num_decode=2)  # stable
     decision = adapter._project_scale_to(outcome, wc)
     # 6 × 400 W = 2400 W over the 1200 W budget → clamped to 3 in the decision.
@@ -337,22 +349,18 @@ def test_final_boundary_clamps_merged_proposal_regardless_of_source():
     assert decision.num_decode == 3
 
 
-def test_project_scale_to_masks_budget_hold_at_unobserved_zero_baseline():
-    """A refused create-from-empty proposal must emit no scale target."""
+def test_project_scale_to_keeps_budget_hold_when_settled_target_is_unknown():
+    """Unknown settled state is not enough evidence to suppress a target."""
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=1200),
     )
     adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=5500), caps)
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[SimpleNamespace(sub_component_type="prefill", replicas=4)]
-        ),
-    )
+    outcome = _apply_outcome(SimpleNamespace(sub_component_type="prefill", replicas=4))
     # Decode alone already exceeds the ceiling. Prefill has never been
     # observed, so the budget layer holds it at the empty baseline (0);
-    # projection must mask that hold to None instead of scaling to zero.
+    # Projection preserves that explicit result because expected prefill is
+    # unknown; only equality with a known settled target proves a no-op.
     wc = WorkerCounts(
         ready_num_prefill=None,
         ready_num_decode=5,
@@ -360,7 +368,10 @@ def test_project_scale_to_masks_budget_hold_at_unobserved_zero_baseline():
         expected_num_decode=5,
     )
 
-    assert adapter._project_scale_to(outcome, wc) is None
+    decision = adapter._project_scale_to(outcome, wc)
+    assert decision is not None
+    assert decision.num_prefill == 0
+    assert decision.num_decode is None
 
 
 # The Kubernetes environment uses a single deployment-wide stability flag, so a
@@ -370,7 +381,7 @@ def test_project_scale_to_masks_budget_hold_at_unobserved_zero_baseline():
 
 def test_scale_up_held_while_deployment_is_rolling(caplog):
     """Fail closed: while any power-relevant role is mid-rollout (deployment
-    unstable → both expected None), a proposed scale-up is held at ready, since
+    unstable → both expected None), a proposed scale-up emits no target, since
     a rolling role can only be charged at its transient ready count.
 
     The hold warning fires once per continuous mid-rollout stretch, not every
@@ -388,9 +399,9 @@ def test_scale_up_held_while_deployment_is_rolling(caplog):
         expected_num_decode=None,  # both settled targets unknown
     )
     with caplog.at_level(logging.WARNING):
-        # Prefill proposed 2 -> 4 is held at ready 2 while the deployment rolls.
-        assert adapter._apply_final_budget(4, None, wc) == (2, None)
-        assert adapter._apply_final_budget(4, None, wc) == (2, None)
+        # Prefill proposed 2 -> 4 emits no target while the deployment rolls.
+        assert adapter._apply_final_budget(4, None, wc) == (None, None)
+        assert adapter._apply_final_budget(4, None, wc) == (None, None)
     hold_warnings = [
         r
         for r in caplog.records
@@ -415,7 +426,7 @@ def test_scale_up_held_while_deployment_is_rolling(caplog):
     )
     with caplog.at_level(logging.WARNING):
         caplog.clear()
-        assert adapter._apply_final_budget(4, None, rolling_again) == (2, None)
+        assert adapter._apply_final_budget(4, None, rolling_again) == (None, None)
     assert (
         sum(
             1
@@ -484,23 +495,18 @@ def test_project_scale_to_holds_scale_up_during_rollout_full_merge():
         expected_num_prefill=None,
         expected_num_decode=None,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=2),
-                SimpleNamespace(sub_component_type="decode", replicas=2),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=2),
+        SimpleNamespace(sub_component_type="decode", replicas=2),
+        proposed={"decode"},
     )
     decision = adapter._project_scale_to(outcome, wc)
-    # decode must NOT be scaled up to 2 while the deployment rolls (held at 1);
-    # the held result equals the current counts, so no new decision is issued.
+    # Decode must not emit a scale-up target while the deployment rolls.
     assert decision is None or (decision.num_decode or 0) <= 1
 
 
-def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
-    """A scale-down of one role must not drag the other role's ready echo.
+def test_project_scale_to_masks_unproposed_echo_during_rollout_scale_down():
+    """A scale-down must not drag the other role's merged baseline echo.
 
     Production-shaped: prefill is rolling from ready=2 toward a larger desired
     (deployment unstable → both ``expected`` None), while decode legitimately
@@ -508,8 +514,8 @@ def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
     into the merged proposal, so before masking ``_project_scale_to`` returned
     ``ScalingDecision(num_prefill=2, num_decode=2)``; DisaggPlanner applies every
     non-None target, writing prefill's DGD desired back to 2 and cancelling its
-    in-flight rollout. The ready-echo mask drops prefill to None while preserving
-    the decode scale-down."""
+    in-flight rollout. The explicit proposal mask drops prefill to None while
+    preserving the decode scale-down."""
     caps = WorkerCapabilities(
         prefill=EngineCapabilities(num_gpu=2, power_watts_per_replica=700),
         decode=EngineCapabilities(num_gpu=4, power_watts_per_replica=1200),
@@ -522,16 +528,12 @@ def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
         expected_num_prefill=None,  # deployment mid-rollout (prefill 2 -> desired)
         expected_num_decode=None,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                # prefill baseline echo == ready 2 (not an intended change)
-                SimpleNamespace(sub_component_type="prefill", replicas=2),
-                # decode scale-down 3 -> 2
-                SimpleNamespace(sub_component_type="decode", replicas=2),
-            ]
-        ),
+    outcome = _apply_outcome(
+        # prefill baseline echo == ready 2 (not an intended change)
+        SimpleNamespace(sub_component_type="prefill", replicas=2),
+        # decode scale-down 3 -> 2
+        SimpleNamespace(sub_component_type="decode", replicas=2),
+        proposed={"decode"},
     )
     decision = adapter._project_scale_to(outcome, wc)
     # prefill's ready echo is masked to None (its rollout desired is left
@@ -539,6 +541,35 @@ def test_project_scale_to_masks_ready_echo_during_rollout_scale_down():
     assert decision is not None
     assert decision.num_prefill is None
     assert decision.num_decode == 2
+
+
+def test_project_scale_to_preserves_explicit_transient_ready_target():
+    """An explicit target may intentionally cancel an in-flight rollout.
+
+    During a rollout the settled target is unknown, so value equality with the
+    transient ready count is not proof of a no-op.
+    """
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=500),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=500),
+    )
+    adapter = _bare_adapter(_mode_config("disagg", total_gpu_power_limit=100000), caps)
+    wc = WorkerCounts(
+        ready_num_prefill=2,
+        ready_num_decode=3,
+        expected_num_prefill=None,
+        expected_num_decode=None,
+    )
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=2),
+        proposed={"prefill"},
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill == 2
+    assert decision.num_decode is None
 
 
 def test_project_scale_to_partial_prefill_proposal_does_not_scale_decode():
@@ -561,15 +592,11 @@ def test_project_scale_to_partial_prefill_proposal_does_not_scale_decode():
         expected_num_prefill=2,
         expected_num_decode=2,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=5),
-                # baseline echo of ready decode — not a genuine proposal
-                SimpleNamespace(sub_component_type="decode", replicas=2),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=5),
+        # Baseline echo of ready decode — not a genuine proposal.
+        SimpleNamespace(sub_component_type="decode", replicas=2),
+        proposed={"prefill"},
     )
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None
@@ -592,14 +619,10 @@ def test_project_scale_to_partial_decode_proposal_does_not_scale_prefill():
         expected_num_prefill=2,
         expected_num_decode=2,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=2),
-                SimpleNamespace(sub_component_type="decode", replicas=5),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=2),
+        SimpleNamespace(sub_component_type="decode", replicas=5),
+        proposed={"decode"},
     )
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None
@@ -621,14 +644,9 @@ def test_project_scale_to_rebalance_emits_decode_only_tick1():
         expected_num_prefill=1,
         expected_num_decode=4,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=4),
-                SimpleNamespace(sub_component_type="decode", replicas=1),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=4),
+        SimpleNamespace(sub_component_type="decode", replicas=1),
     )
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None
@@ -649,14 +667,9 @@ def test_project_scale_to_rebalance_prefill_up_after_decode_stable():
         expected_num_prefill=1,
         expected_num_decode=1,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=4),
-                SimpleNamespace(sub_component_type="decode", replicas=1),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=4),
+        SimpleNamespace(sub_component_type="decode", replicas=1),
     )
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None
@@ -679,14 +692,10 @@ def test_project_scale_to_partial_scale_down_does_not_mutate_unproposed_role():
         expected_num_prefill=4,
         expected_num_decode=4,
     )
-    outcome = SimpleNamespace(
-        execute_action="apply",
-        final_proposal=SimpleNamespace(
-            targets=[
-                SimpleNamespace(sub_component_type="prefill", replicas=2),
-                SimpleNamespace(sub_component_type="decode", replicas=4),
-            ]
-        ),
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=2),
+        SimpleNamespace(sub_component_type="decode", replicas=4),
+        proposed={"prefill"},
     )
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None

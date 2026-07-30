@@ -346,37 +346,34 @@ class KubernetesAPI:
             return True, f"rollingUpdate.phase={phase}"
         return False, ""
 
-    def has_terminating_pods(self, deployment: dict, component_name: str) -> bool:
-        """True if any non-terminal pod for component_name has a deletionTimestamp.
-
-        Deployment status excludes terminating pods, so ``get_service_replica_status``
-        can report desired==updated==available while old pods are still Running.
-        Callers that gate power-budget scale-ups on stability must call this
-        separately; the base stability check intentionally stays pod-free so
-        non-power paths do not acquire the pods/list RBAC surface.
-        """
-        dgd_name = deployment.get("metadata", {}).get("name", "")
-        if not dgd_name:
-            return False
-        all_pods = self._list_pods_for_component(dgd_name, component_name)
+    @staticmethod
+    def has_terminating_pods(pods: list) -> bool:
+        """True if any non-terminal pod in ``pods`` has a deletionTimestamp."""
         return any(
             p.metadata.deletion_timestamp is not None
             and (p.status is None or p.status.phase not in ("Succeeded", "Failed"))
-            for p in all_pods
+            for p in pods
         )
 
-    def _list_pods_for_component(self, dgd_name: str, component_name: str) -> list:
-        """List all pods (any phase) for the given DGD + component label pair."""
-        label_selector = (
-            f"{DYNAMO_DGD_NAME_LABEL}={dgd_name},"
-            f"{DYNAMO_COMPONENT_LABEL}={component_name}"
-        )
+    def list_pods_for_graph(self, dgd_name: str) -> list:
+        """List all Pods for a DGD using its stable graph label."""
         return (
             self.core_api.list_namespaced_pod(
-                namespace=self.current_namespace, label_selector=label_selector
+                namespace=self.current_namespace,
+                label_selector=f"{DYNAMO_DGD_NAME_LABEL}={dgd_name}",
             ).items
             or []
         )
+
+    @staticmethod
+    def partition_pods_by_component(pods: list) -> dict[str, list]:
+        """Partition Pods by the stable Dynamo component label."""
+        by_component: dict[str, list] = {}
+        for pod in pods:
+            component_name = (pod.metadata.labels or {}).get(DYNAMO_COMPONENT_LABEL)
+            if component_name:
+                by_component.setdefault(component_name, []).append(pod)
+        return by_component
 
     def worker_pods_settled(
         self,
@@ -404,9 +401,12 @@ class KubernetesAPI:
         dgd_name = deployment.get("metadata", {}).get("name", "")
         components_by_name = get_components_by_name(deployment)
         pending: list[str] = []
+        pods_by_component = self.partition_pods_by_component(
+            self.list_pods_for_graph(dgd_name)
+        )
 
         for component_name, expected_raw in expected_power_by_component.items():
-            all_pods = self._list_pods_for_component(dgd_name, component_name)
+            all_pods = pods_by_component.get(component_name, [])
             non_terminal = [
                 p
                 for p in all_pods

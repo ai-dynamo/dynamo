@@ -209,7 +209,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "Power awareness requires a connector that implements "
                         "PowerAwareConnector (get_graph_deployment, "
                         "get_component_power_configs, "
-                        "wait_for_settled_graph_deployment); "
+                        "wait_for_settled_graph_deployment, "
+                        "get_power_aware_worker_counts); "
                         "this connector does not."
                     ]
                 )
@@ -339,10 +340,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        Caps are startup-static for the Planner lifetime. Annotation or
-        topology changes take effect through a worker rollout plus Planner
-        restart, which re-runs this hook against a settled post-rollout
-        snapshot.
+        Caps are startup-static for the Planner lifetime. DGD CRD transition
+        validation rejects changes to a power-annotated component's cap,
+        effective NVIDIA GPU count, or node count. Changing that tuple requires
+        deleting and recreating the DGD, then starting Planner against the new
+        settled deployment.
         """
         if not self.config.enable_power_awareness:
             return
@@ -477,14 +479,14 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "Power awareness requires a connector that implements "
                         "PowerAwareConnector (get_graph_deployment, "
                         "get_component_power_configs, "
-                        "wait_for_settled_graph_deployment); "
+                        "wait_for_settled_graph_deployment, "
+                        "get_power_aware_worker_counts); "
                         "this connector does not."
                     ]
                 )
-            counts = await self.controller.get_actual_worker_counts(
+            counts = await self.controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
-                check_terminating_pods=True,
             )
         else:
             counts = await self.controller.get_actual_worker_counts(

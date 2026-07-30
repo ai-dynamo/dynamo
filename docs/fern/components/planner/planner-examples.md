@@ -83,6 +83,10 @@ The mounted PlannerConfig enables it:
 
 `enable_power_awareness` requires `environment: "kubernetes"` and
 `mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported).
+The Planner caches each annotated component's cap, effective main-container GPU
+count, and node count at startup. DGD admission rejects changes to those fields;
+delete and recreate the DGD to change them. Restart the Planner after changing
+`total_gpu_power_limit`.
 
 You must also enable `pods/list` RBAC for the Planner's ServiceAccount at
 install time. The Planner reads Pod annotations during startup to verify that
@@ -99,7 +103,9 @@ helm upgrade --install dynamo deploy/helm/charts/platform \
 See the `power-aware-budget/` directory in
 [Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
 the full annotation + config contract and its limitations (the budget is a
-projected ceiling over requested caps, not a proven hardware limit).
+projected ceiling over requested caps, not a proven hardware limit). Mixed GPU
+generations, dynamic cap retargeting, and DRA-backed GPU allocation are not
+supported.
 
 ## Virtual Connector
 

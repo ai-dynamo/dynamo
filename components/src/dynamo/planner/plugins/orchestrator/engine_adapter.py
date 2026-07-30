@@ -912,12 +912,10 @@ class OrchestratorEngineAdapter:
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
         with planner "no change -> None" detection.
 
-        ``type_aware_merge`` fills omitted roles from the ready-count baseline,
-        so a one-role proposal arrives as ``(changed, ready_echo)``. Collapsing
-        ready-equal targets to ``None`` *before* the final GPU/power budget
-        restores the proposal mask: the unchanged role is still charged at its
-        current count, but is not adjustable — otherwise the joint clamp can
-        emit a cross-role scale-down that ``DisaggPlanner`` would apply.
+        ``type_aware_merge`` fills omitted roles from the ready-count baseline.
+        ``PipelineOutcome.proposed_components`` preserves which roles PROPOSE
+        actually targeted before that merge, so the power path can charge
+        baseline peers without treating them as adjustable targets.
         """
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
             return None
@@ -931,39 +929,37 @@ class OrchestratorEngineAdapter:
         current_p = worker_counts.ready_num_prefill
         current_d = worker_counts.ready_num_decode
 
-        p_unchanged = (num_p is None) or (num_p == current_p)
-        d_unchanged = (num_d is None) or (num_d == current_d)
-        if p_unchanged and d_unchanged:
-            return None
-
         if self._config.enable_power_awareness:
-            # Restore the proposal mask before the final budget boundary (see
-            # docstring). Ready-equal echoes are charged via ``current_*`` inside
-            # the clamps, never returned as adjustable targets.
-            if num_p is not None and num_p == current_p:
+            # Restore the explicit PROPOSE-stage mask before the final budget
+            # boundary. Omitted roles are still charged via ``current_*`` inside
+            # the clamps, but can never become emitted targets.
+            if ComponentKey(sub_component_type="prefill") not in (
+                outcome.proposed_components
+            ):
                 num_p = None
-            if num_d is not None and num_d == current_d:
+            if ComponentKey(sub_component_type="decode") not in (
+                outcome.proposed_components
+            ):
                 num_d = None
+            if num_p is None and num_d is None:
+                return None
+        else:
+            p_unchanged = (num_p is None) or (num_p == current_p)
+            d_unchanged = (num_d is None) or (num_d == current_d)
+            if p_unchanged and d_unchanged:
+                return None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
 
         if self._config.enable_power_awareness:
-            # Mask any target that equals its ready count back to None. Emitting such
-            # a target is a no-op in a stable deployment (spec desired == ready), but
-            # during a rollout (settled target unknown) the merged proposal carries
-            # the baseline == ready for every non-rolling role, and DisaggPlanner
-            # applies every non-None target as the new DGD desired. Emitting a
-            # rolling role's transient ready count would overwrite its larger
-            # in-flight desired and cancel the rollout — so a scale-down of one role
-            # must not drag the other role's echoed ready count along, and a
-            # scale-up held at ready (see ``_hold_scale_up_during_rollout``)
-            # collapses to "no change" instead of re-emitting ready.
-            # No observed ready count means the role is currently empty. A
-            # budget hold at that baseline returns 0; mask it as "no change"
-            # rather than emitting an explicit scale-to-zero target.
-            if num_p is not None and num_p == (0 if current_p is None else current_p):
+            # Suppress only a proven stable no-op. During a rollout ``expected``
+            # is unknown, so an explicit target equal to transient ready may be
+            # intentional cancellation of the in-flight desired count.
+            expected_p = worker_counts.expected_num_prefill
+            expected_d = worker_counts.expected_num_decode
+            if num_p is not None and expected_p is not None and num_p == expected_p:
                 num_p = None
-            if num_d is not None and num_d == (0 if current_d is None else current_d):
+            if num_d is not None and expected_d is not None and num_d == expected_d:
                 num_d = None
             if num_p is None and num_d is None:
                 return None
@@ -1018,11 +1014,9 @@ class OrchestratorEngineAdapter:
         transient ready count, which undercounts it, so while any role rolls no
         role may scale up above its ready count; otherwise the settled total (the
         rolling role at its unknown-but-larger desired plus another role grown)
-        can exceed the budget. Scale-downs stay allowed. A held scale-up equals
-        the ready count, which ``_project_scale_to`` then masks back to None (as
-        it does for any target equal to ready), so the hold emits no target for
-        that role and the already-issued rollout's DGD desired is left untouched
-        even when the other role legitimately scales down this tick.
+        can exceed the budget. Scale-downs stay allowed. A held scale-up becomes
+        ``None`` immediately, so the already-issued rollout's DGD desired is left
+        untouched even when the other role legitimately scales down this tick.
 
         Rollout *state*, not None targets, is the signal — ``type_aware_merge``
         fills a role a plugin omitted from the baseline, so the proposal usually
@@ -1043,10 +1037,10 @@ class OrchestratorEngineAdapter:
         held_roles: list[str] = []
         if num_p is not None and ready_p is not None and num_p > ready_p:
             held_roles.append(f"prefill at {ready_p} (proposed {num_p})")
-            num_p = ready_p
+            num_p = None
         if num_d is not None and ready_d is not None and num_d > ready_d:
             held_roles.append(f"decode at {ready_d} (proposed {num_d})")
-            num_d = ready_d
+            num_d = None
         if held_roles and not self._power_rollout_hold_warned:
             log.warning(
                 "power budget: holding %s — a power-relevant role is "

@@ -109,7 +109,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     # stamped onto Pods by the operator, and enforced by the Power Agent. The
     # planner only reads them. It does NOT own or write per-GPU caps, so no
     # per-GPU / safe-default / sweep-interval fields live here — the planner
-    # config carries only the deployment-wide budget.
+    # config carries only the deployment-wide budget. Power inputs are
+    # process-static: DGD admission protects the per-component tuple, and a
+    # total-budget change requires a Planner restart.
     #
     # ``total_gpu_power_limit`` is required when ``enable_power_awareness=True``
     # (validator enforces). Default None — not a placeholder integer — so the

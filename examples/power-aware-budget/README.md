@@ -41,6 +41,12 @@ The Planner **reads** the caps from the DGD; it does **not** patch Pods. New
 replicas created by a scale-up are born with the annotation because the operator
 renders it into the Deployment / LeaderWorkerSet template.
 
+The Planner caches each component's power tuple at startup: the cap, the
+effective main-container `nvidia.com/gpu` count (limit first, request fallback),
+and `multinode.nodeCount` (default `1`). DGD admission rejects updates to that
+tuple for an annotated component. Delete and recreate the DGD to change it.
+Changing `total_gpu_power_limit` also requires restarting the Planner process.
+
 ## Author the caps
 
 1. Put the per-GPU cap on each worker component's `podTemplate.metadata.annotations`
@@ -86,10 +92,15 @@ replicas × 4 GPU × 300 W) the projection is `1400 + 2400 = 3800 W` against a
 `5200 W` budget. A scale-up that would exceed `5200 W` is clamped to fit, and
 the `dynamo_planner_power_budget_utilization` gauge reports the ratio.
 
-## Changing a cap
+## Static-input limitations
 
 > [!IMPORTANT]
-> Editing a worker `podTemplate` cap rolls that worker (the template hash
-> changes). After the rollout completes, **restart the Planner** so it re-reads
-> the settled annotation at startup. Online cap retargeting without a restart is
-> deferred to a dedicated dynamic-control design.
+> You cannot patch a power annotation, effective GPU count, or node count in
+> place on a power-annotated component. Admission rejects the update; delete and
+> recreate the DGD, then start the Planner against the replacement. Restart the
+> Planner after changing `total_gpu_power_limit`.
+
+Power awareness currently assumes a static, uniform GPU count and cap per
+component. Mixed GPU generations within one component, dynamic cap retargeting,
+and GPU allocation through DRA resource claims are not supported by this
+projection.

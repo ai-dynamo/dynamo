@@ -621,7 +621,8 @@ class PlannerConfig(BaseModel):
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
     # and enforced by the Power Agent. The planner reads those caps from the DGD
     # and combines them with ``total_gpu_power_limit`` to project and clamp a
-    # power budget. It never writes per-GPU caps.
+    # power budget. It never writes per-GPU caps. These inputs are
+    # process-static; changing the total budget requires a Planner restart.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
@@ -639,7 +640,8 @@ class PlannerConfig(BaseModel):
         ge=1,
         description=(
             "Total GPU power budget in watts for this DGD. Required when "
-            "enable_power_awareness=True. Recommended formula: "
+            "enable_power_awareness=True; changing it requires a Planner "
+            "restart. Recommended formula: "
             "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
             "headroom_factor ≈ 0.85–0.9. Used for the power-budget gauges and "
             "as the projected ceiling the final budget clamp holds scaling to — "

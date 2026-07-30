@@ -38,6 +38,10 @@ import (
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
+	dgdAdmissionPowerAnnotation = "dynamo.nvidia.com/gpu-power-limit"
+	dgdAdmissionPowerImmutable  = "dynamo.nvidia.com/gpu-power-limit is immutable; delete and recreate the DynamoGraphDeployment to change it"
+	dgdAdmissionGPUImmutable    = "the effective main-container nvidia.com/gpu count is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
+	dgdAdmissionNodesImmutable  = "multinode.nodeCount is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
 )
 
 const sglangBackendFramework = "sglang"
@@ -444,7 +448,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, betaDGDForAdmission(nil)),
 		},
 		{
-			name: "v1beta1 pod template container counts are not artificially bounded",
+			name: "v1beta1 pod template supports large container counts within CEL cost bound",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				podTemplate := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
@@ -506,6 +510,136 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
 			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name: "v1beta1 power tuple is accepted on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+		},
+		{
+			name: "v1beta1 power annotation change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "350", "1", 2)
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+		},
+		{
+			name:          "v1beta1 power annotation addition is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+		},
+		{
+			name: "v1beta1 power annotation removal is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, dgdAdmissionPowerAnnotation)
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+		},
+		{
+			name: "v1beta1 effective GPU change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "2", 2)
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionGPUImmutable,
+		},
+		{
+			name: "v1beta1 shadow request change is allowed when GPU limit is unchanged",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+					corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("8"),
+				}
+			}),
+		},
+		{
+			name: "v1beta1 power node count change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 3)
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionNodesImmutable,
+		},
+		{
+			name: "v1beta1 unrelated power component update reaches webhook",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To(int32(2))
+				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:1.2.0"
+			}),
+		},
+		{
+			name:          "v1beta1 unannotated component GPU change remains allowed",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+					corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+				}
+			}),
+		},
+		{
+			name: "v1alpha1 power annotation change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionPowerImmutable,
+		},
+		{
+			name: "v1alpha1 effective GPU change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "2", 2)
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionGPUImmutable,
+		},
+		{
+			name: "v1alpha1 power node count change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 3)
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionNodesImmutable,
+		},
+		{
+			name: "v1alpha1 unrelated power service update reaches webhook",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Replicas = k8sptr.To(int32(2))
+				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:1.2.0"
+			}),
 		},
 
 		// Checkpoint rules.
@@ -2010,6 +2144,38 @@ func betaWorkerComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return dgd.GetComponentByName("worker")
+}
+
+func setBetaWorkerPowerInputs(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	watts string,
+	gpus string,
+	nodeCount int32,
+) {
+	worker := betaWorkerComponent(dgd)
+	worker.PodTemplate.Annotations = map[string]string{
+		dgdAdmissionPowerAnnotation: watts,
+	}
+	worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+		corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse(gpus),
+	}
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+}
+
+func setAlphaWorkerPowerInputs(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	watts string,
+	gpus string,
+	nodeCount int32,
+) {
+	worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+	worker.ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
+		Annotations: map[string]string{dgdAdmissionPowerAnnotation: watts},
+	}
+	worker.Resources = &nvidiacomv1alpha1.Resources{
+		Limits: &nvidiacomv1alpha1.ResourceItem{GPU: gpus},
+	}
+	worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: nodeCount}
 }
 
 func enableBetaContainerDiscovery(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {

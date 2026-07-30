@@ -35,7 +35,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import Clock, VirtualClock
-from dynamo.planner.plugins.merge.types import ChainAugmentOutcome
+from dynamo.planner.plugins.merge.types import ChainAugmentOutcome, ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.types import ComponentTarget, ScalingProposal
@@ -282,10 +282,19 @@ def test_observe_fpm_feeds_installed_regression_without_crashing_disagg():
     )
 
 
-def _apply_outcome(targets):
+def _apply_outcome(targets, *, proposed=None):
+    if proposed is None:
+        proposed = {
+            target.sub_component_type
+            for target in targets
+            if target.replicas is not None
+        }
     return PipelineOutcome(
         execute_action="apply",
         final_proposal=ScalingProposal(targets=targets),
+        proposed_components=frozenset(
+            ComponentKey(sub_component_type=component) for component in proposed
+        ),
     )
 
 
@@ -430,7 +439,8 @@ def test_partial_decode_proposal_respects_residual_gpu_ceiling():
         [
             ComponentTarget(sub_component_type="prefill", replicas=7),
             ComponentTarget(sub_component_type="decode", replicas=7),
-        ]
+        ],
+        proposed={"decode"},
     )
     dec = adapter._project_scale_to(outcome, wc)
     assert dec is None or dec.num_prefill is None
@@ -469,7 +479,7 @@ def test_residual_gpu_clamp_holds_when_fixed_peer_already_over_ceiling():
 
     outcome = _apply_outcome([ComponentTarget(sub_component_type="decode", replicas=4)])
     dec = adapter._project_scale_to(outcome, wc)
-    # Held at ready decode=1 → ready-echo mask collapses to no-op.
+    # Held at settled decode=1, then suppressed as a proven stable no-op.
     assert dec is None or dec.num_decode is None
     assert dec is None or dec.num_prefill is None
 

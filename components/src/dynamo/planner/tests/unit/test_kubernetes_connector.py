@@ -55,6 +55,8 @@ def mock_kube_api():
     # Default: no terminating pods; tests that want to simulate terminating pods
     # override this per-test.
     mock_api.has_terminating_pods = Mock(return_value=False)
+    mock_api.list_pods_for_graph = Mock(return_value=[])
+    mock_api.partition_pods_by_component = Mock(return_value={})
     # Default: no blocking rollout; tests that want InProgress/Pending override.
     mock_api.is_rolling_update_blocking_settlement = Mock(return_value=(False, ""))
     return mock_api
@@ -1270,11 +1272,7 @@ async def test_get_actual_worker_counts_no_components(
 async def test_get_actual_worker_counts_no_pod_list_when_power_disabled(
     kubernetes_connector, mock_kube_api
 ):
-    """When check_terminating_pods=False, has_terminating_pods must never be called.
-
-    Power-disabled planners do not hold pods/list RBAC. The connector must not
-    issue the pod list even when replica counts look stable.
-    """
+    """The ordinary connector path remains Pod-list free."""
     mock_deployment = _deployment(
         _component("prefill-component"),
         _component("decode-component"),
@@ -1285,35 +1283,48 @@ async def test_get_actual_worker_counts_no_pod_list_when_power_disabled(
     await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
-        check_terminating_pods=False,
     )
 
+    mock_kube_api.list_pods_for_graph.assert_not_called()
     mock_kube_api.has_terminating_pods.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_get_actual_worker_counts_pod_list_when_power_enabled(
+async def test_get_power_aware_worker_counts_uses_one_partitioned_pod_snapshot(
     kubernetes_connector, mock_kube_api
 ):
-    """When check_terminating_pods=True, has_terminating_pods is called for stable components."""
+    """The power-aware path lists once and checks locally partitioned Pods."""
     mock_deployment = _deployment(
         _component("prefill-component"),
         _component("decode-component"),
     )
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.get_service_replica_status.side_effect = [(2, True), (4, True)]
+    prefill_pods = [object()]
+    decode_pods = [object()]
+    all_pods = [*prefill_pods, *decode_pods]
+    mock_kube_api.list_pods_for_graph.return_value = all_pods
+    mock_kube_api.partition_pods_by_component.return_value = {
+        "prefill-component": prefill_pods,
+        "decode-component": decode_pods,
+    }
     mock_kube_api.has_terminating_pods.return_value = False
 
     (
         prefill_count,
         decode_count,
         is_stable,
-    ) = await kubernetes_connector.get_actual_worker_counts(
+    ) = await kubernetes_connector.get_power_aware_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
-        check_terminating_pods=True,
     )
 
+    mock_kube_api.list_pods_for_graph.assert_called_once_with("test-graph")
+    mock_kube_api.partition_pods_by_component.assert_called_once_with(all_pods)
+    assert mock_kube_api.has_terminating_pods.call_args_list == [
+        call(prefill_pods),
+        call(decode_pods),
+    ]
     assert mock_kube_api.has_terminating_pods.call_count == 2
     assert is_stable is True
     assert prefill_count == 2
@@ -1321,14 +1332,14 @@ async def test_get_actual_worker_counts_pod_list_when_power_enabled(
 
 
 @pytest.mark.asyncio
-async def test_get_actual_worker_counts_inprogress_rollout_is_unstable_when_power_on(
+async def test_get_power_aware_worker_counts_inprogress_rollout_is_unstable(
     kubernetes_connector, mock_kube_api
 ):
     """InProgress rollout with replica-stable counts must be unstable when power is on.
 
     Startup settlement already blocks on Pending/InProgress via
-    is_rolling_update_blocking_settlement. Runtime get_actual_worker_counts
-    must apply the same gate when check_terminating_pods=True (power-on) so
+    is_rolling_update_blocking_settlement. The runtime power snapshot
+    must apply the same gate so
     a scale-up is not admitted while old and new pod generations overlap.
     """
     mock_deployment = _deployment(
@@ -1345,24 +1356,23 @@ async def test_get_actual_worker_counts_inprogress_rollout_is_unstable_when_powe
         "rollingUpdate.phase=InProgress",
     )
 
-    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+    _, _, is_stable = await kubernetes_connector.get_power_aware_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
-        check_terminating_pods=True,
     )
 
     assert is_stable is False
 
 
 @pytest.mark.asyncio
-async def test_get_actual_worker_counts_failed_rollout_is_unstable_when_power_on(
+async def test_get_power_aware_worker_counts_failed_rollout_is_unstable(
     kubernetes_connector, mock_kube_api
 ):
-    """Failed rollout must be treated as unstable when check_terminating_pods=True.
+    """Failed rollout must be treated as unstable by the power snapshot.
 
     is_rolling_update_blocking_settlement only covers Pending/InProgress; Failed
     was intentionally excluded there because startup raises immediately. At
-    runtime there is no raise, so get_actual_worker_counts must be fail-closed
+    runtime there is no raise, so the power-aware method must be fail-closed
     and return is_stable=False so power-aware ticks do not admit scale-ups
     during a terminal (Failed) rollout state.
     """
@@ -1384,10 +1394,9 @@ async def test_get_actual_worker_counts_failed_rollout_is_unstable_when_power_on
     # is_rolling_update_blocking_settlement does not cover Failed; simulate that.
     mock_kube_api.is_rolling_update_blocking_settlement.return_value = (False, "")
 
-    _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
+    _, _, is_stable = await kubernetes_connector.get_power_aware_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
-        check_terminating_pods=True,
     )
 
     assert is_stable is False
@@ -1397,7 +1406,7 @@ async def test_get_actual_worker_counts_failed_rollout_is_unstable_when_power_on
 async def test_get_actual_worker_counts_inprogress_rollout_is_stable_when_power_off(
     kubernetes_connector, mock_kube_api
 ):
-    """InProgress rollout must not affect stability when check_terminating_pods=False.
+    """InProgress rollout does not affect the ordinary count path.
 
     Power-disabled planners do not have pods/list RBAC and must not call the
     rolling-update helper. The legacy replica-count path stays unchanged.
@@ -1412,7 +1421,6 @@ async def test_get_actual_worker_counts_inprogress_rollout_is_stable_when_power_
     _, _, is_stable = await kubernetes_connector.get_actual_worker_counts(
         prefill_component_name="prefill-component",
         decode_component_name="decode-component",
-        check_terminating_pods=False,
     )
 
     assert is_stable is True

@@ -6,8 +6,8 @@
 ``PlannerEnvironmentImpl._load_static_power_caps_at_startup`` reads DGD-owned
 caps once after worker readiness and fails closed on malformed or infeasible
 values. Caps are startup-static for the Planner lifetime: ``refresh()`` never
-re-reads or re-adopts them. Annotation or topology changes take effect through
-a worker rollout plus Planner restart.
+re-reads or re-adopts them. DGD admission rejects annotation or topology tuple
+changes; adopting new values requires a replacement DGD and Planner process.
 """
 
 from unittest.mock import AsyncMock, MagicMock, Mock

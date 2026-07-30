@@ -77,7 +77,7 @@ class PowerAwareConnector(Protocol):
     """Narrow read-only power capability — Kubernetes-specific, not part of PlannerConnector.
 
     The environment calls ``is_power_aware_connector(controller)`` at each
-    power-aware boundary when ``enable_power_awareness=True``. All three methods
+    power-aware boundary when ``enable_power_awareness=True``. All four methods
     must be present and callable; a typo or absent method is caught at that check
     rather than silently falling back to a no-op.
     """
@@ -106,12 +106,10 @@ class PowerAwareConnector(Protocol):
     ) -> dict:
         ...
 
-    async def get_actual_worker_counts(
+    async def get_power_aware_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        *,
-        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
         ...
 
@@ -120,6 +118,7 @@ _POWER_AWARE_REQUIRED: tuple[str, ...] = (
     "get_graph_deployment",
     "get_component_power_configs",
     "wait_for_settled_graph_deployment",
+    "get_power_aware_worker_counts",
 )
 
 

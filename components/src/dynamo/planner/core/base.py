@@ -399,8 +399,9 @@ class NativePlannerBase:
         Per-replica watts come from the cached deployment state
         (``power_watts_per_replica``, resolved once from the DGD worker
         podTemplate annotation during Planner startup), so this performs no
-        apiserver I/O and never blocks the tick loop. Cap changes require a
-        worker rollout plus Planner restart. These gauges are advisory
+        apiserver I/O and never blocks the tick loop. DGD admission rejects
+        changes to the cached power tuple; changing it requires replacing the
+        DGD and starting a new Planner. These gauges are advisory
         observability; the projected power budget (over the requested caps,
         not the effective hardware draw) is applied separately by the final
         budget clamp.

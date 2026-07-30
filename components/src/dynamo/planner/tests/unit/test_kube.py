@@ -481,6 +481,7 @@ def _make_pod(
     phase: str = "Running",
     annotation: "str | None" = "300",
     deletion_timestamp=None,
+    component: str = "VllmDecodeWorker",
 ) -> MagicMock:
     """Build a mock Pod object for pod-annotation settlement tests."""
     pod = MagicMock()
@@ -490,23 +491,19 @@ def _make_pod(
         if annotation is not None
         else {}
     )
+    pod.metadata.labels = {"nvidia.com/dynamo-component": component}
     pod.metadata.deletion_timestamp = deletion_timestamp
     pod.status.phase = phase
     return pod
 
 
 def _mock_pod_list(mock_core_api, pods: list, *, component: str = "VllmDecodeWorker"):
-    """Wire core_api.list_namespaced_pod to return ``pods`` for ``component``."""
-
-    def _list(*args, **kwargs):
-        label_selector = kwargs.get("label_selector", "")
-        result = MagicMock()
-        result.items = (
-            pods if f"nvidia.com/dynamo-component={component}" in label_selector else []
-        )
-        return result
-
-    mock_core_api.list_namespaced_pod.side_effect = _list
+    """Wire the single DGD-scoped Pod LIST and label its mock Pods."""
+    for pod in pods:
+        pod.metadata.labels = {"nvidia.com/dynamo-component": component}
+    result = MagicMock()
+    result.items = pods
+    mock_core_api.list_namespaced_pod.return_value = result
 
 
 def test_is_spec_generation_observed_requires_catch_up(k8s_api):
@@ -660,29 +657,20 @@ def test_worker_pods_settled_differing_prefill_decode_caps(k8s_api, mock_core_ap
         },
     }
 
-    def _list(*args, **kwargs):
-        label_selector = kwargs.get("label_selector", "")
-        result = MagicMock()
-        if "VllmPrefillWorker" in label_selector:
-            result.items = [
-                _make_pod("p-0", annotation="350"),
-                _make_pod("p-1", annotation="350"),
-            ]
-        elif "VllmDecodeWorker" in label_selector:
-            result.items = [
-                _make_pod("d-0", annotation="300"),
-                _make_pod("d-1", annotation="300"),
-            ]
-        else:
-            result.items = []
-        return result
-
-    mock_core_api.list_namespaced_pod.side_effect = _list
+    result = MagicMock()
+    result.items = [
+        _make_pod("p-0", annotation="350", component="VllmPrefillWorker"),
+        _make_pod("p-1", annotation="350", component="VllmPrefillWorker"),
+        _make_pod("d-0", annotation="300", component="VllmDecodeWorker"),
+        _make_pod("d-1", annotation="300", component="VllmDecodeWorker"),
+    ]
+    mock_core_api.list_namespaced_pod.return_value = result
     settled, pending = k8s_api.worker_pods_settled(
         dgd, {"VllmPrefillWorker": "350", "VllmDecodeWorker": "300"}
     )
     assert settled is True
     assert pending == []
+    mock_core_api.list_namespaced_pod.assert_called_once()
 
 
 def test_worker_pods_settled_multi_gpu_replica_compares_per_gpu_annotation(
@@ -1200,48 +1188,42 @@ def test_has_terminating_pods_true_when_running_pod_has_deletion_timestamp(
     are fully gone.  get_service_replica_status stays pod-free intentionally so
     non-power paths do not acquire the pods/list RBAC surface.
     """
-    deployment: Dict[str, Any] = {
-        "metadata": {"name": "my-dgd"},
-        "spec": {"components": [{"name": "decode-worker", "replicas": 1}]},
-        "status": {
-            "components": {
-                "decode-worker": {
-                    "availableReplicas": 1,
-                    "readyReplicas": 1,
-                    "updatedReplicas": 1,
-                }
-            }
-        },
-    }
     terminating = _make_pod(
         "pod-old",
         phase="Running",
         deletion_timestamp=sentinel.ts,
     )
-    _mock_pod_list(mock_core_api, [terminating], component="decode-worker")
 
-    assert k8s_api.has_terminating_pods(deployment, "decode-worker") is True
+    assert k8s_api.has_terminating_pods([terminating]) is True
+    mock_core_api.list_namespaced_pod.assert_not_called()
 
 
 def test_has_terminating_pods_false_when_no_deletion_timestamp(k8s_api, mock_core_api):
     """has_terminating_pods returns False when all pods are cleanly Running."""
-    deployment: Dict[str, Any] = {
-        "metadata": {"name": "my-dgd"},
-        "spec": {"components": [{"name": "decode-worker", "replicas": 1}]},
-        "status": {
-            "components": {
-                "decode-worker": {
-                    "availableReplicas": 1,
-                    "readyReplicas": 1,
-                    "updatedReplicas": 1,
-                }
-            }
-        },
-    }
     running = _make_pod("pod-0", phase="Running")
-    _mock_pod_list(mock_core_api, [running], component="decode-worker")
 
-    assert k8s_api.has_terminating_pods(deployment, "decode-worker") is False
+    assert k8s_api.has_terminating_pods([running]) is False
+    mock_core_api.list_namespaced_pod.assert_not_called()
+
+
+def test_list_and_partition_pods_uses_one_dgd_scoped_request(k8s_api, mock_core_api):
+    prefill = _make_pod("prefill-0", component="VllmPrefillWorker")
+    decode = _make_pod("decode-0", component="VllmDecodeWorker")
+    result = MagicMock()
+    result.items = [prefill, decode]
+    mock_core_api.list_namespaced_pod.return_value = result
+
+    pods = k8s_api.list_pods_for_graph("my-dgd")
+    by_component = k8s_api.partition_pods_by_component(pods)
+
+    mock_core_api.list_namespaced_pod.assert_called_once_with(
+        namespace="default",
+        label_selector="nvidia.com/dynamo-graph-deployment-name=my-dgd",
+    )
+    assert by_component == {
+        "VllmPrefillWorker": [prefill],
+        "VllmDecodeWorker": [decode],
+    }
 
 
 def test_worker_pods_settled_terminating_pod_correct_annotation_blocks(

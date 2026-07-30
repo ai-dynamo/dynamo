@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import logging
 import os
@@ -726,27 +727,58 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        *,
-        check_terminating_pods: bool = False,
     ) -> tuple[int, int, bool]:
-        """
-        Get actual ready worker counts for prefill and decode from DGD status.
-
-        Args:
-            check_terminating_pods: When True, also call has_terminating_pods for
-                each stable component so that scale-downs whose Deployment status
-                already reads desired==available but still have lingering pods with
-                a deletionTimestamp are reported as not-yet-stable.  Must only be
-                True when enable_power_awareness is on: the pod list requires the
-                pods/list RBAC permission granted at install time by
-                ``planner.powerAwareness.enabled`` in the Helm chart.
-
-        Returns:
-            tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
-            - is_stable: False if any component is in a rollout (scaling should be skipped)
-        """
+        """Get ready worker counts from DGD status without listing Pods."""
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        return self._worker_counts_from_snapshot(
+            deployment,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
 
+    async def get_power_aware_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Get power-safe worker counts without blocking the Planner event loop.
+
+        One thread dispatch contains the synchronous DGD GET and the single
+        DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
+        component before terminating-Pod checks run.
+        """
+        return await asyncio.to_thread(
+            self._get_power_aware_worker_counts_sync,
+            prefill_component_name,
+            decode_component_name,
+        )
+
+    def _get_power_aware_worker_counts_sync(
+        self,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+    ) -> tuple[int, int, bool]:
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        dgd_name = deployment.get("metadata", {}).get("name", "")
+        pods = self.kube_api.list_pods_for_graph(dgd_name) if dgd_name else []
+        pods_by_component = self.kube_api.partition_pods_by_component(pods)
+        return self._worker_counts_from_snapshot(
+            deployment,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+            pods_by_component=pods_by_component,
+            power_aware=True,
+        )
+
+    def _worker_counts_from_snapshot(
+        self,
+        deployment: dict,
+        *,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+        pods_by_component: Optional[dict[str, list]] = None,
+        power_aware: bool = False,
+    ) -> tuple[int, int, bool]:
         prefill_count = 0
         decode_count = 0
         all_stable = True
@@ -762,8 +794,10 @@ class KubernetesConnector(PlannerConnector):
             )
             if (
                 is_stable
-                and check_terminating_pods
-                and self.kube_api.has_terminating_pods(deployment, service.name)
+                and power_aware
+                and self.kube_api.has_terminating_pods(
+                    (pods_by_component or {}).get(service.name, [])
+                )
             ):
                 is_stable = False
             if not is_stable:
@@ -781,24 +815,25 @@ class KubernetesConnector(PlannerConnector):
             )
             if (
                 is_stable
-                and check_terminating_pods
-                and self.kube_api.has_terminating_pods(deployment, service.name)
+                and power_aware
+                and self.kube_api.has_terminating_pods(
+                    (pods_by_component or {}).get(service.name, [])
+                )
             ):
                 is_stable = False
             if not is_stable:
                 all_stable = False
             decode_count = ready_replicas
 
-        if check_terminating_pods:
+        if power_aware:
             is_blocking, reason = self.kube_api.is_rolling_update_blocking_settlement(
                 deployment
             )
             if not is_blocking:
                 # Failed is not in ROLLING_UPDATE_BLOCKING_PHASES because at
                 # startup it raises immediately rather than blocking. At runtime
-                # there is no raise, so treat Failed as fail-closed (unstable)
-                # so power-aware ticks do not admit scale-ups during a terminal
-                # rollout state.
+                # there is no raise, so the dedicated power path treats Failed as
+                # fail-closed (unstable) and does not admit scale-ups.
                 rolling = deployment.get("status", {}).get("rollingUpdate") or {}
                 if rolling.get("phase") == "Failed":
                     is_blocking = True

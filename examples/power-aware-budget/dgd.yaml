@@ -10,6 +10,11 @@
 # and applies the NVML/DCGM cap. The Planner only READS these caps from the DGD
 # and combines them with `total_gpu_power_limit` (in the mounted PlannerConfig)
 # to project a power budget and clamp scale-up. The Planner never patches Pods.
+#
+# The annotation, effective main-container nvidia.com/gpu count (limit first,
+# request fallback), and multinode.nodeCount are immutable for an annotated
+# component. Delete and recreate the DGD to change that tuple. Restart the
+# Planner process after changing total_gpu_power_limit.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
