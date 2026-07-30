@@ -111,12 +111,28 @@ pub enum KvDcRelayError {
 }
 
 #[derive(Debug, Clone)]
-pub struct KvDcRelayConfig {
-    pub namespace_filter: Option<String>,
-    pub endpoint_prefix: Option<String>,
+pub struct KvDcRelayProducerConfig {
+    pub expected_unique_blocks: usize,
     pub publication_threshold: usize,
     pub publication_delay_ms: u64,
     pub recovery_attempt_timeout_ms: u64,
+}
+
+impl Default for KvDcRelayProducerConfig {
+    fn default() -> Self {
+        Self {
+            expected_unique_blocks: DEFAULT_EXPECTED_UNIQUE_BLOCKS,
+            publication_threshold: DEFAULT_PUBLICATION_THRESHOLD,
+            publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
+            recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KvDcRelayConfig {
+    pub discovery: KvDcRelayDiscoveryConfig,
+    pub producer: KvDcRelayProducerConfig,
     #[cfg(feature = "kv-dc-relay-wan")]
     pub transport: Option<KvDcRelayTransportConfig>,
 }
@@ -124,11 +140,11 @@ pub struct KvDcRelayConfig {
 impl Default for KvDcRelayConfig {
     fn default() -> Self {
         Self {
-            namespace_filter: None,
-            endpoint_prefix: None,
-            publication_threshold: DEFAULT_PUBLICATION_THRESHOLD,
-            publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
-            recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
+            discovery: KvDcRelayDiscoveryConfig {
+                watch_all: true,
+                ..Default::default()
+            },
+            producer: KvDcRelayProducerConfig::default(),
             #[cfg(feature = "kv-dc-relay-wan")]
             transport: None,
         }
@@ -557,16 +573,21 @@ impl KvDcRelay {
             dc_id.trim() == dc_id,
             "KV DC Relay dc_id must not contain leading or trailing whitespace"
         );
+        config.discovery.validate()?;
         anyhow::ensure!(
-            config.publication_threshold != 0,
+            config.producer.expected_unique_blocks != 0,
+            "KV DC Relay expected_unique_blocks must be positive"
+        );
+        anyhow::ensure!(
+            config.producer.publication_threshold != 0,
             "KV DC Relay publication_threshold must be positive"
         );
         anyhow::ensure!(
-            config.publication_delay_ms != 0,
+            config.producer.publication_delay_ms != 0,
             "KV DC Relay publication_delay_ms must be positive"
         );
         anyhow::ensure!(
-            config.recovery_attempt_timeout_ms != 0,
+            config.producer.recovery_attempt_timeout_ms != 0,
             "KV DC Relay recovery_attempt_timeout_ms must be positive"
         );
         #[cfg(feature = "kv-dc-relay-wan")]
@@ -576,26 +597,24 @@ impl KvDcRelay {
             transport.validate()?;
         }
         let publication = ActorPublicationConfig {
-            threshold: config.publication_threshold,
-            delay: Duration::from_millis(config.publication_delay_ms),
+            threshold: config.producer.publication_threshold,
+            delay: Duration::from_millis(config.producer.publication_delay_ms),
         };
-        let discovery = KvDcRelayDiscoveryConfig {
-            watch_all: config.namespace_filter.is_none(),
-            namespaces: config.namespace_filter.into_iter().collect(),
-            endpoint_prefixes: config.endpoint_prefix.into_iter().collect(),
-        };
+        let relay_identity =
+            DcRelayIdentity::new(component.drt().connection_id(), new_relay_incarnation()?);
         let cancel = component.drt().child_token();
-        let membership =
-            DcMembershipWatch::start(component.drt().discovery(), discovery, cancel.clone())
-                .await?;
+        let membership = DcMembershipWatch::start(
+            component.drt().discovery(),
+            config.discovery,
+            cancel.clone(),
+        )
+        .await?;
         let membership_rx = membership.subscribe();
         let statuses = Arc::new(RwLock::new(HashMap::new()));
         let dc_id: Arc<str> = Arc::from(dc_id);
-        let relay_identity =
-            DcRelayIdentity::new(component.drt().connection_id(), new_relay_incarnation()?);
         let ckf_dc_id = stable_dc_id(dc_id.as_ref());
         let actor_config = PoolActorConfig {
-            expected_unique_blocks: DEFAULT_EXPECTED_UNIQUE_BLOCKS,
+            expected_unique_blocks: config.producer.expected_unique_blocks,
             publication_threshold: publication.threshold,
             publication_delay: publication.delay,
         };
@@ -646,7 +665,7 @@ impl KvDcRelay {
             membership_rx,
             statuses.clone(),
             pools.clone(),
-            Duration::from_millis(config.recovery_attempt_timeout_ms),
+            Duration::from_millis(config.producer.recovery_attempt_timeout_ms),
             cancel.child_token(),
         ));
         Ok(Self {

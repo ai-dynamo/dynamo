@@ -24,8 +24,10 @@ mod transport;
 #[cfg(feature = "kv-dc-relay-wan")]
 mod transport_config;
 
+pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
+    KvDcRelayProducerConfig,
 };
 #[cfg(feature = "ckf-diagnostics")]
 pub use host::{
