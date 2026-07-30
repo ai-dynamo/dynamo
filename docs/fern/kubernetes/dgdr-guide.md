@@ -266,6 +266,21 @@ kubectl get dgdr my-model -n <namespace> \
 kubectl apply -f my-dgd.yaml -n <namespace>
 ```
 
+While `autoApply` is disabled, you may set or change
+`runtimeVersionOverride` during `Profiling` or `Ready`. To have the operator
+deploy the reviewed snapshot, enable `autoApply`:
+
+```bash
+kubectl patch dgdr my-model -n <namespace> --type=merge \
+  -p '{"spec":{"runtimeVersionOverride":"1.4.0"}}'
+kubectl patch dgdr my-model -n <namespace> --type=merge \
+  -p '{"spec":{"autoApply":true}}'
+```
+
+You may also set or change the override in the update that enables
+`autoApply`. The operator applies the current value to the new DGD without
+changing the stored snapshot.
+
 </Step>
 
 </Steps>
@@ -278,7 +293,7 @@ A DGDR progresses through these phases. Profiling failures are terminal — they
 |---|---|
 | `Pending` | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
 | `Profiling` | Profiling job running (sub-phases: `Initializing`, `SweepingPrefill`, `SweepingDecode`, `SelectingConfig`, `BuildingCurves`, `GeneratingDGD`, `Done`) |
-| `Ready` | Profiling complete; config stored in `.status.profilingResults.selectedConfig`. Terminal when `autoApply: false`. |
+| `Ready` | Profiling complete; config stored in `.status.profilingResults.selectedConfig`. Waits for manual application or for `autoApply` to be enabled. |
 | `Deploying` | Creating the DGD (only when `autoApply: true`) |
 | `Deployed` | DGD is running and healthy |
 | `Failed` | Unrecoverable error — check events and conditions |
@@ -309,7 +324,7 @@ For the full lifecycle, conditions, and monitoring command reference, see [DGDR 
 | **OOM during profiling or serving** | The model doesn't fit in GPU memory at the selected TP. Raise `hardware.totalGpus`; edge cases (long context, KV overhead) need more than the minimum. |
 | **Profiler ignores extra GPUs** | Auto-detection caps at 32. Set `hardware.totalGpus` explicitly. |
 | **Profiling job won't schedule** | GPU nodes are tainted. Add tolerations through `overrides.profilingJob`. |
-| **Spec edits rejected** | The DGDR spec is immutable once it enters `Profiling`. Delete and recreate the DGDR. |
+| **Spec edits rejected** | The DGDR spec is immutable once it enters `Profiling`, except that a request with `autoApply: false` may set or change `runtimeVersionOverride` during `Profiling` or `Ready`. In `Ready`, it may also enable `autoApply`. Delete and recreate the DGDR for other changes. |
 | **Multinode deployment errors out** | Grove or LWS is missing. See [Multinode Orchestration](multinode-installation.md). |
 
 ### Profiling Job Fails to Schedule
