@@ -258,10 +258,10 @@ fn trace_sample_ratio_from_env() -> Option<f64> {
 }
 
 fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return Ok(handle);
-    }
-
+    // Keep our own long-lived runtime for the exporter. Using the ambient one
+    // (Handle::try_current) pins the exporter to whatever runtime is live at init,
+    // since INIT (Once) runs setup once. If that's a #[tokio::test] runtime, export
+    // silently dies when it drops.
     static OTEL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     if let Some(rt) = OTEL_RUNTIME.get() {
         return Ok(rt.handle().clone());
@@ -272,8 +272,7 @@ fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
         .thread_name("dynamo-otel-export")
         .enable_all()
         .build()?;
-    let _ = OTEL_RUNTIME.set(rt);
-    Ok(OTEL_RUNTIME.get().expect("set above").handle().clone())
+    Ok(OTEL_RUNTIME.get_or_init(|| rt).handle().clone())
 }
 
 fn build_span_exporter(
@@ -1254,7 +1253,8 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         })
 }
 
-/// Initialize the logger - must be called when Tokio runtime is available
+/// Initialize logging (idempotent). Safe to call with or without a running
+/// Tokio runtime — OTLP exporters fall back to a persistent background runtime.
 pub fn init() {
     INIT.call_once(|| {
         if let Err(e) = setup_logging() {
@@ -1300,7 +1300,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let sample_ratio = trace_sample_ratio_from_env();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
             // Building the OTLP exporters spawns a background flush task, so it needs a
             // live, persistent reactor
             let otel_handle = otel_runtime_handle()?;
@@ -2884,6 +2884,12 @@ pub mod tests {
                 .env("OTEL_EXPORT_ENABLED", "1")
                 .env("DYN_LOGGING_JSONL", jsonl)
                 .env("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://{addr}"))
+                // Don't let host-inherited per-signal overrides redirect an exporter
+                // away from our listener or change its protocol.
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
                 .env("OTEL_BSP_SCHEDULE_DELAY", "100") // flush fast (ms) so it connects promptly
                 .output()
                 .expect("failed to run subprocess");
@@ -2921,9 +2927,13 @@ pub mod tests {
 
         init(); // real global init → setup_logging → otel_runtime_handle
 
-        // Emit real span + log data so both exporters have something to flush.
-        let _span = tracing::info_span!("otlp_sync_smoke").entered();
-        tracing::info!("otlp sync-init smoke log");
+        // Emit real span + log data. Close the span (drop the guard) BEFORE the
+        // wait below: a span is only exported when it ends, so an open span would
+        // leave the batch trace exporter with nothing to flush in the window.
+        {
+            let _span = tracing::info_span!("otlp_sync_smoke").entered();
+            tracing::info!("otlp sync-init smoke log");
+        }
 
         // Give the batch exporter's scheduled flush time to fire and connect.
         std::thread::sleep(std::time::Duration::from_secs(2));
