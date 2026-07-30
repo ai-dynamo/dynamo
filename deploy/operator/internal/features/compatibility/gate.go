@@ -9,15 +9,17 @@ import (
 	semver "github.com/Masterminds/semver/v3"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Gated exposes the versions used to evaluate a compatibility gate.
+// Gated exposes the metadata and runtime version used to evaluate a
+// compatibility gate.
 //
-// A nil version means that the corresponding version could not be resolved.
+// A nil runtime version means that it could not be resolved.
 type Gated interface {
+	metav1.Object
 	RuntimeVersion() *runtimeversion.Version
-	OriginVersion() *semver.Version
 }
 
 // Predicate decides whether a resource explicitly opts in to a feature.
@@ -104,7 +106,7 @@ func (g Gate[T]) Evaluate(resource T) Decision {
 
 	// Enable resources created after the new default was introduced.
 	if g.MinOriginVersion != nil {
-		originVersion := resource.OriginVersion()
+		originVersion := g.originVersion(resource)
 
 		// Apply the new default when the resource was created after its introduction.
 		if originVersion != nil && originVersion.Compare(g.MinOriginVersion) >= 0 {
@@ -146,40 +148,43 @@ func (g Gate[T]) Evaluate(resource T) Decision {
 	}
 }
 
-// Versions is a lightweight Gated implementation for call sites that have
-// already resolved their origin and runtime versions.
-type Versions struct {
-	Runtime *runtimeversion.Version
-	Origin  *semver.Version
-}
-
-// RuntimeVersion returns the resolved Dynamo runtime compatibility version.
-func (v Versions) RuntimeVersion() *runtimeversion.Version {
-	return v.Runtime
-}
-
-// OriginVersion returns the operator version that created the resource.
-func (v Versions) OriginVersion() *semver.Version {
-	return v.Origin
-}
-
-// VersionsFromAnnotations resolves the origin version from Kubernetes annotations.
-func VersionsFromAnnotations(annotations map[string]string) Versions {
+// originVersion resolves the resource's durable operator origin annotation.
+func (g Gate[T]) originVersion(resource T) *semver.Version {
 	// Preserve the legacy default when no durable origin version is available.
-	originValue, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	originValue, exists := resource.GetAnnotations()[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	if !exists {
-		return Versions{}
+		return nil
 	}
 
 	// Treat malformed legacy annotations as an unknown origin version.
 	originVersion, err := semver.NewVersion(originValue)
 	if err != nil {
-		log.Log.WithName("compatibility").Info("Invalid operator origin version",
+		log.Log.WithName("compatibility").WithValues("feature", g.Name).Info(
+			"Invalid operator origin version",
 			"version", originValue,
 			"error", err.Error())
 
-		return Versions{}
+		return nil
 	}
 
-	return Versions{Origin: originVersion}
+	return originVersion
+}
+
+// VersionedResource adapts resolved metadata and runtime information to Gated.
+type VersionedResource struct {
+	metav1.Object
+	Runtime *runtimeversion.Version
+}
+
+// RuntimeVersion returns the resolved Dynamo runtime compatibility version.
+func (r VersionedResource) RuntimeVersion() *runtimeversion.Version {
+	return r.Runtime
+}
+
+// NewVersionedResource creates a lightweight Gated adapter for legacy call sites.
+func NewVersionedResource(object metav1.Object, runtimeVersion *runtimeversion.Version) VersionedResource {
+	return VersionedResource{
+		Object:  object,
+		Runtime: runtimeVersion,
+	}
 }

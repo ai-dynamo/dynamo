@@ -28,7 +28,7 @@ var (
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. It is enabled for resources
 	// originally created by operator >= 1.0.0.
-	VLLMMultiprocessing = Gate[Versions]{
+	VLLMMultiprocessing = Gate[VersionedResource]{
 		Name:             "VLLMMultiprocessing",
 		MinOriginVersion: semver.MustParse("1.0.0"),
 	}
