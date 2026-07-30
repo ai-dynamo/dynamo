@@ -97,7 +97,9 @@ def test_nvdec_video_data_builds_pt_videodata(monkeypatch) -> None:
     from dynamo.common.multimodal import nvdec_decoder
 
     n, h, w = 3, 4, 5
-    frames_np = (np.arange(n * h * w * 3, dtype=np.uint8) % 256).reshape(n, h, w, 3)
+    # Mod in the default int dtype, then cast: `uint8_array % 256` raises
+    # OverflowError under NumPy 2.x / NEP 50 (256 is out of uint8 range).
+    frames_np = (np.arange(n * h * w * 3) % 256).astype(np.uint8).reshape(n, h, w, 3)
     meta = {"total_num_frames": 24, "fps": 12.0, "frames_indices": [0, 8, 16]}
     # _nvdec_video_data imports decode_video_nvdec lazily from this module, so
     # patching the source attribute is picked up on the fresh import.
