@@ -3817,6 +3817,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_completion_request_accepts_empty_image_url_with_uuid() {
+        let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
+        assert_eq!(
+            request["messages"][0]["content"][0]["image_url"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            request["messages"][0]["content"][0]["text"],
+            "raw \u{fffd} \u{1b} data"
+        );
+        assert_eq!(
+            request["messages"][0]["content"][1]["image_url"],
+            serde_json::Value::Null
+        );
+        assert_eq!(request["messages"][0]["content"][1]["uuid"], "image-42");
+    }
+
+    #[test]
     fn test_parse_completion_request_escapes_control_chars_in_prompt() {
         let body =
             b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
