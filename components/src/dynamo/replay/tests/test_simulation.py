@@ -156,9 +156,43 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["output_tokens"] == 128
     assert seen["request_count"] == 320
     assert seen["replay_concurrency"] == 32
-    assert seen["arrival_interval_ms"] == 1.0
+    assert seen["arrival_interval_ms"] is None
     assert seen["num_prefill_workers"] == 2
     assert seen["num_decode_workers"] == 4
+    assert report.metrics == {"output_throughput_tok_s": 99.0}
+
+
+def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
+    seen = {}
+
+    def fake_run_synthetic_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return {"output_throughput_tok_s": 99.0}
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "run_synthetic_trace_replay",
+        fake_run_synthetic_trace_replay,
+    )
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_path": None,
+            "isl": 512,
+            "osl": 128,
+            "num_request_ratio": 10.0,
+            "concurrency": None,
+            "request_rate": 20.0,
+        },
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["request_count"] == 200
+    assert seen["replay_concurrency"] is None
+    assert seen["arrival_interval_ms"] == 50.0
     assert report.metrics == {"output_throughput_tok_s": 99.0}
 
 

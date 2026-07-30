@@ -238,7 +238,7 @@ class DynamoReplayRunner:
         workload = spec.workload
         request_rate = workload.get("request_rate")
         arrival_interval_ms = (
-            1000.0 / float(request_rate) if request_rate is not None else 1.0
+            1000.0 / float(request_rate) if request_rate is not None else None
         )
         load: float
         if spec.concurrency is not None:

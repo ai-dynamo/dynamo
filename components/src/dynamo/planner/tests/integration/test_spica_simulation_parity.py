@@ -68,6 +68,26 @@ def _config(*, scaling_policy: list[str], **sweep_overrides) -> SmartSearchConfi
     )
 
 
+def _synthetic_config() -> SmartSearchConfig:
+    return SmartSearchConfig(
+        search_space={
+            "model_name": "deepseek-ai/DeepSeek-V3",
+            "hardware_sku": "h200_sxm",
+            "backend": ["vllm"],
+            "deployment_mode": ["agg"],
+            "gpu_budget": 32,
+        },
+        workload={
+            "isl": 32,
+            "osl": 16,
+            "concurrency": 2,
+            "num_request_ratio": 1.0,
+        },
+        sweep={"max_rounds": 1, "candidates_per_round": 2, "parallel_evals": 2},
+        goal={"target": "throughput"},
+    )
+
+
 def _run_one(policy: str):
     config = _config(
         scaling_policy=[policy],
@@ -178,3 +198,18 @@ def test_real_spawned_smart_search_returns_ranked_candidates() -> None:
     assert best.score == pytest.approx(
         best.metrics["goodput_output_throughput_tok_s"] / avg_gpu
     )
+
+
+@pytest.mark.timeout(300)
+def test_real_spawned_synthetic_closed_loop_uses_one_load_control() -> None:
+    candidates = run_smart_search(
+        _synthetic_config(),
+        runner_factory=DynamoReplayRunnerFactory(),
+        show_progress=False,
+    )
+
+    assert candidates
+    assert all(
+        candidate.metrics["output_throughput_tok_s"] > 0.0 for candidate in candidates
+    )
+    assert all(candidate.used_gpus <= 32 for candidate in candidates)
