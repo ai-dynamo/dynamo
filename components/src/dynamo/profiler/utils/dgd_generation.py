@@ -113,6 +113,7 @@ def assemble_final_config(
         enable_trtllm_chunked_prefill(dgd_config)
 
     if not mocker and not planner:
+        apply_runtime_version_override(dgdr, dgd_config)
         return dgd_config
 
     # Save picked config for auditing
@@ -156,9 +157,22 @@ def assemble_final_config(
         if profile_cm:
             config_maps.append(profile_cm)
 
+    apply_runtime_version_override(dgdr, base)
     if config_maps:
         return config_maps + [base]
     return base
+
+
+def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
+    """Apply the DGDR runtime version to every generated DGD service."""
+    override = dgdr.runtimeVersionOverride
+    if not override:
+        return
+
+    services = config_dict.get("spec", {}).get("services", {})
+    for service_config in services.values():
+        if isinstance(service_config, dict):
+            service_config["runtimeVersionOverride"] = override
 
 
 def _vllm_worker_roles() -> dict[str, str]:

@@ -445,6 +445,33 @@ pub struct LocalModel {
     self_host_metadata: bool,
 }
 
+/// Register a Model Deployment Card via the discovery system.
+/// Derives the LoRA suffix from card.lora and constructs the DiscoverySpec.
+/// Derive LoRA suffix from an optional adapter name.
+/// Returns None if lora_name is None, otherwise returns a slugified version of the name.
+pub fn derive_lora_suffix(lora_name: Option<&str>) -> Option<String> {
+    lora_name.map(|name| Slug::slugify(name).to_string())
+}
+
+pub async fn register_model_card(
+    endpoint: &Endpoint,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<()> {
+    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
+    let model_suffix = derive_lora_suffix(lora_name);
+
+    let discovery = endpoint.drt().discovery();
+    let spec = DiscoverySpec::from_model_with_suffix(
+        endpoint.component().namespace().name().to_string(),
+        endpoint.component().name().to_string(),
+        endpoint.name().to_string(),
+        card,
+        model_suffix,
+    )?;
+    let _instance = discovery.register(spec).await?;
+    Ok(())
+}
+
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
     /// Downloads the model from Hugging Face if necessary.
@@ -589,10 +616,8 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
-        // Compute model_suffix from lora_name if present
-        let model_suffix = lora_info
-            .as_ref()
-            .map(|info| Slug::slugify(&info.name).to_string());
+        let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
+        let model_suffix = derive_lora_suffix(lora_name);
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -630,16 +655,7 @@ impl LocalModel {
         }
 
         // Register the Model Deployment Card via discovery interface
-        // The model_suffix (for LoRA) will be appended AFTER the instance_id
-        let discovery = endpoint.drt().discovery();
-        let spec = DiscoverySpec::from_model_with_suffix(
-            endpoint.component().namespace().name().to_string(),
-            endpoint.component().name().to_string(),
-            endpoint.name().to_string(),
-            &self.card,
-            model_suffix,
-        )?;
-        let _instance = discovery.register(spec).await?;
+        register_model_card(endpoint, &self.card).await?;
 
         Ok(())
     }
@@ -761,7 +777,7 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = derive_lora_suffix(lora_name);
         let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {

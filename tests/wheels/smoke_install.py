@@ -382,6 +382,72 @@ assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
     run([str(venv_python), "-c", code])
 
 
+def run_mocker_aic_import_smoke(venv_python: Path) -> None:
+    code = r"""
+import json
+import os
+from pathlib import Path
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+import aiconfigurator_core
+from aiconfigurator_core.sdk.engine import compile_engine
+from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
+from dynamo.mocker import AicEngineConfig, EnginePerfLimits, RustEnginePerfModel
+
+assert aiconfigurator_core and compile_engine and estimate_num_gpu_blocks
+
+package_root = Path(aiconfigurator_core.__file__).resolve().parent
+assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
+assert (package_root / "systems/h200_sxm.yaml").is_file()
+parquet_files = list(
+    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.19.0/*.parquet")
+)
+assert parquet_files
+for path in parquet_files:
+    with path.open("rb") as handle:
+        assert handle.read(4) == b"PAR1"
+
+model = RustEnginePerfModel.from_native(
+    aic_config=AicEngineConfig(
+        model_name="Qwen/Qwen3-32B",
+        backend="vllm",
+        system_name="h200_sxm",
+        backend_version="0.19.0",
+        tp_size=1,
+        attention_dp_size=1,
+    ),
+    worker_type="prefill",
+    limits=EnginePerfLimits(
+        max_num_batched_tokens=4096,
+        max_num_seqs=128,
+        max_kv_tokens=1_000_000,
+    ),
+)
+estimate = model.estimate_forward_pass_time(
+    [
+        ForwardPassMetrics(
+            scheduled_requests=ScheduledRequestMetrics(
+                num_prefill_requests=1,
+                sum_prefill_tokens=1024,
+            )
+        )
+    ]
+)
+assert estimate is not None and estimate > 0.0
+diagnostics = json.loads(model.diagnostics())
+assert diagnostics["source"] == "aic"
+assert diagnostics["readiness"] == "ready"
+assert diagnostics["last_warning"] is None
+"""
+    run([str(venv_python), "-c", code])
+
+
 OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
 
 
@@ -408,5 +474,25 @@ def install_core(
             assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
             import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
             run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
+    finally:
+        shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
+
+
+def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
+    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
+    runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
+
+    venv_python = create_venv(python_spec)
+    try:
+        # The wheelhouse contains Dynamo-produced artifacts. Third-party optional
+        # dependencies such as aiconfigurator-core resolve from their package index.
+        pip_install(
+            venv_python,
+            wheelhouse,
+            [str(runtime), f"{ai_dynamo}[mocker]"],
+        )
+        pip_check(venv_python)
+        assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
+        run_mocker_aic_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

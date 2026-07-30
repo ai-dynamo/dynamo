@@ -46,10 +46,6 @@ inputs:
     description: 'Docker Hub password for helm registry login'
     required: false
     default: ''
-  vcluster_k8s_version:
-    description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
-    required: false
-    default: 'v1.32.13'
   vcluster_host_priority_class:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
@@ -250,14 +246,22 @@ runs:
           VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
         fi
 
-        # The K8s version must be supported by the kr8s Python library used in deploy tests.
-        # This is independent of the host cluster version.
+        HOST_K8S_GIT_VERSION=$(kubectl version --output=json | jq -r '.serverVersion.gitVersion // empty')
+        if [[ ! "${HOST_K8S_GIT_VERSION}" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+          echo "::error::Unable to resolve the host Kubernetes version from '${HOST_K8S_GIT_VERSION}'"
+          exit 1
+        fi
+        VCLUSTER_K8S_VERSION="${BASH_REMATCH[1]}"
+
+        # vCluster distro tags use upstream versions, so strip provider suffixes.
+        # Guest/host skew can break Pod status sync (loft-sh/vcluster#3578).
+        echo "Using host Kubernetes ${HOST_K8S_GIT_VERSION}; pinning vCluster guest to ${VCLUSTER_K8S_VERSION}"
         vcluster create "${VCLUSTER_NAME}" \
           --namespace "${NAMESPACE}" \
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
+          --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
           "${VCLUSTER_HELM_ARGS[@]}"
         echo "::endgroup::"
 
@@ -438,7 +442,6 @@ runs:
         helm upgrade --install dynamo-platform . --namespace default \
           "${IMAGE_ARGS[@]}" \
           --set dynamo-operator.gpuDiscovery.enabled=false \
-          --set dynamo-operator.webhook.service.publishNotReadyAddresses=true \
           "${CHECKPOINT_HELM_ARGS[@]}" \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
@@ -460,56 +463,58 @@ runs:
         # The crd-apply init container installs CRDs asynchronously after Helm returns.
         # Poll for the resource because a condition wait fails if it does not exist yet.
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
-        CRD=dynamographdeployments.nvidia.com
-        end=$((SECONDS + 1800))
-        until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
-          if [ $SECONDS -ge $end ]; then
-            echo "::error::CRD ${CRD} was not created after 1800s"
-            exit 1
-          fi
-          sleep 5
+        for CRD in dynamographdeployments.nvidia.com podcliquesets.grove.io; do
+          end=$((SECONDS + 1800))
+          until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+            if [ $SECONDS -ge $end ]; then
+              echo "::error::CRD ${CRD} was not created after 1800s"
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl --kubeconfig="${VKUBECONFIG}" \
+            wait --for=condition=established \
+            "crd/${CRD}" \
+            --timeout=120s
         done
-        kubectl --kubeconfig="${VKUBECONFIG}" \
-          wait --for=condition=established \
-          "crd/${CRD}" \
-          --timeout=120s
         echo "::endgroup::"
 
-    - name: Wait for operator manager container to be ready
+    - name: Wait for operator containers to be ready
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
-        echo "::group::Wait for operator manager container readiness (host namespace)"
+        echo "::group::Wait for operator container readiness (host namespace)"
         # Poll the host namespace instead of the vCluster API because Pod status
         # propagation can lag in either direction. The READY column confirms
-        # container readiness only; the admission smoke test below is the
-        # authoritative end-to-end readiness gate.
+        # container readiness reported by each webhook-aware probe; the
+        # admission smoke tests below are the authoritative end-to-end gate.
         end=$((SECONDS + 1800))
         while true; do
-          STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-            | grep 'dynamo-platform-dynamo-operator-controller-manager' \
-            | awk '{print $2}' | head -1)
-          if [ "${STATUS}" = "1/1" ]; then
-            echo "Operator manager container ready"
+          POD_STATUSES=()
+          mapfile -t POD_STATUSES < <(
+            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+              | awk '
+                  $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
+                  $1 ~ /^grove-operator-/ {
+                    print $1 "=" $2
+                  }
+                '
+          )
+          if [ "${#POD_STATUSES[@]}" -eq 2 ] \
+            && [ "${POD_STATUSES[0]#*=}" = "1/1" ] \
+            && [ "${POD_STATUSES[1]#*=}" = "1/1" ]; then
+            echo "Dynamo and Grove operator containers ready (${POD_STATUSES[*]})"
             break
           fi
-          if [ $SECONDS -ge $end ]; then
-            echo "::error::Operator manager container not ready after 1800s (last status: ${STATUS:-not found})"
+          if [ "${SECONDS}" -ge "${end}" ]; then
+            echo "::error::Expected two ready 1/1 operator Pods after 1800s (last status: ${POD_STATUSES[*]:-not found})"
             exit 1
           fi
-          echo "Waiting for operator manager container... status=${STATUS:-not found}"
+          echo "Waiting for two ready 1/1 operator Pods... status=${POD_STATUSES[*]:-not found}"
           sleep 15
         done
         echo "::endgroup::"
-
-    - name: Wait for CRDs to be established
-      shell: bash
-      run: |
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=120s
 
     - name: Verify operator image and admission webhooks
       shell: bash
@@ -527,35 +532,12 @@ runs:
           exit 1
         fi
 
-        echo "::group::Webhook Service routing override"
-        VIRTUAL_PUBLISH_NOT_READY=$(kubectl --kubeconfig="${VKUBECONFIG}" \
-          get services -n default \
-          -l app.kubernetes.io/component=webhook \
-          -o jsonpath='{.items[0].spec.publishNotReadyAddresses}')
-        if [ "${VIRTUAL_PUBLISH_NOT_READY}" != "true" ]; then
-          echo "::error::vCluster webhook Service does not publish not-ready addresses"
-          exit 1
-        fi
-
-        HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
-          -l app.kubernetes.io/component=webhook \
-          -o jsonpath='{.items[0].metadata.name}')
-        HOST_PUBLISH_NOT_READY=$(kubectl get service "${HOST_WEBHOOK_SERVICE}" \
-          -n "${NAMESPACE}" \
-          -o jsonpath='{.spec.publishNotReadyAddresses}')
-        if [ "${HOST_PUBLISH_NOT_READY}" != "true" ]; then
-          echo "::error::vCluster did not preserve publishNotReadyAddresses on the host webhook Service"
-          exit 1
-        fi
-        echo "Webhook Service publishes not-ready addresses in both virtual and host clusters"
-        echo "::endgroup::"
-
         echo "::group::Resolved operator image identity"
         kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
           -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
         echo "::endgroup::"
 
-        echo "::group::DynamoGraphDeployment admission smoke tests"
+        echo "::group::Admission webhook smoke tests"
         smoke_v1alpha1() {
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
             create --namespace=default --dry-run=server \
@@ -570,6 +552,9 @@ runs:
             Smoke:
               componentType: worker
               replicas: 0
+              extraPodSpec:
+                mainContainer:
+                  image: registry.example/runtime:1.1.0
         EOF
         }
 
@@ -587,26 +572,50 @@ runs:
           - name: Smoke
             type: worker
             replicas: 0
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    image: registry.example/runtime:1.1.0
         EOF
         }
 
-        run_admission_smoke_test() {
-          local version="$1"
+        smoke_grove() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: grove.io/v1alpha1
+        kind: PodCliqueSet
+        metadata:
+          name: ci-grove-webhook-smoke
+        spec:
+          replicas: 1
+          template:
+            cliques:
+            - name: smoke
+              spec:
+                roleName: smoke
+                replicas: 1
+                minAvailable: 1
+                podSpec:
+                  containers:
+                  - name: smoke
+                    image: registry.k8s.io/pause:3.10
+        EOF
+        }
+
+        SMOKE_OUTPUT=
+        run_webhook_smoke_test() {
+          local endpoint="$1"
           local output
-          local origin_version
           local deadline=$((SECONDS + 120))
           local attempt=1
           shift
 
           while true; do
             if output=$("$@" 2>&1); then
-              origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
-              if [ -z "${origin_version}" ]; then
-                echo "::error::${version} request succeeded without the operator origin-version mutation"
-                printf '%s\n' "${output}" >&2
-                return 1
-              fi
-              echo "${version} admission succeeded (operator origin version: ${origin_version})"
+              SMOKE_OUTPUT="${output}"
               return 0
             fi
 
@@ -618,19 +627,70 @@ runs:
             fi
 
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "::error::${version} admission smoke test did not become reachable within 120s"
+              echo "::error::${endpoint} admission smoke test did not become reachable within 120s"
               printf '%s\n' "${output}" >&2
               return 1
             fi
 
-            echo "::warning::${version} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
+            echo "::warning::${endpoint} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
             attempt=$((attempt + 1))
             sleep 2
           done
         }
 
-        run_admission_smoke_test v1alpha1 smoke_v1alpha1
-        run_admission_smoke_test v1beta1 smoke_v1beta1
+        verify_dynamo_admission() {
+          local version="$1"
+          local smoke_function="$2"
+          local origin_version
+
+          run_webhook_smoke_test "${version}" "${smoke_function}"
+          origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${SMOKE_OUTPUT}" | tail -1)
+          if [ -z "${origin_version}" ]; then
+            echo "::error::${version} request succeeded without the operator origin-version mutation"
+            printf '%s\n' "${SMOKE_OUTPUT}" >&2
+            return 1
+          fi
+          echo "${version} admission succeeded (operator origin version: ${origin_version})"
+        }
+
+        verify_grove_webhook_configuration() {
+          local resource_kind="$1"
+          local configuration_name="$2"
+          local webhook_name="$3"
+          local configuration
+
+          configuration=$(kubectl --kubeconfig="${VKUBECONFIG}" \
+            get "${resource_kind}/${configuration_name}" \
+            -o json)
+          if ! jq -e --arg webhook_name "${webhook_name}" '
+            any(.webhooks[];
+              .name == $webhook_name
+              and .failurePolicy == "Fail"
+              and any(.rules[];
+                (.apiGroups | index("grove.io")) != null
+                and (.apiVersions | index("v1alpha1")) != null
+                and (.resources | index("podcliquesets")) != null
+                and (.operations | index("CREATE")) != null
+              )
+            )
+          ' <<<"${configuration}" >/dev/null; then
+            echo "::error::${configuration_name} does not fail closed for grove.io/v1alpha1 PodCliqueSet creation"
+            return 1
+          fi
+        }
+
+        verify_dynamo_admission v1alpha1 smoke_v1alpha1
+        verify_dynamo_admission v1beta1 smoke_v1beta1
+        verify_grove_webhook_configuration \
+          mutatingwebhookconfiguration \
+          podcliqueset-defaulting-webhook \
+          pcs.defaulting.webhooks.grove.io
+        verify_grove_webhook_configuration \
+          validatingwebhookconfiguration \
+          podcliqueset-validating-webhook \
+          pcs.validating.webhooks.grove.io
+        run_webhook_smoke_test 'Grove PodCliqueSet' smoke_grove
+        echo "Grove PodCliqueSet defaulting and validation webhooks are installed and healthy"
         echo "::endgroup::"
 
     - name: Debug deployment failure
@@ -686,6 +746,21 @@ runs:
           echo "::warning::Host webhook Service not found"
         fi
 
+        HOST_GROVE_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
+          -l "vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default,app.kubernetes.io/name=grove-operator" \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "${HOST_GROVE_SERVICE}" ]; then
+          echo "::group::Grove webhook Service and endpoints (host namespace)"
+          kubectl get service "${HOST_GROVE_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpoints "${HOST_GROVE_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpointslices -n "${NAMESPACE}" \
+            -l "kubernetes.io/service-name=${HOST_GROVE_SERVICE}" \
+            -o yaml 2>&1 || true
+          echo "::endgroup::"
+        else
+          echo "::warning::Host Grove webhook Service not found"
+        fi
+
         echo "::group::vCluster syncer logs (host namespace)"
         kubectl logs -n "${NAMESPACE}" \
           -l "app=vcluster,release=${VCLUSTER_NAME}" \
@@ -702,11 +777,15 @@ runs:
         kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
         echo "::endgroup::"
 
-        echo "::group::Operator Pod and webhook Service YAML (vCluster)"
+        echo "::group::Operator Pods and webhook Services YAML (vCluster)"
         kubectl --kubeconfig="${VKUBECONFIG}" get pods -n default \
           -l control-plane=controller-manager -o yaml 2>&1 || true
         kubectl --kubeconfig="${VKUBECONFIG}" get services -n default \
           -l app.kubernetes.io/component=webhook -o yaml 2>&1 || true
+        kubectl --kubeconfig="${VKUBECONFIG}" get pods -n default \
+          -l app.kubernetes.io/name=grove-operator -o yaml 2>&1 || true
+        kubectl --kubeconfig="${VKUBECONFIG}" get service grove-operator \
+          -n default -o yaml 2>&1 || true
         echo "::endgroup::"
 
         NOT_READY=$(kubectl --kubeconfig=${VKUBECONFIG} get pods -n default --no-headers 2>/dev/null \

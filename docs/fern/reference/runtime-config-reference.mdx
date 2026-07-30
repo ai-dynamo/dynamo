@@ -140,6 +140,14 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_REASONING_PARSER`
 </ParamField>
 
+<ParamField path="--dyn-default-thinking-mode" type="string" default="null">
+  Thinking mode to apply when a request omits an explicit thinking control. Request-level `thinking`, `reasoning_effort`, and controls in `chat_template_args` or `chat_template_kwargs` take precedence. When unset, Dynamo preserves the model or chat template's native default. See [Deployment-Level Thinking Default](../reasoning/README.md#deployment-level-thinking-default) for examples and precedence details.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>enabled</Badge> <Badge intent="note" minimal>disabled</Badge></span>
+
+  Environment variable: `DYN_DEFAULT_THINKING_MODE`
+</ParamField>
+
 <ParamField path="--exclude-tools-when-tool-choice-none" type="boolean" default="true">
   Exclude tool definitions from the chat template when `tool_choice='none'`. Prevents models from generating unsolicited raw XML tool calls in the content field. This flag controls the Rust-native chat template path; a matching flag in `FrontendArgGroup` controls the Python processor side independently.
 
