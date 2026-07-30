@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::OutputSignal;
 
 #[derive(Default)]
@@ -31,8 +32,15 @@ enum RequestState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RequestCancellation {
+    Request,
+    Destination(HandoffId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RequestLifecycle {
     state: RequestState,
+    cancellation: RequestCancellation,
     stream_abandoned: bool,
     terminal_seen: bool,
 }
@@ -53,6 +61,7 @@ impl RequestRoute {
     ) -> Self {
         let (lifecycle_tx, _) = watch::channel(RequestLifecycle {
             state: RequestState::Submitting,
+            cancellation: RequestCancellation::Request,
             stream_abandoned: false,
             terminal_seen: false,
         });
@@ -65,12 +74,13 @@ impl RequestRoute {
         }
     }
 
-    pub(super) fn activate(&self) {
+    pub(super) fn activate(&self, cancellation: RequestCancellation) {
         self.lifecycle_tx.send_if_modified(|lifecycle| {
             if lifecycle.state != RequestState::Submitting {
                 return false;
             }
             lifecycle.state = RequestState::Active;
+            lifecycle.cancellation = cancellation;
             true
         });
     }
@@ -103,17 +113,17 @@ impl RequestRoute {
         }
     }
 
-    pub(super) fn begin_cancellation(&self) -> bool {
-        let mut started = false;
+    pub(super) fn begin_cancellation(&self) -> Option<RequestCancellation> {
+        let mut cancellation = None;
         self.lifecycle_tx.send_if_modified(|lifecycle| {
             if lifecycle.state == RequestState::Active {
                 lifecycle.state = RequestState::Cancelling;
-                started = true;
+                cancellation = Some(lifecycle.cancellation);
                 return true;
             }
             false
         });
-        started
+        cancellation
     }
 
     pub(super) fn finish_cancellation(&self, result: &anyhow::Result<bool>) -> bool {

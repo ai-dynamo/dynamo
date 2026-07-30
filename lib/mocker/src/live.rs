@@ -39,8 +39,8 @@ use handoff::{
     supervise_lifecycle_dispatcher,
 };
 use request::{
-    ObservedOutput, OutputDelivery, RequestRoute, RequestRoutes, Routes, remove_route,
-    route_is_registered, shutdown_routes,
+    ObservedOutput, OutputDelivery, RequestCancellation, RequestRoute, RequestRoutes, Routes,
+    remove_route, route_is_registered, shutdown_routes,
 };
 
 const SCHEDULER_EVENT_CAPACITY: usize = 8;
@@ -209,6 +209,7 @@ impl LiveEngine {
         let dispatcher = runtime.spawn(run_event_dispatcher(
             event_rx,
             Arc::clone(&routes),
+            command_tx.clone(),
             cancellation_tx.clone(),
             runtime.clone(),
             cancel.clone(),
@@ -307,6 +308,7 @@ impl LiveEngine {
             rx,
             route: Arc::downgrade(&route),
             routes: Arc::clone(&self.inner.routes),
+            command_tx: self.inner.command_tx.clone(),
             cancellation_tx: self.inner.cancellation_tx.clone(),
             runtime: self.inner.runtime.clone(),
         };
@@ -348,7 +350,7 @@ impl LiveEngine {
             let result = send_command(&command_tx, command).await;
             let admission = submission.validate(result, client_id, scheduler_id);
             if admission.is_ok() {
-                submission_route.activate();
+                submission_route.activate(submission.cancellation());
             } else {
                 submission_route.shutdown();
                 remove_route(&routes, &submission_route);
@@ -388,6 +390,7 @@ impl LiveEngine {
         route.abandon_stream();
         await_cancellation(spawn_cancellation(
             &self.inner.runtime,
+            self.inner.command_tx.clone(),
             self.inner.cancellation_tx.clone(),
             Arc::clone(&self.inner.routes),
             route,
@@ -537,6 +540,13 @@ enum PreparedSubmission {
 }
 
 impl PreparedSubmission {
+    fn cancellation(self) -> RequestCancellation {
+        match self {
+            Self::Destination(handoff_id) => RequestCancellation::Destination(handoff_id),
+            Self::Ordinary | Self::Source(_) => RequestCancellation::Request,
+        }
+    }
+
     fn command(self, request: DirectRequest) -> SchedulerCommand {
         match self {
             Self::Ordinary => SchedulerCommand::Submit(request),
@@ -580,6 +590,7 @@ pub struct LiveRequest {
     rx: mpsc::Receiver<ObservedOutput>,
     route: Weak<RequestRoute>,
     routes: Routes,
+    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     runtime: Handle,
 }
@@ -605,6 +616,7 @@ impl LiveRequest {
         route.abandon_stream();
         await_cancellation(spawn_cancellation(
             &self.runtime,
+            self.command_tx.clone(),
             self.cancellation_tx.clone(),
             Arc::clone(&self.routes),
             route,
@@ -622,6 +634,7 @@ impl Drop for LiveRequest {
         route.abandon_stream();
         drop(spawn_cancellation(
             &self.runtime,
+            self.command_tx.clone(),
             self.cancellation_tx.clone(),
             Arc::clone(&self.routes),
             route,
@@ -634,6 +647,7 @@ impl Drop for LiveRequest {
 async fn run_event_dispatcher(
     mut event_rx: mpsc::Receiver<LiveEngineEvent>,
     routes: Routes,
+    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     runtime: Handle,
     cancel: CancellationToken,
@@ -694,7 +708,14 @@ async fn run_event_dispatcher(
                 pending_event = Some(LiveEngineEvent::Outputs(batch));
             }
             LiveEngineEvent::Outputs(batch) => {
-                if !dispatch_output_batch(batch, &routes, &runtime, &cancellation_tx, &cancel) {
+                if !dispatch_output_batch(
+                    batch,
+                    &routes,
+                    &runtime,
+                    &command_tx,
+                    &cancellation_tx,
+                    &cancel,
+                ) {
                     return Ok(());
                 }
             }
@@ -757,6 +778,7 @@ fn dispatch_output_batch(
     batch: Vec<OutputSignal>,
     routes: &Routes,
     runtime: &Handle,
+    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: &mpsc::Sender<SchedulerCancellationEnvelope>,
     cancel: &CancellationToken,
 ) -> bool {
@@ -790,6 +812,7 @@ fn dispatch_output_batch(
             }
             drop(spawn_cancellation(
                 runtime,
+                command_tx.clone(),
                 cancellation_tx.clone(),
                 Arc::clone(routes),
                 Arc::clone(&route),
@@ -805,6 +828,7 @@ fn dispatch_output_batch(
 
 fn spawn_cancellation(
     runtime: &Handle,
+    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     routes: Routes,
     route: Arc<RequestRoute>,
@@ -822,16 +846,23 @@ fn spawn_cancellation(
         if abandon_stream {
             route.abandon_stream();
         }
-        if !route.begin_cancellation() {
+        let Some(cancellation) = route.begin_cancellation() else {
             return Ok(false);
-        }
+        };
 
-        let result = cancel_request(
-            &cancellation_tx,
-            route.scheduler_id,
-            abandon_stream,
-        )
-        .await;
+        let result = match cancellation {
+            RequestCancellation::Request => {
+                cancel_request(
+                    &cancellation_tx,
+                    route.scheduler_id,
+                    abandon_stream,
+                )
+                .await
+            }
+            RequestCancellation::Destination(handoff_id) => {
+                cancel_destination(&command_tx, handoff_id).await
+            }
+        };
         if route.finish_cancellation(&result) {
             remove_route(&routes, &route);
         }
@@ -873,6 +904,24 @@ async fn cancel_request(
         SchedulerCommandResult::Noop => Ok(false),
         result => Err(anyhow!(
             "unexpected scheduler cancellation result for {request_id}: {result:?}"
+        )),
+    }
+}
+
+async fn cancel_destination(
+    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
+    handoff_id: HandoffId,
+) -> anyhow::Result<bool> {
+    match send_command(
+        command_tx,
+        SchedulerCommand::CancelDestination { handoff_id },
+    )
+    .await?
+    {
+        SchedulerCommandResult::Applied => Ok(true),
+        SchedulerCommandResult::Noop => Ok(false),
+        result => Err(anyhow!(
+            "unexpected scheduler destination cancellation result for {handoff_id:?}: {result:?}"
         )),
     }
 }
