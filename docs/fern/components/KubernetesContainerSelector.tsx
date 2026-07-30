@@ -39,16 +39,22 @@ function normalizeRegistry(registry: string): string {
   return registry.trim().replace(/\/+$/, "");
 }
 
+const REGISTRY_PATTERN = /^(?=.{1,255}$)(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?)(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+
 function registryIsValid(registry: string): boolean {
   const normalized = normalizeRegistry(registry);
-  return normalized.length > 0 && !/\s/.test(normalized);
+  return REGISTRY_PATTERN.test(normalized);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function commandFor(hardware: Hardware, registry: string): string {
   if (hardware === "intel") {
     const imageRegistry = normalizeRegistry(registry) || "<your-registry>/<namespace>";
     return [
-      `export IMAGE_REGISTRY="${imageRegistry}"`,
+      `export IMAGE_REGISTRY=${shellQuote(imageRegistry)}`,
       'export XPU_IMAGE="${IMAGE_REGISTRY}/vllm-runtime-xpu:quickstart"',
       "",
       "python3 container/render.py \\",
@@ -180,7 +186,7 @@ export function KubernetesContainerSelector() {
                 placeholder="registry.example.com/my-team"
                 aria-invalid={!canCopy}
               />
-              {!canCopy && <p className="lqs-hint lqs-hint--error">Enter your registry/namespace before copying.</p>}
+              {!canCopy && <p className="lqs-hint lqs-hint--error">Enter a lowercase Docker registry/namespace before copying.</p>}
             </div>
           </div>
         )}
