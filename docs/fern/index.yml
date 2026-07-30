@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, Kubernetes Guide, CLI Guide, Features, Recipes,
+# Tab-based navigation: Home, Kubernetes Guide, CLI Guide, Use Cases, Recipes,
 # Developer Guide, Reference,
 # Blog, and Community. The Kubernetes Guide and CLI Guide tabs retain their
 # kubernetes/ and cli/ URL prefixes; Recipes retains its recipes/ prefix.
@@ -34,7 +34,7 @@ tabs:
     icon: fa-solid fa-rectangle-terminal
     slug: cli
   use-cases:
-    display-name: Features
+    display-name: Use Cases
     icon: puzzle-piece
     skip-slug: true
   recipes:
@@ -47,7 +47,6 @@ tabs:
   reference:
     display-name: Reference
     icon: book
-    skip-slug: true
   blog:
     display-name: Blog
     icon: newspaper
@@ -83,7 +82,7 @@ navigation:
 
       - section: Installation
         icon: download
-        collapsed: open-by-default
+        collapsed: true
         contents:
         - page: Install Dynamo
           path: kubernetes/installation-guide.md
@@ -134,7 +133,7 @@ navigation:
       # ==================== Usage ====================
       - section: Model Deployment
         icon: microchip
-        collapsed: open-by-default
+        collapsed: true
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.mdx
@@ -144,22 +143,15 @@ navigation:
             path: kubernetes/dgd-expose-frontend.md
           - page: Deploy on Intel GPUs
             path: kubernetes/dgd-intel-xpu.mdx
-          - page: Disaggregated Serving
-            path: features/disaggregated-serving/README.md
-          - page: Sizing with AIConfigurator
-            slug: size-with-ai-configurator
-            path: kubernetes/dgd-aiconfigurator.mdx
           - page: Multinode Deployments
             path: kubernetes/deployment/multinode-deployment.md
           - section: Model Loading
-            collapsed: open-by-default
+            collapsed: true
             contents:
               - page: Model Caching
                 path: kubernetes/model-caching.mdx
               - page: Fast Model Loading
                 path: kubernetes/fast-model-loading.mdx
-          - page: KV Cache Offloading
-            path: kubernetes/dgd-kv-offloading.mdx
 
       - section: KV-Aware Routing
         icon: route
@@ -171,6 +163,26 @@ navigation:
             path: kubernetes/dgd-kv-routing.md
           - page: Gateway API
             path: kubernetes/inference-gateway.mdx
+          - page: Standalone Router
+            slug: standalone-router
+            path: components/router/router-guide.md
+
+      - section: Disaggregated Serving
+        icon: arrows-split-up-and-left
+        collapsed: true
+        contents:
+          - page: Overview
+            path: features/disaggregated-serving/README.md
+          - page: Sizing with AIConfigurator
+            slug: size-with-ai-configurator
+            path: kubernetes/dgd-aiconfigurator.mdx
+
+      - section: KV Cache Offloading
+        icon: database
+        collapsed: true
+        contents:
+          - page: Overview
+            path: kubernetes/dgd-kv-offloading.mdx
 
       - section: Fault Tolerance
         icon: shield-halved
@@ -187,7 +199,7 @@ navigation:
 
       - section: Auto Deployment
         icon: wand-magic-sparkles
-        collapsed: open-by-default
+        collapsed: true
         contents:
           - page: Overview
             path: kubernetes/auto-deployment-overview.mdx
@@ -209,7 +221,9 @@ navigation:
             path: tools/aiperf.mdx
           - page: Performance Tuning
             path: performance/tuning.md
-          - section: DynoSim
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Simulation with DynoSim
             slug: dynosim
             contents:
               - page: Overview
@@ -247,7 +261,7 @@ navigation:
 
       - section: Installation
         icon: download
-        collapsed: open-by-default
+        collapsed: true
         contents:
           - page: Install Dynamo
             path: getting-started/local-installation.mdx
@@ -258,19 +272,37 @@ navigation:
 
       - section: Model Deployment
         icon: microchip
-        collapsed: open-by-default
+        collapsed: true
         contents:
           - page: Introduction
             path: cli/overview.mdx
-          - page: KV-Aware Routing
+          - page: Multi-Node Deployment
+            path: cli/multinode-deployment.mdx
+
+      - section: KV-Aware Routing
+        icon: route
+        collapsed: true
+        contents:
+          - page: Overview
             path: cli/kv-routing.mdx
-          - page: Disaggregated Serving
+          - page: Standalone Router
+            slug: standalone-router
+            path: components/router/router-guide.md
+
+      - section: Disaggregated Serving
+        icon: arrows-split-up-and-left
+        collapsed: true
+        contents:
+          - page: Overview
             path: cli/disaggregated-serving.mdx
           - page: Sizing with AIConfigurator
             path: cli/aiconfigurator.mdx
-          - page: Multi-Node Deployment
-            path: cli/multinode-deployment.mdx
-          - page: KV Cache Offloading
+
+      - section: KV Cache Offloading
+        icon: database
+        collapsed: true
+        contents:
+          - page: Overview
             path: cli/kv-cache-offloading.mdx
 
       - section: Operations
@@ -281,7 +313,9 @@ navigation:
             path: observability/local-observability.mdx
           - page: Benchmarking with AIPerf
             path: cli/aiperf.mdx
-          - section: DynoSim
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Simulation with DynoSim
             slug: dynosim
             contents:
               - page: Overview
@@ -300,7 +334,7 @@ navigation:
 
   - tab: use-cases
     layout:
-      # ==================== Features ====================
+      # ==================== Use Cases ====================
       - section: Agents
         collapsed: true
         icon: users
@@ -387,14 +421,6 @@ navigation:
         contents:
           - page: Overview
             path: features/tokenizer/README.md
-      - section: LoRA Adapters
-        collapsed: true
-        icon: sliders
-        path: features/lora/README.md
-        contents:
-          - page: Overview
-            path: features/lora/README.md
-
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -811,29 +837,6 @@ navigation:
                     path: kubernetes/topology-aware-kv-transfer.md
                   - page: LWS
                     path: kubernetes/lws.md
-      - section: Contributing
-        icon: code-pull-request
-        contents:
-          - page: Overview
-            path: contribution-guide.md
-            slug: contribution-guide
-          - page: Getting Started
-            path: contributing/getting-started.mdx
-          - page: Contribution Flow
-            path: contributing/contribution-flow.mdx
-          - page: Code Quality
-            path: contributing/code-quality.md
-          - page: DCO and Licensing
-            path: contributing/dco-and-licensing.md
-          - section: Documentation
-            contents:
-              - page: Documentation Style Guide
-                path: documentation-style-guide.md
-                slug: style-guide
-              - page: Building and Publishing
-                path: README.md
-                slug: building-and-publishing
-
       - section: Advanced Customizations
         slug: advanced-customizations
         icon: sliders
@@ -906,54 +909,50 @@ navigation:
                 path: features/speculative-decoding/speculative-decoding-vllm.md
 
   - tab: reference
-    variants:
-      # ==================== General variant ====================
-      - title: General
-        icon: circle-info
-        slug: reference
-        layout:
-          - page: Compatibility
-            path: reference/compatibility.mdx
-          - page: Examples
-            path: getting-started/examples.md
-          - page: Release Artifacts
-            path: reference/release-artifacts.mdx
-          - section: Releases
-            contents:
-              - page: Release History
-                path: reference/release-notes/README.mdx
-              - page: Dynamo v1.3.0
-                path: reference/release-notes/v1-3-0.mdx
-                slug: v1-3-0
-              - page: Dynamo v1.2.0
-                path: reference/release-notes/v1-2-0.mdx
-                slug: v1-2-0
-              - page: Dynamo v1.1.0
-                path: reference/release-notes/v1-1-0.mdx
-                slug: v1-1-0
-              - page: Dynamo v1.0.0
-                path: reference/release-notes/v1-0-0.mdx
-                slug: v1-0-0
-              - page: Known Issues
-                path: reference/known-issues.mdx
-              - page: Deprecations
-                path: reference/deprecations.mdx
-          - page: Model Early Access Builds
-            path: reference/model-early-access-builds.mdx
-          - page: Glossary
-            path: reference/glossary.md
-          # Machine-readable mirror of releases.data.ts for agents; reachable
-          # by URL and llms indexes, not the sidebar.
-          - page: Releases (machine-readable)
-            path: reference/releases-data.mdx
-            slug: releases-data
-            hidden: true
+    layout:
+      - page: Compatibility
+        path: reference/compatibility.mdx
+      - page: Examples
+        path: getting-started/examples.md
+      - page: Release Artifacts
+        path: reference/release-artifacts.mdx
+      - section: Releases
+        slug: releases
+        path: reference/release-notes/README.mdx
+        collapsed: true
+        contents:
+          - page: Dynamo v1.3.0
+            path: reference/release-notes/v1-3-0.mdx
+            slug: v1-3-0
+          - page: Dynamo v1.2.0
+            path: reference/release-notes/v1-2-0.mdx
+            slug: v1-2-0
+          - page: Dynamo v1.1.0
+            path: reference/release-notes/v1-1-0.mdx
+            slug: v1-1-0
+          - page: Dynamo v1.0.0
+            path: reference/release-notes/v1-0-0.mdx
+            slug: v1-0-0
+          - page: Known Issues
+            path: reference/known-issues.mdx
+          - page: Deprecations
+            path: reference/deprecations.mdx
+      - page: Model Early Access Builds
+        path: reference/model-early-access-builds.mdx
+      - page: Glossary
+        path: reference/glossary.md
+      # Machine-readable mirror of releases.data.ts for agents; reachable
+      # by URL and llms indexes, not the sidebar.
+      - page: Releases (machine-readable)
+        path: reference/releases-data.mdx
+        slug: releases-data
+        hidden: true
 
-      # ==================== Kubernetes API variant ====================
-      - title: Kubernetes API
+      - section: Kubernetes API
         icon: fa-brands fa-kubernetes
         slug: kubernetes-api
-        layout:
+        collapsed: true
+        contents:
           - page: DynamoGraphDeployment
             path: kubernetes/dgd-reference.mdx
           - page: DynamoGraphDeploymentRequest
@@ -970,11 +969,11 @@ navigation:
               - page: API Reference (K8s)
                 path: kubernetes/api-reference.md
 
-      # ==================== Components variant ====================
-      - title: Components
+      - section: Components
         icon: sliders
         slug: components
-        layout:
+        collapsed: true
+        contents:
           - page: Runtime Configuration
             path: reference/runtime-config-reference.mdx
           - page: Frontend Configuration
@@ -998,11 +997,11 @@ navigation:
           - page: ThunderAgent Scheduler
             path: reference/agents/thunderagent-scheduler.mdx
 
-      # ==================== Backends variant ====================
-      - title: Backends
+      - section: Backends
         icon: server
         slug: backends
-        layout:
+        collapsed: true
+        contents:
           - page: vLLM Configuration
             path: backends/vllm/vllm-config-reference.mdx
           - page: vLLM-Omni Configuration
@@ -1012,11 +1011,11 @@ navigation:
           - page: TensorRT-LLM Configuration
             path: backends/trtllm/trtllm-config-reference.mdx
 
-      # ==================== Observability variant ====================
-      - title: Observability
+      - section: Observability
         icon: gauge
         slug: observability
-        layout:
+        collapsed: true
+        contents:
           - page: Local Stack
             path: reference/observability/local-stack.mdx
           - page: Health Checks
@@ -1040,11 +1039,11 @@ navigation:
           - page: Local Resource Monitor (Local)
             path: reference/observability/local-resource-monitor.mdx
 
-      # ==================== NIXL Connect variant ====================
-      - title: NIXL Connect
+      - section: NIXL Connect
         icon: right-left
         slug: nixl-connect
-        layout:
+        collapsed: true
+        contents:
           - page: Overview
             path: api/nixl-connect/README.mdx
           - page: Connector
@@ -1102,3 +1101,25 @@ navigation:
     layout:
       - page: Community
         path: community/README.mdx
+      - section: Contributing
+        icon: code-pull-request
+        contents:
+          - page: Overview
+            path: contribution-guide.md
+            slug: contribution-guide
+          - page: Getting Started
+            path: contributing/getting-started.mdx
+          - page: Contribution Flow
+            path: contributing/contribution-flow.mdx
+          - page: Code Quality
+            path: contributing/code-quality.md
+          - page: DCO and Licensing
+            path: contributing/dco-and-licensing.md
+          - section: Documentation
+            contents:
+              - page: Documentation Style Guide
+                path: documentation-style-guide.md
+                slug: style-guide
+              - page: Building and Publishing
+                path: README.md
+                slug: building-and-publishing
