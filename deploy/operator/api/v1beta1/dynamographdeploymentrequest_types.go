@@ -229,12 +229,14 @@ type WorkloadSpec struct {
 	OSL *int32 `json:"osl,omitempty"`
 
 	// Concurrency is the target concurrency level.
-	// Required (or RequestRate) when the planner is disabled.
+	// Mutually exclusive with the requestRate field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	Concurrency *float64 `json:"concurrency,omitempty"`
 
 	// RequestRate is the target request rate (req/s).
-	// Required (or Concurrency) when the planner is disabled.
+	// Mutually exclusive with the concurrency field. When both fields are omitted and the
+	// planner is disabled, the profiler uses its default maximum-throughput selection.
 	// +optional
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }

@@ -9,9 +9,12 @@ from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
 # run_synthetic_trace_replay constructs the Rust AIC callback, which imports
-# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
-# PyPI aiconfigurator releases predating PR #1200 don't ship it.
-pytest.importorskip("aiconfigurator.sdk.engine")
+# the AIC-core engine API. Skip when the core wheel is absent.
+pytest.importorskip("aiconfigurator_core.sdk.engine")
+aic_backend_factory = pytest.importorskip("aiconfigurator_core.sdk.backends.factory")
+aic_config = pytest.importorskip("aiconfigurator_core.sdk.config")
+aic_models = pytest.importorskip("aiconfigurator_core.sdk.models")
+aic_perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
@@ -93,24 +96,21 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aiconfigurator = pytest.importorskip("aiconfigurator")
-
-    database = aiconfigurator.sdk.perf_database.get_database(
+    database = aic_perf_database.get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
-    model = aiconfigurator.sdk.models.get_model(
+    backend = aic_backend_factory.get_backend(backend_name)
+    model = aic_models.get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        model_config=aic_config.ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    session = aiconfigurator.sdk.inference_session.InferenceSession(
-        model, database, backend
-    )
-    summary = session.run_static(
-        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+    summary = backend.run_static(
+        model=model,
+        database=database,
+        runtime_config=aic_config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,

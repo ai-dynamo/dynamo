@@ -4239,12 +4239,12 @@ OSL is the Output Sequence Length (number of tokens).
 </ParamField>
 
 <ParamField path="concurrency" type="float">
-Concurrency is the target concurrency level.&lt;br /&gt;Required (or RequestRate) when the planner is disabled.
+Concurrency is the target concurrency level.&lt;br /&gt;Mutually exclusive with the requestRate field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 
 <ParamField path="requestRate" type="float">
-RequestRate is the target request rate (req/s).&lt;br /&gt;Required (or Concurrency) when the planner is disabled.
+RequestRate is the target request rate (req/s).&lt;br /&gt;Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
 **Validation:** Optional: \&#123;\&#125; &lt;br /&gt;
 </ParamField>
 </Accordion>

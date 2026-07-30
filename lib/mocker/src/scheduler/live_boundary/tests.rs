@@ -42,7 +42,10 @@ impl LiveBoundaryCore for FakeCore {
 
     fn receive_live_request(&mut self, _request: DirectRequest) {}
 
-    fn execute_live_pass(&mut self, _scheduler_start: &Instant) -> LivePassExecution {
+    fn execute_live_pass(
+        &mut self,
+        _scheduler_start: &Instant,
+    ) -> anyhow::Result<LivePassExecution> {
         let live_pass_limit = self
             .live_pass_limit
             .as_ref()
@@ -56,10 +59,10 @@ impl LiveBoundaryCore for FakeCore {
         pass.admissions.clear();
         pass.lifecycle_events.clear();
         pass.fpm = None;
-        LivePassExecution {
+        Ok(LivePassExecution {
             pass,
             duration: Duration::ZERO,
-        }
+        })
     }
 
     fn apply_live_command(

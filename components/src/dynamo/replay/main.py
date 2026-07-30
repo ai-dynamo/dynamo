@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
-    AicMemoryEstimatorUnavailableError,
     _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
 )
@@ -35,15 +33,12 @@ from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
-logger = logging.getLogger(__name__)
-
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
 _DEFAULT_AIC_SYSTEM = "h200_sxm"
-_DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_VLLM_BLOCK_SIZE = 64
 
@@ -146,53 +141,42 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    try:
-        per_rank_blocks = estimate_num_gpu_blocks(
-            backend_name=aic_backend,
-            system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
-            model_path=aic_model_path,
-            tp_size=cast(int, tp_size if tp_size is not None else 1),
-            block_size=_resolve_block_size_for_capacity(raw),
-            max_num_batched_tokens=cast(
-                int,
-                max_num_batched_tokens
-                if max_num_batched_tokens is not None
-                else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            ),
-            gpu_memory_utilization=cast(
-                float,
-                gpu_memory_utilization
-                if gpu_memory_utilization is not None
-                else DEFAULT_GPU_MEMORY_UTILIZATION,
-            ),
-            mem_fraction_static=cast(
-                float,
-                mem_fraction_static
-                if mem_fraction_static is not None
-                else DEFAULT_MEM_FRACTION_STATIC,
-            ),
-            # None -> aic.py applies the TRT-LLM default (0.9).
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
-            backend_version=raw.get("aic_backend_version"),
-            moe_tp_size=raw.get("aic_moe_tp_size"),
-            moe_ep_size=raw.get("aic_moe_ep_size"),
-            attention_dp_size=raw.get("aic_attention_dp_size"),
-            gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
-            moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
-            fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
-            kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
-            comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
-        )
-    except AicMemoryEstimatorUnavailableError as exc:
-        logger.warning(
-            "AIC KV-cache capacity estimation is unavailable during replay: %s. "
-            "Falling back to default num_gpu_blocks=%d; upgrade aiconfigurator "
-            "or set num_gpu_blocks explicitly.",
-            exc,
-            _DEFAULT_NUM_GPU_BLOCKS,
-        )
-        raw["num_gpu_blocks"] = _DEFAULT_NUM_GPU_BLOCKS
-        return
+    per_rank_blocks = estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=cast(int, tp_size if tp_size is not None else 1),
+        block_size=_resolve_block_size_for_capacity(raw),
+        max_num_batched_tokens=cast(
+            int,
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        ),
+        gpu_memory_utilization=cast(
+            float,
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION,
+        ),
+        mem_fraction_static=cast(
+            float,
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC,
+        ),
+        # None -> aic.py applies the TRT-LLM default.
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        backend_version=raw.get("aic_backend_version"),
+        moe_tp_size=raw.get("aic_moe_tp_size"),
+        moe_ep_size=raw.get("aic_moe_ep_size"),
+        attention_dp_size=raw.get("aic_attention_dp_size"),
+        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
+        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
+        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
+        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
+        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
+    )
     # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
     # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
     # independent per-rank schedulers and KV pools. Keep the per-rank count; engine-wide
@@ -419,6 +403,9 @@ def _prepare_planner_replay(
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
     from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
+    from dynamo.planner.offline.trace_data import (
+        extract_traffic_observations_from_trace,
+    )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
@@ -440,9 +427,17 @@ def _prepare_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
+    warmup_observations = None
+    if planner_config.load_predictor_warmup_trace is not None:
+        warmup_observations = extract_traffic_observations_from_trace(
+            planner_config.load_predictor_warmup_trace,
+            planner_config.throughput_adjustment_interval_seconds,
+        )
+
     adapter = create_replay_planner_adapter(
         planner_config=planner_config,
         capabilities=capabilities,
+        warmup_observations=warmup_observations,
     )
 
     # Bootstrap regression models from mocker's perf model.
@@ -869,8 +864,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
-        if using_trace_file and args.trace_format != "mooncake":
-            parser.error("--planner-config only supports --trace-format=mooncake")
+        if using_trace_file and args.trace_format not in ("mooncake", "dynamo"):
+            parser.error(
+                "--planner-config only supports --trace-format=mooncake or dynamo"
+            )
 
         replay_options = {
             "extra_engine_args": extra_engine_args,

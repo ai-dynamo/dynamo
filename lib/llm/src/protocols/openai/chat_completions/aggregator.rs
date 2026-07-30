@@ -470,7 +470,8 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        // TODO: Revisit whether tool calls produced at the output-token limit should
+        // preserve Length and yield an incomplete Responses result.
         let finish_reason = if delta
             .tool_calls
             .as_ref()
