@@ -835,7 +835,14 @@ where
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
-        let retain_router_hint_chain = self.has_router_hint_capable_workers();
+        let has_router_hint_capable_workers = self.has_router_hint_capable_workers();
+        let retain_router_hint_chain =
+            has_router_hint_capable_workers && self.indexer.supports_router_hint_chain_retention();
+        if has_router_hint_capable_workers && !retain_router_hint_chain {
+            tracing::warn!(
+                "router_hint chain retention requires a local event-driven indexer with no approximate side indexer and no remote-recorded routing decisions; proceeding without router hints"
+            );
+        }
 
         let TieredLookupResult {
             tiered_matches,

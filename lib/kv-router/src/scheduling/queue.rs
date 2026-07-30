@@ -863,7 +863,11 @@ impl<
                     "refreshed overlap scores after long queue wait"
                 );
                 queued.request.overlap = snapshot.overlap;
-                queued.request.router_hint_candidates = snapshot.router_hint_candidates;
+                queued.request.router_hint_candidates = if queued.request.retain_router_hint_chain {
+                    snapshot.router_hint_candidates
+                } else {
+                    None
+                };
             }
             let admit_now = Instant::now();
             let class_index = popped.class_index();
@@ -2774,6 +2778,57 @@ policy_classes:
                 .map(|candidates| candidates.owner_prefix_blocks.as_slice()),
             Some(&[(WorkerWithDpRank::new(1, 0), 2)][..])
         );
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn update_refresh_drops_router_hint_candidates_when_retention_disabled() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let worker = WorkerWithDpRank::new(0, 0);
+        let refresher = Arc::new(CountingRefresher {
+            calls: AtomicUsize::new(0),
+            last_retain_router_hint_chain: AtomicBool::new(true),
+            response: RefreshedOverlap {
+                router_hint_candidates: Some(RouterHintRootCandidates {
+                    block_hashes: vec![ExternalSequenceBlockHash(101)],
+                    owner_prefix_blocks: vec![(worker, 1)],
+                }),
+                overlap: OverlapSignals {
+                    tier_overlap_blocks: Default::default(),
+                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]),
+                    effective_cached_tokens: HashMap::from([(worker, 80)]),
+                },
+            },
+        });
+        let (queue, slots) =
+            make_queue_with_refresher(1, block_size, isl, Some(0.0), refresher.clone());
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.expect("rx1 dropped").expect("req-1 failed");
+
+        let (req2, rx2) = make_request("req-2", isl);
+        queue
+            .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+        assert!(
+            !refresher
+                .last_retain_router_hint_chain
+                .load(Ordering::Relaxed)
+        );
+        assert_eq!(resp2.best_worker, worker);
+        assert_eq!(resp2.effective_overlap_blocks, 5.0);
+        assert_eq!(resp2.cached_tokens, 80);
+        assert!(resp2.router_hint_candidates.is_none());
         assert_eq!(queue.pending_count(), 0);
     }
 
