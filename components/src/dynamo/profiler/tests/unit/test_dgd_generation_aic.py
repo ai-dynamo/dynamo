@@ -3,7 +3,10 @@
 
 """Unit tests for the AIC-spec integration in profiler DGD generation."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 try:
     from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
@@ -641,6 +644,18 @@ class TestEnableVllmBenchmarkMode:
         )
         assert worker["name"] == "decode"
         assert _benchmark_mode(worker) == "agg"
+
+    def test_real_agg_template_sets_single_worker(self):
+        repository_root = Path(__file__).resolve().parents[6]
+        template_path = repository_root / "examples/backends/vllm/deploy/agg.yaml"
+        cfg = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+
+        services = cfg["spec"]["services"]
+        assert "worker" in services
+        assert "decode" not in services
+
+        enable_vllm_benchmark_mode(cfg)
+        assert _benchmark_mode(services["worker"]) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
