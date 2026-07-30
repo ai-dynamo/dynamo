@@ -7,7 +7,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder import (
     ArtifactT,
     CustomEncoderAdapter,
     Preprocessed,
-    Qwen2VLImageEncoding,
+    Qwen3VLImageEncoding,
     VisionEncoderBackend,
     build_mixed_embeds,
     create_custom_encoder_adapter,
@@ -36,7 +36,7 @@ from dynamo.vllm.multimodal_utils.protocol import (
 __all__ = [
     "build_mixed_embeds",
     "CustomEncoderAdapter",
-    "Qwen2VLImageEncoding",
+    "Qwen3VLImageEncoding",
     "create_custom_encoder_adapter",
     "encode_image_embeddings",
     "extract_user_text",
