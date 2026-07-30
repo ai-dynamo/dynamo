@@ -698,7 +698,7 @@ class DynamoVllmConfig(ConfigBase):
         ):
             if enabled:
                 raise ValueError(f"--realtime cannot be combined with {option}.")
-        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+        if self.enable_multimodal:
             raise ValueError(
                 "--realtime cannot be combined with multimodal worker flags."
             )

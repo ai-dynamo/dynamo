@@ -379,6 +379,7 @@ class RealtimeTranscriptionHandler:
                         )
                     )
                     return
+                assert isinstance(session, dict)
                 input_rate = session["audio"]["input"]["format"]["rate"]
                 connection.emit(session_updated_event(session))
             elif event_type == "input_audio_buffer.append":
@@ -409,22 +410,22 @@ class RealtimeTranscriptionHandler:
                 if ready is not None:
                     turn.audio.put_nowait(ready)
             elif event_type == "input_audio_buffer.commit":
-                turn = connection.active_turn
-                if turn is None:
+                active_turn = connection.active_turn
+                if active_turn is None:
                     connection.emit(
                         invalid_request_error_event(
                             "invalid_audio", "input audio buffer is empty"
                         )
                     )
                     return
-                remainder = turn.flush_audio()
+                remainder = active_turn.flush_audio()
                 if remainder is not None:
-                    turn.audio.put_nowait(remainder)
+                    active_turn.audio.put_nowait(remainder)
                 await connection.emit_for_turn(
-                    turn,
-                    input_audio_buffer_committed_event(turn.item_id),
+                    active_turn,
+                    input_audio_buffer_committed_event(active_turn.item_id),
                 )
-                turn.audio.put_nowait(None)
+                active_turn.audio.put_nowait(None)
                 connection.finish_active_turn()
             elif event_type == "input_audio_buffer.clear":
                 connection.cancel_active_turn()

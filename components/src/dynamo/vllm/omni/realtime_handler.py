@@ -398,9 +398,9 @@ class RealtimeOmniHandler:
             elif event_type == "input_audio_buffer.clear":
                 # Clear discards buffered input without cancelling an in-flight
                 # response. A committed turn is no longer active, so this no-ops.
-                turn = connection.active_turn
-                if turn is not None:
-                    drain_queue(turn.audio_queue)
+                active_turn = connection.active_turn
+                if active_turn is not None:
+                    drain_queue(active_turn.audio_queue)
             else:
                 # Events not used by the current MVP remain non-fatal.
                 logger.debug("realtime omni: ignoring client event %s", event_type)
