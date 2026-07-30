@@ -544,6 +544,9 @@ navigation:
         contents:
           - page: Overview
             path: design-docs/architecture.md
+          - page: Responses Conflict Resolution
+            path: superpowers/specs/2026-07-30-responses-conflict-design.md
+            hidden: true
           - section: Concepts
             collapsed: open-by-default
             contents:
