@@ -164,6 +164,15 @@ impl TieredMatchProvider for Indexer {
     ) -> Result<TieredMatchDetails, KvRouterError> {
         self.find_matches_by_tier_ref(sequence).await
     }
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_ref_with_options(sequence, options)
+            .await
+    }
 }
 
 impl<'a> LookupPipeline<'a> {

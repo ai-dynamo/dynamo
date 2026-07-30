@@ -123,6 +123,15 @@ pub struct TieredMatchDetails {
     pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
 }
 
+impl TieredMatchDetails {
+    pub fn router_hint_root_candidates(&self) -> Option<&RouterHintRootCandidates> {
+        self.lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .or(self.device.router_hint_root_candidates.as_ref())
+    }
+}
+
 impl From<&TieredMatchDetails> for WireTieredMatchDetails {
     fn from(d: &TieredMatchDetails) -> Self {
         Self {
