@@ -7,6 +7,31 @@ package runtimeversion
 
 import "testing"
 
+func TestVersionAtLeast(t *testing.T) {
+	minimum := Version{Major: 1, Minor: 4, Patch: 1}
+	tests := []struct {
+		name    string
+		version Version
+		want    bool
+	}{
+		{name: "below major", version: Version{Major: 0, Minor: 9, Patch: 9}, want: false},
+		{name: "below minor", version: Version{Major: 1, Minor: 3, Patch: 9}, want: false},
+		{name: "below patch", version: Version{Major: 1, Minor: 4, Patch: 0}, want: false},
+		{name: "equal", version: Version{Major: 1, Minor: 4, Patch: 1}, want: true},
+		{name: "above patch", version: Version{Major: 1, Minor: 4, Patch: 2}, want: true},
+		{name: "above minor", version: Version{Major: 1, Minor: 5, Patch: 0}, want: true},
+		{name: "above major", version: Version{Major: 2, Minor: 0, Patch: 0}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.version.AtLeast(minimum); got != tt.want {
+				t.Fatalf("%s.AtLeast(%s) = %t, want %t", tt.version, minimum, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParse(t *testing.T) {
 	tests := []struct {
 		name    string

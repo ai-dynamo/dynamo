@@ -26,6 +26,17 @@ func (v Version) String() string {
 	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
 }
 
+// AtLeast reports whether v is greater than or equal to minimum.
+func (v Version) AtLeast(minimum Version) bool {
+	if v.Major != minimum.Major {
+		return v.Major > minimum.Major
+	}
+	if v.Minor != minimum.Minor {
+		return v.Minor > minimum.Minor
+	}
+	return v.Patch >= minimum.Patch
+}
+
 // Parse returns the compatibility version represented by an explicit override.
 func Parse(value string) (Version, error) {
 	version, err := semver.StrictNewVersion(value)

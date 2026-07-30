@@ -19,14 +19,13 @@ package compatibility
 
 import semver "github.com/Masterminds/semver/v3"
 
-// Feature gates gated on the operator origin version (the operator version that
-// first reconciled / created the DGD resource).
+// Compatibility feature gates.
 
 var (
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. Enabled for DGDs originally
 	// created by operator >= 1.0.0.
-	VLLMMultiprocessing = Gate{
+	VLLMMultiprocessing = OriginGate{
 		Name:             "VLLMMultiprocessing",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}

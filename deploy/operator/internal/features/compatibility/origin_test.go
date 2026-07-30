@@ -24,8 +24,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
-func TestGateEnabled(t *testing.T) {
-	gate := Gate{
+func TestOriginGateEnabled(t *testing.T) {
+	gate := OriginGate{
 		Name:             "TestFeature",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
@@ -113,7 +113,7 @@ func TestGateEnabled(t *testing.T) {
 	}
 }
 
-func TestGateDifferentThresholds(t *testing.T) {
+func TestOriginGateDifferentThresholds(t *testing.T) {
 	annotations := map[string]string{
 		consts.KubeAnnotationDynamoOperatorOriginVersion: "0.9.0",
 	}
@@ -142,7 +142,7 @@ func TestGateDifferentThresholds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gate := Gate{
+			gate := OriginGate{
 				Name:             "TestFeature",
 				MinOriginVersion: tt.minOriginVersion,
 			}
