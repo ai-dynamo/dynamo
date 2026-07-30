@@ -142,10 +142,15 @@ runs:
         REQUESTED_HF_HOME="${{ inputs.hf_home }}"
         FALLBACK_HF_HOME="${WORK_DIR}/.cache/huggingface"
         # Prefer the requested cache path when it is usable in this job container.
+        # Probe hub/ subdirectory with a touch test: HF writes into hub/ subdirs, and a
+        # UID mismatch from a prior run can leave hub/ unwritable even when the top-level
+        # directory passes a simple -w test.
+        _hf_hub_dir="${REQUESTED_HF_HOME}/hub"
         if
           [[ -n "${REQUESTED_HF_HOME}" ]] &&          # caller provided a preferred HF cache path
-          mkdir -p "${REQUESTED_HF_HOME}" 2>/dev/null && # path exists or can be created; hide expected permission noise
-          [[ -w "${REQUESTED_HF_HOME}" ]]             # current runner uid can write model/cache metadata there
+          mkdir -p "${_hf_hub_dir}" 2>/dev/null &&    # path exists or can be created; hide expected permission noise
+          touch "${_hf_hub_dir}/.write_probe" 2>/dev/null &&  # current runner uid can write into hub/ subdir
+          rm -f "${_hf_hub_dir}/.write_probe" 2>/dev/null
         then
           export HF_HOME="${REQUESTED_HF_HOME}"
           echo "✅ HF cache available at ${HF_HOME}"
