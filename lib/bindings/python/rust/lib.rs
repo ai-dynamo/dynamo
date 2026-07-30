@@ -899,25 +899,68 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // Try to get existing runtime first, create new Worker only if needed
-        // This allows multiple DistributedRuntime instances to share the same tokio runtime
-        let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| -> anyhow::Result<rs::Runtime> {
-                // No existing Worker, create new one
+        // Bind the pyo3 <-> tokio bridge to OUR runtime, before anything can drive a
+        // future_into_py.
+        //
+        // This used to live inside the `.or_else(...)` below, which never runs:
+        // `Worker::runtime_from_existing()` has no error path - worker.rs:85-94 falls back
+        // to building a Runtime, publishes its handle, and returns Ok - so
+        // `init_with_runtime` was never called. With pyo3's TOKIO_RUNTIME left unset, the
+        // first `future_into_py` lazily builds pyo3-async-runtimes' OWN runtime
+        // (pyo3-async-runtimes-0.23.0 src/tokio.rs:189-204 -> `Builder::new_multi_thread()
+        // .enable_all()`, i.e. num_cpus worker threads plus tokio's default 512 blocking
+        // threads) which no DYN_RUNTIME_* setting can reach. Measured on a decode worker
+        // pinned to a 176-CPU mask: ~710 extra threads in the app process, all of which
+        // acquire the GIL when driving Python callbacks.
+        //
+        // ORDER MATTERS. `Worker::from_config` refuses to run if either RT or RTHANDLE is
+        // already set (worker.rs:64), and `runtime_from_existing()`'s fallback publishes
+        // RTHANDLE only. `init_with_runtime` needs a &'static tokio::runtime::Runtime,
+        // which only exists in RT - so the Worker has to be constructed BEFORE
+        // `runtime_from_existing()` is ever called.
+        // If we take the create path below we keep the Worker's own Runtime (same
+        // cancellation token / compute pool) instead of minting a second one.
+        let mut created: Option<rs::Runtime> = None;
+
+        INIT.get_or_try_init(|| -> anyhow::Result<()> {
+            // Belt-and-braces: seed pyo3's lazy builder from the same RuntimeConfig, so
+            // that even on a path where we cannot hand it our runtime (another component
+            // published only a Handle first) any runtime it builds itself is bounded
+            // rather than num_cpus + 512.
+            if let Ok(cfg) = config::RuntimeConfig::from_settings() {
+                let mut builder = tokio::runtime::Builder::new_multi_thread();
+                builder
+                    .worker_threads(cfg.num_worker_threads.unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(8)
+                    }))
+                    .max_blocking_threads(cfg.max_blocking_threads)
+                    .enable_all();
+                pyo3_async_runtimes::tokio::init(builder);
+            }
+
+            // Preferred path: nothing has published a runtime yet, so create the Worker
+            // (which is what populates RT) and hand pyo3 that runtime. This removes the
+            // second runtime entirely rather than merely shrinking it.
+            if !rs::Worker::has_existing_runtime() {
                 let worker = rs::Worker::from_settings()?;
-
-                // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| -> anyhow::Result<()> {
-                    let primary = worker.tokio_runtime()?;
-                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
-                    })?;
-                    Ok(())
+                let primary = worker.tokio_runtime()?;
+                pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|_| {
+                    anyhow::anyhow!("failed to initialize pyo3 static runtime: already set")
                 })?;
+                created = Some(worker.runtime().clone());
+            }
+            Ok(())
+        })
+        .map_err(to_pyerr)?;
 
-                Ok(worker.runtime().clone())
-            })
-            .map_err(to_pyerr)?;
+        // Reuse whatever runtime now exists; this also lets multiple DistributedRuntime
+        // instances share one tokio runtime.
+        let runtime = match created {
+            Some(runtime) => runtime,
+            None => rs::Worker::runtime_from_existing().map_err(to_pyerr)?,
+        };
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
