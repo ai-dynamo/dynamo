@@ -723,6 +723,10 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'  # TEMP-11836
       gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'  # TEMP-11836
+      # TEMP-11836: bumped the 30m default to 90 while this job runs the doubled
+      # (pre_merge or post_merge) suite; the parallel GPU stage overran 30m.
+      # Drop this (revert to the 30m default) with the marker set before merge.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
