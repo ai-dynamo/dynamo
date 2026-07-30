@@ -116,7 +116,7 @@ features:
 
 The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
 which automatically profiles your model. See
-[DGDR Examples](../../kubernetes/dgdr-examples.md) for copyable DGDR manifests.
+[DGDR Templates](../../templates/dgdr.mdx) for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
@@ -143,7 +143,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](../../design-docs/planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
-| [DGDR Examples](../../kubernetes/dgdr-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
+| [DGDR Templates](../../templates/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
 ## Configuration Reference

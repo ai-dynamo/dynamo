@@ -7,7 +7,7 @@ subtitle: Field reference and lifecycle for the DynamoGraphDeploymentRequest cus
 
 A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator for [`DynamoGraphDeployment`](dgd-reference.mdx) (DGD) resources. You describe what you want to run and your performance targets; the profiler determines a configuration and produces the DGD that serves traffic.
 
-For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](dgdr-guide.md). For ready-to-copy manifests, see [DGDR Examples](dgdr-examples.md).
+For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](dgdr-guide.md). For ready-to-copy manifests, see [DGDR Templates](../templates/dgdr.mdx).
 
 This page documents the `nvidia.com/v1beta1` API — the served, storage version.
 
@@ -603,7 +603,7 @@ values for typed fields, and field deletion are not supported.
   must appear on deployed components.
 </Note>
 
-For worked examples, see [DGDR Examples](dgdr-examples.md). For router configuration and EPP
+For worked examples, see [DGDR Templates](../templates/dgdr.mdx). For router configuration and EPP
 topologies, see the [Router Guide](../components/router/router-guide.md) and
 [Gateway API Inference Extension](inference-gateway.mdx).
 
@@ -906,7 +906,7 @@ kubectl get dgdr my-model -n $NAMESPACE \
   <Card title="Auto Deploy with DGDR" icon="wand-magic-sparkles" href="dgdr-guide.md">
     Step-by-step walkthrough of authoring a request.
   </Card>
-  <Card title="DGDR Examples" icon="file-code" href="dgdr-examples.md">
+  <Card title="DGDR Templates" icon="file-code" href="../templates/dgdr.mdx">
     Ready-to-copy manifests for SLA targets, private models, MoE, and overrides.
   </Card>
   <Card title="DGD Reference" icon="diagram-project" href="dgd-reference.mdx">

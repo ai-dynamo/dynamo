@@ -2016,6 +2016,11 @@ async fn chat_completions(
         ),
     );
 
+    // When parallel_tool_calls is false, limit the response to a single tool call.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
+    let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2077,8 +2082,23 @@ async fn chat_completions(
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
 
-            while let Some(response) = stream.next().await {
+            while let Some(mut response) = stream.next().await {
                 events.clear();
+
+                // When parallel_tool_calls is false, surface only the first tool call
+                // Keep index 0 and drop any higher indexes
+                if enforce_single_tool_call
+                    && let Some(data) = response.data.as_mut()
+                {
+                    for choice in data.inner.choices.iter_mut() {
+                        if let Some(tool_calls) = choice.delta.tool_calls.as_mut() {
+                            tool_calls.retain(|tc| tc.index == 0);
+                            if tool_calls.is_empty() {
+                                choice.delta.tool_calls = None;
+                            }
+                        }
+                    }
+                }
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
@@ -3794,6 +3814,38 @@ mod tests {
             "unexpected error: {}",
             err.1.message
         );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_accepts_empty_image_url_with_uuid() {
+        let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
+        assert_eq!(
+            request["messages"][0]["content"][0]["image_url"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            request["messages"][0]["content"][0]["text"],
+            "raw \u{fffd} \u{1b} data"
+        );
+        assert_eq!(
+            request["messages"][0]["content"][1]["image_url"],
+            serde_json::Value::Null
+        );
+        assert_eq!(request["messages"][0]["content"][1]["uuid"], "image-42");
     }
 
     #[test]

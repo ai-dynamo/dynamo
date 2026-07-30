@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import json
 from pathlib import Path
 
 import pytest
@@ -31,13 +32,6 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.timeout(120),
 ]
-
-
-@pytest.fixture(autouse=True)
-def _skip_online(request):
-    callspec = getattr(request.node, "callspec", None)
-    if callspec and callspec.params.get("replay_mode") == "online":
-        pytest.skip("intermittent hang in online replay mode (#9548)")
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -135,6 +129,94 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
         input_tokens=64,
         output_tokens=2,
     )
+
+
+def test_online_trace_replay_emits_per_request_goodput_and_capacity(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    jsonl_path = tmp_path / "online_requests.jsonl"
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        report_jsonl_path=jsonl_path,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    records = [
+        json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 4
+    assert {record["session_id"] for record in records} == {
+        "session-a",
+        "session-b",
+    }
+    assert all(record["decode_worker_idx"] is not None for record in records)
+    assert report["goodput_completed_requests"] == 4
+    assert report["decode_worker_seconds"] > 0.0
+    assert report["decode_gpus_per_worker"] == 1
+    assert report["gpu_hours"] > 0.0
+
+
+def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
+    trace_path = tmp_path / "agentic.jsonl"
+    records = [
+        {
+            "request_id": "root",
+            "session_id": "root",
+            "timestamp": 0.0,
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [1],
+        },
+        {
+            "request_id": "dependent",
+            "session_id": "dependent",
+            "timestamp": 0.0,
+            "delay": 5.0,
+            "wait_for": ["root"],
+            "input_length": 64,
+            "output_length": 2,
+            "hash_ids": [2],
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        router_mode="kv_router",
+        trace_format="agentic_mooncake",
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+def test_online_synthetic_replay_supports_goodput_sla():
+    report = run_synthetic_trace_replay(
+        64,
+        2,
+        2,
+        extra_engine_args=_vllm_args(),
+        num_workers=2,
+        replay_mode="online",
+        arrival_interval_ms=1.0,
+        sla_e2e_ms=1_000_000.0,
+    )
+
+    assert report["goodput_completed_requests"] == 2
 
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])

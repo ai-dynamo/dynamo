@@ -48,7 +48,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc21",
+    "tensorrt-llm==1.3.0rc22",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -58,8 +58,8 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu13]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.25.1",
+    "nixl[cu13]==1.3.1",
+    "vllm[flashinfer,runai,otel]==0.26.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
