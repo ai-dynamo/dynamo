@@ -440,7 +440,7 @@ impl StorageTier {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
             "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
-            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "CPU_TIER2" | "DISK" | "NVME" | "STORAGE" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
         }
