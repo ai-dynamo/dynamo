@@ -14,6 +14,7 @@ import pytest
 import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
@@ -23,7 +24,6 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
-    start_profile_compat,
 )
 from dynamo.sglang.args import (
     _forward_pass_metrics_source,
@@ -37,6 +37,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
@@ -148,6 +149,7 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
 
         processor = object.__new__(ConcreteMultimodalProcessor)
         processor._processor = Processor()
+        processor.use_cuda_ipc = False
         image_token_id = 99
         processor._process_and_collect_mm_items = lambda **kwargs: (
             [],
@@ -216,6 +218,57 @@ async def test_tensor_image_size_compat_uses_resolved_model_capability(
     await parse_args(sys.argv[1:])
 
     assert install_calls == ([True] if is_multimodal else [])
+
+
+@pytest.mark.asyncio
+async def test_parse_args_enables_incremental_streaming_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.incremental_streaming_output is True
+        server_args.incremental_streaming_output = (
+            parsed_args.incremental_streaming_output
+        )
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model="/tmp")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.incremental_streaming_output is True
+
+
+@pytest.mark.asyncio
+async def test_parse_args_applies_dynamo_defaults_before_resolution(
+    monkeypatch, mock_sglang_cli
+):
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm="dream",
+        enable_forward_pass_metrics=True,
+        kv_events_config=None,
+        max_running_requests=8,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is True
+        assert parsed_args.max_running_requests == 8
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
+
+    await parse_args(sys.argv[1:])
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():
@@ -389,43 +442,26 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compat_starts_profile_with_legacy_kwargs():
-    class LegacyTokenizerManager:
-        received = None
+async def test_start_profile_forwards_profile_request():
+    class TokenizerManager:
+        request = None
 
-        async def start_profile(self, output_dir=None, start_step=None, num_steps=None):
-            self.received = {
-                "output_dir": output_dir,
-                "start_step": start_step,
-                "num_steps": num_steps,
-            }
+        async def start_profile(self, request):
+            self.request = request
 
-    manager = LegacyTokenizerManager()
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
     body = {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5}
 
-    await start_profile_compat(manager, body)
+    response = await BaseWorkerHandler.start_profile(handler, body)
 
-    assert manager.received == body
-
-
-@pytest.mark.asyncio
-async def test_compat_starts_profile_with_request_object(monkeypatch):
-    class RequestTokenizerManager:
-        received = None
-
-        async def start_profile(self, req=None):
-            self.received = req
-
-    request = SimpleNamespace(output_dir="/tmp/profile", start_step=10, num_steps=5)
-    monkeypatch.setattr(sglang_compat, "_build_profile_request", lambda body: request)
-    manager = RequestTokenizerManager()
-
-    await start_profile_compat(
-        manager,
-        {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5},
-    )
-
-    assert manager.received is request
+    assert isinstance(tokenizer_manager.request, ProfileReq)
+    assert tokenizer_manager.request.output_dir == body["output_dir"]
+    assert tokenizer_manager.request.start_step == body["start_step"]
+    assert tokenizer_manager.request.num_steps == body["num_steps"]
+    assert response == {"status": "ok", "message": "Profiling started"}
 
 
 @pytest.mark.asyncio

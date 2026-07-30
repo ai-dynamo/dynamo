@@ -3446,6 +3446,7 @@ class backend:
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
+            default_thinking_mode: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

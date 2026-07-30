@@ -68,6 +68,18 @@ def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
     assert cli_calls[0][1]["trace_block_size"] is None
 
 
+def test_planner_replay_rejects_empty_dynamo_trace_list():
+    with pytest.raises(
+        ValueError,
+        match="trace_format='dynamo' requires at least one trace file",
+    ):
+        replay_api.run_trace_replay(
+            [],
+            trace_format="dynamo",
+            planner_config={"mode": "agg"},
+        )
+
+
 def test_router_config_from_json_validates_policy_file(tmp_path):
     policy_path = tmp_path / "invalid-policy.yaml"
     policy_path.write_text("not: [valid", encoding="utf-8")
