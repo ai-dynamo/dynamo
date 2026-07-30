@@ -22,39 +22,42 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - 从 **`throughput`**（默认）开始，它无需配置即可立即工作。
 - 如果工作负载有严格的延迟要求，并且你更倾向于过度预配置而不是排队，请切换到 **`latency`**。
 - 当你希望通过 prefill 队列和 decode KV 利用率阈值直接控制扩缩容时，请使用 **`load`**。
-- 当你有部署前 profiling 数据，并希望以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
+- 当你希望使用原生 AIC 估算、可选的部署前 profiling 数据或在线 FPM warmup，以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
 
 ## PlannerConfig 参考
 
-planner 通过 `PlannerConfig` JSON/YAML 对象进行配置。使用 profiler 时，该对象位于 DGDR 规范的 `features.planner` 部分下：
+planner 通过 `PlannerConfig` JSON/YAML 对象进行配置。使用 profiler 时，该对象位于 DGDR 规范的 `spec.features.planner` 部分下：
 
 ```yaml
-features:
-  planner:
-    mode: disagg
-    backend: vllm
-    # optimization_target defaults to "throughput" — works out of the box
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      # optimization_target defaults to "throughput" — works out of the box
 ```
 
 对于基于 SLA 的扩缩容：
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    enable_throughput_scaling: true
-    enable_load_scaling: false
-    pre_deployment_sweeping_mode: rapid
-    mode: disagg
-    backend: vllm
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      pre_deployment_sweeping_mode: rapid
+      mode: disagg
+      backend: vllm
 ```
 
 若要在不改变副本数的情况下评估 Planner 行为，请启用 advisory 模式：
 
 ```yaml
-features:
-  planner:
-    advisory: true
+spec:
+  features:
+    planner:
+      advisory: true
 ```
 
 advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。
@@ -89,15 +92,16 @@ SLA 模式使用 Rust 引擎性能模型 shim。如果配置了 `aic_perf_model`
 手动配置原生 AIC 性能模型：
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    aic_perf_model:
-      hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-      system: h200_sxm
-      backend: vllm
-      prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-      decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      aic_perf_model:
+        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
+        system: h200_sxm
+        backend: vllm
+        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
 ```
 
 ### 基于吞吐量的扩缩容设置
@@ -128,7 +132,7 @@ features:
 | `mode` | string | `disagg` | Planner 模式：`disagg`、`prefill`、`decode` 或 `agg`。 |
 | `backend` | string | `vllm` | Backend：`vllm`、`sglang`、`trtllm` 或 `mocker`。 |
 | `environment` | string | `kubernetes` | 运行时环境：`kubernetes`、`virtual` 或 `global-planner`。 |
-| `namespace` | string | env `DYN_NAMESPACE` | 部署的 Kubernetes namespace。 |
+| `namespace` | string | env `DYN_NAMESPACE` | 部署使用的 Dynamo 逻辑/运行时 namespace。 |
 | `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。 |
 
 ### 流量预测设置

@@ -18,7 +18,6 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
-use crate::scheduling::queue_admission::RequestProgressUpdater;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -76,8 +75,7 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub request_progress: Option<RequestProgressUpdater>,
-    pub lifecycle_lease: Option<super::queue::RequestLifecycleLease>,
+    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +87,6 @@ pub enum ScheduleMode {
     Tracked {
         request_id: String,
     },
-    /// Tracks worker and request lifecycle state; the caller reports dispatch and a terminal outcome.
     TrackedWithLifecycle {
         request_id: String,
     },
@@ -286,6 +283,16 @@ impl SchedulingRequest {
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
         self.isl_tokens.div_ceil(block_size as usize) as u64
+    }
+
+    pub(crate) fn potential_decode_blocks_after_admission(
+        &self,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+    ) -> usize {
+        self.worker_load_for(worker)
+            .potential_decode_blocks()
+            .saturating_add(self.request_blocks(block_size) as usize)
     }
 
     pub(crate) fn response_is_closed(&self) -> bool {

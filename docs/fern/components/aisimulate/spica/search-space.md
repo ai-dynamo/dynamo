@@ -53,7 +53,7 @@ There are four kinds of knob:
 | `hardware_sku` | str | — (required) | pinned | any SKU with a system YAML (e.g. `h200_sxm`) |
 | `gpu_budget` | int | `32` | pinned | max GPUs per candidate |
 | `min_gpu_budget` | int? | `None` | pinned | `0 < min_gpu_budget <= gpu_budget` |
-| `min_endpoint` | int? | `None` | pinned | declared-but-unused (kept as-is) |
+| `min_endpoint` | int? | `None` | pinned | Runtime replica floor when Planner is enabled; preserved but has no effect for static candidates |
 | `context_length` | int? | `None` | pinned | `max_seq_len` for KV feasibility; `None` → model max |
 | `startup_time` | float? | `None` | pinned | — |
 | `aic_nextn` | int? | `None` | pinned | speculative-decode (MTP) depth (the `1..5` in the source is a comment hint; **not** validated) |
@@ -92,11 +92,14 @@ separate study. `min_gpu_budget` is validated against `gpu_budget` by `_validate
 | `agg_gpu_memory_utilization` | float | `0.9` | pinned | — |
 | `agg_enable_prefix_caching` | bool | `True` | pinned | — |
 
-## KV manager (multi-tier offload)
+## KV manager (G2 host offload)
 
-All pinned. G3/G4 extend G2; offload is **off by default** (`num_g2_blocks = 0`).
-When G2 is enabled, `kv_bytes_per_token` is required so replay cannot silently
-disable offload if model metadata is private or unavailable.
+All fields are pinned. The current Spica schema configures only G2 host offload;
+it does not expose G3 or G4 tiers. Offload is **off by default**
+(`num_g2_blocks = 0`). When G2 is enabled, `kv_bytes_per_token` is required so
+replay cannot silently disable offload if model metadata is private or
+unavailable. In disaggregated deployments, these settings are applied only to
+prefill workers; decode workers do not receive a second local offload tier.
 
 | knob | type | default | searched / pinned | allowed choices |
 |---|---|---|---|---|
@@ -122,10 +125,11 @@ active for its KV-router trials.
 | `host_cache_hit_weight` | list[float] | `[0.5, 0.75, 1.0]` | searched **iff** `num_g2_blocks > 0` | `0.5`, `0.75`, `1.0` |
 | `disk_cache_hit_weight` | list[float] | `[0.0, 0.25, 0.5]` | searched **iff** `num_g2_blocks > 0` | `0.0`, `0.25`, `0.5` |
 
-`host_cache_hit_weight` / `disk_cache_hit_weight` weight the **host/disk extension blocks**
-in the router's scoring. With offload off (the default `num_g2_blocks = 0`) those blocks are
-0, so the weights can't affect a replay and are dropped from the search to avoid dead
-dimensions. They are only swept when multi-tier KV offload is enabled (`num_g2_blocks > 0`).
+`host_cache_hit_weight` and `disk_cache_hit_weight` are emitted as router scoring
+weights when G2 offload is enabled. With offload off (the default
+`num_g2_blocks = 0`), they are dropped from the search to avoid dead dimensions.
+The current Spica surface does not configure a disk tier, so
+`disk_cache_hit_weight` does not tune disk capacity or disk offload.
 
 ## Admission control (pinned)
 

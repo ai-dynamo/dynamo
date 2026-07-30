@@ -356,6 +356,8 @@ overrides:
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
+  - { ecosystem: python, name: helion,                    license: "BSD-3-Clause",  source: "PyTorch Helion — https://github.com/pytorch/helion/blob/main/LICENSE" }
+  - { ecosystem: python, name: hpc-ops,                   license: "MIT AND BSD-3-Clause",  source: "Tencent HPC-Ops and bundled CUTLASS — https://github.com/Tencent/hpc-ops/blob/main/LICENSE.txt" }
   - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
   - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
   - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }

@@ -259,19 +259,19 @@ class TestRunNaiveFallback:
 
 class TestRunDefaultSim:
     def _execute_return(self, chosen="disagg", ttft=100.0, tpot=10.0):
-        """Build a fake _execute_task_configs return value."""
+        """Build a fake _execute_tasks return value."""
         best_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": ttft, "tpot": tpot, "request_latency": 0.0}
-        return chosen, {chosen: best_df}, None, None, {chosen: latencies}
+        return chosen, {chosen: best_df}, None, None, {chosen: latencies}, {}
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_returns_required_keys(self):
         dgdr = _make_dgdr()
         with (
-            patch("dynamo.profiler.rapid.build_default_task_configs", return_value={}),
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(),
             ),
             patch(
@@ -314,10 +314,8 @@ class TestRunDefaultSim:
             return self._execute_return()
 
         with (
-            patch("dynamo.profiler.rapid.build_default_task_configs", return_value={}),
-            patch(
-                "dynamo.profiler.rapid._execute_task_configs", side_effect=fake_execute
-            ),
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
+            patch("dynamo.profiler.rapid._execute_tasks", side_effect=fake_execute),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
             _run_default_sim(
@@ -350,10 +348,8 @@ class TestRunDefaultSim:
             return self._execute_return()
 
         with (
-            patch("dynamo.profiler.rapid.build_default_task_configs", return_value={}),
-            patch(
-                "dynamo.profiler.rapid._execute_task_configs", side_effect=fake_execute
-            ),
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
+            patch("dynamo.profiler.rapid._execute_tasks", side_effect=fake_execute),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
             _run_default_sim(
@@ -379,9 +375,9 @@ class TestRunDefaultSim:
         """best_latencies come from the chosen experiment's entry."""
         dgdr = _make_dgdr()
         with (
-            patch("dynamo.profiler.rapid.build_default_task_configs", return_value={}),
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(ttft=123.0, tpot=7.0),
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -416,9 +412,9 @@ class TestRunDefaultSimForceDisagg:
 
     def _call_default_sim(self, dgdr, execute_return_value):
         with (
-            patch("dynamo.profiler.rapid.build_default_task_configs", return_value={}),
+            patch("dynamo.profiler.rapid.build_default_tasks", return_value={}),
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=execute_return_value,
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -448,6 +444,7 @@ class TestRunDefaultSimForceDisagg:
             None,
             None,
             {"agg": latencies, "disagg": latencies},
+            {},
         )
 
     @pytest.mark.pre_merge
@@ -481,6 +478,6 @@ class TestRunDefaultSimForceDisagg:
         dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
         agg_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": 100.0, "tpot": 10.0, "request_latency": 0.0}
-        agg_only = ("agg", {"agg": agg_df}, None, None, {"agg": latencies})
+        agg_only = ("agg", {"agg": agg_df}, None, None, {"agg": latencies}, {})
         result = self._call_default_sim(dgdr, agg_only)
         assert result["chosen_exp"] == "agg"
