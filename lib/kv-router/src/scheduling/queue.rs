@@ -41,6 +41,8 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
+pub type RouterQueueWaitObserver = Arc<dyn Fn(usize, Duration) + Send + Sync>;
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -227,6 +229,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    queue_wait_observer: Option<RouterQueueWaitObserver>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -287,6 +290,7 @@ impl<
             overloaded_worker_provider,
             Duration::from_secs(60),
             PolicyClassAdmissionPolicies::new(),
+            None,
         )
         .expect("synthetic policy profile does not require admission policies")
     }
@@ -303,6 +307,7 @@ impl<
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         queue_recheck_interval: Duration,
         admission_policies: PolicyClassAdmissionPolicies,
+        queue_wait_observer: Option<RouterQueueWaitObserver>,
     ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_capacity(
             slots,
@@ -315,6 +320,7 @@ impl<
             overloaded_worker_provider,
             queue_recheck_interval,
             admission_policies,
+            queue_wait_observer,
             ADMISSION_CHANNEL_CAPACITY,
         )
     }
@@ -331,6 +337,7 @@ impl<
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         queue_recheck_interval: Duration,
         admission_policies: PolicyClassAdmissionPolicies,
+        queue_wait_observer: Option<RouterQueueWaitObserver>,
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
         let admission_enabled = !admission_policies.is_empty();
@@ -405,6 +412,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            queue_wait_observer,
         };
         tokio::spawn(actor.run(admission_rx));
         Ok(Self {
@@ -1358,8 +1366,13 @@ impl<
             );
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            self.subtract_class_counters(popped.class_index(), snapshot);
+            let class_index = popped.class_index();
+            self.subtract_class_counters(class_index, snapshot);
             let queued = popped.payload_mut();
+            let queue_wait = decay_now.saturating_duration_since(queued.enqueue_at);
+            if let Some(observer) = &self.queue_wait_observer {
+                observer(class_index, queue_wait);
+            }
             // NOTE: Overlap refresh is expected to be very short. We intentionally
             // accept load crossing the class threshold during this await: busy
             // thresholds guide admission, not reservation. This differs from main
@@ -1372,7 +1385,7 @@ impl<
                 decay_now,
             )
             .await;
-            let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
+            let wait_ms = queue_wait.as_millis() as u64;
             if let Some(overlap) = refreshed {
                 tracing::info!(
                     request_id = queued.request.mode.request_id().unwrap_or("unknown"),
@@ -1382,7 +1395,6 @@ impl<
                 queued.request.overlap = overlap;
             }
             let admit_now = Instant::now();
-            let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             let admission = queued.admission;
@@ -2010,6 +2022,7 @@ mod tests {
                 None,
                 Duration::from_secs(60),
                 PolicyClassAdmissionPolicies::new(),
+                None,
             )
             .unwrap(),
         );
@@ -2224,6 +2237,7 @@ mod tests {
                 None,
                 Duration::from_secs(60),
                 PolicyClassAdmissionPolicies::new(),
+                None,
                 admission_channel_capacity,
             )
             .unwrap(),
@@ -2437,6 +2451,7 @@ policy_classes:
                 None,
                 Duration::from_secs(60),
                 policies,
+                None,
             )
             .unwrap(),
         );

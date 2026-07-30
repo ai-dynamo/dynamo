@@ -101,6 +101,13 @@ where
             .enumerate()
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
+        let wait_metrics = queue_metrics.clone();
+        let queue_wait_observer: dynamo_kv_router::queue::RouterQueueWaitObserver =
+            Arc::new(move |class_index: usize, wait: Duration| {
+                if let Some(metrics) = wait_metrics.get(class_index) {
+                    metrics.wait_seconds.observe(wait.as_secs_f64());
+                }
+            });
 
         let inner = Arc::new(LocalScheduler::new_with_policy_profile(
             slots,
@@ -117,6 +124,7 @@ where
             worker_type,
             watch_worker_configs,
             admission_policies,
+            Some(queue_wait_observer),
         )?);
 
         let metrics_scheduler = Arc::clone(&inner);

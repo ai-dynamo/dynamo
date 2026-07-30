@@ -322,9 +322,24 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   Cached-token estimate captured when each request enters the queue.
 </ParamField>
 
+<ParamField path="dynamo_frontend_router_queue_wait_seconds" type="histogram">
+  Time requests spend pending in the router scheduler queue before worker admission.
+</ParamField>
+
 <ParamField path="dynamo_frontend_router_queue_backpressure_total" type="counter">
   Queue rejections by configured limit reason. Also labeled by `reason`.
 </ParamField>
+
+Router queue wait P99:
+
+```promql
+histogram_quantile(
+  0.99,
+  sum by (le, model, worker_type, policy_class) (
+    rate(dynamo_frontend_router_queue_wait_seconds_bucket[5m])
+  )
+)
+```
 
 ### KV indexer metrics
 
