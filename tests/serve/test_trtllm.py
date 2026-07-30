@@ -356,7 +356,7 @@ trtllm_configs = {
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
-        delayed_start=120,
+        health_check_workers=True,
         request_payloads=[
             multimodal_payload_default(
                 text="Describe what you see in this image.",
@@ -366,6 +366,9 @@ trtllm_configs = {
         env={
             "PREFILL_CUDA_VISIBLE_DEVICES": "0",
             "DECODE_CUDA_VISIBLE_DEVICES": "0",
+            # Make worker /health readiness depend on a successful one-token
+            # engine canary instead of the system-status server alone.
+            "DYN_HEALTH_CHECK_ENABLED": "true",
         },
     ),
     "e_pd_multimodal": TRTLLMConfig(
