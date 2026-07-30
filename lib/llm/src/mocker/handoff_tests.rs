@@ -104,14 +104,36 @@ impl HandoffSchedulerControl for SemanticControl {
     }
 }
 
+struct SemanticEvent {
+    event: LiveHandoffEvent,
+    consumed: oneshot::Sender<()>,
+}
+
+struct SemanticEventSender {
+    events: mpsc::UnboundedSender<SemanticEvent>,
+}
+
+impl SemanticEventSender {
+    fn send(&self, event: LiveHandoffEvent) -> oneshot::Receiver<()> {
+        let (consumed, consumed_rx) = oneshot::channel();
+        assert!(
+            self.events.send(SemanticEvent { event, consumed }).is_ok(),
+            "semantic handoff event stream closed"
+        );
+        consumed_rx
+    }
+}
+
 struct SemanticEvents {
-    events: mpsc::UnboundedReceiver<LiveHandoffEvent>,
+    events: mpsc::UnboundedReceiver<SemanticEvent>,
 }
 
 #[async_trait]
 impl HandoffEventStream for SemanticEvents {
     async fn recv(&mut self) -> Option<LiveHandoffEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await?;
+        let _ = event.consumed.send(());
+        Some(event.event)
     }
 }
 
@@ -119,7 +141,7 @@ fn semantic_boundary() -> (
     HandoffControl,
     mpsc::UnboundedReceiver<ControlInvocation>,
     HandoffEvents,
-    mpsc::UnboundedSender<LiveHandoffEvent>,
+    SemanticEventSender,
 ) {
     let (call_tx, call_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -127,7 +149,7 @@ fn semantic_boundary() -> (
         HandoffControl::new(Arc::new(SemanticControl { calls: call_tx })),
         call_rx,
         HandoffEvents::new(Box::new(SemanticEvents { events: event_rx })),
-        event_tx,
+        SemanticEventSender { events: event_tx },
     )
 }
 
@@ -210,11 +232,12 @@ async fn destination_ack_precedes_an_early_reservation_fact() {
     let invocation = calls.recv().await.unwrap();
     assert_eq!(invocation.action, HandoffControlAction::ReserveDestination);
 
-    event_tx
-        .send(LiveHandoffEvent::DestinationReserved {
-            transferable_prompt_tokens: 4,
-        })
-        .unwrap();
+    let consumed = event_tx.send(LiveHandoffEvent::DestinationReserved {
+        transferable_prompt_tokens: 4,
+    });
+    consumed
+        .await
+        .expect("destination session should consume the reservation event");
     assert!(
         tokio::time::timeout(Duration::from_millis(20), source.recv())
             .await
@@ -275,11 +298,9 @@ async fn premature_complete_waits_for_destination_cleanup() {
         .await
         .unwrap();
     acknowledge(calls.recv().await.unwrap(), HandoffActionOutcome::Accepted);
-    event_tx
-        .send(LiveHandoffEvent::DestinationReserved {
-            transferable_prompt_tokens: 4,
-        })
-        .unwrap();
+    let _consumed = event_tx.send(LiveHandoffEvent::DestinationReserved {
+        transferable_prompt_tokens: 4,
+    });
     let _ = source.recv().await.unwrap();
     let _ = source.recv().await.unwrap();
 
@@ -342,11 +363,12 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
     ));
     let submit = calls.recv().await.unwrap();
     assert_eq!(submit.action, HandoffControlAction::SubmitPrefill);
-    event_tx
-        .send(LiveHandoffEvent::SourceHeld {
-            transfer_timing: transfer_timing(None),
-        })
-        .unwrap();
+    let consumed = event_tx.send(LiveHandoffEvent::SourceHeld {
+        transfer_timing: transfer_timing(None),
+    });
+    consumed
+        .await
+        .expect("source session should consume the held event");
     assert!(
         tokio::time::timeout(Duration::from_millis(20), destination.recv())
             .await
@@ -416,6 +438,198 @@ async fn pending_source_cancellation_releases_session_permit() {
 
     shutdown.cancel();
     manager.wait_closed().await;
+}
+
+#[tokio::test]
+async fn destination_cleanup_abandons_an_unsubmitted_registration() {
+    let engine = LiveEngine::start(
+        args_with_mode(
+            EngineType::Vllm,
+            WorkerType::Decode,
+            KvTransferTimingMode::FullPrompt,
+        ),
+        0,
+    )
+    .unwrap();
+    let handoff_id = HandoffId::from(Uuid::from_u128(74_001));
+    let request_id = Uuid::from_u128(74_002);
+    let (registration, request_stream) = engine.prepare_request(request(request_id, 1)).unwrap();
+    let (control, events) = engine.register_handoff(handoff_id).unwrap();
+    let (control, events) = live_handoff_boundary(control, events, registration);
+    let retained_control = control.clone();
+
+    assert_eq!(
+        control
+            .execute(HandoffControlAction::CancelDestination)
+            .await
+            .unwrap(),
+        HandoffActionOutcome::Applied
+    );
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), request_stream.cancel())
+            .await
+            .expect("prepared request cancellation should not hang")
+            .unwrap()
+    );
+    wait_for_idle(&engine).await;
+    assert_eq!(engine.metrics_receiver().borrow().active_decode_blocks, 0);
+
+    let (replacement, replacement_stream) = engine
+        .prepare_request(request(request_id, 1))
+        .expect("abandoned client request ID should be reusable");
+    drop(replacement);
+    drop(replacement_stream);
+    drop(control);
+    drop(retained_control);
+    drop(events);
+    let (replacement_control, replacement_events) = engine
+        .register_handoff(handoff_id)
+        .expect("abandoned handoff ID should be reusable");
+    drop(replacement_control);
+    drop(replacement_events);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn active_handoff_shutdown_releases_scheduler_and_session_ownership() {
+    let engine_type = EngineType::Vllm;
+    let transfer_timing_mode = KvTransferTimingMode::FullPrompt;
+    let (source_engine, _source_kv) =
+        start_live_engine(engine_type, WorkerType::Prefill, transfer_timing_mode);
+    let (destination_engine, _destination_kv) =
+        start_live_engine(engine_type, WorkerType::Decode, transfer_timing_mode);
+    let shutdown = CancellationToken::new();
+    let server = BootstrapServer::start(0, shutdown.clone(), BootstrapServerConfig::default())
+        .await
+        .unwrap();
+    let manager = SourceHandoffManager::start(
+        server.take_incoming_receiver().unwrap(),
+        1,
+        Duration::from_secs(2),
+        shutdown.clone(),
+    );
+    let handoff_id = HandoffId::from(Uuid::from_u128(75_001));
+    let request_id = Uuid::from_u128(75_002);
+    let identity = BootstrapIdentity {
+        handoff_id,
+        bootstrap_room: 20,
+        request_id,
+    };
+    let order = order_for_engine(engine_type).unwrap();
+
+    let (source_registration, source_request) = source_engine
+        .prepare_request(request(request_id, 1))
+        .unwrap();
+    let (source_control, source_events) = source_engine.register_handoff(handoff_id).unwrap();
+    let (source_control, source_events) =
+        live_handoff_boundary(source_control, source_events, source_registration);
+    let (destination_registration, destination_request) = destination_engine
+        .prepare_request(request(request_id, 2))
+        .unwrap();
+    let (destination_control, destination_events) =
+        destination_engine.register_handoff(handoff_id).unwrap();
+    let (destination_control, destination_events) = live_handoff_boundary(
+        destination_control,
+        destination_events,
+        destination_registration,
+    );
+
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = permits.clone().try_acquire_owned().unwrap();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+    manager
+        .try_register(SourceRegistration {
+            identity: identity.clone(),
+            order,
+            engine_type,
+            control: source_control,
+            lifecycle: source_events,
+            completion_tx,
+            cancel: CancellationToken::new(),
+            observer: Some(observer_tx),
+            _permit: permit,
+        })
+        .unwrap();
+    let destination_connection = connect_to_prefill(
+        "127.0.0.1",
+        server.port(),
+        identity,
+        ParticipantRegistration {
+            role: BootstrapParticipantRole::Destination,
+            dp_rank: 0,
+            order,
+            engine_type,
+        },
+    )
+    .await
+    .unwrap();
+    let destination_session = tokio::spawn(run_destination_session(
+        destination_connection,
+        destination_control,
+        destination_events,
+        CancellationToken::new(),
+        Duration::from_secs(2),
+        shutdown.clone(),
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut source_held = false;
+        let mut destination_reserved = false;
+        while !source_held || !destination_reserved {
+            match observer_rx.recv().await.unwrap() {
+                NormalizedHandoffEvent::SourceHeld => source_held = true,
+                NormalizedHandoffEvent::DestinationReserved => destination_reserved = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("handoff should acquire source and destination ownership");
+
+    shutdown.cancel();
+    let (source_completion, destination_completion) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(completion_rx, destination_session)
+        })
+        .await
+        .expect("active handoff shutdown should join both participants");
+    assert!(source_completion.unwrap().is_err());
+    assert!(destination_completion.unwrap().is_err());
+    manager.wait_closed().await;
+    server.wait_closed().await;
+
+    let (source_cleanup, destination_cleanup) =
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(source_request.cancel(), destination_request.cancel())
+        })
+        .await
+        .expect("request cleanup should complete after handoff shutdown");
+    source_cleanup.unwrap();
+    destination_cleanup.unwrap();
+    wait_for_idle(&source_engine).await;
+    wait_for_idle(&destination_engine).await;
+    assert_eq!(
+        destination_engine
+            .metrics_receiver()
+            .borrow()
+            .active_decode_blocks,
+        0
+    );
+    assert_eq!(permits.available_permits(), 1);
+
+    let (source_replacement, source_replacement_events) =
+        source_engine.register_handoff(handoff_id).unwrap();
+    drop(source_replacement);
+    drop(source_replacement_events);
+    let (destination_replacement, destination_replacement_events) =
+        destination_engine.register_handoff(handoff_id).unwrap();
+    drop(destination_replacement);
+    drop(destination_replacement_events);
+    assert!(probe_engine_drained(&source_engine).await);
+    assert!(probe_engine_drained(&destination_engine).await);
+    source_engine.shutdown().await.unwrap();
+    destination_engine.shutdown().await.unwrap();
 }
 
 #[derive(Clone)]

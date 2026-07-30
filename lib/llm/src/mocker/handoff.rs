@@ -119,6 +119,8 @@ impl HandoffSchedulerControl for LiveHandoffAdapter {
                 Ok(HandoffActionOutcome::Applied)
             }
             HandoffControlAction::CancelSource => {
+                let registration = self.registration.lock().await.take();
+                drop(registration);
                 self.control.cancel_source().await?;
                 Ok(HandoffActionOutcome::Applied)
             }
@@ -127,6 +129,8 @@ impl HandoffSchedulerControl for LiveHandoffAdapter {
                 Ok(HandoffActionOutcome::Applied)
             }
             HandoffControlAction::CancelDestination => {
+                let registration = self.registration.lock().await.take();
+                drop(registration);
                 self.control.cancel_destination().await?;
                 Ok(HandoffActionOutcome::Applied)
             }
