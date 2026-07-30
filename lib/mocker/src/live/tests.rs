@@ -126,6 +126,22 @@ async fn dropping_engine_closes_outstanding_request_streams() {
 }
 
 #[tokio::test]
+async fn retained_handoff_control_does_not_keep_engine_alive() {
+    let engine = LiveEngine::start(handoff_args(EngineType::Vllm, WorkerType::Decode), 0).unwrap();
+    let (control, mut events) = engine
+        .register_handoff(HandoffId::from(Uuid::new_v4()))
+        .unwrap();
+
+    drop(engine);
+    let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("engine shutdown should close outstanding handoff events");
+    assert!(event.is_none());
+    let error = control.cancel_destination().await.unwrap_err();
+    assert!(error.to_string().contains("engine no longer exists"));
+}
+
+#[tokio::test]
 async fn duplicate_request_id_does_not_replace_the_original_stream() {
     let engine = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
     let uuid = Uuid::from_u128(3);
@@ -264,6 +280,35 @@ async fn typed_handoff_routes_output_and_lifecycle_for_supported_engines() {
         assert!(destination_output.completed);
         destination.shutdown().await.unwrap();
         assert!(destination_events.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn dropping_reserved_destination_releases_scheduler_capacity() {
+    for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+        let engine = LiveEngine::start(handoff_args(engine_type, WorkerType::Decode), 0).unwrap();
+        let handoff_id = HandoffId::from(Uuid::new_v4());
+        let (control, mut events) = engine.register_handoff(handoff_id).unwrap();
+        let (registration, request) = engine
+            .prepare_request(DirectRequest {
+                tokens: vec![1, 2, 3, 4],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![42]),
+                uuid: Some(Uuid::new_v4()),
+                ..Default::default()
+            })
+            .unwrap();
+        control.reserve_destination(registration).await.unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(LiveHandoffEvent::DestinationReserved { .. })
+        ));
+
+        drop(request);
+        wait_for_idle(&engine).await;
+        assert_eq!(engine.metrics_receiver().borrow().active_decode_blocks, 0);
+        control.cancel_destination().await.unwrap();
+        engine.shutdown().await.unwrap();
     }
 }
 

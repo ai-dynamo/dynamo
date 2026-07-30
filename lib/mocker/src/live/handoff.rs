@@ -14,7 +14,9 @@ use crate::common::handoff::{HandoffId, HandoffTransferTiming};
 use crate::scheduler::{SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent};
 
 use super::request::{Routes, shutdown_routes};
-use super::{LiveEngine, LiveRequestRegistration, PreparedSubmission, send_command};
+use super::{
+    LiveEngine, LiveEngineInner, LiveRequestRegistration, PreparedSubmission, send_command,
+};
 
 const HANDOFF_EVENT_CAPACITY: usize = 8;
 
@@ -142,7 +144,7 @@ impl LiveEngine {
             .insert(handoff_id, (route.generation, Arc::downgrade(&route)));
         Ok((
             LiveHandoffControl {
-                engine: self.clone(),
+                engine: Arc::downgrade(&self.inner),
                 route: Arc::clone(&route),
             },
             LiveHandoffEvents {
@@ -157,7 +159,7 @@ impl LiveEngine {
 /// Typed scheduler controls for one disaggregated handoff.
 #[derive(Clone)]
 pub struct LiveHandoffControl {
-    engine: LiveEngine,
+    engine: Weak<LiveEngineInner>,
     route: Arc<HandoffRoute>,
 }
 
@@ -171,8 +173,9 @@ impl LiveHandoffControl {
         registration: LiveRequestRegistration,
     ) -> anyhow::Result<()> {
         let command_guard = self.route.command_lock.clone().lock_owned().await;
-        self.ensure_generation(false)?;
-        self.engine
+        let engine = self.engine()?;
+        self.ensure_generation(&engine, false)?;
+        LiveEngine { inner: engine }
             .submit_prepared(
                 registration,
                 PreparedSubmission::Source(self.route.handoff_id),
@@ -186,8 +189,9 @@ impl LiveHandoffControl {
         registration: LiveRequestRegistration,
     ) -> anyhow::Result<()> {
         let command_guard = self.route.command_lock.clone().lock_owned().await;
-        self.ensure_generation(false)?;
-        self.engine
+        let engine = self.engine()?;
+        self.ensure_generation(&engine, false)?;
+        LiveEngine { inner: engine }
             .submit_prepared(
                 registration,
                 PreparedSubmission::Destination(self.route.handoff_id),
@@ -242,12 +246,13 @@ impl LiveHandoffControl {
         expected: HandoffCommandResult,
     ) -> anyhow::Result<()> {
         let _command_guard = self.route.command_lock.clone().lock_owned().await;
-        self.ensure_generation(true)?;
+        let engine = self.engine()?;
+        self.ensure_generation(&engine, true)?;
         anyhow::ensure!(
-            !self.engine.inner.cancel.is_cancelled(),
+            !engine.cancel.is_cancelled(),
             "live Mocker engine is not running"
         );
-        let result = send_command(&self.engine.inner.command_tx, command).await?;
+        let result = send_command(&engine.command_tx, command).await?;
         match (expected, result) {
             (HandoffCommandResult::Applied, SchedulerCommandResult::Applied)
             | (
@@ -261,14 +266,18 @@ impl LiveHandoffControl {
         }
     }
 
-    fn ensure_generation(&self, allow_unregistered: bool) -> anyhow::Result<()> {
-        match self
-            .engine
-            .inner
-            .handoff_routes
-            .by_id
-            .get(&self.route.handoff_id)
-        {
+    fn engine(&self) -> anyhow::Result<Arc<LiveEngineInner>> {
+        self.engine
+            .upgrade()
+            .ok_or_else(|| anyhow!("live Mocker engine no longer exists"))
+    }
+
+    fn ensure_generation(
+        &self,
+        engine: &LiveEngineInner,
+        allow_unregistered: bool,
+    ) -> anyhow::Result<()> {
+        match engine.handoff_routes.by_id.get(&self.route.handoff_id) {
             Some(current) if Arc::ptr_eq(current.value(), &self.route) => Ok(()),
             Some(_) => bail!(
                 "handoff {:?} control belongs to an earlier registration",
