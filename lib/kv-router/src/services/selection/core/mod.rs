@@ -764,6 +764,8 @@ impl SelectionCore {
             lora_name: prompt.lora_name,
             priority_jump,
             strict_priority,
+            // Exposed on the selection API by the request-path follow-up.
+            priority_load_shed_percent: 0,
             policy_class,
             session_id,
             expected_output_tokens,

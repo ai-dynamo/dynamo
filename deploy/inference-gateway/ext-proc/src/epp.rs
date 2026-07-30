@@ -331,6 +331,8 @@ impl Router {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                // Lifted from `nvext.agent_hints` by the request-path follow-up.
+                0,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
@@ -380,6 +382,8 @@ impl Router {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                // Lifted from `nvext.agent_hints` by the request-path follow-up.
+                0,
                 None,
                 allowed_worker_ids,
                 RoutingConstraints::default(),

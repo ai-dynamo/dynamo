@@ -538,6 +538,8 @@ pub enum RouterRequest {
         priority_jump: f64,
         #[serde(default, skip_serializing_if = "is_zero")]
         strict_priority: u32,
+        #[serde(default, skip_serializing_if = "is_zero_u8")]
+        priority_load_shed_percent: u8,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,6 +576,7 @@ impl Default for RouterRequest {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             lora_name: None,
             cache_namespace: None,
         }
@@ -581,6 +584,10 @@ impl Default for RouterRequest {
 }
 
 fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
 
@@ -1899,6 +1906,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 5.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             lora_name: None,
             cache_namespace: None,
         };
@@ -1927,6 +1935,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             lora_name: Some("adapter-a".to_string()),
             cache_namespace: None,
         };
@@ -1971,6 +1980,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 4,
+            priority_load_shed_percent: 0,
             lora_name: None,
             cache_namespace: None,
         };
@@ -1997,6 +2007,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             lora_name: None,
             cache_namespace: None,
         };
@@ -2007,6 +2018,37 @@ mod tests {
     }
 
     #[test]
+    fn test_router_request_new_priority_load_shed_percent_compatibility() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            priority_load_shed_percent: 20,
+            lora_name: None,
+            cache_namespace: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"priority_load_shed_percent":20}"#
+        );
+
+        // Older clients omit the field entirely and must keep the base cap.
+        let missing: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            missing,
+            RouterRequest::New {
+                priority_load_shed_percent: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_router_request_new_serialization_with_cache_namespace() {
         let request = RouterRequest::New {
             tokens: vec![1, 2, 3],
@@ -2014,6 +2056,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             lora_name: None,
             cache_namespace: Some("tenant-a".to_string()),
         };

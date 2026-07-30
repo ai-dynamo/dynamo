@@ -160,6 +160,8 @@ pub struct ScheduleRequest {
     pub router_config_override: Option<RouterConfigOverride>,
     pub priority_jump: f64,
     pub strict_priority: u32,
+    /// Percentage a priority request may exceed the queue-depth caps by.
+    pub priority_load_shed_percent: u8,
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
     pub overlap: OverlapSignals,
@@ -187,6 +189,8 @@ pub struct SchedulingRequest {
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,
     pub strict_priority: u32,
+    /// Percentage a priority request may exceed the queue-depth caps by.
+    pub priority_load_shed_percent: u8,
     pub policy_class: Option<String>,
     pub session_id: Option<String>,
 

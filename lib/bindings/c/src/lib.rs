@@ -504,6 +504,8 @@ impl RouterHandles {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                // Lifted from `nvext.agent_hints` by the request-path follow-up.
+                0,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -583,6 +585,8 @@ impl RouterHandles {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                // Lifted from `nvext.agent_hints` by the request-path follow-up.
+                0,
                 None,
                 None,
                 allowed_worker_ids,

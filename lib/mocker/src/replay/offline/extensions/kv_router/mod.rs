@@ -210,6 +210,7 @@ impl PendingRequest {
             lora_name: None,
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
+            priority_load_shed_percent: 0,
             policy_class: self.policy_class.clone(),
             session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
@@ -518,6 +519,7 @@ impl OfflineReplayRouter {
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
+                    0,
                     WorkerPlacement::Any,
                     pending,
                 )

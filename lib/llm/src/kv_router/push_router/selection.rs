@@ -85,6 +85,8 @@ impl KvPushRouter {
                 args.cache_namespace,
                 args.priority_jump,
                 args.strict_priority,
+                // Lifted from `nvext.agent_hints` by the request-path follow-up.
+                0,
                 args.policy_class,
                 args.session_id,
                 args.expected_output_tokens,

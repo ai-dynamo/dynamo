@@ -218,6 +218,7 @@ mod tests {
             lora_name: None,
             priority_jump,
             strict_priority: 0,
+            priority_load_shed_percent: 0,
             policy_class: None,
             session_id: None,
             expected_output_tokens: None,

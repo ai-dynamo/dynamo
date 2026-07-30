@@ -799,6 +799,7 @@ mod tests {
                     router_config_override: None,
                     priority_jump: 0.0,
                     strict_priority: 0,
+                    priority_load_shed_percent: 0,
                     policy_class: None,
                     session_id: None,
                     overlap: OverlapSignals::default(),

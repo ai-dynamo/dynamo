@@ -2124,6 +2124,7 @@ impl KvRouter {
                     cache_namespace.clone(),
                     0.0,
                     strict_priority,
+                    0,
                     policy_class,
                     None,
                     None,
