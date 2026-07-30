@@ -30,18 +30,8 @@ service.
 
 ```mermaid
 flowchart LR
-  C[Client] -->|OpenAI-compatible HTTP| F[Dynamo Frontend and Router]
-  D[Dynamo Discovery Plane] -.->|Engine endpoint| F
-
-  subgraph H[Same host or Kubernetes pod]
-    E[Stock inference engine<br/>vLLM, SGLang, or TensorRT-LLM]
-    S[Dynamo Sidecar<br/>CPU-only]
-  end
-
-  F -->|Native gRPC| E
-  S -->|Register engine| D
-  E -->|KV events| S
-  S -->|Publish events| V[Dynamo Event Plane]
+  S[Dynamo Sidecar] -->|Discovery and Event planes| F[Dynamo Frontend]
+  F -->|Request plane<br/>Native gRPC| E[Inference Engine]
 ```
 
 The frontend and router resolve the engine endpoint through discovery, then
