@@ -181,8 +181,7 @@ navigation:
         icon: database
         collapsed: true
         contents:
-          - page: Kubernetes
-            slug: kubernetes
+          - page: Overview
             path: kubernetes/dgd-kv-offloading.mdx
 
       - section: Fault Tolerance
@@ -303,8 +302,7 @@ navigation:
         icon: database
         collapsed: true
         contents:
-          - page: CLI
-            slug: cli
+          - page: Overview
             path: cli/kv-cache-offloading.mdx
 
       - section: Operations
@@ -337,48 +335,6 @@ navigation:
   - tab: use-cases
     layout:
       # ==================== Use Cases ====================
-      - section: Routing
-        collapsed: true
-        icon: route
-        slug: routing
-        contents:
-          - page: Overview
-            path: components/router/README.md
-          - page: Kubernetes
-            slug: kubernetes
-            path: kubernetes/kv-aware-routing.md
-          - page: CLI
-            slug: cli
-            path: cli/kv-routing.mdx
-          - page: Standalone Router
-            slug: standalone-router
-            path: components/router/router-guide.md
-      - section: Disaggregated Serving
-        collapsed: true
-        icon: arrows-split-up-and-left
-        slug: disaggregated-serving
-        contents:
-          - page: Overview
-            path: features/disaggregated-serving/README.md
-          - page: CLI
-            slug: cli
-            path: cli/disaggregated-serving.mdx
-          - page: AIConfigurator
-            path: features/disaggregated-serving/aiconfigurator.md
-      - section: KV Cache Offloading
-        collapsed: true
-        icon: database
-        slug: kv-cache-offloading
-        contents:
-          - page: Kubernetes
-            slug: kubernetes
-            path: kubernetes/dgd-kv-offloading.mdx
-          - page: CLI
-            slug: cli
-            path: cli/kv-cache-offloading.mdx
-          - page: vLLM
-            slug: vllm
-            path: backends/vllm/vllm-kv-offloading.md
       - section: Agents
         collapsed: true
         icon: users

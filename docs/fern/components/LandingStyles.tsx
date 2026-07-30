@@ -528,10 +528,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   background: #4a154b;
 }
 
-.dynamo-welcome__notification--wechat .dynamo-welcome__notification-icon {
-  background: #07c160;
-}
-
 .dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
   background: #ff3b30;
 }
