@@ -34,6 +34,7 @@ import functools
 import logging
 import os
 import tempfile
+import warnings
 
 import numpy as np
 
@@ -100,7 +101,16 @@ def nvdec_available() -> bool:
     if env_bool(DISABLE_ENV):
         return False
     try:
-        import PyNvVideoCodec  # noqa: F401
+        with warnings.catch_warnings():
+            # A third-party deprecation must not decide whether the capability
+            # exists. PyNvVideoCodec 2.2.0's __init__ does `from ast import Str`,
+            # which warns on Python 3.12; under pytest's filterwarnings=error
+            # that warning is *raised*, the import "fails", and this lru_cache
+            # then pins False for the whole process -- silently disabling NVDEC
+            # for every test in the session (a second import would have
+            # succeeded, since the warning is only raised once).
+            warnings.simplefilter("ignore")
+            import PyNvVideoCodec  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         # ImportError when the wheel is absent; RuntimeError when the wheel is
         # present but the NVDEC/NVENC driver libs are not loadable -- the

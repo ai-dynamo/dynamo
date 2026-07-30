@@ -3,16 +3,21 @@
 
 """GPU integration test for NVDEC decode (needs a GPU + PyNvVideoCodec).
 
-Generates short H.264/H.265 clips with imageio's full ffmpeg (a test artifact
-only -- the in-tree ffmpeg is VP9-only) and decodes them through the real
-``nvdec_decoder``, asserting the frame contract. Mirrors the hardware validation
-done on gpu-ts. Skips cleanly where NVDEC or a full ffmpeg is unavailable, so it
-is a no-op on CPU lanes and images without PyNvVideoCodec.
+Decodes the committed H.264/H.265 fixtures through the real ``nvdec_decoder``
+and asserts the frame contract, mirroring the hardware validation done on
+gpu-ts. Skips cleanly where NVDEC is unavailable, so it is a no-op on CPU lanes
+and images without PyNvVideoCodec.
+
+The clips are committed fixtures rather than synthesized at run time on purpose:
+generating them needs an H.264/H.265 *encoder*, which the codec-compliant image
+deliberately does not ship (the in-tree ffmpeg is VP9-only, and imageio-ffmpeg
+is installed with --no-binary). Synthesizing here made the test unable to run in
+the very image it is meant to validate.
 """
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,45 +32,26 @@ pytestmark = [
 ]
 
 
-def _synth_frames(n: int = 24, h: int = 256, w: int = 256) -> list[np.ndarray]:
-    frames = []
-    for i in range(n):
-        f = np.zeros((h, w, 3), np.uint8)
-        f[:, (i * 5) % w :, 0] = 220
-        f[(i * 4) % h :, :, 1] = 140
-        f[:, :, 2] = (i * 8) % 256
-        frames.append(f)
-    return frames
+_MEDIA_DIR = (
+    Path(__file__).resolve().parents[6] / "lib" / "llm" / "tests" / "data" / "media"
+)
+
+# Committed fixtures, re-encoded from the VP9 240p_10.mp4 clip.
+_FIXTURES = {"h264": "240p_10_h264.mp4", "hevc": "240p_10_h265.mp4"}
 
 
-def _encode_sample(path: str, codec: str) -> None:
-    """Write an H.264/H.265 clip using imageio's bundled full ffmpeg.
-
-    The image points IMAGEIO_FFMPEG_EXE at the in-tree VP9-only ffmpeg, so unset
-    it to reach imageio-ffmpeg's full build (has libx264/libx265). Skips the test
-    if that build or its encoders are unavailable.
-    """
-    imageio = pytest.importorskip("imageio")
-    pytest.importorskip("imageio_ffmpeg")
-    saved = os.environ.pop("IMAGEIO_FFMPEG_EXE", None)
-    try:
-        imageio.mimwrite(path, _synth_frames(), format="FFMPEG", codec=codec, fps=10)
-    except Exception as exc:  # noqa: BLE001 - sample generator, not the code under test
-        pytest.skip(f"could not generate a {codec} sample clip: {exc}")
-    finally:
-        if saved is not None:
-            os.environ["IMAGEIO_FFMPEG_EXE"] = saved
-
-
-@pytest.mark.parametrize("codec", ["libx264", "libx265"])
-def test_nvdec_decodes_real_clip(tmp_path, codec):
+@pytest.mark.parametrize("codec", sorted(_FIXTURES))
+def test_nvdec_decodes_real_clip(codec):
     if not nd.nvdec_available():
         pytest.skip("PyNvVideoCodec/NVDEC not available (needs the video capability)")
 
-    path = str(tmp_path / f"{codec}.mp4")
-    _encode_sample(path, codec)
-    with open(path, "rb") as fh:
-        data = fh.read()
+    path = _MEDIA_DIR / _FIXTURES[codec]
+    if not path.is_file():
+        pytest.skip(f"fixture not available: {path}")
+    data = path.read_bytes()
+    # Guard against an unresolved Git LFS pointer masquerading as the clip.
+    if data[:7] == b"version":
+        pytest.skip(f"fixture is an unresolved LFS pointer: {path}")
 
     # Sanity: the probe classifies the clip as an NVDEC-routed codec.
     assert nd.probe_video_codec(data) in nd.HW_ROUTED_CODECS
