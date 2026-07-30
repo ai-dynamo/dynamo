@@ -363,7 +363,7 @@ async fn source_held_waits_for_submit_outcome_before_progressing() {
     assert_eq!(cleanup.action, HandoffControlAction::CancelSource);
     acknowledge(cleanup, HandoffActionOutcome::Applied);
     assert!(session.await.unwrap().is_err());
-    assert!(matches!(completion_rx.await.unwrap(), Err(_)));
+    assert!(completion_rx.await.unwrap().is_err());
     finish_test_transport(server, shutdown).await;
 }
 
@@ -405,7 +405,7 @@ async fn pending_source_cancellation_releases_session_permit() {
     manager.wait_for_pending_source(handoff_id).await;
 
     cancel.cancel();
-    assert!(matches!(completion_rx.await.unwrap(), Err(_)));
+    assert!(completion_rx.await.unwrap().is_err());
     manager.wait_for_retired(handoff_id).await;
     assert_eq!(permits.available_permits(), 1);
 

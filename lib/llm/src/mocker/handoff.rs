@@ -1511,7 +1511,7 @@ pub(crate) async fn cancel_destination(control: &HandoffControl, timeout: Durati
 fn action_outcome(result: Result<HandoffActionOutcome>) -> HandoffActionOutcome {
     match result {
         Ok(outcome) => outcome,
-        Err(error) => return HandoffActionOutcome::Failed(error.to_string()),
+        Err(error) => HandoffActionOutcome::Failed(error.to_string()),
     }
 }
 
