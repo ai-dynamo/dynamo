@@ -7,8 +7,9 @@ sidebar-title: 简介
 
 Dynamo 是一个开源、高吞吐、低延迟的推理框架，专为在分布式环境中服务生成式 AI 工作负载而设计。本页概述 Dynamo 的设计原则、性能优势和生产级功能。
 
-> [!TIP]
-> 想马上开始？请参阅 [Quickstart](quickstart.mdx)，几分钟内即可安装并运行 Dynamo。
+<Tip>
+想马上开始？请参阅 [Quickstart](quickstart.mdx)，几分钟内即可安装并运行 Dynamo。
+</Tip>
 
 ## 为什么选择 Dynamo？
 
@@ -42,8 +43,9 @@ pip install kvbm
 pip install nixl
 ```
 
-> [!NOTE]
-> 也提供包含所有依赖项的预构建容器。请参阅 [Release Artifacts](../../../../reference/release-artifacts.mdx) 了解容器镜像。
+<Note>
+也提供包含所有依赖项的预构建容器。请参阅 [Release Artifacts](../../../../reference/release-artifacts.mdx) 了解容器镜像。
+</Note>
 
 Dynamo 生态系统包含以下额外的模块化组件，并会随着时间继续增长：
 
@@ -98,8 +100,9 @@ Dynamo 通过组合三项核心技术实现先进的 LLM 性能：分离式服�
 - **分离式服务 + KV Cache Offloading** -- KV 缓存卸载带来更快的 TTFT，并且可以减少 prefill worker 数量以降低 TCO。
 - **KV Cache-Aware Routing + KV Cache Offloading** -- 卸载会增加总体可寻址缓存大小，提高 KV 缓存命中率，进而加速 TTFT。
 
-> [!TIP]
-> 准备尝试这些技术？请参阅 [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)，了解组合分离式服务、路由和卸载的分步部署示例。
+<Tip>
+准备尝试这些技术？请参阅 [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)，了解组合分离式服务、路由和卸载的分步部署示例。
+</Tip>
 
 ## 从配置到生产级部署
 

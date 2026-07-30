@@ -25,12 +25,14 @@ subtitle: 使用 Dynamo 内置的工具调用解析器，将模型连接到外�
 python -m dynamo.<backend> --help
 ```
 
-> [!TIP]
-> 如果你的模型默认的 chat template 不支持工具调用，但模型本身支持，你可以为每个 worker 指定自定义 chat template：
-> `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`。
+<Tip>
+如果你的模型默认的 chat template 不支持工具调用，但模型本身支持，你可以为每个 worker 指定自定义 chat template：
+`python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`。
+</Tip>
 
-> [!TIP]
-> 如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../../../../reasoning/README.md) 了解支持的 `--dyn-reasoning-parser` 取值。
+<Tip>
+如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../../../../reasoning/README.md) 了解支持的 `--dyn-reasoning-parser` 取值。
+</Tip>
 
 ## 支持的工具调用解析器
 
@@ -58,8 +60,9 @@ python -m dynamo.<backend> --help
 | `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
 | `default` | *(fallback)* | Dynamo-only | 空 JSON 配置（无 start/end token）。生产环境请优先使用模型专用解析器。 |
 
-> [!TIP]
-> 对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../../../../reasoning/README.md) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
+<Tip>
+对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../../../../reasoning/README.md) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
+</Tip>
 
 ## 示例
 
@@ -101,9 +104,10 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 Dynamo 会从模型输出中解析出工具调用，并在响应中以兼容 OpenAI 的 `tool_calls` 形式呈现。
 
-> [!TIP]
-> 如果工具调用返回结果不正确，请向单个复现请求添加 `"logprobs": true` 并分享响应。有关报告问题时需要捕获和包含的内容，请参阅
-> [工具调用故障排查](../../../../tool-calling/troubleshooting.md)。
+<Tip>
+如果工具调用返回结果不正确，请向单个复现请求添加 `"logprobs": true` 并分享响应。有关报告问题时需要捕获和包含的内容，请参阅
+[工具调用故障排查](../../../../tool-calling/troubleshooting.md)。
+</Tip>
 
 ## 可选：结构化标签（structural tags）
 

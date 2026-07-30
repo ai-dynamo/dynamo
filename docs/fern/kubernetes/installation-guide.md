@@ -275,12 +275,42 @@ For large clusters with frequent model updates, consider [ModelExpress](model-ca
 
 Run the pre-deployment check script to validate your cluster is ready for deployments:
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 ./deploy/pre-deployment/pre-deployment-check.sh
+```
+
+The default run checks kubectl connectivity, default StorageClass configuration, NVIDIA GPU node availability (label `nvidia.com/gpu.present=true`), and GPU Operator status.
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
 ./deploy/pre-deployment/pre-deployment-check.sh --device cpu
 ```
 
-This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+The `--device cpu` flag skips NVIDIA-specific GPU checks. Verify your Intel GPU resources separately:
+
+```bash
+kubectl get deviceclass gpu.intel.com
+kubectl get resourceslices
+```
+
+</Tab>
+<Tab title="CPU">
+
+```bash
+./deploy/pre-deployment/pre-deployment-check.sh --device cpu
+```
+
+The `--device cpu` flag skips GPU checks entirely. The script validates kubectl connectivity and default StorageClass configuration.
+
+</Tab>
+</Tabs>
+
+See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
 
 </Step>
 
