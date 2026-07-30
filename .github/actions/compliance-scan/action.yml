@@ -122,7 +122,7 @@ runs:
 
     - name: Upload attribution artifacts
       if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
       with:
         name: ${{ inputs.artifact_name }}
         path: ${{ inputs.artifact_name }}*.csv

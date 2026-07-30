@@ -385,7 +385,7 @@ runs:
 
     - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
       if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
       with:
         # compliance-<git-sha>-<container>. artifact_name_prefix == target_tag_plain
         # == the container name (e.g. vllm-runtime, vllm-runtime-efa, dynamo-planner);
@@ -397,7 +397,7 @@ runs:
 
     - name: Upload /sources/ tarball (post-merge / RC / release only)
       if: ${{ inputs.archive_sources == 'true' && always() }}
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
       with:
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
         path: /tmp/sources/sources.zip
