@@ -128,7 +128,7 @@ features:
 | `mode` | string | `disagg` | Planner 模式：`disagg`、`prefill`、`decode` 或 `agg`。 |
 | `backend` | string | `vllm` | Backend：`vllm`、`sglang`、`trtllm` 或 `mocker`。 |
 | `environment` | string | `kubernetes` | 运行时环境：`kubernetes`、`virtual` 或 `global-planner`。 |
-| `namespace` | string | env `DYN_NAMESPACE` | 部署的 Kubernetes namespace。 |
+| `namespace` | string | env `DYN_NAMESPACE` | 部署使用的 Dynamo 逻辑/运行时 namespace。 |
 | `advisory` | bool | `false` | 仅建议模式。计算、记录、导出并报告建议副本数，但不执行扩缩容操作，也不更改部署。 |
 
 ### 流量预测设置

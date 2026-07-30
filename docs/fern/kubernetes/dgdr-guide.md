@@ -105,8 +105,8 @@ spec:
 | `workload.osl` | Expected average output sequence length | `1000` |
 | `workload.requestRate` | Target requests per second | — |
 | `workload.concurrency` | Target concurrent requests (alternative to `requestRate`) | — |
-| `sla.ttft` | Target Time To First Token, ms | — |
-| `sla.itl` | Target Inter-Token Latency, ms | — |
+| `sla.ttft` | Target Time To First Token, ms | `2000` |
+| `sla.itl` | Target Inter-Token Latency, ms | `30` |
 | `sla.e2eLatency` | Target end-to-end latency, ms. **Cannot** be combined with `ttft`/`itl`. | — |
 
 > [!NOTE]
@@ -296,7 +296,7 @@ kubectl describe dgdr my-model -n <namespace>
 kubectl get dgdr my-model -n <namespace> -o jsonpath='{.status.profilingPhase}'
 
 # Profiling job logs
-kubectl get pods -n <namespace> -l nvidia.com/dgdr-name=my-model
+kubectl get pods -n <namespace> -l app=dynamo-profiler,dgdr=my-model
 kubectl logs -f <profiling-pod-name> -n <namespace>
 ```
 

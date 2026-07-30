@@ -57,11 +57,11 @@ planner:
                                       # PR #1; logs WARNING on startup)
       request_timeout_seconds: 5
       keepalive_time_ms: 30000
-      max_message_size_bytes: 10000000
-  scheduling:
-    clock:
-      type: wall                       # virtual only allowed in test/replay
+      max_message_size_bytes: 10485760
 ```
+
+Production scheduling uses `WallClock`. Replay and tests inject
+`VirtualClock`; clock selection is not a Planner configuration field.
 
 The mTLS config block (`grpc_mtls.enabled` / `secret_mount_path` etc.)
 documented in earlier drafts is **not** shipped in PR #1 and is not a

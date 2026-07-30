@@ -166,8 +166,8 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `max_gpu_budget` | `8` | Maximum GPUs across all workers |
 | `min_endpoint` | `1` | Minimum replicas per worker type |
-| `decode_engine_num_gpu` | `1` | GPUs per decode engine |
-| `prefill_engine_num_gpu` | `1` | GPUs per prefill engine |
+| `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |
+| `prefill_engine_num_gpu` | `null` | GPUs per prefill engine; auto-detected from the deployment when unset |
 | `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
 | **Throughput-based scaling** | | |
 | `enable_throughput_scaling` | `true` | Enable throughput-based scaling |
@@ -260,7 +260,7 @@ In advisory mode, the Planner still observes traffic and FPM data, computes reco
 Additional series support dashboards and offline analysis:
 
 - **Perf-model latency estimates:** `dynamo_planner_estimated_ttft_ms` and `dynamo_planner_estimated_itl_ms` reflect the maximum estimated TTFT and ITL from the engine perf model across engines.
-- **Engine capacity:** `dynamo_planner_engine_prefill_requests_per_second` and `dynamo_planner_engine_decode_requests_per_second` report single-engine prefill and decode capacity under the configured SLA.
+- **Engine capacity:** `dynamo_planner_engine_prefill_capacity_requests_per_second` and `dynamo_planner_engine_decode_capacity_requests_per_second` report single-engine prefill and decode capacity under the configured SLA.
 - **Scaling decision reasons:** `dynamo_planner_load_scaling_decision` and `dynamo_planner_throughput_scaling_decision` are Enum gauges whose state labels encode why each mode chose to scale, hold, or skip (for example `scale_up`, `no_fpm_data`, `set_lower_bound`).
 - **Per-engine FPM queue depths:** `dynamo_planner_engine_queued_prefill_tokens`, `dynamo_planner_engine_queued_decode_kv_tokens`, and `dynamo_planner_engine_inflight_decode_kv_tokens` are labeled with `worker_id` and `dp_rank` for each engine.
 

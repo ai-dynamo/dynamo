@@ -138,7 +138,7 @@ features:
 | `mode` | string | `disagg` | Planner mode: `disagg`, `prefill`, `decode`, or `agg`. |
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
-| `namespace` | string | env `DYN_NAMESPACE` | Kubernetes namespace for the deployment. |
+| `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
 | `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
 
 ### Traffic Prediction Settings
