@@ -133,7 +133,8 @@ Four predictor implementations are available:
 | **Prophet**  | Facebook Prophet time-series model       | Complex seasonality              |
 
 
-All predictors support warm-starting from trace files (`--load-predictor-warmup-trace`).
+All predictors support warm-starting from trace files
+(`load_predictor_warmup_trace`).
 
 Runtime metadata that describes engine/router behavior is not forecast with
 these predictors. KV hit rate and speculative decode accept length use
@@ -173,13 +174,15 @@ then calls the configured connector to apply component replica targets.
 ### Interface
 
 ```python
-class PlannerConnector(ABC):
-    async def add_component(self, component_name)
-    async def remove_component(self, component_name)
-    # Extended interface (not on ABC, but implemented by both connectors):
-    async def set_component_replicas(self, targets, blocking)
+class PlannerConnector(Protocol):
+    async def async_init(self)
     async def validate_deployment(self, ...)
     async def wait_for_deployment_ready(self)
+    def get_model_name(self, ...)
+    def get_gpu_counts(self, ...)
+    def get_worker_info(self, ...)
+    async def get_actual_worker_counts(self, ...)
+    async def set_component_replicas(self, targets, blocking=True)
 ```
 
 ### KubernetesConnector
@@ -230,7 +233,7 @@ bootstraps builtin and configured plugins, and enters the tick loop.
 - **Adjustment interval sizing**: The plugin execution interval must be long enough for scaling operations to complete. If `load_adjustment_interval_seconds` or `throughput_adjustment_interval_seconds` is shorter than the time to add/remove a worker (which includes pod scheduling, model loading, and registration), scaling decisions may observe an in-progress replica transition and hold until it completes.
 - **Perf-model bootstrap quality**: Throughput-based scaling can start from worker self-benchmark data, AI Configurator interpolation, `profile_results_dir` files, or live FPM regression. Missing bootstrap data is allowed, but early decisions may hold until enough live FPM observations arrive.
 - **Interpolation accuracy vs profiling cost**: Higher `prefillInterpolationGranularity` and `decodeInterpolationGranularity` in the profiler sweep produce more accurate bootstrap data but increase profiling time linearly. Default granularity (16 prefill, 6 decode) balances accuracy with profiling duration.
-- **Predictor warm-up period**: All predictors need observation history before making reliable forecasts. ARIMA and Prophet need multiple adjustment intervals of data. Kalman starts forecasting after `--kalman-min-points` observations. During warm-up, the planner uses the constant predictor as fallback.
+- **Predictor warm-up period**: All predictors need observation history before making reliable forecasts. ARIMA and Prophet need multiple adjustment intervals of data. Kalman starts forecasting after `kalman_min_points` observations. During warm-up, the planner uses the constant predictor as fallback.
 
 ## Load-Based Scaling
 
@@ -275,17 +278,16 @@ When both modes are enabled, throughput-based scaling (longer interval) sets a l
 
 ### Aggregated Mode
 
-In aggregated mode (`--mode agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
+In aggregated mode (`mode: agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
 
 ## Known Limitations
 
 1. **Adjustment interval vs scaling latency**: If a plugin interval is shorter than the time to scale, later ticks may observe an in-progress transition and hold rather than stacking new replica changes.
 2. **Average-based prediction**: Throughput-based scaling uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
-3. **Single DGD scope**: Each planner instance manages exactly one DGD. Multi-model/multi-DGD coordination is not supported.
+3. **Local Planner scope**: Each local Planner instance directly manages one DGD. Use GlobalPlanner for shared GPU budgets and coordination across multiple DGDs.
 
 ## Future Work
 
-- Multi-DGD coordination for shared-cluster scenarios
 - Distribution-aware interpolation (beyond mean ISL/OSL)
 - Adaptive adjustment interval based on observed scaling latency
 

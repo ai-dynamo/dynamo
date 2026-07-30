@@ -80,7 +80,7 @@ Planner 会预测下一个 interval 的三个流量形状值：
 | **Kalman**   | Local linear trend Kalman filter         | 突发流量 |
 | **Prophet**  | Facebook Prophet time-series model       | 复杂季节性 |
 
-所有 predictors 都支持从 trace 文件 warm-starting（`--load-predictor-warmup-trace`）。
+所有 predictors 都支持通过 `load_predictor_warmup_trace` 从 trace 文件 warm-starting。
 
 描述 engine/router 行为的 runtime metadata 不通过这些 predictors 预测。KV hit rate 和 speculative decode accept length 使用 last-value 语义：planner 保存最新的有效 Prometheus 观测，并在新的有效值到来前复用它。冷启动时，KV hit rate 缺失表示不做 discount，accept length 缺失表示 `1.0`。
 
@@ -108,13 +108,15 @@ Throughput proposer 会把预测负载和每个 engine 的 capacity 转换成 re
 ### Interface
 
 ```python
-class PlannerConnector(ABC):
-    async def add_component(self, component_name)
-    async def remove_component(self, component_name)
-    # Extended interface (not on ABC, but implemented by both connectors):
-    async def set_component_replicas(self, targets, blocking)
+class PlannerConnector(WorkerInfoProvider, Protocol):
+    async def async_init(self)
     async def validate_deployment(self, ...)
     async def wait_for_deployment_ready(self)
+    def get_model_name(self, ...)
+    def get_gpu_counts(self, ...)
+    def get_worker_info(self, ...)
+    async def get_actual_worker_counts(self, ...)
+    async def set_component_replicas(self, targets, blocking=True)
 ```
 
 ### KubernetesConnector
@@ -161,7 +163,7 @@ Interpolators 使用 profiling sweep granularity 来决定精度。granularity �
 - **Adjustment interval sizing**：plugin execution interval 必须足够长，让扩缩容操作完成。如果 `load_adjustment_interval_seconds` 或 `throughput_adjustment_interval_seconds` 短于添加/移除 worker 的时间（包括 pod scheduling、model loading 和 registration），后续扩缩容决策可能观察到一个仍在进行中的 replica transition，并 hold 到它完成。
 - **Perf-model bootstrap quality**：基于吞吐量的扩缩容可以从 worker self-benchmark data、AI Configurator interpolation、`profile_results_dir` 文件或 live FPM regression 启动。缺少 bootstrap data 是允许的，但早期决策可能会 hold，直到足够的 live FPM observations 到达。
 - **Interpolation accuracy vs profiling cost**：profiler sweep 中更高的 `prefillInterpolationGranularity` 和 `decodeInterpolationGranularity` 会产生更准确的 bootstrap data，但 profiling 时间也会线性增加。默认 granularity（16 prefill，6 decode）在准确性和 profiling duration 之间做平衡。
-- **Predictor warm-up period**：所有 predictors 都需要 observation history 才能产生可靠预测。ARIMA 和 Prophet 需要多个 adjustment intervals 的数据。Kalman 在 `--kalman-min-points` 个观测之后开始预测。Warm-up 期间，planner 使用 constant predictor 作为 fallback。
+- **Predictor warm-up period**：所有 predictors 都需要 observation history 才能产生可靠预测。ARIMA 和 Prophet 需要多个 adjustment intervals 的数据。Kalman 在 `kalman_min_points` 个观测之后开始预测。Warm-up 期间，planner 使用 constant predictor 作为 fallback。
 
 ## 基于负载的扩缩容
 
@@ -207,17 +209,16 @@ Interpolators 使用 profiling sweep granularity 来决定精度。granularity �
 
 ### Aggregated Mode
 
-在 aggregated mode（`--mode agg`）下，engines 同时处理 prefill 和 decode，并使用 chunked prefill。Planner 维护 TTFT 和 ITL 两个 regression models，但使用按 worker 时间平均的 metrics（不是瞬时值）进行 regression training，以平滑 chunked prefill noise。如果 prefill 或 decode 任一信号 overload，则 scale up；只有两者都 underload 时才 scale down。
+在 aggregated mode（`mode: agg`）下，engines 同时处理 prefill 和 decode，并使用 chunked prefill。Planner 维护 TTFT 和 ITL 两个 regression models，但使用按 worker 时间平均的 metrics（不是瞬时值）进行 regression training，以平滑 chunked prefill noise。如果 prefill 或 decode 任一信号 overload，则 scale up；只有两者都 underload 时才 scale down。
 
 ## Known Limitations
 
 1. **Adjustment interval vs scaling latency**：如果 plugin interval 短于扩缩容耗时，后续 tick 可能观察到正在进行中的 transition，并 hold，而不是叠加新的 replica change。
 2. **Average-based prediction**：基于吞吐量的扩缩容使用平均 ISL/OSL，这可能无法很好表示 bimodal 或 heavy-tailed distributions。
-3. **Single DGD scope**：每个 planner instance 只管理一个 DGD。不支持 multi-model/multi-DGD coordination。
+3. **Local Planner scope**：每个本地 Planner instance 直接管理一个 DGD。跨多个 DGD 的共享 GPU 预算和协调请使用 GlobalPlanner。
 
 ## Future Work
 
-- 面向 shared-cluster 场景的 multi-DGD coordination
 - Distribution-aware interpolation（超越 mean ISL/OSL）
 - 基于 observed scaling latency 的 adaptive adjustment interval
 
