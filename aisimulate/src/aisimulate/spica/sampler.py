@@ -9,18 +9,16 @@ One Vizier study per branch (per the design). The study's parameters are:
   pool.
 - a continuous ``kv_load_ratio`` when a Pareto workload supplies a range.
 - one parameter per multi-choice searchable knob (categorical for string choices
-  like ``planner_scaling_policy``/``router_mode``; discrete for the numeric
-  batching / router-weight choices). Single-choice knobs are injected as
-  constants (not Vizier params).
+  and discrete for numeric choices). Adapter parameters are already namespaced
+  when they reach the sampler. Single-choice knobs are injected as constants
+  rather than Vizier parameters.
 
 ``suggest`` decodes each trial into a ``selection`` dict (the shape
 :func:`aisimulate.spica.sample.unroll_sample` consumes) plus the chosen parallel-config
 object; ``observe`` reports the (higher-is-better) score back to Vizier.
 
-The sampler is swappable behind the :class:`BranchSampler` Protocol so a lighter
-backend can replace Vizier without touching the orchestration. The branch-space
-builder removes dependent router/planner knobs when those components are pinned
-off; mixed-mode studies retain them because Vizier has no conditional params here.
+The sampler is swappable behind the :class:`BranchSampler` Protocol so another
+optimizer can replace Vizier without touching orchestration.
 """
 
 from __future__ import annotations
@@ -115,9 +113,9 @@ class VizierBranchSampler:
         clients, vz = _vizier_modules()
 
         # Vizier's embedded service defaults its SQLite database to the installed
-        # package directory, which is read-only in the planner image. Spica studies
-        # are process-local unless the caller explicitly configures Vizier storage,
-        # so use an in-memory database for the default embedded-service path.
+        # package directory, which can be read-only. Spica studies are process-local
+        # unless the caller explicitly configures Vizier storage, so use an in-memory
+        # database for the default embedded-service path.
         if "database_url" not in clients.environment_variables.servicer_kwargs:
             clients.environment_variables.servicer_use_sql_ram()
 

@@ -6,21 +6,19 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 import yaml
 from pydantic import ValidationError
 
 from .config import SmartSearchConfig
-from .search import run_smart_search
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m aisimulate.spica",
         description=(
-            "[EXPERIMENTAL] Spica smart sweeper. Its configuration, output, and "
-            "optimization behavior may change without notice."
+            "[EXPERIMENTAL] Spica is replay-runtime neutral. Use its Python API "
+            "with an injected RunnerFactory to execute a sweep."
         ),
     )
     parser.add_argument(
@@ -37,29 +35,11 @@ def main() -> None:
     except ValidationError as exc:
         parser.error(f"invalid config {args.config}: {exc}")
 
-    candidates = run_smart_search(config)
-    if not candidates:
-        print(
-            "no feasible candidate found "
-            "(check backends / SLA / gpu_budget / replay errors)",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if config.goal.is_pareto:
-        # The result is a Pareto front: show every objective + the concrete concurrency, since
-        # the single `score` (the first objective) hides the tradeoff the front is about.
-        print(f"pareto front ({len(candidates)} non-dominated):")
-        for i, candidate in enumerate(candidates):
-            objectives = ", ".join(
-                f"{key}={value:.4g}"
-                for key, value in (candidate.objectives or {}).items()
-            )
-            concurrency = candidate.config.get("concurrency")
-            conc = f" concurrency={concurrency}" if concurrency is not None else ""
-            print(f"{i}: {objectives}{conc} used_gpus={candidate.used_gpus}")
-    else:
-        for i, candidate in enumerate(candidates):
-            print(f"{i}: score={candidate.score} used_gpus={candidate.used_gpus}")
+    del config
+    parser.error(
+        "the standalone CLI has no default replay runtime; call "
+        "aisimulate.spica.run_smart_search(config, runner_factory=...) from Python"
+    )
 
 
 if __name__ == "__main__":

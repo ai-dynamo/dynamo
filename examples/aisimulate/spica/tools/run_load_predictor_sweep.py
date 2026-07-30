@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 
-from aisimulate.spica import SmartSearchConfig
-from aisimulate.spica.load_predictor_sweep import sweep_load_predictor
+from dynamo.planner.simulation.load_predictor import (
+    LOAD_PREDICTOR_PRESETS,
+    sweep_load_predictor,
+)
 
 
 def main() -> None:
@@ -24,21 +26,16 @@ def main() -> None:
         "--policies",
         nargs="+",
         default=["throughput_180_5"],
-        help="planner_scaling_policy candidates",
+        help="Planner scaling_policy candidates",
     )
-    p.add_argument("--model", default="deepseek-ai/DeepSeek-V3")
-    p.add_argument("--hardware", default="h200_sxm")
     a = p.parse_args()
 
-    cfg = SmartSearchConfig(
-        search_space={
-            "model_name": a.model,
-            "hardware_sku": a.hardware,
-            "planner_scaling_policy": a.policies,
-        },
-        workload={"trace_path": a.trace, "trace_format": "mooncake"},
+    result = sweep_load_predictor(
+        policies=a.policies,
+        candidates=list(LOAD_PREDICTOR_PRESETS),
+        trace_path=a.trace,
+        show_progress=True,
     )
-    result = sweep_load_predictor(cfg)
 
     print(f"\nreason = {result.reason}")
     for iv, best in result.best_by_interval.items():

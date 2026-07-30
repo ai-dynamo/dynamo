@@ -14,8 +14,9 @@ subtitle: Objective metrics, SLA constraints, and Pareto-front scoring
 An `OptimizationGoal` (the `goal:` block of a `SmartSearchConfig`) declares **what
 "better" means** plus the SLA constraint. It is pinned, never searched. It picks one
 `OptimizationTarget` and — for `pareto` — the list of scalar objectives whose frontier to
-trace. The target also derives the Dynamo Planner's `optimization_target`
-(`OptimizationTarget.planner_optimization_target`; see search-space.md).
+trace. When configured, the `dynamo.planner` adapter maps the target to Dynamo Planner's
+`optimization_target`. That mapping belongs to the adapter, not the Spica core; see
+[Search Space](search-space.md).
 
 The whole `goal:` block is **optional**: it defaults to a `throughput` goal with no SLA
 (`OptimizationGoal()` → `target = throughput`). `OptimizationGoal` itself is

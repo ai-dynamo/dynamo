@@ -8,10 +8,8 @@ from pathlib import Path
 import pytest
 
 _INTEGRATION_TESTS = {
-    "test_load_predictor_sweep_integration.py",
     "test_kv_estimate.py",
     "test_model_hw.py",
-    "test_replay_integration.py",
 }
 _TEST_ROOT = Path(__file__).parent
 

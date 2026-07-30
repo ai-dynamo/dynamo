@@ -15,7 +15,12 @@ from aisimulate.spica.kv_estimate import (
 )
 from aisimulate.spica.parallel_enum import ParallelShape
 
-_COMMON = dict(model_name="m", hardware_sku="hw", backend="trtllm", backend_version="v")
+_COMMON = {
+    "model_name": "m",
+    "hardware_sku": "hw",
+    "backend": "trtllm",
+    "backend_version": "v",
+}
 
 
 def test_memory_fraction_kind():

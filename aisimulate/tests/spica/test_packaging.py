@@ -5,10 +5,18 @@
 
 import importlib.metadata
 import importlib.util
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -38,13 +46,69 @@ def test_ai_dynamo_has_no_spica_extra():
     assert "spica" not in distribution.metadata.get_all("Provides-Extra", [])
 
 
-def test_aisimulate_declares_planner_monitoring_dependency():
+def test_aisimulate_has_no_dynamo_or_component_adapter_dependencies():
     distribution = importlib.metadata.distribution("aisimulate")
 
     requirements = distribution.requires or []
-    assert any(
-        requirement.startswith("prometheus-api-client==0.6.0")
-        for requirement in requirements
+    names = {Requirement(requirement).name.lower() for requirement in requirements}
+    assert "ai-dynamo" not in names
+    assert "prometheus-api-client" not in names
+    assert "filterpy" not in names
+    assert "pmdarima" not in names
+    assert "prophet" not in names
+
+
+def test_importing_spica_does_not_import_dynamo():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import aisimulate.spica; "
+                "assert not any(name == 'dynamo' or name.startswith('dynamo.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def test_ai_dynamo_publishes_optional_spica_adapters():
+    root_pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    match = re.search(
+        r'^\[project\.entry-points\."aisimulate\.adapters"\]\n'
+        r"(?P<body>.*?)(?=^\[|\Z)",
+        root_pyproject.read_text(),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+    assert match is not None
+    body = match.group("body")
+    assert '"dynamo.planner" = "dynamo.planner.simulation:create_adapter"' in body
+    assert '"dynamo.router" = "dynamo.router.simulation:create_adapter"' in body
+
+
+def test_ai_dynamo_simulation_extra_installs_adapter_runtime_dependencies():
+    root_pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    project = tomllib.loads(root_pyproject.read_text())["project"]
+    requirements = {
+        Requirement(requirement).name.lower()
+        for requirement in project["optional-dependencies"]["simulation"]
+    }
+
+    assert requirements.issuperset(
+        {
+            "aisimulate",
+            "filterpy",
+            "pmdarima",
+            "prometheus-api-client",
+            "prophet",
+            "scikit-learn",
+            "scipy",
+        }
     )
 
 

@@ -60,22 +60,16 @@ Every `Workload` field:
 | `turns_per_session` | `int` | `1` | Turns per multi-turn session. |
 | `inter_turn_delay_ms` | `float` | `0.0` | Think-time between turns in a multi-turn synthetic session, ms. |
 | `trace_path` | `str \| None` | `None` | Path to a replay trace (shape 1). Its presence selects the trace shape and **forbids** all synthetic fields. |
-| `trace_format` | `str` | `"mooncake"` | Replay-ready trace schema. Decoded but **not** forwarded by the evaluator — the trace path is read as mooncake regardless; effectively inert today. |
+| `trace_format` | `str` | `"mooncake"` | Replay-ready trace schema. The transitional Dynamo runner reads Mooncake traces; other runners may validate this field. |
 | `arrival_speedup_ratio` | `float` | `1.0` | Scales the trace's inter-arrival times (open-loop trace only). `>1` speeds arrivals up. |
 | `replay_concurrency` | `int \| None` | `None` | Closed-loop in-flight cap **for a trace** (shape 1c); when set, trace timestamps are ignored. For synthetic closed-loop use `concurrency` instead. |
 
 The synthetic fields are `isl`, `osl`, `request_rate`, `concurrency`, `kv_load_ratio`,
 `num_request_ratio`;
 `shared_prefix_ratio`, `num_prefix_groups`, `turns_per_session`, `inter_turn_delay_ms` are
-shared synthetic knobs threaded into the replay (`ReplayEvaluator._synthetic_kwargs`).
+shared synthetic knobs carried by `ReplaySpec.workload`.
 
 ## `kv_load_ratio` (candidate-relative concurrency)
-
-> [!WARNING]
-> `kv_load_ratio` requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. The default `dynamo-planner` image currently retains AI Configurator
-> 0.9, so this workload mode fails fast before search starts in that image. Use a trace workload
-> or fixed `concurrency` with the default image.
 
 Spica resolves a KV-load trial after the backend, parallel shape, replicas, and batching
 knobs have been selected. For every active role, it asks AI Configurator for the **per-rank** KV token
@@ -141,25 +135,24 @@ when unset (`max(1, …)` keeps at least one request).
   goals. A scalar `kv_load_ratio` is valid for every goal. A synthetic Pareto config that
   omits all three load fields defaults to `kv_load_ratio: [0.0, 1.0]`.
 
-## Replay routing (from `evaluator.py`)
+## Replay Routing
 
-Each shape × deployment case routes to a Dynamo Replay entry point; all emit the same flat
-`trace_report` dict. `ReplayEvaluator.evaluate` branches on `is_trace_based`, then on
-`plan.is_static`:
+Spica places the validated workload and concrete concurrency in `ReplaySpec`. The injected runner
+owns traffic execution. The transitional Dynamo runner maps each workload to the current Replay
+entry points:
 
-| Load | static (no planner) | planner-in-the-loop |
+| Load | No Planner hook | Dynamo Planner hook |
 |---|---|---|
 | **mooncake trace** | `dynamo.replay.api.run_trace_replay(..., planner_config=None)` | `run_trace_replay(..., planner_config=<dict>)` |
 | **synthetic** (rate, fixed concurrency, or KV load) | `dynamo.replay.api.run_synthetic_trace_replay(..., planner_config=None)` | `run_synthetic_trace_replay(..., planner_config=<dict>)` |
 
 Notes:
 
-- The closed-loop cap passed as `replay_concurrency=` on every path is
-  `effective_in_flight_cap()` — `replay_concurrency` for a trace, fixed `concurrency`, or
-  the KV-load-derived per-trial `concurrency_override` for synthetic.
+- The closed-loop cap passed as `replay_concurrency=` is `replay_concurrency` for a trace, fixed
+  `concurrency`, or the KV-load-derived per-trial `ReplaySpec.concurrency` for synthetic traffic.
 - The **goodput SLA** (`goal.sla`) is passed as `sla_ttft_ms` / `sla_itl_ms` / `sla_e2e_ms`
   on every path **only when an SLA is configured** — `_goodput_sla_kwargs` returns `{}` when
   `goal.sla is None`, so no `sla_*` kwargs are passed and no goodput is computed. It is
   independent of the planner's own scaling SLA.
-- Under `kv_router` the searched router weights become a real `KvRouterConfig`;
-  `round_robin` passes `router_config=None`.
+- A `dynamo.router:placement_policy@1` hook becomes a `KvRouterConfig`. Without that hook, the
+  transitional runner uses round-robin routing and passes `router_config=None`.

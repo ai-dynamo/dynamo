@@ -2,32 +2,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: AI Simulate (Experimental)
-subtitle: Experimental simulation and configuration-search tools for Dynamo deployments
+subtitle: Backend-neutral simulation and configuration-search tools
 ---
 
 > [!WARNING]
 > **Experimental.** AI Simulate is intended for evaluation and feedback, not production capacity
 > planning. Its Python APIs, configuration schemas, search results, and deployment output may
-> change without a standard deprecation period. It provides no SLA, accuracy, or
-> configuration-optimality guarantees.
+> change without a standard deprecation period.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. It contains simulation
-and configuration-search tools that use Dynamo models and replay without making those tools part
-of the stable `ai-dynamo` Python API.
+AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
+simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
 ## Spica
 
-[Spica](spica/README.md) is AI Simulate's first package. It searches engine, router, Planner, and
-parallelism settings with a black-box optimizer, accepts pinned G2 host-offload settings, and
-conditionally searches router cache-hit weights. It evaluates candidates with Dynamo Replay and
-supports scalar and Pareto-front objectives.
+[Spica](spica/README.md) searches backend deployment settings against an injected replay runner.
+Its core owns backend search, candidate orchestration, scoring, and the versioned `ReplaySpec`
+contract.
 
-Spica requires the matching Dynamo runtime from the same source revision. Follow the
-[Spica development setup](spica/README.md#develop), then invoke the package module:
+Optional adapters extend the search without adding a Dynamo dependency to AI Simulate. The
+`ai-dynamo[simulation]` extra installs Planner simulation dependencies and publishes
+`dynamo.planner` and `dynamo.router` adapters. Selecting either adapter imports its Dynamo
+implementation and adds a versioned runtime hook to the replay specification.
+
+KVBM search settings are deprecated and have no adapter migration. Native G2 replaces that path.
+
+## Install
+
+Install the AI Simulate distribution from the repository root:
 
 ```bash
-python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
+uv pip install -e ./aisimulate
 ```
 
-The `dynamo-planner` container builds and installs this distribution. AI Simulate is not included
-in the `ai-dynamo` wheel and does not add an `ai-dynamo[spica]` extra or a console script.
+To use the Dynamo adapters and the transitional Dynamo replay runner, also install the matching
+`ai-dynamo` wheel.

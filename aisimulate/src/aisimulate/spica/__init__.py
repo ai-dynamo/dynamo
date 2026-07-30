@@ -1,16 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental replay-backed smart sweeper for Dynamo deployments.
+"""Experimental, backend-neutral deployment simulation sweeper.
 
-Spica is an experimental feature. Its Python API, configuration schema, output
-format, and optimization behavior may change without the compatibility guarantees
-provided for stable Dynamo APIs.
+The package root eagerly exposes only schemas and ABI contracts. Search and
+AIConfigurator-backed helpers are loaded lazily so an optional adapter can import
+``aisimulate.spica.adapter`` without importing a simulation backend.
 """
 
 from __future__ import annotations
 
+import importlib
+from typing import Any
+
+from .adapter import (
+    API_VERSION,
+    AdapterReplaySpec,
+    AdapterSearchPlan,
+    CandidateContext,
+    RuntimeHookSpec,
+    SearchSpaceFragment,
+    SimulationAdapter,
+    SweepContext,
+)
 from .config import (
+    AdapterRequest,
     Candidate,
     OptimizationGoal,
     OptimizationTarget,
@@ -20,95 +34,92 @@ from .config import (
     SweepConfig,
     Workload,
 )
-from .deploy import DeploymentPlan, build_deployment
-from .evaluator import ReplayEvaluator
-from .kv_estimate import NoPerfDatabase, estimate_kv_tokens, feasible_shape_tokens
-from .load_predictor_sweep import (
-    LoadPredictorResult,
-    predictor_fields,
-    sweep_load_predictor,
-    window_loss,
+from .discovery import (
+    ADAPTER_ENTRY_POINT_GROUP,
+    AdapterResolutionError,
+    resolve_adapters,
 )
-from .model_hw import (
-    ModelHardware,
-    NoViableParallelConfig,
-    parallel_configs_for,
-    resolve_model_hardware,
+from .replay import (
+    REPLAY_SPEC_API_VERSION,
+    BackendDeploymentSpec,
+    HookCapability,
+    ReplayReport,
+    ReplaySpec,
+    Runner,
+    RunnerCapabilities,
+    RunnerFactory,
+    canonical_json,
 )
-from .parallel_enum import (
-    DisaggParallelConfig,
-    ParallelShape,
-    ReplicaParallelConfig,
-    enumerate_disagg_configs,
-    enumerate_parallel_configs,
-    enumerate_worker_shapes,
-)
-from .planner import (
-    FPM_SAMPLING,
-    LOAD_SENSITIVITY,
-    SCALING_POLICIES,
-    ScalingPolicy,
-    throughput_intervals,
-)
-from .sample import unroll_sample
-from .sampler import BranchSampler, Suggestion, make_branch_sampler
-from .score import is_feasible, make_candidate, objective_value, rank, score_report
-from .search import run_smart_search
-from .search_space import BranchSpace, enumerate_branches
+
+_LAZY_EXPORTS = {
+    "build_backend_deployment": (".deploy", "build_backend_deployment"),
+    "NoPerfDatabase": (".kv_estimate", "NoPerfDatabase"),
+    "estimate_kv_tokens": (".kv_estimate", "estimate_kv_tokens"),
+    "feasible_shape_tokens": (".kv_estimate", "feasible_shape_tokens"),
+    "ModelHardware": (".model_hw", "ModelHardware"),
+    "NoViableParallelConfig": (".model_hw", "NoViableParallelConfig"),
+    "parallel_configs_for": (".model_hw", "parallel_configs_for"),
+    "resolve_model_hardware": (".model_hw", "resolve_model_hardware"),
+    "DisaggParallelConfig": (".parallel_enum", "DisaggParallelConfig"),
+    "ParallelShape": (".parallel_enum", "ParallelShape"),
+    "ReplicaParallelConfig": (".parallel_enum", "ReplicaParallelConfig"),
+    "enumerate_disagg_configs": (".parallel_enum", "enumerate_disagg_configs"),
+    "enumerate_parallel_configs": (".parallel_enum", "enumerate_parallel_configs"),
+    "enumerate_worker_shapes": (".parallel_enum", "enumerate_worker_shapes"),
+    "unroll_sample": (".sample", "unroll_sample"),
+    "BranchSampler": (".sampler", "BranchSampler"),
+    "Suggestion": (".sampler", "Suggestion"),
+    "make_branch_sampler": (".sampler", "make_branch_sampler"),
+    "objective_value": (".score", "objective_value"),
+    "score_report": (".score", "score_report"),
+    "is_feasible": (".score", "is_feasible"),
+    "make_candidate": (".score", "make_candidate"),
+    "rank": (".score", "rank"),
+    "run_smart_search": (".search", "run_smart_search"),
+    "BranchSpace": (".search_space", "BranchSpace"),
+    "enumerate_branches": (".search_space", "enumerate_branches"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = target
+    value = getattr(importlib.import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
+    "API_VERSION",
+    "REPLAY_SPEC_API_VERSION",
+    "AdapterReplaySpec",
+    "AdapterRequest",
+    "AdapterSearchPlan",
     "Candidate",
+    "CandidateContext",
     "OptimizationGoal",
     "OptimizationTarget",
+    "RuntimeHookSpec",
     "SearchSpace",
+    "SearchSpaceFragment",
+    "SimulationAdapter",
     "SLATarget",
     "SmartSearchConfig",
     "SweepConfig",
+    "SweepContext",
     "Workload",
-    "run_smart_search",
-    # parallel-config enumeration
-    "ParallelShape",
-    "ReplicaParallelConfig",
-    "DisaggParallelConfig",
-    "enumerate_parallel_configs",
-    "enumerate_worker_shapes",
-    "enumerate_disagg_configs",
-    # planner preset decode
-    "SCALING_POLICIES",
-    "ScalingPolicy",
-    "throughput_intervals",
-    "FPM_SAMPLING",
-    "LOAD_SENSITIVITY",
-    # load-predictor sweep
-    "LoadPredictorResult",
-    "sweep_load_predictor",
-    "window_loss",
-    "predictor_fields",
-    # KV-cache feasibility
-    "NoPerfDatabase",
-    "estimate_kv_tokens",
-    "feasible_shape_tokens",
-    # sample unroll
-    "unroll_sample",
-    # model/hardware resolution + parallel-config enumeration
-    "ModelHardware",
-    "NoViableParallelConfig",
-    "resolve_model_hardware",
-    "parallel_configs_for",
-    # candidate space + sampler
-    "BranchSpace",
-    "enumerate_branches",
-    "BranchSampler",
-    "Suggestion",
-    "make_branch_sampler",
-    # deployment translation + evaluation
-    "DeploymentPlan",
-    "build_deployment",
-    "ReplayEvaluator",
-    # scoring
-    "objective_value",
-    "score_report",
-    "is_feasible",
-    "make_candidate",
-    "rank",
+    "ADAPTER_ENTRY_POINT_GROUP",
+    "AdapterResolutionError",
+    "resolve_adapters",
+    "BackendDeploymentSpec",
+    "HookCapability",
+    "ReplayReport",
+    "ReplaySpec",
+    "Runner",
+    "RunnerCapabilities",
+    "RunnerFactory",
+    "canonical_json",
+    *_LAZY_EXPORTS,
 ]

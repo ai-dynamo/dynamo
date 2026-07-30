@@ -75,17 +75,17 @@ def _branch() -> BranchSpace:
         supported_backends={c: frozenset({"trtllm"}) for c in configs},
         knob_choices={
             "backend": ["trtllm"],  # single choice -> constant
-            "router_mode": ["round_robin"],  # single choice -> constant, not a param
-            "planner_scaling_policy": ["disabled", "throughput_180_5"],  # categorical
-            "planner_fpm_sampling": ["default", "large"],
-            "planner_load_sensitivity": ["default"],  # single -> constant
+            "adapter::example::mode": ["static"],  # constant adapter parameter
+            "adapter::example::policy": ["disabled", "dynamic"],  # categorical
+            "adapter::example::sampling": ["default", "large"],
+            "adapter::example::sensitivity": ["default"],  # single choice
             "agg_max_num_batched_tokens": [8192, 16384],  # discrete int
             "agg_max_num_seqs": [256, 512, 1024],  # discrete int
-            "overlap_score_credit": [
+            "adapter::example::weight": [
                 0.0,
                 0.5,
                 1.0,
-            ],  # discrete float (ignored under round_robin)
+            ],  # discrete float
         },
     )
 
@@ -102,20 +102,20 @@ def test_suggest_produces_valid_selections():
             s.selection["deployment_mode"] == "agg"
             and s.selection["backend"] == "trtllm"
         )
-        assert s.selection["router_mode"] == "round_robin"
-        assert s.selection["planner_load_sensitivity"] == "default"
+        assert s.selection["adapter::example::mode"] == "static"
+        assert s.selection["adapter::example::sensitivity"] == "default"
         # searched knobs land within their choice sets, native types preserved
-        assert s.selection["planner_scaling_policy"] in {"disabled", "throughput_180_5"}
+        assert s.selection["adapter::example::policy"] in {"disabled", "dynamic"}
         assert s.selection["agg_max_num_seqs"] in {256, 512, 1024}
         assert isinstance(s.selection["agg_max_num_seqs"], int)
-        assert s.selection["overlap_score_credit"] in {0.0, 0.5, 1.0}
+        assert s.selection["adapter::example::weight"] in {0.0, 0.5, 1.0}
         # the chosen parallel config is one of the branch's
         assert s.parallel_config in branch.parallel_configs
 
 
-def test_dict_form_composite_decodes_via_index():
-    # planner_scaling_policy mixes a preset id and a pinned dict; the sampler
-    # categorizes over the index and decodes back to the exact entry (str or dict).
+def test_adapter_dict_choice_decodes_via_index():
+    # An adapter parameter may mix a preset id and a structured choice; the sampler
+    # categorizes over the index and decodes back to the exact entry.
     raw = {
         "enable_throughput_scaling": True,
         "enable_load_scaling": False,
@@ -131,16 +131,14 @@ def test_dict_form_composite_decodes_via_index():
         supported_backends={pc: frozenset({"trtllm"})},
         knob_choices={
             "backend": ["trtllm"],
-            "planner_scaling_policy": [
+            "adapter::example::policy": [
                 "disabled",
                 raw,
             ],  # str | dict -> index categorical
-            "planner_fpm_sampling": ["default"],
-            "planner_load_sensitivity": ["default"],
         },
     )
     sampler = make_branch_sampler(branch, study_id="test_dict_index")
-    seen = [s.selection["planner_scaling_policy"] for s in sampler.suggest(count=5)]
+    seen = [s.selection["adapter::example::policy"] for s in sampler.suggest(count=5)]
     assert seen, "expected suggestions"
     # every decoded entry is exactly one of the two originals (native type preserved)
     for entry in seen:

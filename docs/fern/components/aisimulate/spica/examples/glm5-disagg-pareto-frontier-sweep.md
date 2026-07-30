@@ -10,13 +10,6 @@ subtitle: Experimental Spica search for a GLM-5-FP8 Pareto frontier on B200 GPUs
 > treat them as production capacity guidance or a performance commitment. Spica's search behavior
 > and output may change without a standard deprecation period.
 
-{/* Separate the adjacent admonitions for Markdown and MDX renderers. */}
-
-> [!IMPORTANT]
-> This experiment uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails fast before search starts in the default `dynamo-planner`
-> image, which currently retains AI Configurator 0.9.
-
 This replay-backed sweep targets the InferenceX/SemiAnalysis (SA) **GLM-5-FP8 / B200 /
 Dynamo with SGLang / 1k-1k / disaggregated** frontier. It tests whether Spica can discover competitive
 deployment mappings without pinning the parallel shape or replica count.
@@ -84,8 +77,6 @@ search_space:
   hardware_sku: b200_sxm
   gpu_budget: 72
   context_length: 2048
-  router_mode: [round_robin]
-  planner_scaling_policy: [disabled]
 workload:
   isl: 1024
   osl: 1024
@@ -152,16 +143,10 @@ shape of the frontier without treating those near-duplicates as different deploy
 For this workload, 50-55 rounds is the practical quality/runtime point. The final 27 rounds
 after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolume.
 
-## Reproduction Status
-
-This historical experiment cannot currently be reproduced with Dynamo's
-packaged AI Configurator 0.9 dependency. The configuration is retained as a
-reference until Dynamo upgrades to an AI Configurator release that provides
-`aiconfigurator.sdk.memory`.
+## Reproduce
 
 ```bash
-# Reference command; fails fast with the currently packaged dependencies.
-python -m aisimulate.spica \
+python examples/aisimulate/spica/tools/run_sweep.py \
   --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
 ```
 

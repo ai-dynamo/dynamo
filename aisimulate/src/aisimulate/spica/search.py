@@ -13,12 +13,12 @@ samples complete successfully (ask), they are evaluated **in parallel across wor
 processes** (``SweepConfig.parallel_evals``; ``<= 1`` runs sequentially), then their
 scores are fed back (tell). Exact duplicates use a run-local result cache and trigger
 replacement asks. Vizier ask/tell stay on the main process — workers run only the pure
-unroll->deploy->replay->score and never touch the study (the Vizier trial handle never
-crosses the process boundary). The load-predictor winner is resolved once and injected
-into every unroll.
+unroll->materialize ReplaySpec->runner->score path and never touch the study (the
+Vizier trial handle never crosses the process boundary).
 
-``evaluator`` and ``sampler_factory`` are injectable so the loop is unit-testable
-without real replay / Vizier (use ``parallel_evals=1`` to avoid spawning processes).
+The replay implementation is always injected as a :class:`RunnerFactory`. Optional
+feature adapters are resolved explicitly or through the ``aisimulate.adapters``
+entry-point group.
 """
 
 from __future__ import annotations
@@ -27,35 +27,34 @@ import logging
 import multiprocessing as mp
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
-from dataclasses import asdict, is_dataclass
-from typing import Any, Protocol
+from dataclasses import asdict, dataclass, is_dataclass, replace
+from multiprocessing.util import Finalize
+from typing import Any
 
 from tqdm import tqdm
 
-from .config import Candidate, OptimizationGoal, SmartSearchConfig
-from .deploy import build_deployment
-from .evaluator import ReplayEvaluator
+from .adapter import (
+    AdapterSearchPlan,
+    CandidateContext,
+    SimulationAdapter,
+    SweepContext,
+)
+from .config import Candidate, OptimizationGoal, OptimizationTarget, SmartSearchConfig
+from .deploy import build_backend_deployment
+from .discovery import resolve_adapters
 from .kv_estimate import resolve_backend_version
 from .kv_load import InfeasibleKVCapacity, resolve_kv_load
-from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
-from .planner import filter_scaling_policies, scaling_fields
+from .replay import REPLAY_SPEC_API_VERSION, ReplaySpec, Runner, RunnerFactory
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
 from .score import is_feasible, make_candidate, pareto_front, rank
 from .search_space import BranchSpace, enumerate_branches
 
 logger = logging.getLogger(__name__)
-
-
-class _Evaluator(Protocol):
-    def evaluate(
-        self, plan: Any, *, concurrency_override: int | None = None
-    ) -> dict[str, float]:
-        ...
 
 
 # Result of evaluating one suggestion (no Vizier here): (candidate|None, observe_metrics|None,
@@ -66,6 +65,103 @@ class _Evaluator(Protocol):
 # for them (a gated trial is never fed back as a high score). "unsupported" is decided on the
 # main process before evaluation and never reaches the worker.
 _EvalResult = tuple[Candidate | None, dict[str, float] | None, str, str]
+_ReplayResult = tuple[dict[str, float] | None, str, str]
+
+
+@dataclass(frozen=True)
+class _PreparedCandidate:
+    sample: dict[str, Any]
+    replay_spec: ReplaySpec
+
+
+_ADAPTER_PARAM_PREFIX = "adapter::"
+
+
+def _adapter_param(adapter_name: str, local_name: str) -> str:
+    return f"{_ADAPTER_PARAM_PREFIX}{adapter_name}::{local_name}"
+
+
+def _adapter_selection(
+    selection: Mapping[str, Any], adapter_name: str
+) -> dict[str, Any]:
+    prefix = _adapter_param(adapter_name, "")
+    return {
+        key.removeprefix(prefix): value
+        for key, value in selection.items()
+        if key.startswith(prefix)
+    }
+
+
+def _prepare_adapters(
+    config: SmartSearchConfig,
+    *,
+    injected: Mapping[str, SimulationAdapter] | None,
+    show_progress: bool,
+) -> tuple[dict[str, SimulationAdapter], dict[str, AdapterSearchPlan]]:
+    adapters = resolve_adapters(config.adapters, injected=injected)
+    context = SweepContext(
+        core_search_space=config.search_space.model_dump(mode="json"),
+        workload=config.workload.model_dump(mode="json"),
+        goal=config.goal.model_dump(mode="json"),
+        show_progress=show_progress,
+    )
+    plans = {
+        name: adapter.generate_search_space(config.adapters[name].search_space, context)
+        for name, adapter in adapters.items()
+    }
+    configured_modes = set(config.search_space.deployment_mode)
+    for name, plan in plans.items():
+        unknown = (
+            set(plan.fragment.choices_by_branch)
+            | set(plan.fragment.float_ranges_by_branch)
+        ) - configured_modes
+        if unknown:
+            raise ValueError(
+                f"adapter {name!r} returned unknown deployment branch(es): "
+                f"{sorted(unknown)}"
+            )
+    return adapters, plans
+
+
+def _merge_adapter_spaces(
+    branches: list[BranchSpace],
+    plans: Mapping[str, AdapterSearchPlan],
+) -> list[BranchSpace]:
+    """Namespace and merge every adapter fragment into each core branch."""
+    merged: list[BranchSpace] = []
+    for branch in branches:
+        choices = dict(branch.knob_choices)
+        float_ranges = dict(branch.float_ranges)
+        for name, plan in plans.items():
+            local_choices = plan.fragment.choices_by_branch.get(
+                branch.deployment_mode, {}
+            )
+            local_ranges = plan.fragment.float_ranges_by_branch.get(
+                branch.deployment_mode, {}
+            )
+            overlap = set(local_choices).intersection(local_ranges)
+            if overlap:
+                raise ValueError(
+                    f"adapter {name!r} defined parameters as both categorical and "
+                    f"continuous: {sorted(overlap)}"
+                )
+            for local_name, values in local_choices.items():
+                if not values:
+                    raise ValueError(
+                        f"adapter {name!r} search parameter {local_name!r} "
+                        f"has no choices in branch {branch.deployment_mode!r}"
+                    )
+                choices[_adapter_param(name, local_name)] = list(values)
+            for local_name, bounds in local_ranges.items():
+                low, high = bounds
+                if low >= high:
+                    raise ValueError(
+                        f"adapter {name!r} search parameter {local_name!r} needs "
+                        f"low < high, got {bounds!r}"
+                    )
+                float_ranges[_adapter_param(name, local_name)] = (low, high)
+        merged.append(replace(branch, knob_choices=choices, float_ranges=float_ranges))
+    return merged
 
 
 def _freeze(value: Any) -> Any:
@@ -93,24 +189,22 @@ def _suggestion_cache_key(suggestion: Suggestion, context: Any) -> Any:
     return (context, _freeze(suggestion.selection), _freeze(suggestion.parallel_config))
 
 
-def _evaluate_one(
+def _materialize_one(
     selection: dict[str, Any],
     parallel_config: Any,
     *,
     config: SmartSearchConfig,
     goal: OptimizationGoal,
-    load_predictor: LoadPredictorResult,
-    evaluator: _Evaluator,
-) -> _EvalResult:
-    """Pure unroll -> deploy -> replay -> score for one (already backend-supported)
-    suggestion. No Vizier, no shared mutable state -> safe to run in a worker process.
-    """
+    adapters: Mapping[str, SimulationAdapter],
+    adapter_plans: Mapping[str, AdapterSearchPlan],
+    runner_factory: RunnerFactory,
+) -> tuple[_PreparedCandidate | None, _EvalResult | None]:
+    """Build a complete replay specification on the main process."""
     try:
         sample = unroll_sample(
             search_space=config.search_space,
             selection=selection,
             parallel_config=parallel_config,
-            load_predictor=load_predictor,
         )
         backend_version = resolve_backend_version(
             config.search_space.hardware_sku, selection["backend"]
@@ -142,27 +236,98 @@ def _evaluate_one(
             # Preserve the concrete load on every candidate, including a fixed absolute
             # concurrency and one derived from kv_load_ratio.
             sample["concurrency"] = concurrency
-        plan = build_deployment(
-            sample,
-            backend_version=backend_version,
-            optimization_target=goal.target.planner_optimization_target,
-            planner_sla=goal.sla,
+        backend_deployment = build_backend_deployment(
+            sample, backend_version=backend_version
         )
+        candidate_context = CandidateContext(
+            sample=sample,
+            backend_deployment=backend_deployment,
+            concurrency=concurrency,
+        )
+        adapter_specs = {
+            name: adapter.materialize_replay(
+                adapter_plans[name],
+                _adapter_selection(selection, name),
+                candidate_context,
+            )
+            for name, adapter in adapters.items()
+        }
+        replay_spec = ReplaySpec(
+            backend_deployment=backend_deployment,
+            workload=config.workload.model_dump(mode="json"),
+            goal=goal.model_dump(mode="json"),
+            concurrency=concurrency,
+            adapters=adapter_specs,
+        )
+        runner_factory.capabilities().require_compatible(replay_spec)
+        if adapter_specs:
+            sample["adapters"] = {
+                name: adapter_spec.config
+                for name, adapter_spec in adapter_specs.items()
+            }
     except InfeasibleKVCapacity as exc:
-        return None, None, "infeasible", f"candidate KV capacity infeasible: {exc}"
+        return None, (
+            None,
+            None,
+            "infeasible",
+            f"candidate KV capacity infeasible: {exc}",
+        )
     except Exception as exc:
         logger.exception("Spica candidate build failed")
-        return (
+        return None, (
             None,
             None,
             "failed",
             f"candidate build failed: {type(exc).__name__}: {exc}",
         )
+    return _PreparedCandidate(sample=sample, replay_spec=replay_spec), None
+
+
+def _run_replay(spec: ReplaySpec, runner: Runner) -> _ReplayResult:
+    """Worker-only boundary: run one fully materialized replay specification."""
     try:
-        report = evaluator.evaluate(plan, concurrency_override=concurrency)
+        return runner.run(spec).metrics, "replayed", ""
     except Exception as exc:  # one candidate failing must not abort the sweep
         logger.exception("Spica candidate replay failed")
-        return None, None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
+        return None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
+
+
+def _score_prepared(
+    prepared: _PreparedCandidate,
+    replay_result: _ReplayResult,
+    *,
+    config: SmartSearchConfig,
+    goal: OptimizationGoal,
+) -> _EvalResult:
+    """Score a runner result on the main process."""
+    report, outcome, reason = replay_result
+    if outcome == "failed":
+        return None, None, outcome, reason
+    if report is None:
+        return (
+            None,
+            None,
+            "failed",
+            "runner contract violation: a successful replay returned no metrics",
+        )
+    effective_targets = (
+        set(goal.resolved_pareto_objectives) if goal.is_pareto else {goal.target}
+    )
+    if (
+        effective_targets.intersection(
+            {OptimizationTarget.GOODPUT, OptimizationTarget.GOODPUT_PER_GPU}
+        )
+        and "goodput_output_throughput_tok_s" not in report
+    ):
+        return (
+            None,
+            None,
+            "failed",
+            "runner contract violation: goodput objective requires "
+            "goodput_output_throughput_tok_s; aggregate latency cannot be used "
+            "as a fallback",
+        )
+    sample = prepared.sample
     if not is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
         # Over gpu_budget: report as infeasible to the optimizer (observe_infeasible, not
         # observe(metrics)) so a high score doesn't steer the sampler into the infeasible
@@ -190,127 +355,73 @@ def _evaluate_one(
     return candidate, observe_metrics, "feasible", ""
 
 
-# Worker-process plumbing: the shared read-only state (config/goal/load_predictor/
-# evaluator) is sent once via the pool initializer and stashed as a module global, so
-# each task only ships the per-suggestion (selection, parallel_config).
+# Worker-process plumbing: shared read-only state is sent once via the pool
+# initializer; each process creates and reuses one runner.
 _WORKER_CTX: dict[str, Any] = {}
 
 
 def _init_worker(
-    config: SmartSearchConfig,
-    goal: OptimizationGoal,
-    load_predictor: LoadPredictorResult,
-    evaluator: _Evaluator,
+    runner_factory: RunnerFactory,
 ) -> None:
-    _WORKER_CTX.update(
-        config=config, goal=goal, load_predictor=load_predictor, evaluator=evaluator
-    )
+    identity = getattr(mp.current_process(), "_identity", ())
+    worker_id = int(identity[0]) if identity else 0
+    runner = runner_factory.create(worker_id)
+    # multiprocessing runs Finalize callbacks during a normal child-process
+    # shutdown.  Unlike a plain atexit handler, this matches the ProcessPool
+    # worker lifecycle and lets a runtime release worker-local resources.
+    Finalize(None, runner.close, exitpriority=0)
+    _WORKER_CTX.update(runner=runner)
 
 
-def _worker_eval(selection: dict[str, Any], parallel_config: Any) -> _EvalResult:
-    return _evaluate_one(selection, parallel_config, **_WORKER_CTX)
+def _worker_eval(spec: ReplaySpec) -> _ReplayResult:
+    return _run_replay(spec, _WORKER_CTX["runner"])
 
 
 def run_smart_search(
     config: SmartSearchConfig,
     *,
-    evaluator: _Evaluator | None = None,
+    runner_factory: RunnerFactory,
+    adapters: Mapping[str, SimulationAdapter] | None = None,
     sampler_factory: Callable[..., BranchSampler] = make_branch_sampler,
     show_progress: bool = True,
     on_round: Callable[[int, list[Candidate]], None] | None = None,
 ) -> list[Candidate]:
     """Run the sweep and return feasible candidates sorted best-first.
 
-    ``evaluator`` defaults to a :class:`ReplayEvaluator` over the workload+goal;
-    inject a fake to test the loop without replay. ``sampler_factory`` defaults to
-    the Vizier-backed sampler. Within a round, suggestions are evaluated across
-    ``SweepConfig.parallel_evals`` **spawned** worker processes (``<= 1`` -> sequential,
-    no pool). With ``parallel_evals > 1`` the caller must guard its entrypoint with
-    ``if __name__ == "__main__":`` (spawn re-imports the module) — the ``python -m aisimulate.spica``
-    CLI already does; ad-hoc scripts must too, or set ``parallel_evals=1``.
-    ``show_progress`` draws a tqdm bar over the
-    candidate evaluations (live feasible/failed tally + best score) and prints a
-    one-line summary at the end; set False for quiet/non-interactive runs.
+    ``runner_factory`` is the only replay runtime injection point. ``adapters`` can
+    inject feature implementations directly; otherwise configured adapters are
+    discovered from package entry points. Within a round, suggestions are evaluated
+    across spawned worker processes when ``parallel_evals > 1``. Such callers must
+    guard script entrypoints with ``if __name__ == "__main__":``.
     """
     goal = config.goal
-    # Predictive throughput scaling only works under the planner's "sla" target
-    # (a goodput sweep). For throughput/latency sweeps, drop the throughput-scaling
-    # policies up front so neither the sampler nor the load-predictor sub-sweep sees
-    # them. (Disabled / load_* still run; static-path goodput is fine once the mocker
-    # is SLA-aware.)
-    kept, dropped = filter_scaling_policies(
-        config.search_space.planner_scaling_policy,
-        allow_throughput=(goal.target.planner_optimization_target == "sla"),
+    capabilities = runner_factory.capabilities()
+    capabilities.require_replay_spec_version(REPLAY_SPEC_API_VERSION)
+    resolved_adapters, adapter_plans = _prepare_adapters(
+        config, injected=adapters, show_progress=show_progress
     )
-    if dropped:
-        if not kept:
+    for name, plan in adapter_plans.items():
+        unsupported = [
+            hook
+            for hook in plan.potential_runtime_hooks
+            if not capabilities.supports_hook(hook)
+        ]
+        if unsupported:
+            labels = ", ".join(
+                f"{hook.provider}:{hook.kind}@{hook.api_version}"
+                for hook in unsupported
+            )
             raise ValueError(
-                f"every planner_scaling_policy enables throughput scaling, which a "
-                f"'{goal.target.value}' sweep can't use (it has no SLA — use a goodput target, "
-                f"or include 'disabled' / a load_* policy)"
-            )
-        if show_progress:
-            tqdm.write(
-                f"smart-sweep: dropped {len(dropped)} throughput-scaling policy option(s) "
-                f"for target={goal.target.value} (needs SLA): {dropped}"
-            )
-        config = config.model_copy(
-            update={
-                "search_space": config.search_space.model_copy(
-                    update={"planner_scaling_policy": kept}
-                )
-            }
-        )
-
-    # Goodput can be defined by an end-to-end SLA, but the planner's SLA scaling
-    # target can only be seeded from ttft+itl. With e2e-only SLA, keep static
-    # candidates and drop every scaling policy before Vizier can sample it.
-    sla = goal.sla
-    if (
-        goal.target.planner_optimization_target == "sla"
-        and sla is not None
-        and (sla.ttft_ms is None or sla.itl_ms is None)
-    ):
-        kept = []
-        dropped = []
-        for policy in config.search_space.planner_scaling_policy:
-            fields = scaling_fields(policy)
-            target = (
-                dropped
-                if (
-                    fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
-                )
-                else kept
-            )
-            target.append(policy)
-        if dropped:
-            if not kept:
-                raise ValueError(
-                    "every planner_scaling_policy enables planner scaling, but an e2e-only SLA "
-                    "cannot seed the planner's ttft/itl scaling target; use ttft_ms+itl_ms, "
-                    "or include 'disabled'"
-                )
-            if show_progress:
-                tqdm.write(
-                    f"smart-sweep: dropped {len(dropped)} planner-scaling policy option(s) "
-                    f"for e2e-only SLA (planner needs ttft_ms+itl_ms): {dropped}"
-                )
-            config = config.model_copy(
-                update={
-                    "search_space": config.search_space.model_copy(
-                        update={"planner_scaling_policy": kept}
-                    )
-                }
+                f"runner is incompatible with configured adapter {name!r}; "
+                f"unsupported runtime hook(s): {labels}"
             )
 
-    # Thread the configured context_length into KV feasibility so parallel configs that
-    # can't fit the requested sequence length are dropped up front (None -> model max).
-    branches: list[BranchSpace] = enumerate_branches(
-        config, max_seq_len=config.search_space.context_length
+    branches = enumerate_branches(
+        config,
+        max_seq_len=config.search_space.context_length,
+        runner_capabilities=capabilities,
     )
-    load_predictor = sweep_load_predictor(config, show_progress=show_progress)
-    if evaluator is None:
-        evaluator = ReplayEvaluator(config.workload, goal)
+    branches = _merge_adapter_spaces(branches, adapter_plans)
 
     sweep = config.sweep
     per_round = sweep.candidates_per_round or sweep.parallel_evals
@@ -338,9 +449,13 @@ def run_smart_search(
     cache_context = _freeze(
         {
             "search_space": config.search_space.model_dump(mode="python"),
+            "adapters": {
+                name: request.model_dump(mode="python")
+                for name, request in config.adapters.items()
+            },
             "workload": config.workload.model_dump(mode="python"),
             "goal": goal.model_dump(mode="python"),
-            "load_predictor": load_predictor,
+            "adapter_plans": adapter_plans,
         }
     )
     replay_cache: dict[Any, tuple[Candidate, dict[str, float]]] = {}
@@ -348,21 +463,19 @@ def run_smart_search(
     def _best() -> float | None:
         return max((c.score for c in candidates), default=None)
 
-    # Parallel across worker processes when parallel_evals > 1: spawn (not fork —
-    # dynamo's tokio runtime isn't fork-safe); shared read-only state goes once via the
-    # initializer; one pool for the whole run amortizes the per-worker dynamo import.
+    # Parallel across worker processes when parallel_evals > 1. Spawn keeps
+    # runner runtimes isolated and lets each worker reuse one runner instance.
     use_pool = sweep.parallel_evals > 1 and per_round > 1
     max_eval_seconds = sweep.max_eval_seconds
     worker_count = min(sweep.parallel_evals, per_round)
+    sequential_runner = None if use_pool else runner_factory.create(0)
 
     def _new_pool() -> ProcessPoolExecutor:
-        # spawn (not fork — dynamo's tokio runtime isn't fork-safe); shared read-only state
-        # goes once via the initializer; one pool amortizes the per-worker dynamo import.
         return ProcessPoolExecutor(
             max_workers=worker_count,
             mp_context=mp.get_context("spawn"),
             initializer=_init_worker,
-            initargs=(config, goal, load_predictor, evaluator),
+            initargs=(runner_factory,),
         )
 
     # One-element box so a runtime timeout can kill the hung pool and swap in a fresh one
@@ -388,8 +501,14 @@ def run_smart_search(
         try:
             yield
         finally:
-            _terminate_pool(pool_box[0])
+            # A completed sweep shuts workers down normally so their Runner
+            # finalizers execute.  Only the timeout-recovery path above sends a
+            # terminate signal, where cleanup is necessarily best-effort.
+            if pool_box[0] is not None:
+                pool_box[0].shutdown(wait=True, cancel_futures=True)
             pool_box[0] = None
+            if sequential_runner is not None:
+                sequential_runner.close()
 
     def _pool_error(detail: str) -> RuntimeError:
         return RuntimeError(
@@ -398,7 +517,7 @@ def run_smart_search(
             '"__main__":`, or set sweep.parallel_evals=1 to evaluate sequentially.'
         )
 
-    def _eval_batch(todo: list[Suggestion]):
+    def _eval_batch(todo: list[tuple[Suggestion, _PreparedCandidate]]):
         """Yield ``(suggestion, _EvalResult)`` for each supported suggestion — across worker
         processes when a pool is set, else sequentially in-process. On the pool path it
         evaluates waves no larger than the worker count so queued work never consumes a
@@ -407,16 +526,15 @@ def run_smart_search(
         pool can't cancel a running task), then a fresh pool handles later waves.
         """
         if pool_box[0] is None:
-            for s in todo:
+            assert sequential_runner is not None
+            for suggestion, prepared in todo:
                 yield (
-                    s,
-                    _evaluate_one(
-                        s.selection,
-                        s.parallel_config,
+                    suggestion,
+                    _score_prepared(
+                        prepared,
+                        _run_replay(prepared.replay_spec, sequential_runner),
                         config=config,
                         goal=goal,
-                        load_predictor=load_predictor,
-                        evaluator=evaluator,
                     ),
                 )
             return
@@ -429,10 +547,11 @@ def run_smart_search(
                 # submit() can raise when an initializer or an earlier task killed
                 # the pool, so keep it inside the friendly-error wrapper.
                 futures = {
-                    pool.submit(
-                        _worker_eval, suggestion.selection, suggestion.parallel_config
-                    ): suggestion
-                    for suggestion in wave
+                    pool.submit(_worker_eval, prepared.replay_spec): (
+                        suggestion,
+                        prepared,
+                    )
+                    for suggestion, prepared in wave
                 }
             except BrokenProcessPool as exc:
                 raise _pool_error("submitting a candidate wave") from exc
@@ -450,20 +569,30 @@ def run_smart_search(
                     break
                 for future in done:
                     try:
-                        result = future.result()
+                        replay_result = future.result()
                     except BrokenProcessPool as exc:
                         raise _pool_error("collecting a candidate result") from exc
                     except Exception as exc:
                         raise _pool_error(
                             f"collecting a candidate result ({type(exc).__name__}: {exc})"
                         ) from exc
-                    yield futures[future], result
+                    suggestion, prepared = futures[future]
+                    yield (
+                        suggestion,
+                        _score_prepared(
+                            prepared,
+                            replay_result,
+                            config=config,
+                            goal=goal,
+                        ),
+                    )
 
             if pending:
                 seconds = max_eval_seconds or 0.0
                 for future in pending:
+                    suggestion, _prepared = futures[future]
                     yield (
-                        futures[future],
+                        suggestion,
                         (
                             None,
                             None,
@@ -525,7 +654,7 @@ def run_smart_search(
                     # Deduplicate against completed cache entries and within this ask batch.
                     # A duplicate trial still receives the cached measurement so f(z) remains
                     # deterministic, but only the first full sample reaches replay.
-                    todo: list[Suggestion] = []
+                    todo: list[tuple[Suggestion, _PreparedCandidate]] = []
                     primary_by_key: dict[Any, Suggestion] = {}
                     duplicates_by_key: dict[Any, list[Suggestion]] = {}
                     for suggestion in suggestions:
@@ -551,7 +680,36 @@ def run_smart_search(
                             duplicates_by_key.setdefault(key, []).append(suggestion)
                             continue
                         primary_by_key[key] = suggestion
-                        todo.append(suggestion)
+
+                    # Materialization stays on the main process: adapters see the
+                    # resolved backend candidate and workers receive ReplaySpec only.
+                    for key, suggestion in primary_by_key.items():
+                        prepared, build_result = _materialize_one(
+                            suggestion.selection,
+                            suggestion.parallel_config,
+                            config=config,
+                            goal=goal,
+                            adapters=resolved_adapters,
+                            adapter_plans=adapter_plans,
+                            runner_factory=runner_factory,
+                        )
+                        if build_result is not None:
+                            candidate, observe_metrics, outcome, reason = build_result
+                            assert candidate is None and observe_metrics is None
+                            duplicates = duplicates_by_key.get(key, [])
+                            sampler.observe_infeasible(suggestion, reason)
+                            for duplicate in duplicates:
+                                sampler.observe_infeasible(duplicate, reason)
+                            if outcome == "failed":
+                                failure_reasons[reason] = (
+                                    failure_reasons.get(reason, 0) + 1 + len(duplicates)
+                                )
+                            _record(outcome, None)
+                            for _duplicate in duplicates:
+                                _record(outcome, None)
+                            continue
+                        assert prepared is not None
+                        todo.append((suggestion, prepared))
 
                     for suggestion, (
                         candidate,
@@ -576,7 +734,7 @@ def run_smart_search(
 
                         if candidate is None or observe_metrics is None:
                             raise RuntimeError(
-                                "Spica evaluator contract violation: a feasible outcome "
+                                "Spica runner contract violation: a feasible outcome "
                                 "must include both a candidate and observation metrics"
                             )
                         sampler.observe(suggestion, observe_metrics)

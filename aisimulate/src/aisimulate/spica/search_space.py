@@ -9,11 +9,8 @@ branch: it is a searched categorical knob within the study. For each mode we tak
 **union** of every configured backend's KV-feasible parallel configs
 (:func:`aisimulate.spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
 config which backends support it. The sampler projects structured latent features onto this
-pool. Backends with no perf DB, no viable config, or no replay support for a mode are dropped
-from the backend knob.
-
-``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
-and is not a sampler dimension.
+pool. Backends with no perf DB, no viable config, or no support from the injected replay
+runner are dropped from the backend knob.
 """
 
 from __future__ import annotations
@@ -26,30 +23,10 @@ from .config import SmartSearchConfig
 from .kv_estimate import NoPerfDatabase
 from .model_hw import NoViableParallelConfig, parallel_configs_for
 from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
-from .planner import scaling_fields
+from .replay import RunnerCapabilities
 
 _ParallelConfig = ReplicaParallelConfig | DisaggParallelConfig
 
-# Searchable atomic knobs, by group. Names are SearchSpace list-typed fields.
-_ROUTER_KNOBS = (
-    "router_mode",
-    "overlap_score_credit",
-    "prefill_load_scale",
-    "host_cache_hit_weight",
-    "disk_cache_hit_weight",
-    "router_temperature",
-)
-# Router knobs that only bite when multi-tier KV offload is enabled: in the kv-router's
-# scoring they multiply the *host/disk extension blocks*, which are 0 whenever host
-# offload is off (num_g2_blocks == 0). The mocker honours offload, but with it disabled
-# (the default) these weights can't move any replay metric — so sweeping them just
-# inflates the search space (3x3) with dead dimensions. Gated out unless offload is on.
-_OFFLOAD_ONLY_ROUTER_KNOBS = ("host_cache_hit_weight", "disk_cache_hit_weight")
-_PLANNER_KNOBS = (
-    "planner_scaling_policy",
-    "planner_fpm_sampling",
-    "planner_load_sensitivity",
-)
 _AGG_ENGINE = ("agg_max_num_batched_tokens", "agg_max_num_seqs")
 _DISAGG_ENGINE = (
     "prefill_max_num_batched_tokens",
@@ -57,16 +34,6 @@ _DISAGG_ENGINE = (
     "decode_max_num_batched_tokens",
     "decode_max_num_seqs",
 )
-
-
-def _backend_supports_replay_mode(backend: str, deployment_mode: str) -> bool:
-    """Whether Dynamo replay can evaluate this backend/topology pair.
-
-    TRT-LLM mock engines currently reject every disaggregated replay mode. Keep
-    that deterministic incompatibility out of Vizier instead of spending the
-    replacement budget repeatedly evaluating an unsupported branch.
-    """
-    return not (backend == "trtllm" and deployment_mode == "disagg")
 
 
 @dataclass(frozen=True)
@@ -124,37 +91,16 @@ def _parse_parallel_entry(entry: dict[str, Any], deployment_mode: str):
 
 
 def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[Any]]:
-    """The searchable atomic knobs for a branch (router + planner + the active mode's
-    engine batching), each mapped to its configured choice list. ``backend`` is added
-    by :func:`enumerate_branches` (only the backends viable for the mode).
-
-    Dependent knobs are removed when their component is statically disabled: a
-    round-robin-only router has no KV-router weights, and planner policies that all
-    disable scaling have no FPM or load-sensitivity knobs.
-
-    The host/disk cache-hit weights are dropped unless multi-tier KV offload is enabled
-    (``num_g2_blocks > 0``) — see :data:`_OFFLOAD_ONLY_ROUTER_KNOBS`."""
-    router_is_round_robin_only = set(search_space.router_mode) == {"round_robin"}
-    router = ("router_mode",) if router_is_round_robin_only else _ROUTER_KNOBS
-    if not router_is_round_robin_only and search_space.num_g2_blocks == 0:
-        router = tuple(k for k in router if k not in _OFFLOAD_ONLY_ROUTER_KNOBS)
-
-    planner_scaling_is_disabled = not any(
-        fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
-        for fields in (
-            scaling_fields(policy) for policy in search_space.planner_scaling_policy
-        )
-    )
-    planner = (
-        ("planner_scaling_policy",) if planner_scaling_is_disabled else _PLANNER_KNOBS
-    )
-
-    names = (*router, *planner, *_engine_knobs(deployment_mode))
+    """Backend-owned atomic knobs for one deployment branch."""
+    names = _engine_knobs(deployment_mode)
     return {name: list(getattr(search_space, name)) for name in names}
 
 
 def enumerate_branches(
-    config: SmartSearchConfig, *, max_seq_len: int | None = None
+    config: SmartSearchConfig,
+    *,
+    max_seq_len: int | None = None,
+    runner_capabilities: RunnerCapabilities | None = None,
 ) -> list[BranchSpace]:
     """One :class:`BranchSpace` per ``deployment_mode``. Within each, ``backend`` is a
     searched knob: the parallel-config domain is the **union** of every configured
@@ -181,13 +127,21 @@ def enumerate_branches(
             else None
         )
         support: dict[_ParallelConfig, set[str]] = {}
-        replay_incompatible = [
+        runner_incompatible = [
             backend
             for backend in ss.backend
-            if not _backend_supports_replay_mode(backend, deployment_mode)
+            if runner_capabilities is not None
+            and not runner_capabilities.supports_backend_topology(
+                backend, deployment_mode
+            )
         ]
         for backend in ss.backend:
-            if not _backend_supports_replay_mode(backend, deployment_mode):
+            if (
+                runner_capabilities is not None
+                and not runner_capabilities.supports_backend_topology(
+                    backend, deployment_mode
+                )
+            ):
                 continue
             try:
                 legal = parallel_configs_for(
@@ -218,8 +172,8 @@ def enumerate_branches(
                 f"smart-sweep: deployment_mode={deployment_mode!r} skipped — no configured backend "
                 f"has a viable parallel config within gpu_budget={ss.gpu_budget}"
                 + (
-                    f"; replay-incompatible backends={replay_incompatible}"
-                    if replay_incompatible
+                    f"; runner-incompatible backends={runner_incompatible}"
+                    if runner_incompatible
                     else ""
                 ),
                 stacklevel=2,

@@ -48,12 +48,13 @@ search_space:
     - {tp: 4, moe_ep: 4, replicas: 8}           # fixed: TEP, 8 workers x TP4
   agg_max_num_batched_tokens: [16384]
   agg_max_num_seqs: [512]
-  planner_scaling_policy: [disabled]            # static — no autoscaling
-  # swept: the router
-  router_mode: [kv_router, round_robin]
-  overlap_score_credit: [0.0, 0.5, 1.0]         # kv-router hard-caps this at 1.0
-  prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
-  router_temperature: [0.0, 0.2, 0.5, 1.0]
+adapters:
+  dynamo.router:
+    search_space:
+      mode: [kv_router, round_robin]
+      overlap_score_credit: [0.0, 0.5, 1.0]
+      prefill_load_scale: [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+      temperature: [0.0, 0.2, 0.5, 1.0]
 workload:
   trace_path: <toolagent_trace.jsonl>           # 2k subset for the search; full trace to validate
   trace_format: mooncake
@@ -139,10 +140,10 @@ Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2
 ## Reproduce
 
 ```bash
-python -m aisimulate.spica --config path/to/router-sweep.yaml
+python examples/aisimulate/spica/tools/run_sweep.py --config path/to/router-sweep.yaml
 ```
 
 Run the winning router configuration against the full trace with
 `dynamo.replay.run_trace_replay`. The AI Configurator performance model needs the
 `aic-forward-pass` binding. To suppress router logs, set `RUST_LOG=error`.
-`prefill_load_scale` values up to 32 require the extended `SEARCH_CHOICES` in `config.py`.
+The Router adapter validates the configured search choices before the study starts.

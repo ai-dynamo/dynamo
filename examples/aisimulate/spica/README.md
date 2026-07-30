@@ -11,43 +11,44 @@ SPDX-License-Identifier: Apache-2.0
 > standard deprecation period. Spica does not guarantee SLA compliance, prediction accuracy, or
 > globally optimal configurations.
 
-These examples run Spica's replay-backed configuration search from a Dynamo source checkout.
+These examples run Spica's backend-neutral configuration search. The provided runner script
+composes Spica with Dynamo Replay and discovers the selected Dynamo adapters.
 
 ## Prerequisites
 
-Spica requires the matching Dynamo runtime from the same source revision. Build the bindings and
-install both distributions from the repository root:
+Backend-only Spica does not require Dynamo. To use the Dynamo replay runner or the
+`dynamo.planner` and `dynamo.router` adapters, build the matching Dynamo runtime and install the
+simulation dependencies from the repository root:
 
 ```bash
 uv venv .venv
 source .venv/bin/activate
 uv pip install pip "maturin[patchelf]"
 cd lib/bindings/python
-maturin develop --uv --release --features aic-forward-pass,mocker-kvbm-offload
+maturin develop --uv --release --features aic-forward-pass
 cd ../../..
 uv pip install --no-deps -e .
 uv pip install -e ./aisimulate
+uv pip install -r container/deps/requirements.planner.txt
 ```
 
-The `dynamo-planner` image already builds and installs both wheels from the same commit.
+For published wheels, `uv pip install "ai-dynamo[simulation]"` installs the matching simulation
+bundle. The `dynamo-planner` image already builds and installs both wheels from the same commit.
 
 ## Run a Search
 
-Validate and run the general search example:
+Run the general search example with the explicit Dynamo runner:
 
 ```bash
-python -m aisimulate.spica \
+python examples/aisimulate/spica/tools/run_sweep.py \
   --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-The GLM-5-FP8 Pareto-front configuration is retained as a reference for a
-previous experiment:
+To use another replay implementation, pass its `RunnerFactory` to
+`aisimulate.spica.run_smart_search`.
 
-> [!IMPORTANT]
-> This configuration uses `kv_load_ratio` and requires an AI Configurator release that provides
-> `aiconfigurator.sdk.memory`. It fails closed in the default `dynamo-planner` image, which currently
-> retains AI Configurator 0.9. It is not runnable with the repository's packaged dependencies.
-> Use `smart_sweep.yaml` with a trace or fixed `concurrency` workload for a runnable search.
+The GLM-5-FP8 configuration demonstrates a disaggregated Pareto search over
+`kv_load_ratio`.
 
 Update `workload.trace_path` before running a trace-backed configuration.
 
@@ -70,5 +71,5 @@ python examples/aisimulate/spica/tools/run_load_predictor_sweep.py \
 
 ## Documentation
 
-Read the [Spica documentation](../../../docs/fern/components/aisimulate/spica/README.md)
+Read the [Spica documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/components/aisimulate/spica/README.md)
 for the search flow, workload schema, optimization goals, and search-space reference.

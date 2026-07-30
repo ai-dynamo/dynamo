@@ -65,15 +65,19 @@ search_space:
     - {tp: 4, moe_ep: 4, replicas: 8}           # fixed; planner scales replicas 1..8
   agg_max_num_batched_tokens: [16384]
   agg_max_num_seqs: [512]
-  router_mode: [kv_router]                       # fixed tuned router
-  overlap_score_credit: [1.0]
-  prefill_load_scale: [4.0]
-  router_temperature: [0.0]
-  # swept: the planner
-  planner_scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
-                           load_180_10, hybrid_180_5, hybrid_600_5]
-  planner_load_sensitivity: [aggressive, default, conservative]
-  planner_fpm_sampling: [small, default, large, fine]
+adapters:
+  dynamo.router:
+    search_space:
+      mode: [kv_router]
+      overlap_score_credit: [1.0]
+      prefill_load_scale: [4.0]
+      temperature: [0.0]
+  dynamo.planner:
+    search_space:
+      scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
+                       load_180_10, hybrid_180_5, hybrid_600_5]
+      load_sensitivity: [aggressive, default, conservative]
+      fpm_sampling: [small, default, large, fine]
 workload:
   trace_path: <toolagent_trace.jsonl>            # open-loop: no replay_concurrency
   trace_format: mooncake
@@ -109,7 +113,7 @@ goodput-per-GPU first. `load_scaling_down_sensitivity` 70/80/90 = aggressive/def
 the predictive throughput-scaling policies** — for the `load_*` policies it is inert (so its
 spread within the `load_180_10` family is noise).
 
-| goodput/gpu | avg_gpu | goodput | ttft_ms | tpot_ms | planner_scaling_policy | load_scaling_down_sensitivity | max_num_fpm_samples |
+| goodput/gpu | avg_gpu | goodput | ttft_ms | tpot_ms | scaling_policy | load_scaling_down_sensitivity | max_num_fpm_samples |
 |---|---|---|---|---|---|---|---|
 | 121.0 | 8.26 | 999 | 1121 | 77.8 | load_180_10 | 90 | 128 |
 | 119.1 | 7.76 | 924 | 1249 | 83.8 | load_180_10 | 90 | 32 |
@@ -149,7 +153,7 @@ spread within the `load_180_10` family is noise).
 ## Reproduce
 
 ```bash
-python -m aisimulate.spica --config path/to/planner-sweep.yaml
+python examples/aisimulate/spica/tools/run_sweep.py --config path/to/planner-sweep.yaml
 ```
 
 Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval

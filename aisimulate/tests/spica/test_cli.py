@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-import aisimulate.spica as spica
 import aisimulate.spica.__main__ as cli
+from aisimulate import spica
 
 
 def test_package_is_marked_experimental():
@@ -75,7 +75,7 @@ def test_cli_rejects_invalid_config(tmp_path):
     assert "invalid config" in result.stderr
 
 
-def test_cli_reports_no_feasible_candidates(monkeypatch, tmp_path, capsys):
+def test_cli_requires_an_injected_replay_runtime(monkeypatch, tmp_path, capsys):
     config_path = tmp_path / "valid.yaml"
     config_path.write_text(
         "search_space:\n"
@@ -87,14 +87,15 @@ def test_cli_reports_no_feasible_candidates(monkeypatch, tmp_path, capsys):
         "  request_rate: 1\n"
         "  num_request_ratio: 3\n"
     )
-    monkeypatch.setattr(cli, "run_smart_search", lambda config: [])
     monkeypatch.setattr(
         sys,
         "argv",
         ["aisimulate.spica", "--config", str(config_path)],
     )
 
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(SystemExit, match="2"):
         cli.main()
 
-    assert "no feasible candidate found" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "no default replay runtime" in error
+    assert "run_smart_search(config, runner_factory=...)" in error

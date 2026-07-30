@@ -60,27 +60,6 @@ class OptimizationTarget(str, Enum):
             raise ValueError("'pareto' is multi-objective and has no scalar direction")
         return self is not OptimizationTarget.E2E_LATENCY
 
-    @property
-    def planner_optimization_target(self) -> str:
-        """The dynamo planner ``optimization_target`` this sweep goal maps to.
-
-        The planner's scaling objective should match what the sweep optimizes:
-        ``goodput``/``goodput_per_gpu`` -> ``"sla"`` (SLA-based scaling, the only
-        mode that uses ttft/itl and enables predictive throughput scaling);
-        ``throughput``/``throughput_per_gpu``/``throughput_per_user`` -> ``"throughput"``;
-        ``e2e_latency`` -> ``"latency"`` (both reactive, no SLA). ``pareto`` ->
-        ``"throughput"`` (its default objectives are throughput-based; no SLA).
-        """
-        return {
-            OptimizationTarget.THROUGHPUT: "throughput",
-            OptimizationTarget.THROUGHPUT_PER_GPU: "throughput",
-            OptimizationTarget.THROUGHPUT_PER_USER: "throughput",
-            OptimizationTarget.E2E_LATENCY: "latency",
-            OptimizationTarget.GOODPUT: "sla",
-            OptimizationTarget.GOODPUT_PER_GPU: "sla",
-            OptimizationTarget.PARETO: "throughput",
-        }[self]
-
 
 class SLATarget(BaseModel):
     """Per-request latency bounds in ms. Set ttft_ms+itl_ms, or e2e_ms."""
@@ -369,95 +348,17 @@ SEARCH_CHOICES: dict[str, tuple] = {
     "decode_max_num_seqs": (256, 512, 1024),
     "agg_max_num_batched_tokens": (8192, 16384, 32768),
     "agg_max_num_seqs": (256, 512, 1024),
-    "router_mode": ("kv_router", "round_robin"),
-    "overlap_score_credit": (0.0, 0.5, 1.0),  # kv-router hard-caps this at 1.0
-    "prefill_load_scale": (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0),
-    "host_cache_hit_weight": (0.5, 0.75, 1.0),
-    "disk_cache_hit_weight": (0.0, 0.25, 0.5),
-    "router_temperature": (0.0, 0.2, 0.5, 1.0),
-    "planner_scaling_policy": (
-        "disabled",
-        "throughput_180_5",
-        "throughput_600_5",
-        "load_180_5",
-        "load_180_10",
-        "hybrid_180_5",
-        "hybrid_600_5",
-    ),
-    "planner_fpm_sampling": ("small", "default", "large", "fine"),
-    "planner_load_sensitivity": ("aggressive", "default", "conservative"),
-    "load_predictor_candidates": (
-        "constant_last",
-        "arima_raw",
-        "arima_log1p",
-        "prophet_w20_raw",
-        "prophet_w20_log1p",
-        "prophet_w50_raw",
-        "prophet_w50_log1p",
-        "kalman_default_raw",
-        "kalman_default_log1p",
-        "kalman_reactive_raw",
-        "kalman_reactive_log1p",
-    ),
-}
-
-# Composite knobs accept either a preset id (a string from SEARCH_CHOICES) or a
-# dict that pins the unrolled fields directly (the escape hatch — search a custom
-# value a preset doesn't offer). A dict entry must be self-contained: its keys are
-# exactly that composite's unrolled field names (no partial/merge). The legality of
-# the values (perfect-square fpm bucket, interval > 0, etc.) is validated downstream
-# by Dynamo's PlannerConfig; here we only gate the key set. See
-# docs/fern/components/aisimulate/spica/search-space.md.
-COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
-    "planner_scaling_policy": frozenset(
-        {
-            "enable_throughput_scaling",
-            "enable_load_scaling",
-            "throughput_adjustment_interval_seconds",
-            "load_adjustment_interval_seconds",
-        }
-    ),
-    "planner_fpm_sampling": frozenset(
-        {"max_num_fpm_samples", "fpm_sample_bucket_size"}
-    ),
-    "planner_load_sensitivity": frozenset(
-        {"load_scaling_down_sensitivity", "load_min_observations"}
-    ),
-    "load_predictor_candidates": frozenset(
-        {
-            "load_predictor",
-            "load_predictor_log1p",
-            "prophet_window_size",
-            "kalman_q_level",
-            "kalman_q_trend",
-            "kalman_r",
-            "kalman_min_points",
-        }
-    ),
-}
-
-# Keys a composite dict MUST provide (any others default downstream). The three
-# planner composites are small coupled sets, so a dict must give all of them (the
-# doc's "self-contained" contract); a load-predictor dict needs at least the family
-# (``load_predictor``) — there is no sensible default for it, and omitting it would
-# crash the sub-sweep; the remaining family params default per family.
-COMPOSITE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
-    "planner_scaling_policy": COMPOSITE_DICT_KEYS["planner_scaling_policy"],
-    "planner_fpm_sampling": COMPOSITE_DICT_KEYS["planner_fpm_sampling"],
-    "planner_load_sensitivity": COMPOSITE_DICT_KEYS["planner_load_sensitivity"],
-    "load_predictor_candidates": frozenset({"load_predictor"}),
 }
 
 
 class SearchSpace(BaseModel):
-    """Inputs to one search run, grouped by component.
+    """Dynamo-independent backend inputs to one search run.
 
     Each group lists its swept knobs (list-typed candidate sets; a
     single-element list pins that knob) followed by the pinned knobs that group
     needs (scalars). When ``deployment_mode`` lists both branches the optimizer
-    runs one flat study per branch and ranks across both. Most fields drive the
-    main Vizier sweep; ``load_predictor_candidates`` is swept by a separate
-    forecast-loss grid, with its winner pinned into the main sweep.
+    runs one flat study per branch and ranks across both. Dynamo Planner and
+    Router search spaces live under :class:`SmartSearchConfig.adapters`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -473,7 +374,6 @@ class SearchSpace(BaseModel):
     hardware_sku: str  # e.g. "h200_sxm"
     gpu_budget: int = 32  # max GPUs per candidate
     min_gpu_budget: int | None = None
-    min_endpoint: int | None = None
     context_length: int | None = None
     startup_time: float | None = None
     aic_nextn: int | None = None  # speculative-decode (MTP) depth, 1..5
@@ -502,110 +402,17 @@ class SearchSpace(BaseModel):
     agg_gpu_memory_utilization: float = 0.9
     agg_enable_prefix_caching: bool = True
 
-    # kv manager: multi-tier offload policy (all pinned; G3/G4 extend G2)
-    num_g2_blocks: int = Field(default=0, ge=0)  # 0 disables host offload
-    kv_bytes_per_token: int | None = Field(
-        default=None, gt=0
-    )  # required replay transfer sizing when G2 is on
-    bandwidth_g1_to_g2_gbps: float | None = None
-    bandwidth_g2_to_g1_gbps: float | None = None
-    offload_batch_size: int | None = None
-
-    # router (KV-router knobs are ignored under round_robin)
-    router_mode: list[str] = ["kv_router", "round_robin"]
-    overlap_score_credit: list[float] = [
-        0.0,
-        0.5,
-        1.0,
-    ]  # kv-router hard-caps this at 1.0
-    prefill_load_scale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
-    host_cache_hit_weight: list[float] = [0.5, 0.75, 1.0]
-    disk_cache_hit_weight: list[float] = [0.0, 0.25, 0.5]
-    router_temperature: list[float] = [0.0, 0.2, 0.5, 1.0]
-    # pinned (admission control)
-    active_decode_blocks_threshold: int | None = None
-    active_prefill_tokens_threshold: int | None = None
-    active_prefill_tokens_threshold_frac: float | None = None
-    no_admission_control: bool = False
-
-    # planner: composite knobs — each entry is a preset id (str) OR a dict pinning
-    # the unrolled fields directly (see COMPOSITE_DICT_KEYS and
-    # docs/fern/components/aisimulate/spica/search-space.md).
-    # "disabled" = planner not enabled (no autoscaling, static replica count).
-    planner_scaling_policy: list[str | dict[str, Any]] = [
-        "disabled",
-        "throughput_180_5",
-        "throughput_600_5",
-        "load_180_5",
-        "load_180_10",
-        "hybrid_180_5",
-        "hybrid_600_5",
-    ]
-    planner_fpm_sampling: list[str | dict[str, Any]] = [
-        "small",
-        "default",
-        "large",
-        "fine",
-    ]
-    planner_load_sensitivity: list[str | dict[str, Any]] = [
-        "aggressive",
-        "default",
-        "conservative",
-    ]
-
-    # planner load predictor — independent grid sweep (ranked by one-step-ahead
-    # forecast loss, NOT the main Vizier loop); the winning preset is pinned
-    # into the main sweep. Only relevant under predictive throughput scaling.
-    load_predictor_candidates: list[str | dict[str, Any]] = [
-        "constant_last",
-        "arima_raw",
-        "arima_log1p",
-        "prophet_w20_raw",
-        "prophet_w20_log1p",
-        "prophet_w50_raw",
-        "prophet_w50_log1p",
-        "kalman_default_raw",
-        "kalman_default_log1p",
-        "kalman_reactive_raw",
-        "kalman_reactive_log1p",
-    ]
-
     @model_validator(mode="after")
     def _validate_search_choices(self) -> SearchSpace:
-        """Each swept dimension is a non-empty list whose entries are valid: a string
-        must be one of the listed choices; a dict (only on a composite knob) must have
-        exactly that composite's unrolled field names (value legality is checked
-        downstream by dynamo's PlannerConfig)."""
+        """Every backend dimension is a non-empty subset of its allowed choices."""
         for field_name, allowed in SEARCH_CHOICES.items():
             values = getattr(self, field_name)
             if not values:
                 raise ValueError(
                     f"{field_name} must list at least one choice; allowed: {list(allowed)}"
                 )
-            dict_keys = COMPOSITE_DICT_KEYS.get(field_name)
             for v in values:
-                if isinstance(v, dict):
-                    if dict_keys is None:
-                        raise ValueError(
-                            f"{field_name} does not accept a dict entry; choices: {list(allowed)}"
-                        )
-                    if not v:
-                        raise ValueError(f"{field_name} dict entry must not be empty")
-                    unknown = set(v) - dict_keys
-                    if unknown:
-                        raise ValueError(
-                            f"{field_name} dict has unknown keys {sorted(unknown)}; allowed: {sorted(dict_keys)}"
-                        )
-                    missing = COMPOSITE_REQUIRED_KEYS.get(
-                        field_name, frozenset()
-                    ) - set(v)
-                    if missing:
-                        raise ValueError(
-                            f"{field_name} dict is missing required keys {sorted(missing)}; "
-                            "a dict entry must be self-contained "
-                            "(see docs/fern/components/aisimulate/spica/search-space.md)"
-                        )
-                elif v not in allowed:
+                if v not in allowed:
                     raise ValueError(
                         f"{field_name} has invalid choice {v!r}; allowed: {list(allowed)}"
                     )
@@ -613,56 +420,13 @@ class SearchSpace(BaseModel):
 
     @model_validator(mode="after")
     def _validate_gpu_budget(self) -> SearchSpace:
-        """When ``min_gpu_budget`` is set it must be a positive value not exceeding
-        ``gpu_budget``. ``min_endpoint`` is carried into scaling candidates as a planner
-        runtime floor; its detailed feasibility is validated by the planner."""
+        """A minimum GPU budget must be positive and within the maximum budget."""
         if self.min_gpu_budget is not None and not (
             0 < self.min_gpu_budget <= self.gpu_budget
         ):
             raise ValueError(
                 f"min_gpu_budget must satisfy 0 < min_gpu_budget <= gpu_budget "
                 f"(got min_gpu_budget={self.min_gpu_budget}, gpu_budget={self.gpu_budget})"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_kv_offload_replay_sizing(self) -> SearchSpace:
-        """Require deterministic transfer sizing whenever G2 offload is enabled.
-
-        Dynamo can try to infer this value from model metadata, but inference may
-        fail for private, gated, or offline models and silently skip attaching the
-        offload engine. Requiring the pinned value keeps replay and deployment
-        artifacts on the same KVBM policy.
-        """
-        if self.num_g2_blocks > 0 and self.kv_bytes_per_token is None:
-            raise ValueError(
-                "kv_bytes_per_token is required when num_g2_blocks > 0 so replay can model KVBM offload"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_router_admission_replay_support(self) -> SearchSpace:
-        """Reject admission-control pins until Dynamo replay can model them.
-
-        Generated deployments support these frontend flags, but the pinned replay
-        API accepts only ``KvRouterConfig`` and would silently score a different
-        router policy. Failing here keeps optimized and generated artifacts aligned.
-        """
-        if "kv_router" not in self.router_mode:
-            return self
-
-        admission_pins = {
-            "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
-            "active_prefill_tokens_threshold": self.active_prefill_tokens_threshold,
-            "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
-        }
-        enabled = [name for name, value in admission_pins.items() if value is not None]
-        if self.no_admission_control:
-            enabled.append("no_admission_control")
-        if enabled:
-            raise ValueError(
-                "router admission-control knobs are not supported by the Dynamo replay API; "
-                f"remove {', '.join(enabled)} so replay and generated artifacts stay equivalent"
             )
         return self
 
@@ -722,12 +486,20 @@ class SweepConfig(BaseModel):
     max_eval_seconds: float | None = Field(default=600.0, gt=0)
 
 
+class AdapterRequest(BaseModel):
+    """One optional simulation adapter and the search space it owns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    search_space: dict[str, Any] = Field(default_factory=dict)
+
+
 class Candidate(BaseModel):
     """One evaluated configuration and its replay performance."""
 
     model_config = ConfigDict(extra="forbid")
 
-    config: dict[str, Any]  # the decoded knob assignment (engine/router/planner)
+    config: dict[str, Any]  # backend assignment plus namespaced adapter selections
     used_gpus: int
     score: float  # objective score, normalized so higher is better (pareto: the first objective's value)
     metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
@@ -743,9 +515,68 @@ class SmartSearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     search_space: SearchSpace
+    adapters: dict[str, AdapterRequest] = Field(default_factory=dict)
     workload: Workload
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
     sweep: SweepConfig = Field(default_factory=SweepConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_flat_fields(cls, data: Any) -> Any:
+        """Fail clearly instead of silently accepting the pre-adapter Spica schema."""
+        if not isinstance(data, dict):
+            return data
+        search_space = data.get("search_space")
+        if not isinstance(search_space, dict):
+            return data
+
+        kvbm_fields = {
+            "num_g2_blocks",
+            "kv_bytes_per_token",
+            "bandwidth_g1_to_g2_gbps",
+            "bandwidth_g2_to_g1_gbps",
+            "offload_batch_size",
+            "host_cache_hit_weight",
+            "disk_cache_hit_weight",
+        }
+        planner_fields = {
+            "min_endpoint",
+            "planner_scaling_policy",
+            "planner_fpm_sampling",
+            "planner_load_sensitivity",
+            "load_predictor_candidates",
+        }
+        router_fields = {
+            "router_mode",
+            "overlap_score_credit",
+            "prefill_load_scale",
+            "router_temperature",
+            "active_decode_blocks_threshold",
+            "active_decode_tokens_threshold",
+            "active_prefill_tokens_threshold",
+            "active_prefill_tokens_threshold_frac",
+            "no_admission_control",
+        }
+
+        present_kvbm = sorted(kvbm_fields.intersection(search_space))
+        if present_kvbm:
+            raise ValueError(
+                "KVBM sweep fields were removed from Spica and have no migration "
+                f"because native G2 replaces KVBM; remove {present_kvbm}"
+            )
+        present_planner = sorted(planner_fields.intersection(search_space))
+        if present_planner:
+            raise ValueError(
+                "Planner search fields now belong to an adapter; move "
+                f"{present_planner} to adapters['dynamo.planner'].search_space"
+            )
+        present_router = sorted(router_fields.intersection(search_space))
+        if present_router:
+            raise ValueError(
+                "Router search fields now belong to an adapter; move "
+                f"{present_router} to adapters['dynamo.router'].search_space"
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod
