@@ -1091,11 +1091,17 @@ class TestConversationAffinity:
     ``SchedulingParams`` as before.
     """
 
-    def _make_handler(self, *, conversation_affinity: bool) -> HandlerBase:
+    def _make_handler(
+        self,
+        *,
+        conversation_affinity: bool,
+        dp_rank_source: str = "engine",
+    ) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.conversation_affinity = False
+        config.conversation_affinity_dp_rank_source = dp_rank_source
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -1203,6 +1209,60 @@ class TestConversationAffinity:
         conv_params = kwargs["conversation_params"]
         assert conv_params is not None
         assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_forwards_rank(self, monkeypatch):
+        """Dynamo-owned placement forwards both the rank and conversation id."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-42:agent-0"},
+            },
+        )
+        scheduling_params = kwargs["scheduling_params"]
+        assert scheduling_params is not None
+        assert scheduling_params.attention_dp_rank == 3
+        assert scheduling_params.attention_dp_relax is False
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_and_no_session_suppresses_rank(
+        self, monkeypatch
+    ):
+        """Without a conversation id, preserve TRT-LLM's no-id balancing path."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert kwargs["conversation_params"] is None
 
     @pytest.mark.asyncio
     async def test_affinity_on_without_session_id_passes_none_conversation_params(

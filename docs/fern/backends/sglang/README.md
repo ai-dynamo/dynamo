@@ -13,6 +13,13 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with SGLang's native engine arguments. It supports LLM inference, embedding models, multimodal vision models, and diffusion-based generation (LLM, image, video).
 
+## Experimental Sidecar
+
+The experimental sidecar path runs the Dynamo worker outside SGLang and
+connects through SGLang's native gRPC API. It keeps SGLang's native server and
+argument surface while separating Dynamo and engine dependencies. See
+[SGLang Sidecar](sidecar.md) for current readiness and launch examples.
+
 ## Prerequisites
 
 - **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../getting-started/local-installation.mdx#system-requirements). Not required when running the pre-built `sglang-runtime` container.

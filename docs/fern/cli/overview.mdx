@@ -10,6 +10,14 @@ This guide walks through the basic **aggregated deployment** flow: a single fron
 
 A deployment is always a **frontend** (`python -m dynamo.frontend`, the HTTP ingress) plus **one or more workers** (`python -m dynamo.<backend>`, which wrap an inference engine). Workers register with the frontend automatically on startup. The steps below start one of each.
 
+<Warning>
+**Experimental sidecar launch mode.** The steps below run an integrated backend,
+with the Dynamo worker and inference engine in the same process. The
+[Sidecar Backends](../design-docs/sidecar-backends.md) page explains how to run
+a stock engine server beside a CPU-only Dynamo worker and links to the
+framework-specific launch guides.
+</Warning>
+
 > **Prerequisites.** Dynamo installed for your backend (see the [installation guide](../getting-started/local-installation.mdx)), and etcd + NATS reachable on localhost so the frontend and worker can discover each other:
 >
 > ```bash

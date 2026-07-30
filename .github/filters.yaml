@@ -72,6 +72,7 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
+  - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'

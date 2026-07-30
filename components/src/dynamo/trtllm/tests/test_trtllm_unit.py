@@ -318,6 +318,40 @@ def test_conversation_affinity_defaults_false(monkeypatch):
     assert config.conversation_affinity is False
 
 
+def test_conversation_affinity_dp_rank_source_cli_flag(monkeypatch):
+    """The initial affinity placement owner can be selected on the CLI."""
+    monkeypatch.delenv(
+        "DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+        raising=False,
+    )
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--conversation-affinity-dp-rank-source",
+            "dynamo",
+        ]
+    )
+    assert config.conversation_affinity_dp_rank_source == "dynamo"
+
+
+def test_conversation_affinity_dp_rank_source_env_var(monkeypatch):
+    """DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE selects initial placement."""
+    monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE", "dynamo")
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity_dp_rank_source == "dynamo"
+
+
+def test_conversation_affinity_dp_rank_source_defaults_engine(monkeypatch):
+    """TRT-LLM keeps ownership of first-turn placement by default."""
+    monkeypatch.delenv(
+        "DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+        raising=False,
+    )
+    config = parse_args(["--model", "fake-model"])
+    assert config.conversation_affinity_dp_rank_source == "engine"
+
+
 def test_enable_multimodal_rejects_diffusion_modality():
     with pytest.raises(ValueError, match="--enable-multimodal cannot be combined"):
         parse_args(

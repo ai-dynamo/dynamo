@@ -1252,6 +1252,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-sglang:
     name: SGLang DynamoCheckpoint Operator Setup
@@ -1283,6 +1286,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM DynamoCheckpoint Operator Setup
@@ -1314,6 +1320,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-snapshot-agent-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
@@ -1350,6 +1359,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1398,6 +1410,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1446,6 +1461,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1495,6 +1513,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1520,6 +1541,9 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=vllm
@@ -1561,6 +1585,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1586,6 +1613,9 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=sglang
@@ -1627,6 +1657,9 @@ jobs:
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
           checkpoint_storage_size: 64Gi
+          # Same shared model cache as regular deploy tests; empty vars -> HF download.
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -1652,6 +1685,9 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
+          # Mount the shared model cache only when both endpoint vars are set
+          # (matches the PV/PVC creation gate); otherwise workers download from HF.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
             -m dynamocheckpoint
             --checkpoint-backend=trtllm
