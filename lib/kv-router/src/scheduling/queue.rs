@@ -27,7 +27,8 @@ use super::types::{
     SchedulingContext, SchedulingRequest, SchedulingResponse,
 };
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
+    WorkerWithDpRank,
 };
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -54,6 +55,12 @@ struct QueuedRequest {
     request: SchedulingRequest,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
+}
+
+struct SelectedWorkerForRequest {
+    selection: WorkerSelectionResult,
+    selected_worker_tiers: SelectedWorkerTierSnapshot,
+    selected_worker_load: AdvisoryWorkerLoad,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -913,13 +920,7 @@ impl<
         &self,
         request: &mut SchedulingRequest,
         decay_now: Instant,
-    ) -> Result<
-        (
-            crate::protocols::WorkerSelectionResult,
-            SelectedWorkerTierSnapshot,
-        ),
-        KvSchedulerError,
-    > {
+    ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -940,7 +941,20 @@ impl<
                     let selected_worker_tiers = request
                         .overlap
                         .selected_worker_tiers(selection.worker, config);
-                    (selection, selected_worker_tiers)
+                    let worker_load = request.worker_load_for(selection.worker);
+                    let selected_worker_load = AdvisoryWorkerLoad {
+                        active_prefill_tokens: worker_load.active_prefill_tokens,
+                        prefill_token_capacity: config
+                            .max_num_batched_tokens()
+                            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
+                            as usize,
+                        total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+                    };
+                    SelectedWorkerForRequest {
+                        selection,
+                        selected_worker_tiers,
+                        selected_worker_load,
+                    }
                 })
         }
     }
@@ -950,42 +964,16 @@ impl<
         request: &mut SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
-
-        let workers = self.workers_with_configs.borrow();
-        let overloaded_worker_ids = self
-            .overloaded_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
-        let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
-        let selection =
-            self.selector
-                .select_worker(&workers, request, eligibility, self.block_size)?;
-        let config = workers
-            .get(&selection.worker.worker_id)
-            .expect("selected worker config must exist");
-        let selected_worker_tiers = request
-            .overlap
-            .selected_worker_tiers(selection.worker, config);
-        let worker_load = request.worker_load_for(selection.worker);
+        let selected = self.select_worker_for_request(request, decay_now)?;
 
         Ok(AdvisorySchedulingResponse {
-            selected_worker_load: AdvisoryWorkerLoad {
-                active_prefill_tokens: worker_load.active_prefill_tokens,
-                prefill_token_capacity: config
-                    .max_num_batched_tokens()
-                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
-                    as usize,
-                total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
-            },
+            selected_worker_load: selected.selected_worker_load,
             response: SchedulingResponse {
-                best_worker: selection.worker,
-                effective_overlap_blocks: selection.effective_overlap_blocks,
-                cached_tokens: selection.cached_tokens,
-                selected_worker_tiers,
-                potential_decode_blocks: selection.potential_decode_blocks,
+                best_worker: selected.selection.worker,
+                effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+                cached_tokens: selected.selection.cached_tokens,
+                selected_worker_tiers: selected.selected_worker_tiers,
+                potential_decode_blocks: selected.selection.potential_decode_blocks,
             },
         })
     }
@@ -993,22 +981,21 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
-        let (selection, selected_worker_tiers) =
-            match self.select_worker_for_request(&mut request, decay_now) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("scheduling failed: {e}");
-                    request.respond(Err(e));
-                    return false;
-                }
-            };
+        let selected = match self.select_worker_for_request(&mut request, decay_now) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("scheduling failed: {e}");
+                request.respond(Err(e));
+                return false;
+            }
+        };
 
         let response = SchedulingResponse {
-            best_worker: selection.worker,
-            effective_overlap_blocks: selection.effective_overlap_blocks,
-            cached_tokens: selection.cached_tokens,
-            selected_worker_tiers,
-            potential_decode_blocks: selection.potential_decode_blocks,
+            best_worker: selected.selection.worker,
+            effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+            cached_tokens: selected.selection.cached_tokens,
+            selected_worker_tiers: selected.selected_worker_tiers,
+            potential_decode_blocks: selected.selection.potential_decode_blocks,
         };
 
         if !request.mode.is_tracked() {
@@ -1024,7 +1011,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.cached_tokens,
+            selected.selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -1034,7 +1021,7 @@ impl<
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
-            worker: selection.worker,
+            worker: selected.selection.worker,
             lora_name: request.lora_name.take(),
         };
         self.book_and_respond(request, sequence_request, response)
