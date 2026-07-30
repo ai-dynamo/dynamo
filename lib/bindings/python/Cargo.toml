@@ -28,6 +28,7 @@ kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 # Exposes the optional Relay stats/snapshot methods to Python diagnostic builds.
 ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
+kv-dc-relay-wan = ["dynamo-llm/kv-dc-relay-wan"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]

@@ -3,7 +3,6 @@
 
 """DC-scoped, multi-endpoint Dynamo KV Relay component."""
 
-import argparse
 import asyncio
 import hashlib
 import logging
@@ -15,22 +14,10 @@ from dynamo.llm import KvDcRelay
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cli import monitor_relay, parse_args
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dynamo DC-scoped KV Relay")
-    parser.add_argument(
-        "--namespace-filter",
-        help="Optional discovery namespace filter; the default watches all namespaces",
-    )
-    parser.add_argument(
-        "--endpoint-prefix",
-        help="Optional prefix filter over namespace.component.endpoint",
-    )
-    parser.add_argument("--dc-id", required=True)
-    return parser.parse_args()
 
 
 class KvDcRelayDiagnostics:
@@ -58,8 +45,31 @@ async def worker(runtime: DistributedRuntime) -> None:
     relay = KvDcRelay(
         relay_endpoint,
         args.dc_id,
-        args.namespace_filter,
-        args.endpoint_prefix,
+        namespaces=list(args.namespaces),
+        endpoint_prefixes=list(args.endpoint_prefixes),
+        watch_all=args.watch_all,
+        expected_unique_blocks=args.expected_unique_blocks,
+        publication_threshold=args.publication_threshold,
+        publication_delay_ms=args.publication_delay_ms,
+        recovery_attempt_timeout_ms=args.recovery_attempt_timeout_ms,
+        bind=args.bind,
+        tls_server_cert=args.tls_server_cert,
+        tls_server_key=args.tls_server_key,
+        tls_client_ca=args.tls_client_ca,
+        max_message_bytes=args.max_message_bytes,
+        keepalive_interval_ms=args.keepalive_interval_ms,
+        keepalive_timeout_ms=args.keepalive_timeout_ms,
+        pool_heartbeat_interval_ms=args.pool_heartbeat_interval_ms,
+        readiness_heartbeat_interval_ms=args.readiness_heartbeat_interval_ms,
+        load_window_ms=args.load_window_ms,
+        load_fanout_capacity=args.load_fanout_capacity,
+        publication_queue_capacity=args.publication_queue_capacity,
+        publication_queue_bytes=args.publication_queue_bytes,
+        publication_encoding_concurrency=args.publication_encoding_concurrency,
+        max_catalog_subscribers=args.max_catalog_subscribers,
+        max_pool_subscribers=args.max_pool_subscribers,
+        max_readiness_subscribers=args.max_readiness_subscribers,
+        max_load_subscribers=args.max_load_subscribers,
     )
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)
@@ -67,10 +77,13 @@ async def worker(runtime: DistributedRuntime) -> None:
     diagnostics_component = f"kv_dc_relay_{relay_identity}"
 
     logger.info(
-        "KV DC Relay started for dc_id=%s namespace_filter=%s endpoint_prefix=%s",
+        "KV DC Relay started for dc_id=%s namespaces=%s watch_all=%s "
+        "endpoint_prefixes=%s wan_bind=%s",
         args.dc_id,
-        args.namespace_filter,
-        args.endpoint_prefix,
+        args.namespaces,
+        args.watch_all,
+        args.endpoint_prefixes,
+        args.bind,
     )
     endpoint_tasks = []
     try:
@@ -114,7 +127,7 @@ async def worker(runtime: DistributedRuntime) -> None:
                 )
             )
         )
-        await asyncio.gather(*endpoint_tasks)
+        await monitor_relay(relay, endpoint_tasks)
     finally:
         for task in endpoint_tasks:
             task.cancel()

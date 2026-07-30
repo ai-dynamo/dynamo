@@ -7,11 +7,27 @@ mod actor;
 mod discovery;
 mod host;
 mod identity;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod load;
 mod pool_registry;
+#[cfg(feature = "kv-dc-relay-proto")]
+pub mod protocol;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_codec;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_hub;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod readiness;
 mod resolution;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod transport_config;
 
+pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
+    KvDcRelayProducerConfig,
 };
 #[cfg(feature = "ckf-diagnostics")]
 pub use host::{
@@ -25,3 +41,5 @@ pub use identity::{
     DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
     PoolIdentitySources,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+pub use transport_config::KvDcRelayTransportConfig;

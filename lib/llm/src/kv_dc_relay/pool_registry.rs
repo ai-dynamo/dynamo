@@ -4,12 +4,18 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(feature = "kv-dc-relay-wan")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
+#[cfg(feature = "kv-dc-relay-wan")]
+use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
 use dynamo_runtime::protocols::EndpointId;
 use parking_lot::Mutex;
+#[cfg(feature = "kv-dc-relay-wan")]
+use tokio::sync::Notify;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +25,17 @@ use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
     ModelAlias,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::load::{PoolLoadSnapshot, PoolLoadState};
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::publication_hub::{
+    PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubHealth,
+    PublicationHubSubscription, TerminalFailure, publication_lease,
+};
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::readiness::{EndpointServingFacts, ServingReadinessSnapshot, derive_endpoint_readiness};
+#[cfg(feature = "kv-dc-relay-wan")]
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
 
@@ -34,6 +51,10 @@ pub(super) struct PoolAttachRequest {
     pub(super) pool_id: PoolId,
     pub(super) endpoint: EndpointId,
     pub(super) registrations: Vec<CanonicalModelRegistration>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) serving_facts: EndpointServingFacts,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +78,198 @@ struct PoolEntry {
     registrations: Arc<[CanonicalModelRegistration]>,
     cancel: CancellationToken,
     state: PoolEntryState,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    hub: Arc<PoolHubSlot>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    serving_facts: EndpointServingFacts,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    load: PoolLoadState,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+enum PoolHubState {
+    Vacant,
+    Initializing,
+    Ready(PublicationHub),
+    Failed(String),
+    Retired,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct PoolHubSlot {
+    state: Mutex<PoolHubState>,
+    changed: Notify,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PoolPublicationMetricsSnapshot {
+    pub(super) initialized_hubs: usize,
+    pub(super) ready_hubs: usize,
+    pub(super) terminal_failures: u64,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+impl PoolHubSlot {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PoolHubState::Vacant),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn get_or_start(
+        self: &Arc<Self>,
+        actor: KvDcRelayHandle,
+        config: PublicationHubConfig,
+        generation_cancel: CancellationToken,
+        terminal_failure: TerminalFailure,
+    ) -> Result<PublicationHub, PublicationHubError> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let should_start = {
+                let mut state = self.state.lock();
+                match &*state {
+                    PoolHubState::Ready(hub) => return Ok(hub.clone()),
+                    PoolHubState::Failed(reason) => {
+                        return Err(PublicationHubError::Unavailable(reason.clone()));
+                    }
+                    PoolHubState::Retired => {
+                        return Err(PublicationHubError::Unavailable(
+                            "pool generation retired".to_string(),
+                        ));
+                    }
+                    PoolHubState::Initializing => false,
+                    PoolHubState::Vacant => {
+                        *state = PoolHubState::Initializing;
+                        true
+                    }
+                }
+            };
+            if should_start {
+                let slot = self.clone();
+                let cancel = generation_cancel.clone();
+                let failure = terminal_failure.clone();
+                let lease = publication_lease(actor.identity());
+                let actor = actor.clone();
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let mut start =
+                        tokio::spawn(PublicationHub::start(actor, lease, config, failure.clone()));
+                    let result = tokio::select! {
+                        result = &mut start => match result {
+                            Ok(Ok(hub)) => Ok(hub),
+                            Ok(Err(error)) => Err(format!(
+                                "failed to initialize publication hub: {error}"
+                            )),
+                            Err(error) => Err(format!(
+                                "publication hub initialization task failed: {error}"
+                            )),
+                        },
+                        _ = cancel.cancelled() => {
+                            start.abort();
+                            let _ = start.await;
+                            *slot.state.lock() = PoolHubState::Retired;
+                            slot.changed.notify_waiters();
+                            return;
+                        }
+                    };
+                    if cancel.is_cancelled() {
+                        if let Ok(hub) = result {
+                            hub.shutdown().await;
+                        }
+                        *slot.state.lock() = PoolHubState::Retired;
+                        slot.changed.notify_waiters();
+                        return;
+                    }
+                    match result {
+                        Ok(hub) => *slot.state.lock() = PoolHubState::Ready(hub),
+                        Err(reason) => {
+                            *slot.state.lock() = PoolHubState::Failed(reason.clone());
+                            failure(reason);
+                        }
+                    }
+                    slot.changed.notify_waiters();
+                });
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = generation_cancel.cancelled() => {
+                    return Err(PublicationHubError::Unavailable(
+                        "pool generation retired".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn shutdown(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let hub = {
+                let mut state = self.state.lock();
+                match std::mem::replace(&mut *state, PoolHubState::Retired) {
+                    PoolHubState::Ready(hub) => Some(hub),
+                    PoolHubState::Initializing => {
+                        *state = PoolHubState::Initializing;
+                        None
+                    }
+                    PoolHubState::Vacant | PoolHubState::Failed(_) | PoolHubState::Retired => {
+                        return;
+                    }
+                }
+            };
+            if let Some(hub) = hub {
+                hub.shutdown().await;
+                self.changed.notify_waiters();
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn phase(&self) -> &'static str {
+        match &*self.state.lock() {
+            PoolHubState::Vacant => "vacant",
+            PoolHubState::Initializing => "initializing",
+            PoolHubState::Ready(_) => "ready",
+            PoolHubState::Failed(_) => "failed",
+            PoolHubState::Retired => "retired",
+        }
+    }
+
+    fn metrics(&self) -> Option<PublicationHubHealth> {
+        let hub = match &*self.state.lock() {
+            PoolHubState::Ready(hub) => Some(hub.clone()),
+            PoolHubState::Vacant
+            | PoolHubState::Initializing
+            | PoolHubState::Failed(_)
+            | PoolHubState::Retired => None,
+        };
+        hub.map(|hub| hub.health())
+    }
+
+    fn is_initialized(&self) -> bool {
+        matches!(
+            &*self.state.lock(),
+            PoolHubState::Ready(_) | PoolHubState::Failed(_)
+        )
+    }
+
+    fn retire(&self) {
+        let hub = match &*self.state.lock() {
+            PoolHubState::Ready(hub) => Some(hub.clone()),
+            _ => None,
+        };
+        if let Some(hub) = hub {
+            hub.retire();
+        }
+    }
 }
 
 struct PoolReservation {
@@ -99,6 +312,8 @@ struct PoolRegistryState {
     reservations: HashMap<PoolId, PoolReservation>,
     next_layout_generation: u64,
     catalog_revision: u64,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    readiness_revision: u64,
     accepting: bool,
 }
 
@@ -109,6 +324,8 @@ impl Default for PoolRegistryState {
             reservations: HashMap::new(),
             next_layout_generation: 1,
             catalog_revision: 0,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            readiness_revision: 0,
             accepting: true,
         }
     }
@@ -129,10 +346,39 @@ pub(super) struct PoolRegistry {
     ckf_allocation_permits: Arc<Semaphore>,
     state: Mutex<PoolRegistryState>,
     catalog_tx: watch::Sender<DcPoolCatalog>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    publication_config: PublicationHubConfig,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    readiness_tx: watch::Sender<ServingReadinessSnapshot>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    load_tx: watch::Sender<Vec<PoolLoadSnapshot>>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    publication_terminal_failures: AtomicU64,
 }
 
 impl PoolRegistry {
     pub(super) fn new(relay_identity: DcRelayIdentity, actor_config: PoolActorConfig) -> Self {
+        #[cfg(feature = "kv-dc-relay-wan")]
+        return Self::new_with_publication_config(
+            relay_identity,
+            actor_config,
+            PublicationHubConfig::default(),
+        );
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
+        Self::new_inner(relay_identity, actor_config)
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn new_with_publication_config(
+        relay_identity: DcRelayIdentity,
+        actor_config: PoolActorConfig,
+        publication_config: PublicationHubConfig,
+    ) -> Self {
+        Self::new_inner(relay_identity, actor_config, publication_config)
+    }
+
+    #[cfg(not(feature = "kv-dc-relay-wan"))]
+    fn new_inner(relay_identity: DcRelayIdentity, actor_config: PoolActorConfig) -> Self {
         let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
         Self {
             relay_identity,
@@ -140,6 +386,28 @@ impl PoolRegistry {
             ckf_allocation_permits: Arc::new(Semaphore::new(DEFAULT_CKF_ALLOCATION_CONCURRENCY)),
             state: Mutex::new(PoolRegistryState::default()),
             catalog_tx,
+        }
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    fn new_inner(
+        relay_identity: DcRelayIdentity,
+        actor_config: PoolActorConfig,
+        publication_config: PublicationHubConfig,
+    ) -> Self {
+        let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
+        let (readiness_tx, _) = watch::channel(ServingReadinessSnapshot::default());
+        let (load_tx, _) = watch::channel(Vec::new());
+        Self {
+            relay_identity,
+            actor_config,
+            ckf_allocation_permits: Arc::new(Semaphore::new(DEFAULT_CKF_ALLOCATION_CONCURRENCY)),
+            state: Mutex::new(PoolRegistryState::default()),
+            catalog_tx,
+            publication_config,
+            readiness_tx,
+            load_tx,
+            publication_terminal_failures: AtomicU64::new(0),
         }
     }
 
@@ -164,6 +432,8 @@ impl PoolRegistry {
             request.pool_id
         );
         validate_registrations(&request.registrations)?;
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let load = PoolLoadState::from_runtime_configs(&request.runtime_configs)?;
 
         let layout_generation = {
             let mut state = self.state.lock();
@@ -246,9 +516,20 @@ impl PoolRegistry {
                 registrations: registrations.clone(),
                 cancel: cancel.clone(),
                 state: PoolEntryState::Active,
+                #[cfg(feature = "kv-dc-relay-wan")]
+                hub: Arc::new(PoolHubSlot::new()),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: request.serving_facts,
+                #[cfg(feature = "kv-dc-relay-wan")]
+                load,
             },
         );
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
+        #[cfg(feature = "kv-dc-relay-wan")]
+        {
+            publish_readiness_if_changed(&mut state, &self.readiness_tx);
+            publish_load_if_changed(&state, &self.load_tx, request.pool_id);
+        }
         reservation.disarm();
 
         Ok(PoolAttachment {
@@ -312,7 +593,87 @@ impl PoolRegistry {
         );
         attachment.registrations = registrations;
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
+        #[cfg(feature = "kv-dc-relay-wan")]
+        publish_readiness_if_changed(&mut state, &self.readiness_tx);
         Ok(())
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn replace_serving_facts(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        serving_facts: EndpointServingFacts,
+    ) -> bool {
+        let mut state = self.state.lock();
+        let Some(entry) = state.pools.get_mut(&pool_id) else {
+            return false;
+        };
+        if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
+            return false;
+        }
+        if entry.serving_facts == serving_facts {
+            return true;
+        }
+        entry.serving_facts = serving_facts;
+        publish_readiness_if_changed(&mut state, &self.readiness_tx);
+        true
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn replace_load_capacity(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> anyhow::Result<bool> {
+        let mut state = self.state.lock();
+        let Some(entry) = state.pools.get_mut(&pool_id) else {
+            return Ok(false);
+        };
+        if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
+            return Ok(false);
+        }
+        if entry.load.replace_capacity(runtime_configs)? {
+            publish_load_if_changed(&state, &self.load_tx, pool_id);
+        }
+        Ok(true)
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn observe_load(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        load: ActiveLoad,
+    ) -> bool {
+        let mut state = self.state.lock();
+        let Some(entry) = state.pools.get_mut(&pool_id) else {
+            return false;
+        };
+        if entry.layout_generation != layout_generation
+            || entry.state != PoolEntryState::Active
+            || !entry.load.observe(load)
+        {
+            return false;
+        }
+        publish_load_if_changed(&state, &self.load_tx, pool_id);
+        true
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn clear_load_observations(&self, pool_id: PoolId, layout_generation: u64) -> bool {
+        let mut state = self.state.lock();
+        let Some(entry) = state.pools.get_mut(&pool_id) else {
+            return false;
+        };
+        if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
+            return false;
+        }
+        if entry.load.clear_observations() {
+            publish_load_if_changed(&state, &self.load_tx, pool_id);
+        }
+        true
     }
 
     pub(super) async fn withdraw(
@@ -321,12 +682,48 @@ impl PoolRegistry {
         layout_generation: u64,
         mode: PoolRetirementMode,
     ) -> bool {
-        let mut state = self.state.lock();
-        let Some(entry) = state.pools.get_mut(&pool_id) else {
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let Some((hub, _)) = self.withdraw_publication_visibility(pool_id, layout_generation, mode)
+        else {
             return false;
         };
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
+        {
+            let mut state = self.state.lock();
+            let Some(entry) = state.pools.get_mut(&pool_id) else {
+                return false;
+            };
+            if entry.layout_generation != layout_generation {
+                return false;
+            }
+            let was_active = entry.state == PoolEntryState::Active;
+            entry.state = match (entry.state, mode) {
+                (PoolEntryState::Fenced, _) | (_, PoolRetirementMode::Fenced) => {
+                    PoolEntryState::Fenced
+                }
+                _ => PoolEntryState::Withdrawn,
+            };
+            entry.cancel.cancel();
+            if was_active {
+                publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
+            }
+        }
+        #[cfg(feature = "kv-dc-relay-wan")]
+        hub.shutdown().await;
+        true
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    fn withdraw_publication_visibility(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        mode: PoolRetirementMode,
+    ) -> Option<(Arc<PoolHubSlot>, bool)> {
+        let mut state = self.state.lock();
+        let entry = state.pools.get_mut(&pool_id)?;
         if entry.layout_generation != layout_generation {
-            return false;
+            return None;
         }
         let was_active = entry.state == PoolEntryState::Active;
         entry.state = match (entry.state, mode) {
@@ -334,29 +731,119 @@ impl PoolRegistry {
             _ => PoolEntryState::Withdrawn,
         };
         entry.cancel.cancel();
+        let hub = entry.hub.clone();
         if was_active {
             publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
+            publish_readiness_if_changed(&mut state, &self.readiness_tx);
+            publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
-        true
+        Some((hub, was_active))
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn fence_generation(
+        &self,
+        pool_id: PoolId,
+        layout_generation: u64,
+        reason: &str,
+    ) -> bool {
+        let retired = self.withdraw_publication_visibility(
+            pool_id,
+            layout_generation,
+            PoolRetirementMode::Fenced,
+        );
+        let Some((hub, was_active)) = retired else {
+            return false;
+        };
+        hub.retire();
+        if was_active {
+            tracing::error!(%pool_id, layout_generation, %reason, "Fencing KV DC Relay pool after terminal generation task failure");
+        }
+        was_active
     }
 
     pub(super) async fn remove(&self, pool_id: PoolId, layout_generation: u64) -> bool {
-        let mut state = self.state.lock();
-        let Some(entry) = state.pools.get(&pool_id) else {
-            return false;
+        let entry = {
+            let mut state = self.state.lock();
+            let Some(entry) = state.pools.get(&pool_id) else {
+                return false;
+            };
+            if entry.layout_generation != layout_generation {
+                return false;
+            }
+            let was_active = entry.state == PoolEntryState::Active;
+            let Some(entry) = state.pools.remove(&pool_id) else {
+                return false;
+            };
+            entry.cancel.cancel();
+            if was_active {
+                publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
+            }
+            #[cfg(feature = "kv-dc-relay-wan")]
+            {
+                publish_readiness_if_changed(&mut state, &self.readiness_tx);
+                publish_load_if_changed(&state, &self.load_tx, pool_id);
+            }
+            entry
         };
-        if entry.layout_generation != layout_generation {
-            return false;
-        }
-        let was_active = entry.state == PoolEntryState::Active;
-        let Some(entry) = state.pools.remove(&pool_id) else {
-            return false;
-        };
-        entry.cancel.cancel();
-        if was_active {
-            publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
-        }
+        #[cfg(feature = "kv-dc-relay-wan")]
+        entry.hub.shutdown().await;
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
+        drop(entry);
         true
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) async fn subscribe_pool(
+        self: &Arc<Self>,
+        pool_id: PoolId,
+    ) -> Result<PublicationHubSubscription, PublicationHubError> {
+        let (identity, actor, generation_cancel, hub_slot) = {
+            let state = self.state.lock();
+            let entry = state
+                .pools
+                .get(&pool_id)
+                .filter(|entry| entry.state == PoolEntryState::Active)
+                .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+            (
+                entry.identity,
+                entry.handle.clone(),
+                entry.cancel.clone(),
+                entry.hub.clone(),
+            )
+        };
+        let weak = Arc::downgrade(self);
+        let terminal_failure: TerminalFailure = Arc::new(move |reason| {
+            let Some(registry) = weak.upgrade() else {
+                return;
+            };
+            let reason = format!("publication hub: {reason}");
+            if registry.fence_generation(pool_id, identity.layout_generation(), &reason) {
+                registry
+                    .publication_terminal_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let hub = hub_slot
+            .get_or_start(
+                actor,
+                self.publication_config.clone(),
+                generation_cancel,
+                terminal_failure,
+            )
+            .await?;
+        let state = self.state.lock();
+        let entry = state
+            .pools
+            .get(&pool_id)
+            .filter(|entry| {
+                entry.state == PoolEntryState::Active
+                    && entry.identity == identity
+                    && Arc::ptr_eq(&entry.hub, &hub_slot)
+            })
+            .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+        debug_assert_eq!(entry.layout_generation, identity.layout_generation());
+        hub.subscribe()
     }
 
     pub(super) fn catalog(&self) -> DcPoolCatalog {
@@ -367,6 +854,43 @@ impl PoolRegistry {
         self.catalog_tx.subscribe()
     }
 
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn readiness(&self) -> ServingReadinessSnapshot {
+        self.readiness_tx.borrow().clone()
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn watch_readiness(&self) -> watch::Receiver<ServingReadinessSnapshot> {
+        self.readiness_tx.subscribe()
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
+        self.load_tx.borrow().clone()
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) fn publication_metrics(&self) -> PoolPublicationMetricsSnapshot {
+        let hubs = self
+            .state
+            .lock()
+            .pools
+            .values()
+            .map(|entry| entry.hub.clone())
+            .collect::<Vec<_>>();
+        let mut snapshot = PoolPublicationMetricsSnapshot {
+            terminal_failures: self.publication_terminal_failures.load(Ordering::Relaxed),
+            ..PoolPublicationMetricsSnapshot::default()
+        };
+        for hub in hubs {
+            snapshot.initialized_hubs += usize::from(hub.is_initialized());
+            if let Some(health) = hub.metrics() {
+                snapshot.ready_hubs += usize::from(health.ready);
+            }
+        }
+        snapshot
+    }
+
     pub(super) async fn shutdown(&self) {
         let entries = {
             let mut state = self.state.lock();
@@ -375,10 +899,23 @@ impl PoolRegistry {
             state.reservations.clear();
             let entries = state.pools.drain().collect::<Vec<_>>();
             publish_catalog_clear(&mut state, &self.catalog_tx);
+            #[cfg(feature = "kv-dc-relay-wan")]
+            {
+                publish_readiness_if_changed(&mut state, &self.readiness_tx);
+                self.load_tx.send_if_modified(|snapshots| {
+                    if snapshots.is_empty() {
+                        return false;
+                    }
+                    snapshots.clear();
+                    true
+                });
+            }
             entries
         };
         for (pool_id, entry) in entries {
             entry.cancel.cancel();
+            #[cfg(feature = "kv-dc-relay-wan")]
+            entry.hub.shutdown().await;
             if let Err(error) = entry.handle.fence().await {
                 tracing::warn!(%pool_id, %error, "KV Relay pool actor failed to fence during registry shutdown");
             }
@@ -388,6 +925,22 @@ impl PoolRegistry {
     #[cfg(test)]
     pub(super) async fn pool_count(&self) -> usize {
         self.state.lock().pools.len()
+    }
+
+    #[cfg(all(test, feature = "kv-dc-relay-wan"))]
+    async fn hub_phase_count(&self, phase: &'static str) -> usize {
+        let hubs = self
+            .state
+            .lock()
+            .pools
+            .values()
+            .map(|entry| entry.hub.clone())
+            .collect::<Vec<_>>();
+        let mut count = 0;
+        for hub in hubs {
+            count += usize::from(hub.phase() == phase);
+        }
+        count
     }
 }
 
@@ -472,6 +1025,69 @@ fn publish_catalog_remove(
 fn publish_catalog_clear(state: &mut PoolRegistryState, sender: &watch::Sender<DcPoolCatalog>) {
     let revision = advance_catalog_revision(state);
     sender.send_modify(|catalog| catalog.clear(revision));
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+fn publish_readiness_if_changed(
+    state: &mut PoolRegistryState,
+    sender: &watch::Sender<ServingReadinessSnapshot>,
+) {
+    let mut entries = state
+        .pools
+        .values()
+        .filter(|entry| entry.state == PoolEntryState::Active)
+        .flat_map(|entry| {
+            derive_endpoint_readiness(entry.identity, &entry.registrations, &entry.serving_facts)
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by(|left, right| {
+        (left.producer.pool_id(), &left.model, &left.target).cmp(&(
+            right.producer.pool_id(),
+            &right.model,
+            &right.target,
+        ))
+    });
+    if sender.borrow().entries == entries {
+        return;
+    }
+    state.readiness_revision = state.readiness_revision.saturating_add(1);
+    sender.send_replace(ServingReadinessSnapshot {
+        revision: state.readiness_revision,
+        entries,
+    });
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+fn publish_load_if_changed(
+    state: &PoolRegistryState,
+    sender: &watch::Sender<Vec<PoolLoadSnapshot>>,
+    pool_id: PoolId,
+) {
+    let snapshot = state
+        .pools
+        .get(&pool_id)
+        .filter(|entry| entry.state == PoolEntryState::Active)
+        .map(|entry| entry.load.snapshot(entry.identity));
+    sender.send_if_modified(|snapshots| {
+        match (
+            snapshots.binary_search_by_key(&pool_id, |item| item.producer.pool_id()),
+            snapshot,
+        ) {
+            (Ok(index), Some(snapshot)) if snapshots[index] != snapshot => {
+                snapshots[index] = snapshot;
+                true
+            }
+            (Ok(index), None) => {
+                snapshots.remove(index);
+                true
+            }
+            (Err(index), Some(snapshot)) => {
+                snapshots.insert(index, snapshot);
+                true
+            }
+            _ => false,
+        }
+    });
 }
 
 fn validate_registrations(registrations: &[CanonicalModelRegistration]) -> anyhow::Result<()> {
@@ -572,6 +1188,10 @@ mod tests {
             pool_id,
             endpoint: EndpointId::from(endpoint),
             registrations: vec![registration(model)],
+            #[cfg(feature = "kv-dc-relay-wan")]
+            serving_facts: EndpointServingFacts::default(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            runtime_configs: HashMap::new(),
         }
     }
 
@@ -1019,6 +1639,10 @@ mod tests {
                 pool_id: pool(1),
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: registrations(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -1027,6 +1651,10 @@ mod tests {
                 pool_id: pool(2),
                 endpoint: EndpointId::from("slow.router.generate"),
                 registrations: registrations(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -1073,6 +1701,10 @@ mod tests {
                     CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -1096,5 +1728,287 @@ mod tests {
         assert!(catalog.pools()[0].registrations()[0].aliases().is_empty());
 
         registry.detach(without_alias).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn pool_does_not_allocate_a_publication_hub_until_subscribed() {
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+
+        assert_eq!(registry.hub_phase_count("vacant").await, 1);
+        let subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        assert_eq!(
+            subscription.snapshot().identity(),
+            attachment.handle.identity()
+        );
+        assert_eq!(registry.hub_phase_count("ready").await, 1);
+
+        drop(subscription);
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn concurrent_first_subscribers_share_one_hub() {
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let mut subscribers = Vec::new();
+        for _ in 0..8 {
+            let registry = registry.clone();
+            subscribers.push(tokio::spawn(async move {
+                registry
+                    .subscribe_pool(pool(1))
+                    .await
+                    .map(|subscription| subscription.snapshot().identity())
+            }));
+        }
+        for subscriber in subscribers {
+            assert_eq!(
+                subscriber.await.unwrap().unwrap(),
+                attachment.handle.identity()
+            );
+        }
+        assert_eq!(registry.hub_phase_count("ready").await, 1);
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn cancelled_first_subscriber_does_not_cancel_hub_initialization() {
+        let gate = Arc::new(Semaphore::new(0));
+        let publication_config = PublicationHubConfig {
+            initialization_gate: Some(gate.clone()),
+            ..PublicationHubConfig::default()
+        };
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            publication_config,
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+
+        let first = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.subscribe_pool(pool(1)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.hub_phase_count("initializing").await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hub initialization must start");
+        first.abort();
+        let _ = first.await;
+        gate.add_permits(1);
+
+        let subscription =
+            tokio::time::timeout(Duration::from_secs(1), registry.subscribe_pool(pool(1)))
+                .await
+                .expect("next subscriber must observe completed initialization")
+                .unwrap();
+        assert_eq!(
+            subscription.snapshot().identity(),
+            attachment.handle.identity()
+        );
+        drop(subscription);
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn retirement_during_hub_initialization_publishes_no_hub() {
+        let gate = Arc::new(Semaphore::new(0));
+        let publication_config = PublicationHubConfig {
+            initialization_gate: Some(gate),
+            ..PublicationHubConfig::default()
+        };
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            publication_config,
+        ));
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let subscriber = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.subscribe_pool(pool(1)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.hub_phase_count("initializing").await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hub initialization must start");
+
+        tokio::time::timeout(Duration::from_secs(1), registry.detach(attachment))
+            .await
+            .expect("retirement must cancel hub initialization")
+            .unwrap();
+        assert!(subscriber.await.unwrap().is_err());
+        assert!(registry.catalog().pools().is_empty());
+        assert_eq!(registry.pool_count().await, 0);
+        assert_eq!(registry.hub_phase_count("ready").await, 0);
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn readiness_and_load_are_generation_scoped_and_withdrawn_together() {
+        use std::collections::HashSet;
+
+        use crate::kv_dc_relay::discovery::DomainWorkerTopology;
+        use crate::kv_dc_relay::readiness::ServingReadinessState;
+        use crate::worker_type::WorkerType;
+
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let serving_facts = EndpointServingFacts {
+            worker_topology: HashMap::from([(
+                1,
+                DomainWorkerTopology {
+                    worker_type: Some(WorkerType::Aggregated),
+                    needs: Vec::new(),
+                },
+            )]),
+            live_workers: Some(HashSet::from([1])),
+            ..EndpointServingFacts::default()
+        };
+        let runtime_configs = HashMap::from([(
+            1,
+            ModelRuntimeConfig {
+                total_kv_blocks: Some(100),
+                max_num_batched_tokens: Some(2_048),
+                ..ModelRuntimeConfig::default()
+            },
+        )]);
+        let attachment = registry
+            .attach(PoolAttachRequest {
+                pool_id: pool(1),
+                endpoint: EndpointId::from("fast.router.generate"),
+                registrations: vec![registration("llama")],
+                serving_facts: serving_facts.clone(),
+                runtime_configs,
+            })
+            .await
+            .unwrap();
+        let old_generation = attachment.layout_generation;
+        let old_producer = attachment.handle.identity();
+
+        let readiness = registry.readiness();
+        assert_eq!(readiness.entries.len(), 1);
+        assert_eq!(readiness.entries[0].producer, old_producer);
+        assert_eq!(readiness.entries[0].state, ServingReadinessState::Ready);
+        let initial_load = registry.load_snapshots();
+        assert_eq!(initial_load.len(), 1);
+        assert_eq!(initial_load[0].kv_expected_ranks, 1);
+        assert_eq!(initial_load[0].kv_observed_ranks, 0);
+
+        let mut load = ActiveLoad {
+            worker_id: 1,
+            dp_rank: 0,
+            ..ActiveLoad::default()
+        };
+        load.kv_used_blocks = Some(40);
+        load.active_decode_blocks = Some(30);
+        load.active_prefill_tokens = Some(512);
+        assert!(registry.observe_load(pool(1), old_generation, load));
+        let observed = registry.load_snapshots()[0];
+        assert_eq!(observed.kv_used_blocks, 40);
+        assert_eq!(observed.active_decode_blocks, 30);
+        assert_eq!(observed.active_prefill_tokens, 512);
+        assert!(!observed.has_degraded_coverage());
+
+        assert!(
+            registry
+                .withdraw(pool(1), old_generation, PoolRetirementMode::Graceful)
+                .await
+        );
+        assert!(registry.readiness().entries.is_empty());
+        assert!(registry.load_snapshots().is_empty());
+        assert!(!registry.replace_serving_facts(pool(1), old_generation, serving_facts.clone(),));
+        assert!(!registry.observe_load(
+            pool(1),
+            old_generation,
+            ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                kv_used_blocks: Some(99),
+                ..ActiveLoad::default()
+            },
+        ));
+        registry.detach(attachment).await.unwrap();
+
+        let replacement = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        assert_ne!(replacement.layout_generation, old_generation);
+        assert_ne!(replacement.handle.identity(), old_producer);
+        assert!(!registry.replace_serving_facts(pool(1), old_generation, serving_facts));
+        assert!(
+            !registry
+                .replace_load_capacity(
+                    pool(1),
+                    old_generation,
+                    &HashMap::from([(
+                        1,
+                        ModelRuntimeConfig {
+                            total_kv_blocks: Some(999),
+                            ..ModelRuntimeConfig::default()
+                        },
+                    )]),
+                )
+                .unwrap()
+        );
+        assert_eq!(registry.load_snapshots()[0].kv_expected_ranks, 0);
+        assert_eq!(
+            registry.readiness().entries[0].state,
+            ServingReadinessState::Unknown
+        );
+        registry.detach(replacement).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn terminal_hub_failure_withdraws_generation_from_catalog() {
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
+        let mut catalog = registry.watch_catalog();
+        let attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let _subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+
+        attachment.handle.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if catalog.borrow_and_update().pools().is_empty() {
+                    break;
+                }
+                catalog.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("terminal hub failure must withdraw the catalog descriptor");
+        assert!(attachment.pool_cancel.is_cancelled());
+        assert!(registry.readiness().entries.is_empty());
+        assert!(registry.load_snapshots().is_empty());
+        assert!(
+            registry
+                .remove(attachment.pool_id, attachment.layout_generation)
+                .await
+        );
     }
 }
