@@ -271,6 +271,7 @@ def test_gms_shadow_engine_failover_vllm(
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 @pytest.mark.sglang
+@pytest.mark.pre_merge
 def test_gms_shadow_engine_failover_sglang(
     request, runtime_services_dynamic_ports, predownload_models
 ):
