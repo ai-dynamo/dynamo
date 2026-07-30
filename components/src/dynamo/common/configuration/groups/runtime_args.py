@@ -37,6 +37,7 @@ class DynamoRuntimeConfig(ConfigBase):
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
+    dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     dyn_enable_structural_tag: bool = False
     dyn_structural_tag_scope: str = "auto"
@@ -196,6 +197,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
             choices=get_reasoning_parser_names(),
         )
+        add_argument(
+            g,
+            flag_name="--dyn-default-thinking-mode",
+            env_var="DYN_DEFAULT_THINKING_MODE",
+            default=None,
+            choices=["enabled", "disabled"],
+            help="Deployment-level default thinking mode for chat templates. "
+            "Client request thinking, reasoning_effort, chat_template_args, or "
+            "chat_template_kwargs values override this default.",
+        )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
         # Both definitions are needed: this one controls the Rust-native chat
         # template path (oai.rs), while the frontend copy controls the Python
@@ -214,7 +225,9 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
             default=False,
-            help="Enable structural tag guided decoding for tool calls.",
+            help="Enable structural tag guided decoding for tool calls. "
+            "Named Kimi K3 tool_choice requests always activate their required "
+            "XTML structural tag even when this flag is off.",
         )
         add_argument(
             g,

@@ -25,9 +25,10 @@ on:
         type: boolean
         default: false
       build_timeout_minutes:
+        description: 'Timeout for the image build job. Matches the 60 min the other framework builds get in pr.yaml.'
         required: false
         type: number
-        default: 30
+        default: 60
       no_cache:
         description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
         required: false
@@ -238,7 +239,7 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
-      cpu_only_test_timeout_minutes: 30
+      cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}
