@@ -66,8 +66,7 @@ pub struct TraceThroughputStats {
     pub decode_worker_seconds: f64,
     /// GPUs per worker per role, derived from the mocker engine parallelism
     /// (`MockEngineArgs::aic_gpus_per_worker` = tensor parallelism × materialized
-    /// DP topology); the runtime sets it on the collector. 0 when not set
-    /// (e.g. the online path).
+    /// DP topology); the runtime sets it on the collector. 0 when not set.
     pub prefill_gpus_per_worker: usize,
     pub decode_gpus_per_worker: usize,
     /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` — the
@@ -744,6 +743,10 @@ impl TraceCollector {
     /// reports `count × duration_s` worker-seconds.
     pub(crate) fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
         self.static_worker_count = Some((prefill, decode));
+    }
+
+    pub(crate) fn clear_static_worker_count(&mut self) {
+        self.static_worker_count = None;
     }
 
     /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
