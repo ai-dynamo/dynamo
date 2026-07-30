@@ -41,6 +41,21 @@ Dynamo addresses these constraints by separating serving, control, and state pro
 
 ## System Model
 
+### Backend Execution Modes
+
+Dynamo supports two ways to connect an inference engine to the request plane:
+
+- An **integrated backend** runs the Dynamo worker and inference engine in the
+  same process.
+- An **experimental sidecar backend** runs a stock inference engine server
+  beside a CPU-only Dynamo sidecar. The request plane calls the engine's native
+  gRPC API directly, while discovery and events flow through the sidecar.
+
+The sidecar mode preserves the engine's native serve interface and separates
+engine dependencies from Dynamo, but it does not yet match the integrated
+backends' feature coverage. See [Sidecar Backends](sidecar-backends.md) for the
+architecture and current readiness.
+
 ### Request Plane (critical data path)
 
 The request plane is responsible for request/response execution:
