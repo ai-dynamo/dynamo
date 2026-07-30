@@ -65,7 +65,7 @@ def manifest(
     spec = copy.deepcopy(spec) if spec else {}
     backend = spec.get("backend", manager.config.backend)
     model = spec.get("model", manager.config.model)
-    if model == QWEN and backend in REMOTE_CODE_WORKERS:
+    if not manager.config.mocker and model == QWEN and backend in REMOTE_CODE_WORKERS:
         spec.setdefault("overrides", {}).setdefault(
             "dgd", remote_code_override(backend)
         )
