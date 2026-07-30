@@ -557,6 +557,9 @@ pub struct ActiveLoad {
     /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
+    /// Number of requests waiting in the worker's engine scheduler queue.
+    #[serde(default)]
+    pub num_waiting_reqs: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,

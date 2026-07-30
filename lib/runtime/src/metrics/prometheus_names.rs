@@ -276,6 +276,10 @@ pub mod frontend_service {
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
 
+    /// Requests waiting in the worker's engine scheduler queue
+    /// Gauge metric tracking worker-reported queue depth
+    pub const WORKER_WAITING_REQUESTS: &str = "worker_waiting_requests";
+
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
     pub const WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS: &str =

@@ -22,6 +22,12 @@ from httpx_sse import aconnect_sse
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.llm import HttpError, ModelInput, ModelType, WorkerType, register_model
 from dynamo.openai_backend.engine_metrics import register_engine_metrics
+from dynamo.openai_backend.load_reporter import (
+    EngineLoadReporter,
+    build_runtime_config,
+    fetch_engine_capacity,
+    load_report_interval_secs,
+)
 from dynamo.runtime import DistributedRuntime, Endpoint, dynamo_worker
 
 LOGGER = logging.getLogger("dynamo.openai_backend.worker")
@@ -768,9 +774,21 @@ async def init(
     endpoint_name: str,
 ) -> None:
     upstream = UpstreamClient(config)
+    load_reporter: Optional[EngineLoadReporter] = None
+
+    # The upstream may be a router; the abort URL always addresses the engine
+    # itself, which is where /get_server_info and the engine's /metrics live.
+    engine_url = config.abort_base_url or config.upstream_base_url
 
     try:
         await upstream.wait_until_ready()
+
+        capacity = await fetch_engine_capacity(engine_url)
+        runtime_config = build_runtime_config(capacity)
+        if runtime_config is None:
+            LOGGER.warning(
+                "Engine KV capacity unavailable; registering without runtime config"
+            )
 
         await register_model(
             ModelInput.Text,
@@ -778,6 +796,7 @@ async def init(
             endpoint,
             config.model,
             model_name=config.served_model_name,
+            runtime_config=runtime_config,
             worker_type=WorkerType.Aggregated,
         )
 
@@ -799,15 +818,27 @@ async def init(
         )
         register_engine_metrics(
             endpoint,
-            config.abort_base_url or config.upstream_base_url,
+            engine_url,
             namespace_name=namespace_name,
             component_name=component_name,
             endpoint_name=generate_name,
             model_name=config.served_model_name or config.model,
         )
 
+        interval = load_report_interval_secs()
+        if interval > 0:
+            load_reporter = EngineLoadReporter(
+                endpoint,
+                engine_url,
+                total_kv_blocks=capacity.total_kv_blocks if capacity else None,
+                interval_seconds=interval,
+            )
+            await load_reporter.start()
+
         await endpoint.serve_endpoint(RequestHandler(upstream).generate)
     finally:
+        if load_reporter is not None:
+            await load_reporter.stop()
         await upstream.aclose()
 
 

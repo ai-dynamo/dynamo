@@ -710,6 +710,7 @@ impl MockEngine {
                                 Some(metrics.dp_rank),
                                 None,
                                 Some(metrics.active_decode_blocks),
+                                None,
                             ) {
                                 tracing::warn!("Failed to publish metrics for DP rank {}: {e}", metrics.dp_rank);
                             } else {

@@ -609,6 +609,7 @@ class WorkerMetricsPublisher:
         dp_rank: Optional[int] = None,
         active_decode_blocks: int | None = None,
         kv_used_blocks: int | None = None,
+        num_waiting_reqs: int | None = None,
     ) -> None:
         """
         Publish worker metrics for load monitoring.
@@ -617,6 +618,7 @@ class WorkerMetricsPublisher:
             dp_rank: Data parallel rank of the worker (None defaults to 0)
             active_decode_blocks: Optional scheduler-compatible decode-block signal
             kv_used_blocks: Optional authoritative total KV blocks currently in use
+            num_waiting_reqs: Optional requests waiting in the engine's scheduler queue
         """
         ...
 

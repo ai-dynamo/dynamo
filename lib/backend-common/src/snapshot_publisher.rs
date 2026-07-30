@@ -61,7 +61,7 @@ impl SnapshotPublisher {
     pub fn publish(&self, dp_rank: u32, snap: ComponentSnapshot) {
         self.gauges.update(&snap);
         if let Some(rp) = self.router_publishers.get(&dp_rank)
-            && let Err(e) = rp.publish(Some(dp_rank), None, Some(snap.kv_used_blocks))
+            && let Err(e) = rp.publish(Some(dp_rank), None, Some(snap.kv_used_blocks), None)
         {
             if self.warned_ranks.lock().insert(dp_rank) {
                 tracing::warn!(dp_rank, error = %e, "router signal publish failed; suppressing further");

@@ -1043,6 +1043,8 @@ impl ModelWatcher {
                 Some(KvWorkerMonitor::new(
                     monitor_client,
                     router_config.load_threshold_config.clone(),
+                    // In KV mode sequence.rs owns the worker load gauges.
+                    router_config.router_mode != RouterMode::KV,
                 ))
             } else {
                 None
@@ -1264,12 +1266,28 @@ impl ModelWatcher {
         {
             // Text-input workers receive OpenAI-shaped requests directly, so add
             // a direct router for every endpoint type the worker advertises.
+            //
+            // Text workers publish ActiveLoad like Tokens workers do, so give this
+            // WorkerSet a monitor too: it consumes load reports, drives the
+            // overload/busy gate, and exports the worker load gauges (Text models
+            // never use the KV router, so the monitor owns the gauges here).
+            let worker_monitor = KvWorkerMonitor::new(
+                client.clone(),
+                router_config.load_threshold_config.clone(),
+                router_config.router_mode != RouterMode::KV,
+            );
+            let monitor_arc = Arc::new(worker_monitor.clone())
+                as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>;
+            worker_set.worker_monitor = Some(worker_monitor);
+
             if card.model_type.supports_chat() {
                 let push_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                    client.clone(),
+                    router_config.router_mode,
+                    Some(monitor_arc.clone()),
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(push_router));
@@ -1281,7 +1299,7 @@ impl ModelWatcher {
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
                 >::from_client_with_monitor(
-                    client, router_config.router_mode, None
+                    client, router_config.router_mode, Some(monitor_arc)
                 )
                 .await?;
                 worker_set.completions_engine = Some(Arc::new(push_router));

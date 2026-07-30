@@ -244,10 +244,13 @@ impl RouterWorkerStatusMetrics {
 // ---------------------------------------------------------------------------
 
 /// Per-worker active load gauges, published by `ActiveSequencesMultiWorker`
-/// and cleaned up by `KvWorkerMonitor` when workers disappear.
+/// (KV router mode) or by `KvWorkerMonitor` from worker-reported `ActiveLoad`
+/// (non-KV router modes), and cleaned up by `KvWorkerMonitor` when workers
+/// disappear.
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
+    pub waiting_requests: IntGaugeVec,
 }
 
 impl WorkerLoadMetrics {
@@ -268,6 +271,31 @@ impl WorkerLoadMetrics {
         self.active_prefill_tokens
             .with_label_values(labels)
             .set(active_tokens as i64);
+    }
+
+    /// Observe a worker-published `ActiveLoad` (monitor path, non-KV router
+    /// modes). Only fields present in the report are written.
+    pub fn observe_active_load(
+        &self,
+        worker_id: u64,
+        dp_rank: u32,
+        worker_type: &str,
+        active_decode_blocks: Option<u64>,
+        num_waiting_reqs: Option<u64>,
+    ) {
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = dp_rank.to_string();
+        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+        if let Some(blocks) = active_decode_blocks {
+            self.active_decode_blocks
+                .with_label_values(labels)
+                .set(blocks as i64);
+        }
+        if let Some(waiting) = num_waiting_reqs {
+            self.waiting_requests
+                .with_label_values(labels)
+                .set(waiting as i64);
+        }
     }
 }
 
@@ -296,6 +324,18 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
         &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_prefill_tokens gauge"),
+    waiting_requests: IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_WAITING_REQUESTS
+            ),
+            "Requests waiting in the worker's engine scheduler queue",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+    )
+    .expect("Failed to create worker_waiting_requests gauge"),
 });
 
 /// Register the worker load gauges with the given Prometheus registry.
@@ -306,6 +346,7 @@ pub fn register_worker_load_metrics(
     let m = &*WORKER_LOAD_METRICS;
     registry.register(Box::new(m.active_decode_blocks.clone()))?;
     registry.register(Box::new(m.active_prefill_tokens.clone()))?;
+    registry.register(Box::new(m.waiting_requests.clone()))?;
     Ok(())
 }
 
@@ -805,6 +846,18 @@ mod tests {
                 &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
+            waiting_requests: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::WORKER_WAITING_REQUESTS
+                    ),
+                    "Requests waiting in the worker's engine scheduler queue",
+                ),
+                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.active_decode_blocks.clone()))
@@ -812,8 +865,12 @@ mod tests {
         registry
             .register(Box::new(metrics.active_prefill_tokens.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.waiting_requests.clone()))
+            .unwrap();
 
         metrics.observe(123, 0, "decode", 42, 100);
+        metrics.observe_active_load(123, 0, "decode", None, Some(7));
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -823,6 +880,9 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+# HELP dynamo_frontend_worker_waiting_requests Requests waiting in the worker's engine scheduler queue
+# TYPE dynamo_frontend_worker_waiting_requests gauge
+dynamo_frontend_worker_waiting_requests{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 7
 ";
         assert_eq!(
             output, expected,

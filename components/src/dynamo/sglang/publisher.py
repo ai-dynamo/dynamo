@@ -220,8 +220,13 @@ class DynamoSglangPublisher:
                 active_decode_blocks, total_blocks = kv_metrics_block_values(
                     kv_metrics, self.server_args.page_size
                 )
+                num_waiting = getattr(kv_metrics, "num_requests_waiting", None)
                 self.metrics_publisher.publish(
-                    dp_rank, kv_used_blocks=active_decode_blocks
+                    dp_rank,
+                    kv_used_blocks=active_decode_blocks,
+                    num_waiting_reqs=int(num_waiting)
+                    if num_waiting is not None
+                    else None,
                 )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
