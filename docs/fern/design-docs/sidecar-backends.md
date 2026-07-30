@@ -49,7 +49,7 @@ with Dynamo's discovery and event planes.
 | Layer | Responsibility |
 |---|---|
 | Dynamo frontend and router | OpenAI-compatible API, preprocessing, routing, and direct native gRPC requests to the engine |
-| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding over native gRPC |
+| Dynamo sidecar | Engine registration and discovery, plus metadata and event forwarding |
 | Inference engine | Native gRPC request serving, scheduling, sampling, token generation, KV cache, and GPU execution |
 
 ## Current Readiness
