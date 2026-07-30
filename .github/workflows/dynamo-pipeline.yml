@@ -25,9 +25,10 @@ on:
         type: boolean
         default: false
       build_timeout_minutes:
+        description: 'Timeout for the image build job. Matches the 60 min the other framework builds get in pr.yaml.'
         required: false
         type: number
-        default: 30
+        default: 60
       no_cache:
         description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
         required: false

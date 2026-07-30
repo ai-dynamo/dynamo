@@ -40,18 +40,14 @@ python -m aisimulate.spica \
   --config examples/aisimulate/spica/configs/smart_sweep.yaml
 ```
 
-Run the GLM-5-FP8 Pareto-front search:
+The GLM-5-FP8 Pareto-front configuration is retained as a reference for a
+previous experiment:
 
 > [!IMPORTANT]
 > This configuration uses `kv_load_ratio` and requires an AI Configurator release that provides
 > `aiconfigurator.sdk.memory`. It fails closed in the default `dynamo-planner` image, which currently
-> retains AI Configurator 0.9. Trace workloads and fixed `concurrency` workloads remain usable in
-> the default image.
-
-```bash
-python -m aisimulate.spica \
-  --config examples/aisimulate/spica/configs/glm5-disagg-pareto-frontier.yaml
-```
+> retains AI Configurator 0.9. It is not runnable with the repository's packaged dependencies.
+> Use `smart_sweep.yaml` with a trace or fixed `concurrency` workload for a runnable search.
 
 Update `workload.trace_path` before running a trace-backed configuration.
 

@@ -9,6 +9,19 @@ use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+fn is_kimi_k3_parser(parser_name: Option<&str>) -> bool {
+    parser_name.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
+}
+
+fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
+    // Named K3 calls cannot use Dynamo's generic JSON-schema fallback because
+    // K3 emits an XTML tools channel. Treat the K3 structural tag as part of
+    // implementing this standard OpenAI request shape, not as an operator
+    // opt-in. The global flag still controls optional structural enforcement
+    // for auto/required and every other model family.
+    is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_))
+}
+
 impl OpenAIPreprocessor {
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
@@ -19,11 +32,14 @@ impl OpenAIPreprocessor {
         prompt_injected_reasoning: bool,
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
-        if self.runtime_config.structural_tag_mode == StructuralTagMode::Off {
+        let parser_name = self.tool_call_parser.as_deref();
+        if self.runtime_config.structural_tag_mode == StructuralTagMode::Off
+            && !requires_intrinsic_structural_tag(parser_name, tool_choice)
+        {
             return Ok(false);
         }
 
-        let Some(parser_name) = self.tool_call_parser.as_deref() else {
+        let Some(parser_name) = parser_name else {
             tracing::warn!(
                 "Structural tag is enabled but --dyn-tool-call-parser is not set; \
                  structural tags will not be applied"
@@ -157,5 +173,29 @@ impl OpenAIPreprocessor {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
+        let named = ToolChoice::Named("get_weather".to_string());
+        assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
+        assert!(requires_intrinsic_structural_tag(Some("kimi-k3"), &named));
+    }
+
+    #[test]
+    fn other_choices_and_parsers_still_follow_the_global_mode() {
+        assert!(!requires_intrinsic_structural_tag(
+            Some("kimi_k3"),
+            &ToolChoice::Required
+        ));
+        assert!(!requires_intrinsic_structural_tag(
+            Some("hermes"),
+            &ToolChoice::Named("get_weather".to_string())
+        ));
     }
 }

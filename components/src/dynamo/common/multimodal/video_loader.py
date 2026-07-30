@@ -21,8 +21,12 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
@@ -138,6 +142,12 @@ class VideoLoader:
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
             raise
+        except (UrlValidationError, HttpStatusError):
+            # Preserve deliberate client-error verdicts. UrlValidationError is
+            # a ValueError, so the generic handler below would otherwise erase
+            # its type and prevent the frontend from returning a 4xx.
+            logger.error("URL rejected loading video: '%s'", video_url)
+            raise
         except Exception as exc:
             logger.error("Error loading video from %s: %s", video_url, exc)
             raise ValueError(f"Failed to load video from {video_url}: {exc}") from exc
@@ -182,6 +192,8 @@ class VideoLoader:
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
         collective_exceptions: list[str] = []
+        status_error: HttpStatusError | None = None
+        url_error: UrlValidationError | None = None
         for media_item, result in zip(video_mm_items, results):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -191,9 +203,18 @@ class VideoLoader:
                 collective_exceptions.append(
                     f"Failed to load video from {source[:80]}...: {result}\n"
                 )
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
+                elif url_error is None and isinstance(result, UrlValidationError):
+                    url_error = result
                 continue
             frames, metadata = result
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
+
+        if status_error is not None:
+            raise status_error
+        if url_error is not None:
+            raise url_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
