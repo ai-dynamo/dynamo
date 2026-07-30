@@ -14,6 +14,7 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.core.protocol import (
     AbortRequest,
     AllocateRequest,
+    AllocationRecord,
     CommitRequest,
     ErrorResponse,
     ExportRequest,
@@ -21,6 +22,8 @@ from gpu_memory_service.core.protocol import (
     FreeRequest,
     HandshakeRequest,
     HandshakeResponse,
+    ListAllocationsRequest,
+    ListAllocationsResponse,
     Message,
     SuccessResponse,
     receive_message,
@@ -38,12 +41,14 @@ class _GMSClientSession:
         path: str,
         lock_type: RequestedLockType,
         expected_identity: tuple[str, str] | None = None,
+        handshake_timeout: float | None = None,
     ):
         self._lock = threading.RLock()
         self._socket: socket.socket | None = socket.socket(
             socket.AF_UNIX, socket.SOCK_STREAM
         )
         try:
+            self._socket.settimeout(handshake_timeout)
             self._socket.connect(path)
             send_message(self._socket, HandshakeRequest(lock_type, expected_identity))
             response, received_fd = receive_message(self._socket)
@@ -55,6 +60,7 @@ class _GMSClientSession:
             )
             self._granted_lock_type = handshake.lock_type
             self._identity = (handshake.server_nonce, handshake.gpu_uuid)
+            self._socket.settimeout(None)
         except Exception:
             self._socket.close()
             self._socket = None
@@ -84,6 +90,13 @@ class _GMSClientSession:
 
     def free(self, allocation_id: str) -> None:
         self._call(FreeRequest(allocation_id), SuccessResponse)
+
+    def list_allocations(self) -> tuple[AllocationRecord, ...]:
+        response = self._call(
+            ListAllocationsRequest(),
+            ListAllocationsResponse,
+        )
+        return response.allocations
 
     def commit(self) -> None:
         self._call(CommitRequest(), SuccessResponse)

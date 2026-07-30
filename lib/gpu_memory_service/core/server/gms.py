@@ -13,11 +13,15 @@ from gpu_memory_service.common.vmm import VMMDevice
 from gpu_memory_service.core.protocol import (
     AbortRequest,
     AllocateRequest,
+    AllocationRecord,
     CommitRequest,
     ExportRequest,
     ExportResponse,
     FreeRequest,
+    ListAllocationsRequest,
+    ListAllocationsResponse,
     Request,
+    Response,
     SuccessResponse,
 )
 from gpu_memory_service.core.server.allocations import GMSAllocationManager
@@ -47,7 +51,7 @@ class GMSServerMemoryManager:
 
     def handle_request(
         self, session: ServerSession, request: Request
-    ) -> tuple[SuccessResponse | ExportResponse, int]:
+    ) -> tuple[Response, int]:
         if isinstance(request, AllocateRequest):
             self._require_rw(session)
             self._allocations.allocate(request.allocation_id, request.aligned_size)
@@ -59,6 +63,15 @@ class GMSServerMemoryManager:
             self._require_rw(session)
             self._allocations.free(request.allocation_id)
             return SuccessResponse(), -1
+        if isinstance(request, ListAllocationsRequest):
+            self._require_active(session)
+            allocations = tuple(
+                AllocationRecord(allocation_id, aligned_size)
+                for allocation_id, aligned_size in (
+                    self._allocations.list_allocations()
+                )
+            )
+            return ListAllocationsResponse(allocations), -1
         if isinstance(request, CommitRequest):
             self._require_rw(session)
             self._sessions.commit(session)

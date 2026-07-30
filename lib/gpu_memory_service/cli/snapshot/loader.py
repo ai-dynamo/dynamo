@@ -23,6 +23,7 @@ from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import TransferBackendKind
+from gpu_memory_service.v1.loader import main as v1_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,8 +159,15 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        v1_main(remaining)
+        return
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

@@ -42,12 +42,21 @@ class FreeRequest(msgspec.Struct, tag="free_request"):
     allocation_id: str
 
 
+class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
+    pass
+
+
 class CommitRequest(msgspec.Struct, tag="commit_request"):
     pass
 
 
 class AbortRequest(msgspec.Struct, tag="abort_request"):
     pass
+
+
+class AllocationRecord(msgspec.Struct, frozen=True):
+    allocation_id: str
+    aligned_size: int
 
 
 class SuccessResponse(msgspec.Struct, tag="success_response"):
@@ -58,24 +67,32 @@ class ExportResponse(msgspec.Struct, tag="export_response"):
     pass
 
 
+class ListAllocationsResponse(msgspec.Struct, tag="list_allocations_response"):
+    allocations: tuple[AllocationRecord, ...]
+
+
 class ErrorResponse(msgspec.Struct, tag="error_response"):
     message: str
     out_of_memory: bool = False
 
 
 Request: TypeAlias = (
-    AllocateRequest | ExportRequest | FreeRequest | CommitRequest | AbortRequest
+    AllocateRequest
+    | ExportRequest
+    | FreeRequest
+    | ListAllocationsRequest
+    | CommitRequest
+    | AbortRequest
 )
-Message: TypeAlias = (
-    HandshakeRequest
-    | HandshakeResponse
-    | Request
-    | (SuccessResponse | ExportResponse | ErrorResponse)
+Response: TypeAlias = (
+    SuccessResponse | ExportResponse | ListAllocationsResponse | ErrorResponse
 )
+Message: TypeAlias = HandshakeRequest | HandshakeResponse | Request | Response
 REQUEST_TYPES = (
     AllocateRequest,
     ExportRequest,
     FreeRequest,
+    ListAllocationsRequest,
     CommitRequest,
     AbortRequest,
 )
