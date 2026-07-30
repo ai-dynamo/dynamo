@@ -7,6 +7,49 @@ package runtimeversion
 
 import "testing"
 
+func TestVersionAtLeast(t *testing.T) {
+	minimum := Version{Major: 1, Minor: 4, Patch: 0}
+	tests := []struct {
+		version Version
+		want    bool
+	}{
+		{version: Version{Major: 1, Minor: 3, Patch: 9}, want: false},
+		{version: Version{Major: 1, Minor: 4, Patch: 0}, want: true},
+		{version: Version{Major: 1, Minor: 4, Patch: 1}, want: true},
+		{version: Version{Major: 2, Minor: 0, Patch: 0}, want: true},
+	}
+
+	for _, tt := range tests {
+		if got := tt.version.AtLeast(minimum); got != tt.want {
+			t.Errorf("%s.AtLeast(%s) = %t, want %t", tt.version, minimum, got, tt.want)
+		}
+	}
+}
+
+func TestResolve(t *testing.T) {
+	t.Run("override takes precedence over image tag", func(t *testing.T) {
+		got, err := Resolve("registry.example/runtime:1.3.0", "1.4.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Version{Major: 1, Minor: 4, Patch: 0}
+		if got != want {
+			t.Fatalf("Resolve() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("falls back to image tag", func(t *testing.T) {
+		got, err := Resolve("registry.example/runtime:1.4.0", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Version{Major: 1, Minor: 4, Patch: 0}
+		if got != want {
+			t.Fatalf("Resolve() = %+v, want %+v", got, want)
+		}
+	})
+}
+
 func TestParse(t *testing.T) {
 	tests := []struct {
 		name    string

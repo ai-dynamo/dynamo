@@ -296,7 +296,7 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_TracksRuntimeVersionOverride(t *testing.T) {
 	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	}))
@@ -305,7 +305,7 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.
 	withOverride := base.DeepCopy()
 	withOverride.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
 
-	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {
