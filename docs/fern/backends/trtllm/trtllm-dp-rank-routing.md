@@ -15,6 +15,44 @@ TensorRT-LLM supports [attention data parallelism](https://lmsys.org/blog/2024-1
 - **Dynamo DP Rank Routing**: The router selects the optimal DP rank based on KV cache overlap and instructs TRT-LLM to use that rank with strict routing (`attention_dp_relax=False`). Use this with `--router-mode kv` for cache-aware routing.
 - **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed.
 
+### Conversation-Aware DP Rank Routing
+
+To keep a conversation on the same worker and attention-DP rank, enable conversation affinity in both the [Dynamo router](../../components/router/router-configuration.md#session-affinity) and the [TensorRT-LLM ADP router](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/tech_blog/blog26_DeepSeek_V4_on_NVIDIA_Blackwell_Model_Specific_and_Agentic_Workload_Optimizations_in_TensorRT-LLM.md#rank-level-routing-within-a-context-server). Dynamo passes the stable conversation ID to TensorRT-LLM through `ConversationParams`. Use `--conversation-affinity-dp-rank-source` to choose which component owns the initial attention-DP rank placement:
+
+| Value | Initial placement | Later requests |
+| --- | --- | --- |
+| `engine` (default) | TensorRT-LLM selects the rank with its conversation-aware ADP router. | TensorRT-LLM reuses the stored conversation-to-rank binding. |
+| `dynamo` | Dynamo forwards the KV router's selected rank as a strict `SchedulingParams.attention_dp_rank`. | TensorRT-LLM reuses the stored conversation-to-rank binding, even if a later Dynamo routing hint differs. |
+
+Enable conversation-aware routing in the TensorRT-LLM engine configuration:
+
+```yaml
+enable_attention_dp: true
+attention_dp_config:
+  kv_cache_routing_conversation_affinity: true
+```
+
+Then pass that configuration and configure the rank source on the Dynamo TensorRT-LLM worker:
+
+```bash
+python3 -m dynamo.trtllm \
+  --model-path <MODEL_PATH> \
+  --extra-engine-args engine.yaml \
+  --conversation-affinity \
+  --conversation-affinity-dp-rank-source engine
+```
+
+You can set the same option with the `DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE` environment variable:
+
+```bash
+export DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE=dynamo
+```
+
+> [!WARNING]
+> The `dynamo` rank source requires a TensorRT-LLM version containing [NVIDIA/TensorRT-LLM#16815](https://github.com/NVIDIA/TensorRT-LLM/pull/16815) or equivalent support. Enable it only after Dynamo's TensorRT-LLM dependency includes that change. Without it, TensorRT-LLM may accept the explicit first-turn rank without recording it as the conversation binding, allowing later turns to move to another rank.
+
+The rank-source option changes only who selects the first rank. Both modes require a stable conversation ID, and TensorRT-LLM owns the conversation-to-rank binding after initial placement.
+
 ### Enabling DP Rank Routing
 
 ```bash

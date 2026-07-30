@@ -149,6 +149,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	// source of truth on v1alpha1); for standalone DCDs the caller falls
 	// back to ObjectMeta.Name when src.ServiceName is empty.
 	dst.ComponentName = src.ServiceName
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
@@ -258,9 +259,13 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
-		cp := *preserved.ExtraPodSpec.DeepCopy()
-		dst.ExtraPodSpec = &cp
+	if shouldRestorePreservedExtraPodSpec(dst, preserved) {
+		if dst.ExtraPodSpec == nil {
+			cp := *preserved.ExtraPodSpec.DeepCopy()
+			dst.ExtraPodSpec = &cp
+		} else {
+			restorePreservedFrontendSidecarConflict(dst.ExtraPodSpec, preserved.ExtraPodSpec)
+		}
 	}
 	restoreMainContainerFieldOrigins(dst, preserved, mainContainerPresent)
 	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
@@ -268,6 +273,23 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
 	}
+}
+
+func restorePreservedFrontendSidecarConflict(dst, preserved *ExtraPodSpec) {
+	if dst == nil || preserved == nil || preserved.PodSpec == nil {
+		return
+	}
+	container, found := findContainerByName(preserved.PodSpec.Containers, defaultFrontendSidecarContainerName)
+	if !found {
+		return
+	}
+	if dst.PodSpec == nil {
+		dst.PodSpec = &corev1.PodSpec{}
+	}
+	if _, found := findContainerByName(dst.PodSpec.Containers, defaultFrontendSidecarContainerName); found {
+		return
+	}
+	dst.PodSpec.Containers = append(dst.PodSpec.Containers, container)
 }
 
 func restoreSharedAlphaOnlyDisabledFeatures(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
@@ -520,6 +542,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
 
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.

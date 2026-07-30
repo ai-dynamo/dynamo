@@ -1993,12 +1993,6 @@ fn load_optional_replay_mocker_args(
         .transpose()
 }
 
-fn is_aic_memory_estimator_unavailable(py: Python<'_>, error: &PyErr) -> bool {
-    py.import("dynamo._internal.aic")
-        .and_then(|module| module.getattr("AicMemoryEstimatorUnavailableError"))
-        .is_ok_and(|exception_type| error.is_instance(py, &exception_type))
-}
-
 fn resolve_aic_backend_version(
     py: Python<'_>,
     backend: &str,
@@ -2047,7 +2041,7 @@ fn materialize_replay_mocker_args(
         // `dp_size` independent per-rank schedulers, each with a per-rank KV pool.
         // The topology applies whether KV capacity is explicit or estimated.
         if !num_gpu_blocks_explicit {
-            let capacity = estimate_aic_num_gpu_blocks(
+            let per_rank_blocks = estimate_aic_num_gpu_blocks(
                 py,
                 &backend,
                 &system,
@@ -2069,32 +2063,19 @@ fn materialize_replay_mocker_args(
                 fmha_dtype.as_deref(),
                 kv_cache_dtype.as_deref(),
                 comm_dtype.as_deref(),
-            );
-            match capacity {
-                Ok(per_rank_blocks) => {
-                    // AIC returns a per-rank (per-GPU) block count. When replicating
-                    // attention-DP into per-rank workers, each worker owns this per-rank
-                    // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
-                    // per rank as on real hardware). With dp == 1 the per-rank pool is
-                    // the engine-wide pool.
-                    args.num_gpu_blocks = per_rank_blocks;
-                }
-                Err(error) if is_aic_memory_estimator_unavailable(py, &error) => {
-                    tracing::warn!(
-                        %error,
-                        num_gpu_blocks = args.num_gpu_blocks,
-                        "AIC KV-cache capacity estimation is unavailable during replay; \
-                         using the default block count. Upgrade aiconfigurator or set \
-                         num_gpu_blocks explicitly"
-                    );
-                }
-                Err(error) => {
-                    return Err(PyException::new_err(format!(
-                        "Failed to estimate AIC KV cache capacity \
-                         (--aic-perf-model was requested): {error}"
-                    )));
-                }
-            }
+            )
+            .map_err(|error| {
+                PyException::new_err(format!(
+                    "Failed to estimate AIC KV cache capacity \
+                     (--aic-perf-model was requested): {error}"
+                ))
+            })?;
+            // AIC returns a per-rank (per-GPU) block count. When replicating
+            // attention-DP into per-rank workers, each worker owns this per-rank
+            // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
+            // per rank as on real hardware). With dp == 1 the per-rank pool is
+            // the engine-wide pool.
+            args.num_gpu_blocks = per_rank_blocks;
         }
         let callback = create_aic_callback(
             py,
@@ -2614,6 +2595,11 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                     "avg_osl": traffic.avg_osl,
                     "avg_ttft_ms": traffic.avg_ttft_ms,
                     "avg_itl_ms": traffic.avg_itl_ms,
+                    // Native denominators keep completion-derived shape and
+                    // latency averages exact even though num_req is offered load.
+                    "shape_count": traffic.shape_count,
+                    "ttft_count": traffic.ttft_count,
+                    "itl_count": traffic.itl_count,
                     "avg_accept_length": traffic.avg_accept_length,
                     "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
                     // Denominators behind the two ratio averages, so the Python

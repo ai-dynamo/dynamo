@@ -127,7 +127,7 @@ fn check_decode_mem_for_burst(
             )
         });
         let mut req = running.remove(idx);
-        kv_manager.retract(std::mem::take(&mut req.kv_lease));
+        kv_manager.retract_in_place(&mut req.kv_lease);
         req.reset_for_retract();
         req.debug_assert_invariants(config.block_size);
         if let Some((uuid, state_before, request_blocks, logical_available, required_blocks)) =
@@ -187,7 +187,8 @@ pub(super) fn simulate_decode_step(
         None,
         current_time_ms,
         apply_speedup,
-    );
+    )
+    .expect("SGLang decode simulation failed");
     for mut request in result.completed_requests.drain(..) {
         cleanup_completed_request(&mut request, kv_manager, config.block_size);
     }
@@ -214,12 +215,12 @@ pub(super) fn simulate_decode_step_with_sampler(
     mut sampler: Option<&mut SpeculativeDecodeSampler>,
     current_time_ms: f64,
     apply_speedup: bool,
-) -> DecodeResult {
+) -> anyhow::Result<DecodeResult> {
     if running.is_empty() {
-        return DecodeResult {
+        return Ok(DecodeResult {
             end_ms: current_time_ms,
             ..DecodeResult::default()
-        };
+        });
     }
 
     // Terminal requests have no decode work and otherwise remain in `running` forever.
@@ -255,12 +256,12 @@ pub(super) fn simulate_decode_step_with_sampler(
     completed_requests.reverse();
 
     if running.is_empty() {
-        return DecodeResult {
+        return Ok(DecodeResult {
             completed_requests,
             output_signals,
             end_ms: current_time_ms,
             ..DecodeResult::default()
-        };
+        });
     }
 
     let max_burst = if config.worker_type == crate::common::protocols::WorkerType::Prefill {
@@ -271,13 +272,13 @@ pub(super) fn simulate_decode_step_with_sampler(
     let retracted = check_decode_mem_for_burst(running, kv_manager, config, max_burst);
     let retracted_any = !retracted.is_empty();
     if running.is_empty() {
-        return DecodeResult {
+        return Ok(DecodeResult {
             completed_requests,
             output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-        };
+        });
     }
 
     let total_context: usize = running
@@ -291,7 +292,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         active_kv_tokens,
         avg_context,
         config.total_kv_tokens,
-    );
+    )?;
     let unscaled_time = Duration::from_secs_f64(decode_time / 1000.0);
     let effective_ratio = config.speedup_ratio * config.decode_speedup_ratio;
     let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
@@ -307,13 +308,13 @@ pub(super) fn simulate_decode_step_with_sampler(
             reserved_pages,
             "Failed to reserve speculative decode pages after capacity preflight"
         );
-        return DecodeResult {
+        return Ok(DecodeResult {
             completed_requests,
             output_signals,
             requests: retracted,
             retracted_any,
             end_ms: current_time_ms,
-        };
+        });
     };
 
     output_signals.reserve(running.len());
@@ -335,7 +336,7 @@ pub(super) fn simulate_decode_step_with_sampler(
                 req.allocated_tokens += config.block_size;
             }
             let token_id = req.next_output_token();
-            req.append_output_token(token_id);
+            req.append_output_token(token_id, config.block_size);
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;
@@ -373,11 +374,11 @@ pub(super) fn simulate_decode_step_with_sampler(
     newly_completed_requests.reverse();
     completed_requests.extend(newly_completed_requests);
 
-    DecodeResult {
+    Ok(DecodeResult {
         requests: retracted,
         completed_requests,
         output_signals,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,
-    }
+    })
 }

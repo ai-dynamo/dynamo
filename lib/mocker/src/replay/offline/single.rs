@@ -221,7 +221,7 @@ impl SingleRuntime {
             with_engine_evidence_context(self.current_time_ms, WorkerPool::Agg, 0, 0, || {
                 self.worker
                     .execute_pass(&mut self.collector, self.current_time_ms)
-            });
+            })?;
         attach_pressure_references(&mut self.collector);
         for admission in &pass.admissions {
             self.collector.on_pool_admission(
@@ -564,7 +564,9 @@ mod tests {
                 continue;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
@@ -618,7 +620,9 @@ mod tests {
                 break;
             }
 
-            let pass = worker.execute_pass(&mut collector, current_time_ms);
+            let pass = worker
+                .execute_pass(&mut collector, current_time_ms)
+                .unwrap();
             record_manual_terminals(&mut collector, &pass);
             current_time_ms = pass.end_ms;
         }
