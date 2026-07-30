@@ -9,6 +9,7 @@ use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
 use crate::replay::offline::evidence::{
     EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
+    with_engine_evidence_timestamp,
 };
 
 use super::config::{SglangConfig, floor_to_block};
@@ -269,7 +270,9 @@ pub(super) fn simulate_decode_step_with_sampler(
     } else {
         config.speculative_max_tokens.unwrap_or(1)
     };
-    let retracted = check_decode_mem_for_burst(running, kv_manager, config, max_burst);
+    let retracted = with_engine_evidence_timestamp(current_time_ms, || {
+        check_decode_mem_for_burst(running, kv_manager, config, max_burst)
+    });
     let retracted_any = !retracted.is_empty();
     if running.is_empty() {
         return Ok(DecodeResult {

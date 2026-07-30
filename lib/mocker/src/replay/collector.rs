@@ -470,6 +470,7 @@ struct PerRequestDetail {
     decode_route_overlap_tokens: Option<usize>,
     routing_history: Vec<PerRequestRoutingRecord>,
     admission_history: Vec<PerRequestAdmissionRecord>,
+    pool_admission_counts: [usize; 3],
     pressure_record_ordinals: Vec<u64>,
 }
 
@@ -479,6 +480,16 @@ pub enum ReplayRequestPool {
     Agg,
     Prefill,
     Decode,
+}
+
+impl ReplayRequestPool {
+    fn index(self) -> usize {
+        match self {
+            Self::Agg => 0,
+            Self::Prefill => 1,
+            Self::Decode => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -1054,11 +1065,9 @@ impl TraceCollector {
             return;
         };
         let admission_ordinal = detail.admission_history.len();
-        let pool_admission_ordinal = detail
-            .admission_history
-            .iter()
-            .filter(|admission| admission.pool == pool)
-            .count();
+        let pool_count = &mut detail.pool_admission_counts[pool.index()];
+        let pool_admission_ordinal = *pool_count;
+        *pool_count += 1;
         detail.admission_history.push(PerRequestAdmissionRecord {
             admission_ordinal,
             pool_admission_ordinal,
@@ -1384,10 +1393,10 @@ impl TraceCollector {
                 routing_history: detail.routing_history.clone(),
                 admission_count: detail.admission_history.len(),
                 readmission_count: detail
-                    .admission_history
+                    .pool_admission_counts
                     .iter()
-                    .filter(|admission| admission.is_readmission)
-                    .count(),
+                    .map(|count| count.saturating_sub(1))
+                    .sum(),
                 admission_history: detail.admission_history.clone(),
                 pressure_record_ordinals: detail.pressure_record_ordinals.clone(),
                 terminal_status,

@@ -201,6 +201,7 @@ class ReplayPlannerAdapter:
         capabilities: Optional[WorkerCapabilities] = None,
         warmup_observations: Optional[list[TrafficObservation]] = None,
         benchmark_granularity: Optional[int] = None,
+        capture_details: bool = True,
     ) -> None:
         self._config = planner_config
         self._capabilities = capabilities
@@ -209,6 +210,7 @@ class ReplayPlannerAdapter:
         self._engine = engine
         self._warmup_observations = list(warmup_observations or [])
         self._benchmark_granularity = benchmark_granularity
+        self._capture_details = capture_details
         self._bootstrap_metadata: dict[str, Any] = {"status": "not_attempted"}
         self._orchestrator_bootstrapped = False
         # Replay's ``run()`` is synchronous; we own a scoped event loop to
@@ -328,7 +330,8 @@ class ReplayPlannerAdapter:
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         self._total_ticks += 1
-        self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
+        if self._capture_details:
+            self._record_diagnostics(tick_input, effects, result, emit_diagnostics)
 
         current_p = result.get(
             "non_draining_prefill_count", result["active_prefill_count"]
@@ -365,29 +368,32 @@ class ReplayPlannerAdapter:
             "next_tick_ms": next_tick_ms,
         }
         tick_ordinal = int(result["tick_ordinal"])
-        self._ticks.append(
-            {
-                "ordinal": tick_ordinal,
-                "at_ms": tick.at_s * 1000.0,
-                "scheduled_tick": asdict(tick),
-                "input": self._tick_input_record(tick_input),
-                "topology": self._topology_record(result),
-                "effects": asdict(effects),
-                "runtime_decision": decision,
-            }
-        )
+        if self._capture_details:
+            self._ticks.append(
+                {
+                    "ordinal": tick_ordinal,
+                    "at_ms": tick.at_s * 1000.0,
+                    "scheduled_tick": asdict(tick),
+                    "input": self._tick_input_record(tick_input),
+                    "topology": self._topology_record(result),
+                    "effects": asdict(effects),
+                    "runtime_decision": decision,
+                }
+            )
         return decision
 
     def finalize(
         self, lifecycle_operations: list[dict[str, Any]] | None = None
     ) -> PlannerReplayDetails:
         """Finalize planner-owned replay details after successful execution."""
-        html_report_path = self._recorder.finalize()
+        html_report_path = self._recorder.finalize() if self._capture_details else None
         return PlannerReplayDetails(
             metadata=self._planner_metadata(),
-            ticks=self._ticks,
+            ticks=self._ticks if self._capture_details else [],
             scaling_events=self._scaling_events,
-            lifecycle_operations=list(lifecycle_operations or []),
+            lifecycle_operations=(
+                list(lifecycle_operations or []) if self._capture_details else []
+            ),
             total_ticks=self._total_ticks,
             html_report_path=html_report_path,
         )
@@ -462,13 +468,21 @@ class ReplayPlannerAdapter:
             "report_interval_hours",
             "report_write_gzip_log",
             "live_dashboard_port",
-            "plugin_registration",
-            "scheduling.external_plugins",
+            "plugin_registration.auth",
+            "plugin_registration.transport",
+            "plugin_registration.protocol_version_min",
+            "plugin_registration.protocol_version_max",
+            "plugin_registration.heartbeat_timeout_seconds",
+            "plugin_registration.heartbeat_missed_threshold",
+            "plugin_registration.admin",
+            "plugin_registration.in_process_plugins.kwargs",
+            "scheduling.external_plugins.endpoint",
+            "scheduling.external_plugins.auth_token",
             "scheduling.gateway",
         ]
-        config = self._config.model_dump(mode="json")
+        config = self._config.model_dump(mode="json", by_alias=True)
         decision_config = dict(config)
-        for field in excluded_fields:
+        for field in excluded_fields[:5]:
             parent = decision_config
             parts = field.split(".")
             for part in parts[:-1]:
@@ -478,21 +492,75 @@ class ReplayPlannerAdapter:
                     break
                 parent = child
             parent.pop(parts[-1], None)
+        registration = dict(decision_config.get("plugin_registration", {}))
+        in_process = []
+        for plugin in registration.get("in_process_plugins", []):
+            identity = dict(plugin)
+            kwargs = identity.pop("kwargs", {})
+            identity["kwargs_digest"] = hashlib.sha256(
+                json.dumps(kwargs, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            identity["source"] = "in_process"
+            in_process.append(identity)
+        in_process.sort(
+            key=lambda item: (
+                item["plugin_type"],
+                item["priority"],
+                item["plugin_id"],
+                item["module"],
+                item["class"],
+            )
+        )
+        registration = {"in_process_plugins": in_process}
+        decision_config["plugin_registration"] = registration
+
+        scheduling = dict(decision_config.get("scheduling", {}))
+        external = []
+        for plugin in scheduling.get("external_plugins", []):
+            identity = {
+                key: value
+                for key, value in plugin.items()
+                if key not in {"endpoint", "auth_token"}
+            }
+            identity["source"] = "external"
+            external.append(identity)
+        external.sort(
+            key=lambda item: (
+                item["plugin_type"],
+                item["priority"],
+                item["plugin_id"],
+                item["version"],
+            )
+        )
+        scheduling["external_plugins"] = external
+        scheduling.pop("gateway", None)
+        decision_config["scheduling"] = scheduling
+
+        builtin_plugin_ids = [
+            "builtin_load_predict",
+            "builtin_load_propose",
+            "builtin_throughput_propose",
+        ]
+        plugin_pipeline = [
+            {"plugin_id": plugin_id, "source": "builtin"}
+            for plugin_id in builtin_plugin_ids
+        ]
+        plugin_pipeline.extend(in_process)
+        plugin_pipeline.extend(external)
         config_bytes = json.dumps(
             decision_config, sort_keys=True, separators=(",", ":")
         ).encode()
         return {
             "planner_config_digest": hashlib.sha256(config_bytes).hexdigest(),
             "planner_config_identity_exclusions": excluded_fields,
-            "builtin_plugin_ids": [
-                "builtin_load_predict",
-                "builtin_load_propose",
-                "builtin_throughput_propose",
-            ],
+            "builtin_plugin_ids": builtin_plugin_ids,
+            "configured_plugin_identities": [*in_process, *external],
+            "plugin_pipeline": plugin_pipeline,
             "pipeline_schema_version": "planner-plugin-pipeline.v1",
             "mode": self._config.mode,
             "benchmark_granularity": self._benchmark_granularity,
             "bootstrap": self._bootstrap_metadata,
+            "details_captured": self._capture_details,
         }
 
     def close(self) -> None:
@@ -762,6 +830,7 @@ def create_replay_planner_adapter(
     capabilities: Optional[WorkerCapabilities] = None,
     warmup_observations: Optional[list[TrafficObservation]] = None,
     benchmark_granularity: Optional[int] = None,
+    capture_details: bool = True,
 ) -> ReplayPlannerAdapter:
     """Create a replay adapter backed by the builtin planner orchestrator."""
     engine = OrchestratorEngineAdapter(
@@ -775,5 +844,6 @@ def create_replay_planner_adapter(
         capabilities=capabilities,
         warmup_observations=warmup_observations,
         benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
     )
     return adapter

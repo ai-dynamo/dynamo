@@ -49,8 +49,8 @@ class ReplayReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "summary": _to_primitive(self.summary),
-            "per_request": _to_primitive(self.per_request),
-            "coverage": _to_primitive(self.coverage),
+            "summary": self.summary,
+            "per_request": self.per_request,
+            "coverage": self.coverage,
             "planner": None if self.planner is None else self.planner.to_dict(),
         }

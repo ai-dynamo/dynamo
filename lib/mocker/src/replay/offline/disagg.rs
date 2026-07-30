@@ -23,7 +23,7 @@ use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::evidence::{
     KvIngestBoundary, WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool,
     WorkerPoolState, attach_pressure_references, drain_origin, lifecycle_capture_active,
-    record_lifecycle_operation, record_pressure_readmission, startup_origin,
+    record_lifecycle_operation, startup_origin,
 };
 #[cfg(test)]
 use super::extensions::kv_router::{
@@ -2093,7 +2093,6 @@ where
                 self.now_ms,
                 admission.reused_input_tokens,
             );
-            record_pressure_readmission(admission.uuid, WorkerPool::Prefill, self.now_ms);
         }
     }
 
@@ -2104,7 +2103,6 @@ where
                 self.now_ms,
                 admission.reused_input_tokens,
             );
-            record_pressure_readmission(admission.uuid, WorkerPool::Decode, self.now_ms);
             match self.state(admission.uuid)?.phase {
                 DisaggPhase::ReadyDecode => {
                     self.state_mut(admission.uuid)?.start_decode();

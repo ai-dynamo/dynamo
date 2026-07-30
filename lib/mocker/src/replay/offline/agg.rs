@@ -15,7 +15,7 @@ use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::evidence::{
     KvIngestBoundary, WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool,
     WorkerPoolState, attach_pressure_references, drain_origin, lifecycle_capture_active,
-    record_lifecycle_operation, record_pressure_readmission, startup_origin,
+    record_lifecycle_operation, startup_origin,
 };
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
@@ -761,7 +761,6 @@ where
                 self.now_ms,
                 admission.reused_input_tokens,
             );
-            record_pressure_readmission(admission.uuid, WorkerPool::Agg, self.now_ms);
         }
         self.apply_engine_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {

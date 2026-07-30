@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::components::ReplayWorkerCore;
-use super::evidence::{
-    WorkerPool, attach_pressure_references, record_pressure_readmission,
-    with_engine_evidence_context,
-};
+use super::evidence::{WorkerPool, attach_pressure_references, with_engine_evidence_context};
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
@@ -230,7 +227,6 @@ impl SingleRuntime {
                 self.current_time_ms,
                 admission.reused_input_tokens,
             );
-            record_pressure_readmission(admission.uuid, WorkerPool::Agg, self.current_time_ms);
         }
         self.current_time_ms = pass.end_ms;
         let made_progress = self.current_time_ms > pass_start_ms

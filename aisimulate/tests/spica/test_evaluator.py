@@ -170,6 +170,7 @@ def test_scaling_agg_threads_planner_config(monkeypatch):
     assert rec["planner_config"]["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
     assert rec["capture_per_request"] is False
+    assert rec["capture_planner_details"] is False
 
 
 def test_scaling_report_preserves_planner_tick_count(monkeypatch):

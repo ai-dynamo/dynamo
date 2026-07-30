@@ -26,6 +26,7 @@ use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
 use crate::replay::offline::evidence::{
     EnginePressureState, PressureKind, canonical_evidence_capture_active, record_pressure,
+    record_pressure_readmission,
 };
 use crate::scheduler::vllm::policy::{self, AdmissionDecision, PolicySequence};
 use crate::scheduler::vllm::request::RequestKvState;
@@ -1473,6 +1474,7 @@ impl VllmCore {
             ) {
                 ScheduleOutcome::Scheduled { admission, .. } => {
                     if let Some(admission) = admission {
+                        record_pressure_readmission(admission.uuid, now_ms);
                         if let Some(collector) = collector.as_deref_mut() {
                             collector.on_admit(
                                 admission.uuid,
@@ -1605,6 +1607,7 @@ impl VllmCore {
                     tokens_used,
                 } => {
                     if let Some(admission) = admission {
+                        record_pressure_readmission(admission.uuid, now_ms);
                         if let Some(collector) = collector.as_deref_mut() {
                             collector.on_admit(
                                 admission.uuid,

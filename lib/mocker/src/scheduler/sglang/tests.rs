@@ -28,7 +28,9 @@ use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::RadixRequestLease;
 #[cfg(feature = "replay-bench")]
 use crate::replay::offline::PressureKind;
-use crate::replay::offline::evidence::with_engine_evidence_context;
+use crate::replay::offline::evidence::{
+    with_engine_evidence_context, with_engine_evidence_timestamp,
+};
 use crate::replay::offline::{WorkerPool, with_runtime_evidence};
 use crate::replay::{ReplayCaptureOptions, ReplayDeterminism};
 use crate::scheduler::test_utils::{
@@ -306,7 +308,9 @@ fn fresh_prefill_tracks_cache_owned_prefix_pages() {
         },
         || {
             with_engine_evidence_context(7.5, WorkerPool::Decode, 11, 2, || {
-                decode::check_decode_mem(&mut running, &mut kv_manager, &config)
+                with_engine_evidence_timestamp(12.5, || {
+                    decode::check_decode_mem(&mut running, &mut kv_manager, &config)
+                })
             })
         },
     );
@@ -319,7 +323,7 @@ fn fresh_prefill_tracks_cache_owned_prefix_pages() {
         assert_eq!(pressure.sglang_retractions_total, 1);
         let record = &pressure.records[0];
         assert_eq!(record.pressure_ordinal, 0);
-        assert_eq!(record.at_ms, 7.5);
+        assert_eq!(record.at_ms, 12.5);
         assert_eq!(record.pool, WorkerPool::Decode);
         assert_eq!(record.worker_id, 11);
         assert_eq!(record.dp_rank, 2);

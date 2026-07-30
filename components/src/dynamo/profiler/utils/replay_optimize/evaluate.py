@@ -54,6 +54,7 @@ def _run_replay_for_state(
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
             capture_per_request=False,
+            capture_planner_details=False,
         )
         return report.summary
 
@@ -79,6 +80,7 @@ def _run_replay_for_state(
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
         capture_per_request=False,
+        capture_planner_details=False,
     )
     return report.summary
 
@@ -104,6 +106,7 @@ def _run_agg_replay_for_state(
             trace_shared_prefix_ratio=workload.traceSharedPrefixRatio,
             trace_num_prefix_groups=workload.traceNumPrefixGroups,
             capture_per_request=False,
+            capture_planner_details=False,
         )
         return report.summary
 
@@ -127,6 +130,7 @@ def _run_agg_replay_for_state(
         num_prefix_groups=workload.numPrefixGroups,
         inter_turn_delay_ms=workload.interTurnDelayMs,
         capture_per_request=False,
+        capture_planner_details=False,
     )
     return report.summary
 

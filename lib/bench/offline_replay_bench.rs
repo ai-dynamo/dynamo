@@ -329,7 +329,7 @@ fn canonical_report(
     args: &Args,
     engine_args: &MockEngineArgs,
     workload_digest: &str,
-    evidence: &OfflineRuntimeEvidence,
+    evidence: OfflineRuntimeEvidence,
 ) -> Result<CanonicalReplayRecord> {
     let engine_config = match args.serving_mode {
         ServingModeArg::Aggregated => CanonicalEngineConfig::aggregated(engine_args)?,
@@ -385,8 +385,8 @@ fn canonical_report(
         capture_planner_details: false,
         capture_canonical_evidence: true,
         per_request_records: report.per_request.len(),
-        pressure: evidence.pressure.clone(),
-        kv_ingest: evidence.kv_ingest.clone(),
+        pressure: evidence.pressure,
+        kv_ingest: evidence.kv_ingest,
     };
     CanonicalReplayRecord::build(report, &metadata, &coverage, Value::Null)
 }
@@ -441,6 +441,7 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let record_per_request = canonical_writer.is_some();
+    let mut first_canonical_line: Option<Vec<u8>> = None;
     let mut last_report = None;
     for iteration in 0..args.iterations {
         let determinism = if canonical_writer.is_some() {
@@ -513,20 +514,27 @@ fn main() -> Result<()> {
             writer.write_all(b"\n")?;
         }
         if let Some(writer) = canonical_writer.as_mut() {
-            writer.write_all(
-                &canonical_report(
-                    &report,
-                    &args,
-                    &engine_args,
-                    &canonical_workload
-                        .as_ref()
-                        .expect("canonical writer requires canonical workload identity")
-                        .1,
-                    &runtime_evidence,
-                )?
-                .into_json_line()
-                .context("failed to encode canonical replay report")?,
-            )?;
+            let line = canonical_report(
+                &report,
+                &args,
+                &engine_args,
+                &canonical_workload
+                    .as_ref()
+                    .expect("canonical writer requires canonical workload identity")
+                    .1,
+                runtime_evidence,
+            )?
+            .into_json_line()
+            .context("failed to encode canonical replay report")?;
+            if let Some(first) = first_canonical_line.as_ref() {
+                ensure!(
+                    line == *first,
+                    "canonical replay output changed between iterations 0 and {iteration}"
+                );
+            } else {
+                first_canonical_line = Some(line.clone());
+            }
+            writer.write_all(&line)?;
         }
         last_report = Some(report);
     }

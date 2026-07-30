@@ -256,11 +256,11 @@ pub struct CanonicalReplayCoverage {
 
 #[derive(Debug, Serialize)]
 pub struct CanonicalReplayRecord {
-    pub metadata: Value,
-    pub summary: Value,
-    pub per_request: Value,
     pub coverage: Value,
+    pub metadata: Value,
+    pub per_request: Value,
     pub planner: Value,
+    pub summary: Value,
 }
 
 impl CanonicalReplayRecord {
@@ -273,29 +273,34 @@ impl CanonicalReplayRecord {
         validate_report_finite(report)?;
         validate_metadata_finite(metadata)?;
         let mut metadata = serde_json::to_value(metadata)?;
-        let metadata = metadata
-            .as_object_mut()
-            .context("canonical replay metadata must be an object")?;
-        metadata.insert(
-            "schema_version".to_string(),
-            Value::String(CANONICAL_SCHEMA_VERSION.to_string()),
-        );
-        metadata.insert(
-            "result_exclusions".to_string(),
-            serde_json::to_value(CANONICAL_RESULT_EXCLUSIONS)?,
-        );
-        if let Some(planner_metadata) = planner.get("metadata").and_then(Value::as_object).cloned()
         {
-            metadata.insert("planner".to_string(), Value::Object(planner_metadata));
+            let metadata = metadata
+                .as_object_mut()
+                .context("canonical replay metadata must be an object")?;
+            metadata.insert(
+                "schema_version".to_string(),
+                Value::String(CANONICAL_SCHEMA_VERSION.to_string()),
+            );
+            metadata.insert(
+                "result_exclusions".to_string(),
+                serde_json::to_value(CANONICAL_RESULT_EXCLUSIONS)?,
+            );
+            if let Some(planner_metadata) =
+                planner.get("metadata").and_then(Value::as_object).cloned()
+            {
+                metadata.insert("planner".to_string(), Value::Object(planner_metadata));
+            }
         }
 
         let mut summary = serde_json::to_value(report)?;
-        let summary = summary
-            .as_object_mut()
-            .context("serialized replay summary must be an object")?;
-        summary.remove("wall_time_ms");
-        summary.remove("processed_tokens_per_s");
-        summary.remove("processed_output_tokens_per_s");
+        {
+            let summary = summary
+                .as_object_mut()
+                .context("serialized replay summary must be an object")?;
+            summary.remove("wall_time_ms");
+            summary.remove("processed_tokens_per_s");
+            summary.remove("processed_output_tokens_per_s");
+        }
 
         let mut per_request = serde_json::to_value(&report.per_request)?;
         let records = per_request
@@ -315,23 +320,17 @@ impl CanonicalReplayRecord {
         }
 
         Ok(Self {
-            metadata: canonicalize_json(metadata.clone().into()),
-            summary: canonicalize_json(summary.clone().into()),
-            per_request: canonicalize_json(per_request),
             coverage: canonicalize_json(serde_json::to_value(coverage)?),
+            metadata: canonicalize_json(metadata),
+            per_request: canonicalize_json(per_request),
             planner: canonicalize_json(planner),
+            summary: canonicalize_json(summary),
         })
     }
 
-    pub fn into_value(self) -> Result<Value> {
-        serde_json::to_value(self)
-            .map(canonicalize_json)
-            .context("failed to serialize canonical replay record")
-    }
-
     pub fn into_json_line(self) -> Result<Vec<u8>> {
-        let mut line = serde_json::to_vec(&self.into_value()?)
-            .context("failed to serialize canonical replay JSON")?;
+        let mut line =
+            serde_json::to_vec(&self).context("failed to serialize canonical replay JSON")?;
         line.push(b'\n');
         Ok(line)
     }

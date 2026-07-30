@@ -2613,6 +2613,7 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
@@ -2686,6 +2687,7 @@ def run_mocker_synthetic_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.

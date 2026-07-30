@@ -167,6 +167,36 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path):
     )
 
 
+def test_summary_only_planner_replay_keeps_metrics_decisions_and_tick_count(tmp_path):
+    trace_path = _write_burst_idle_trace(
+        tmp_path,
+        input_tokens=128,
+        output_tokens=512,
+    )
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            num_gpu_blocks=16,
+            max_num_seqs=32,
+            speedup_ratio=50.0,
+        ),
+        num_workers=1,
+        planner_config=_planner_config("agg", tmp_path),
+        capture_per_request=False,
+        capture_planner_details=False,
+    )
+
+    assert report.summary["completed_requests"] == 33
+    assert report.per_request is None
+    assert report.coverage["capture_per_request"] is False
+    assert report.coverage["capture_planner_details"] is False
+    assert report.planner.total_ticks > 0
+    assert report.planner.scaling_events
+    assert report.planner.ticks == []
+    assert report.planner.lifecycle_operations == []
+
+
 @pytest.mark.parametrize(
     ("component", "input_tokens", "output_tokens"),
     [

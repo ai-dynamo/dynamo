@@ -404,6 +404,7 @@ def _prepare_planner_replay(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
@@ -454,6 +455,7 @@ def _prepare_planner_replay(
         capabilities=capabilities,
         benchmark_granularity=benchmark_granularity,
         warmup_observations=warmup_observations,
+        capture_details=capture_details,
     )
     adapter.set_bootstrap_metadata({"status": "not_required"})
 
@@ -623,6 +625,7 @@ def _planner_replay_adapter(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Own planner preparation, replay execution, and cleanup as one scope."""
     adapter = _prepare_planner_replay(
@@ -631,6 +634,7 @@ def _planner_replay_adapter(
         decode_engine_args=decode_engine_args,
         planner_config_arg=planner_config_arg,
         benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
     )
     with adapter:
         yield adapter
@@ -961,9 +965,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_format=args.trace_format,
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
-            report_jsonl_path=(
-                args.per_request_jsonl if args.replay_mode == "online" else None
-            ),
+            report_jsonl_path=args.per_request_jsonl,
             max_sim_time_ms=max_sim_time_ms,
             **replay_options,
         )
@@ -988,7 +990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         summary = report.summary
         report_payload = report.to_dict()
-        if args.per_request_jsonl is not None:
+        if args.per_request_jsonl is not None and not using_trace_file:
             _write_per_request_jsonl(args.per_request_jsonl, report.per_request)
 
     report_path = write_report_json(report_payload, args.report_json)

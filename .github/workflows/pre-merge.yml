@@ -191,10 +191,18 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
-    - name: Run canonical replay digest tests
+    - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
+      run: |
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib pressure_readmission
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib fresh_prefill_tracks_cache_owned_prefix_pages
+        cargo test --locked -p dynamo-bench --features replay-bench \
+          --bench offline_replay_bench -- \
+          testdata/mooncake_trace_tiny.jsonl \
+          --iterations 2 \
+          --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
     - name: Run Mocker AIC feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

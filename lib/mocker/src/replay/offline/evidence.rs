@@ -310,6 +310,17 @@ pub(crate) fn with_engine_evidence_context<T>(
     run()
 }
 
+#[inline]
+pub(crate) fn with_engine_evidence_timestamp<T>(at_ms: f64, run: impl FnOnce() -> T) -> T {
+    if !canonical_evidence_capture_active() {
+        return run();
+    }
+    let Some(context) = ENGINE_EVIDENCE_CONTEXT.with(|context| *context.borrow()) else {
+        return run();
+    };
+    with_engine_evidence_context(at_ms, context.pool, context.worker_id, context.dp_rank, run)
+}
+
 pub(crate) fn lifecycle_capture_active() -> bool {
     ACTIVE_EVIDENCE.with(|active| {
         active
@@ -394,16 +405,20 @@ pub(crate) fn attach_pressure_references(collector: &mut TraceCollector) {
     }
 }
 
-pub(crate) fn record_pressure_readmission(uuid: Uuid, pool: WorkerPool, at_ms: f64) {
+#[inline]
+pub(crate) fn record_pressure_readmission(uuid: Uuid, at_ms: f64) {
     if !canonical_evidence_capture_active() {
         return;
     }
+    let Some(context) = ENGINE_EVIDENCE_CONTEXT.with(|context| *context.borrow()) else {
+        return;
+    };
     ACTIVE_EVIDENCE.with(|active| {
         let mut active = active.borrow_mut();
         let Some(collector) = active.as_mut() else {
             return;
         };
-        let key = (uuid, pool);
+        let key = (uuid, context.pool);
         let (pressure_ordinal, remove_key) = {
             let Some(ordinals) = collector.outstanding_pressure.get_mut(&key) else {
                 return;
@@ -877,8 +892,12 @@ mod tests {
                         )
                     });
                 }
-                record_pressure_readmission(uuid, WorkerPool::Agg, 3.0);
-                record_pressure_readmission(uuid, WorkerPool::Agg, 4.0);
+                with_engine_evidence_context(3.0, WorkerPool::Agg, 0, 0, || {
+                    record_pressure_readmission(uuid, 3.0);
+                });
+                with_engine_evidence_context(4.0, WorkerPool::Agg, 0, 0, || {
+                    record_pressure_readmission(uuid, 4.0);
+                });
             },
         );
 
@@ -886,5 +905,38 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].readmitted_at_ms, Some(4.0));
         assert_eq!(records[1].readmitted_at_ms, Some(3.0));
+    }
+
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn same_pass_pressure_readmission_waits_for_the_next_admission() {
+        let uuid = Uuid::from_u128(43);
+        let ((), evidence) = with_runtime_evidence(
+            ReplayCaptureOptions {
+                capture_canonical_evidence: true,
+                ..Default::default()
+            },
+            || {
+                with_engine_evidence_context(1.0, WorkerPool::Agg, 0, 0, || {
+                    record_pressure_readmission(uuid, 1.0);
+                    record_pressure(
+                        PressureKind::SglangRetraction,
+                        uuid,
+                        EnginePressureState::default(),
+                        EnginePressureState::default(),
+                        0,
+                        None,
+                        None,
+                    );
+                });
+                with_engine_evidence_context(2.0, WorkerPool::Agg, 0, 0, || {
+                    record_pressure_readmission(uuid, 2.0);
+                });
+            },
+        );
+
+        let records = evidence.pressure.unwrap().records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].readmitted_at_ms, Some(2.0));
     }
 }

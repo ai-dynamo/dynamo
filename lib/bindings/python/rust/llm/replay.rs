@@ -984,7 +984,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, scaling_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -1012,6 +1012,7 @@ pub fn run_mocker_trace_replay(
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
     capture_per_request: bool,
+    capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     if capture_per_request && replay_mode != "offline" {
@@ -1046,7 +1047,7 @@ pub fn run_mocker_trace_replay(
         ));
     }
     let jsonl_path_for_emit = report_jsonl_path.clone();
-    let capture_planner_details = scaling_policy.is_some();
+    let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
     let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
         capture_per_request: capture_per_request || report_jsonl_path.is_some(),
         capture_planner_details,
@@ -1435,7 +1436,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1466,6 +1467,7 @@ pub fn run_mocker_synthetic_trace_replay(
     sla_itl_ms: Option<f64>,
     sla_e2e_ms: Option<f64>,
     capture_per_request: bool,
+    capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
 ) -> PyResult<PyObject> {
     if capture_per_request && replay_mode != "offline" {
@@ -1505,7 +1507,7 @@ pub fn run_mocker_synthetic_trace_replay(
     let router_config = load_replay_router_config(router_config, model_name)?;
     let replay_mode = replay_mode.to_owned();
     let is_offline = replay_mode == "offline";
-    let capture_planner_details = scaling_policy.is_some();
+    let capture_planner_details = scaling_policy.is_some() && capture_planner_details;
     let capture_options = dynamo_mocker::replay::ReplayCaptureOptions {
         capture_per_request,
         capture_planner_details,
