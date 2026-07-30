@@ -85,6 +85,14 @@ pub mod runtime {
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
+    /// Maximum blocking threads for the small auxiliary runtimes built by
+    /// `transports::utils::build_in_runtime` (the etcd-lease and NATS-client runtimes).
+    /// These are NOT the main runtime and are not covered by
+    /// DYN_RUNTIME_MAX_BLOCKING_THREADS. Without this they inherit tokio's default of
+    /// 512 blocking threads EACH, which is where ~1000 of the app process's threads
+    /// come from. Defaults to 8.
+    pub const DYN_RUNTIME_AUX_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_AUX_MAX_BLOCKING_THREADS";
+
     /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
     pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
@@ -737,6 +745,7 @@ mod tests {
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_AUX_MAX_BLOCKING_THREADS,
             runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
