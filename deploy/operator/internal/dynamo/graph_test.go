@@ -2676,7 +2676,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -2754,7 +2754,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													TimeoutSeconds:   4,
 													PeriodSeconds:    5,
 													SuccessThreshold: 0,
-													FailureThreshold: 3,
+													FailureThreshold: 1,
 												},
 												ReadinessProbe: &corev1.Probe{
 													ProbeHandler: corev1.ProbeHandler{
@@ -2890,7 +2890,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -3698,7 +3698,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -3899,7 +3899,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "true",
+														Value: "false",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
