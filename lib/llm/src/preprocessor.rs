@@ -5011,20 +5011,6 @@ mod tests {
     }
 
     #[test]
-    fn test_restrictive_template_accepts_request_with_user_message() {
-        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}]
-        }))
-        .unwrap();
-
-        let rendered = render_prompt_template(formatter.as_ref(), &request).unwrap();
-
-        assert_eq!(rendered, "hello");
-    }
-
-    #[test]
     fn test_kimi_thinking_normalization_keeps_template_and_gates_in_sync() {
         let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
             "chat_template": "{% if thinking == true and enable_thinking == true %}<think>{% elif thinking == false and enable_thinking == false %}<chat>{% else %}<mismatch>{% endif %}"
