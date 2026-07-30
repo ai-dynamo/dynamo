@@ -252,6 +252,10 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    // When `Some`, the model is a direct-gRPC backend: swap the router's transport
+    // seam for this dispatch instead of the request-plane `AddressedPushRouter`.
+    // All selection / fault-detection / migration behavior is unchanged.
+    direct_dispatch: Option<crate::discovery::LlmStreamingDispatch>,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -261,6 +265,12 @@ pub async fn build_preprocessed_routing(
         model_manager.lora_enabled(),
         session_affinity_ttl_secs.is_some(),
     )?;
+    if direct_dispatch.is_some() && matches!(router_mode, RouterMode::DeviceAwareWeighted) {
+        anyhow::bail!(
+            "direct-gRPC backends do not support DeviceAwareWeighted routing \
+             (no multimodal embedding-cache indexer on the direct path)"
+        );
+    }
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
@@ -288,14 +298,23 @@ pub async fn build_preprocessed_routing(
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router = LlmPushRouter::from_client_with_state(
-        router_client,
-        router_mode,
-        monitor_arc,
-        embedding_cache_indexer,
-        cache_key_extractor,
-    )
-    .await?;
+    let router = match direct_dispatch {
+        // Direct-gRPC backend: keep all PushRouter behavior, swap only the
+        // final-hop transport (request plane -> gRPC).
+        Some(dispatch) => {
+            LlmPushRouter::from_client_with_dispatch(router_client, router_mode, dispatch).await?
+        }
+        None => {
+            LlmPushRouter::from_client_with_state(
+                router_client,
+                router_mode,
+                monitor_arc,
+                embedding_cache_indexer,
+                cache_key_extractor,
+            )
+            .await?
+        }
+    };
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.

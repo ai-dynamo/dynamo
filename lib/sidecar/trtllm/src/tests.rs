@@ -633,6 +633,31 @@ async fn aggregated_generation_streams_delta_then_terminal() {
 }
 
 #[tokio::test]
+async fn direct_mode_advertises_backend_and_override_endpoint() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let mut engine = engine(&server.endpoint, 1);
+    engine.is_direct = true;
+    engine.advertise_grpc_endpoint = Some("10.0.0.5:50051".to_string());
+    let config = engine.start(0).await.expect("start");
+
+    assert_eq!(
+        config
+            .runtime_data
+            .get("direct_backend")
+            .and_then(|v| v.as_str()),
+        Some("trtllm")
+    );
+    // The frontend dials the advertised override, not the local endpoint.
+    assert_eq!(
+        config
+            .runtime_data
+            .get("direct_grpc_endpoint")
+            .and_then(|v| v.as_str()),
+        Some("10.0.0.5:50051")
+    );
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeTrtllm::default();
     service.reject.store(true, Ordering::SeqCst);

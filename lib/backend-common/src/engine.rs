@@ -258,6 +258,17 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Liveness probe for the engine's backing service. Default `Ok(())`.
+    ///
+    /// The `--direct` registrar polls this on an interval and unregisters the
+    /// worker from discovery when it fails (re-registering on recovery), so the
+    /// frontend stops routing to a dead external gRPC server proactively rather
+    /// than only reactively via `report_instance_down`. Engines fronting an
+    /// external process should override it with a cheap RPC.
+    async fn health_check(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Release all engine resources. Called exactly once.
     ///
     /// `Worker` guarantees:

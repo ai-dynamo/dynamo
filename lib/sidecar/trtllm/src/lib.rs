@@ -6,10 +6,12 @@
 mod args;
 mod client;
 mod convert;
+mod direct;
 mod engine;
 mod model;
 mod proto;
 
+pub use direct::{GrpcDispatch, TrtllmDirectDispatchProvider};
 pub use engine::TrtllmSidecarEngine;
 
 #[cfg(test)]

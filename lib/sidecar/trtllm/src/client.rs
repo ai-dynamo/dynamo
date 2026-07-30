@@ -55,6 +55,20 @@ impl TrtllmClient {
             .map_err(|status| status_to_dynamo("Generate", status))
     }
 
+    /// Open the `Generate` server-stream returning the raw `tonic::Status` on
+    /// failure (no `status_to_dynamo` mapping). The direct-gRPC dispatch maps
+    /// statuses to TOP-LEVEL `ErrorType`s itself so `PushRouter` fault detection
+    /// fires — see `crate::direct::status_to_top_level`.
+    pub(crate) async fn generate_raw(
+        &self,
+        request: pb::GenerateRequest,
+    ) -> Result<tonic::Streaming<pb::GenerateResponse>, tonic::Status> {
+        self.client()
+            .generate(request)
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
     /// Queries `GetModelInfo` and returns the reported maximum sequence length
     /// (input + output) as the registration context length, if positive.
     pub(crate) async fn model_info(&self) -> Result<Option<u32>, DynamoError> {

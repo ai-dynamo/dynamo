@@ -76,12 +76,18 @@ pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
     Tcp(String),
+    /// Native external-engine gRPC endpoint (e.g. `host:port`). Unlike `Nats`/`Tcp`
+    /// this is NOT dialable by the Dynamo request plane; it is dispatched to directly
+    /// by a `StreamingDispatch` gRPC implementation (see the direct-gRPC path).
+    Grpc(String),
 }
 
 impl TransportType {
     pub fn address(&self) -> &str {
         match self {
-            TransportType::Nats(address) | TransportType::Tcp(address) => address,
+            TransportType::Nats(address)
+            | TransportType::Tcp(address)
+            | TransportType::Grpc(address) => address,
         }
     }
 }
@@ -576,5 +582,34 @@ fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
         Ok(())
     } else {
         Err(ValidationError::new("invalid_characters"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_type_grpc_serde_roundtrip() {
+        // The discovery wire tag for a direct-gRPC instance must be stable:
+        // deployed workers register with it and the frontend routes off it.
+        let grpc = TransportType::Grpc("127.0.0.1:50051".to_string());
+        let json = serde_json::to_string(&grpc).unwrap();
+        assert_eq!(json, r#"{"grpc":"127.0.0.1:50051"}"#);
+        assert_eq!(serde_json::from_str::<TransportType>(&json).unwrap(), grpc);
+        assert_eq!(grpc.address(), "127.0.0.1:50051");
+    }
+
+    #[test]
+    fn transport_type_existing_tags_unchanged() {
+        // Guard the pre-existing wire tags while adding the new variant.
+        assert_eq!(
+            serde_json::to_string(&TransportType::Nats("s".to_string())).unwrap(),
+            r#"{"nats_tcp":"s"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&TransportType::Tcp("a".to_string())).unwrap(),
+            r#"{"tcp":"a"}"#
+        );
     }
 }

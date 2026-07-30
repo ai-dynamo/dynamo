@@ -386,12 +386,96 @@ impl Endpoint {
     /// from sending requests to this worker. Use this when a worker is sleeping
     /// and should not receive any requests.
     pub async fn unregister_endpoint_instance(&self) -> anyhow::Result<()> {
+        let instance_id = self.drt().connection_id();
+        let transport = build_transport_type(self, &self.id(), instance_id).await?;
+        self.unregister_instance_with_transport(transport).await
+    }
+
+    /// Re-register this endpoint instance to discovery.
+    ///
+    /// This adds the endpoint back to the instances bucket, allowing the router
+    /// to send requests to this worker again. Use this when a worker wakes up
+    /// and should start receiving requests.
+    pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
+        let instance_id = self.drt().connection_id();
+        let transport = build_transport_type(self, &self.id(), instance_id).await?;
+        self.register_instance_with_transport(transport).await
+    }
+
+    /// Register this endpoint instance in discovery with a direct-gRPC transport
+    /// address (`host:port`) instead of a request-plane (TCP/NATS) one. The
+    /// frontend's router dispatches straight to `grpc_endpoint` via a gRPC
+    /// `StreamingDispatch`; no request-plane handler is served for this instance.
+    ///
+    /// Used by the `--direct` registrar path, which registers + health-checks a
+    /// stock external-engine gRPC server without proxying requests through a
+    /// Dynamo worker.
+    pub async fn register_direct_endpoint_instance(
+        &self,
+        grpc_endpoint: String,
+    ) -> anyhow::Result<()> {
+        self.register_instance_with_transport(TransportType::Grpc(grpc_endpoint))
+            .await
+    }
+
+    /// Unregister a direct-gRPC endpoint instance previously registered by
+    /// [`Self::register_direct_endpoint_instance`]. The `Grpc(grpc_endpoint)`
+    /// transport must match the registered record (discovery keys instances by
+    /// transport), which is why the direct path passes it explicitly rather than
+    /// reusing [`Self::unregister_endpoint_instance`] (which rebuilds a
+    /// request-plane transport via [`build_transport_type`]).
+    pub async fn unregister_direct_endpoint_instance(
+        &self,
+        grpc_endpoint: String,
+    ) -> anyhow::Result<()> {
+        self.unregister_instance_with_transport(TransportType::Grpc(grpc_endpoint))
+            .await
+    }
+
+    /// Register this endpoint instance in discovery under `transport`.
+    async fn register_instance_with_transport(
+        &self,
+        transport: TransportType,
+    ) -> anyhow::Result<()> {
         let drt = self.drt();
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 
-        // Get the transport type for the endpoint
-        let transport = build_transport_type(self, &endpoint_id, instance_id).await?;
+        let spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            transport,
+            device_type: endpoint_device_type(),
+        };
+
+        if let Err(e) = drt.discovery().register(spec).await {
+            tracing::error!(
+                endpoint_id = %self.id(),
+                error = %e,
+                "Unable to register endpoint instance to discovery"
+            );
+            anyhow::bail!(
+                "Unable to register endpoint instance to discovery. Check discovery service status"
+            );
+        }
+
+        tracing::info!(
+            instance_id,
+            "Registered endpoint instance in discovery - worker added to routing pool"
+        );
+        Ok(())
+    }
+
+    /// Unregister this endpoint instance from discovery under `transport`. The
+    /// transport must match the one used at registration.
+    async fn unregister_instance_with_transport(
+        &self,
+        transport: TransportType,
+    ) -> anyhow::Result<()> {
+        let drt = self.drt();
+        let instance_id = drt.connection_id();
+        let endpoint_id = self.id();
 
         let instance = crate::discovery::DiscoveryInstance::Endpoint(Instance {
             namespace: endpoint_id.namespace,
@@ -402,11 +486,9 @@ impl Endpoint {
             device_type: endpoint_device_type(),
         });
 
-        let discovery = drt.discovery();
-        if let Err(e) = discovery.unregister(instance).await {
-            let endpoint_id = self.id();
+        if let Err(e) = drt.discovery().unregister(instance).await {
             tracing::error!(
-                %endpoint_id,
+                endpoint_id = %self.id(),
                 error = %e,
                 "Unable to unregister endpoint instance from discovery"
             );
@@ -416,52 +498,9 @@ impl Endpoint {
         }
 
         tracing::info!(
-            instance_id = instance_id,
-            "Successfully unregistered endpoint instance from discovery - worker removed from routing pool"
+            instance_id,
+            "Unregistered endpoint instance from discovery - worker removed from routing pool"
         );
-
-        Ok(())
-    }
-
-    /// Re-register this endpoint instance to discovery.
-    ///
-    /// This adds the endpoint back to the instances bucket, allowing the router
-    /// to send requests to this worker again. Use this when a worker wakes up
-    /// and should start receiving requests.
-    pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
-        let drt = self.drt();
-        let instance_id = drt.connection_id();
-        let endpoint_id = self.id();
-
-        // Get the transport type for the endpoint
-        let transport = build_transport_type(self, &endpoint_id, instance_id).await?;
-
-        let spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace,
-            component: endpoint_id.component,
-            endpoint: endpoint_id.name,
-            transport,
-            device_type: endpoint_device_type(),
-        };
-
-        let discovery = drt.discovery();
-        if let Err(e) = discovery.register(spec).await {
-            let endpoint_id = self.id();
-            tracing::error!(
-                %endpoint_id,
-                error = %e,
-                "Unable to re-register endpoint instance to discovery"
-            );
-            anyhow::bail!(
-                "Unable to re-register endpoint instance to discovery. Check discovery service status"
-            );
-        }
-
-        tracing::info!(
-            instance_id = instance_id,
-            "Successfully re-registered endpoint instance to discovery - worker added back to routing pool"
-        );
-
         Ok(())
     }
 }

@@ -115,6 +115,10 @@ impl RuntimeConfig {
     }
 }
 
+/// `runtime_data` key a `--direct` worker sets to the address the frontend should
+/// dial for gRPC dispatch. The engine writes it in `start`; `run_direct` reads it.
+pub const DIRECT_GRPC_ENDPOINT_KEY: &str = "direct_grpc_endpoint";
+
 /// Per-worker runtime configuration.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -193,6 +197,14 @@ pub struct WorkerConfig {
     pub media_fetcher: Option<MediaFetcher>,
     /// Deployment-level default thinking mode written to runtime metadata.
     pub default_thinking_mode: Option<String>,
+    /// When `true`, run in "direct" registrar mode: register this worker in
+    /// discovery with a `TransportType::Grpc` endpoint and health-check its
+    /// engine's gRPC server, but do NOT serve the Dynamo request plane. The
+    /// frontend dispatches inference straight to the engine's gRPC endpoint via
+    /// a gRPC `StreamingDispatch`. Requires the engine to surface its gRPC
+    /// address in `EngineConfig.runtime_data["direct_grpc_endpoint"]`. Driven by
+    /// `--direct`.
+    pub is_direct: bool,
 }
 
 impl WorkerConfig {
@@ -234,6 +246,7 @@ impl Default for WorkerConfig {
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
+            is_direct: false,
         }
     }
 }
@@ -285,6 +298,14 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
             EngineKind::Raw(e) => e.is_quiescent().await,
+        }
+    }
+
+    /// See [`LLMEngine::health_check`]. Raw engines have no external service to probe.
+    async fn health_check(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.health_check().await,
+            EngineKind::Raw(_) => Ok(()),
         }
     }
 
@@ -620,8 +641,13 @@ impl Worker {
             return Ok(());
         }
 
-        self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
-            .await
+        if self.config.is_direct {
+            self.register_direct_orchestrator(&engine_config, endpoint, shutdown.clone())
+                .await
+        } else {
+            self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
+                .await
+        }
     }
 
     /// Build KV-event publishers and the `SnapshotPublisher` from the
@@ -833,13 +859,15 @@ impl Worker {
         self.state = LifecycleState::Stopped;
     }
 
-    /// Drive the serve loop and the shutdown orchestrator. Returns when
-    /// either the serve loop exits or `shutdown` is cancelled.
-    async fn serve_with_orchestrator(
+    /// Model-registration prologue shared by both orchestrators: resolve the
+    /// model/worker type, build the local model, hand the engine its endpoint
+    /// (a fatal handoff, done before discovery so a failure leaves nothing
+    /// published), and attach the discovery Model record. Callers add the
+    /// transport-specific tail (request-plane ingress vs. direct-gRPC register).
+    async fn register_model(
         &mut self,
         engine_config: &EngineConfig,
-        endpoint: dynamo_runtime::component::Endpoint,
-        shutdown: CancellationToken,
+        endpoint: &dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
@@ -848,18 +876,11 @@ impl Worker {
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
 
-        // Hand the engine its serving endpoint before registering the model
-        // with discovery. on_endpoint_ready is a fatal handoff: doing it first
-        // means a failure leaves nothing published, so there is no stale
-        // discovery entry to reclaim. Engines that publish their own discovery
-        // records (e.g. vLLM dynamic LoRA) stash the endpoint here, and this
-        // still runs before `register_engine_controls`, so `/engine/*` cannot
-        // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
 
         local_model
             .attach(
-                &endpoint,
+                endpoint,
                 model_type,
                 self.config.model_input,
                 None,
@@ -874,6 +895,21 @@ impl Worker {
                 )
             })?;
         tracing::debug!("model registered with discovery");
+        Ok(())
+    }
+
+    /// Drive the serve loop and the shutdown orchestrator. Returns when
+    /// either the serve loop exits or `shutdown` is cancelled.
+    async fn serve_with_orchestrator(
+        &mut self,
+        engine_config: &EngineConfig,
+        endpoint: dynamo_runtime::component::Endpoint,
+        shutdown: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        // on_endpoint_ready (inside register_model) runs before
+        // register_engine_controls, so `/engine/*` cannot fire before the engine
+        // has its endpoint.
+        self.register_model(engine_config, &endpoint).await?;
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
@@ -1009,6 +1045,150 @@ impl Worker {
         }
 
         self.orchestrator_steps(&endpoint).await;
+        Ok(())
+    }
+
+    /// Direct-mode counterpart to [`Self::serve_with_orchestrator`]. Registers the
+    /// model card + a `TransportType::Grpc` endpoint instance in discovery so the
+    /// frontend dispatches inference straight to the engine's gRPC server, then
+    /// waits for shutdown and tears down. No request-plane `Ingress` is served and
+    /// no `/engine/*` controls are exposed (a stock external-engine container is
+    /// not a Dynamo worker). KV-event publishing is already wired by
+    /// `setup_publishing` in `run_inner` when `enable_kv_routing` is on.
+    async fn register_direct_orchestrator(
+        &mut self,
+        engine_config: &EngineConfig,
+        endpoint: dynamo_runtime::component::Endpoint,
+        shutdown: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        // The engine must surface the address the FRONTEND dials.
+        let grpc_endpoint = engine_config
+            .runtime_data
+            .get(DIRECT_GRPC_ENDPOINT_KEY)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "--direct requires the engine to surface \
+                     runtime_data[\"direct_grpc_endpoint\"]; this engine did not",
+                )
+            })?;
+
+        // Model record only — the direct path serves no request plane.
+        self.register_model(engine_config, &endpoint).await?;
+
+        // Register the direct-gRPC endpoint instance the frontend routes to.
+        endpoint
+            .register_direct_endpoint_instance(grpc_endpoint.clone())
+            .await
+            .map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("register direct endpoint: {e}"),
+                )
+            })?;
+
+        let served = resolve_served_name(&self.config, engine_config)
+            .unwrap_or_else(|| engine_config.model.clone());
+        tracing::info!(
+            "Serving {} on {}.{}.{} via direct gRPC → {}",
+            served,
+            self.config.namespace,
+            self.config.component,
+            self.config.endpoint,
+            grpc_endpoint,
+        );
+
+        // Hold the graceful-shutdown registration so runtime teardown waits for
+        // our unregister + drain + cleanup (mirrors serve_with_orchestrator).
+        let _orchestrator_registration = endpoint.drt().register_graceful_task();
+
+        // Proactively probe engine liveness and pull the instance from discovery
+        // when it dies (re-register on recovery), complementing the frontend's
+        // reactive report_instance_down. Consecutive-count thresholds stop a
+        // briefly-slow engine from flapping the routing pool; a per-probe timeout
+        // stops a wedged engine (TCP up, RPC hung) from defeating the unregister.
+        const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+        const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+        const FAILURES_BEFORE_UNREGISTER: u32 = 3;
+        const SUCCESSES_BEFORE_REGISTER: u32 = 2;
+
+        let mut registered = true;
+        let mut failures = 0u32;
+        let mut successes = 0u32;
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(HEALTH_INTERVAL) => {}
+            }
+            // Race the probe against shutdown so a hung RPC can't stall it.
+            let health = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                result = tokio::time::timeout(HEALTH_PROBE_TIMEOUT, self.engine.health_check()) => result,
+            };
+            let is_healthy = match health {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "direct worker health probe failed");
+                    false
+                }
+                Err(_) => {
+                    tracing::debug!("direct worker health probe timed out");
+                    false
+                }
+            };
+
+            if is_healthy {
+                failures = 0;
+                successes += 1;
+                if !registered && successes >= SUCCESSES_BEFORE_REGISTER {
+                    match endpoint
+                        .register_direct_endpoint_instance(grpc_endpoint.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            registered = true;
+                            tracing::info!("direct worker recovered; re-registered with discovery");
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to re-register recovered direct worker")
+                        }
+                    }
+                }
+            } else {
+                successes = 0;
+                failures += 1;
+                if registered && failures >= FAILURES_BEFORE_UNREGISTER {
+                    tracing::warn!(failures, "direct worker unhealthy; unregistering");
+                    match endpoint
+                        .unregister_direct_endpoint_instance(grpc_endpoint.clone())
+                        .await
+                    {
+                        Ok(()) => registered = false,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to unregister unhealthy direct worker")
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!("Received shutdown signal; tearing down direct endpoint");
+        // Remove from the routing pool (if still registered) before drain + cleanup.
+        if registered {
+            if let Err(error) = endpoint
+                .unregister_direct_endpoint_instance(grpc_endpoint)
+                .await
+            {
+                tracing::warn!(%error, "direct endpoint discovery unregister failed");
+            } else {
+                tracing::info!("Direct endpoint unregistered from discovery");
+            }
+        }
+        self.run_engine_shutdown_steps().await;
         Ok(())
     }
 

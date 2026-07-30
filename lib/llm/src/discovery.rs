@@ -30,6 +30,12 @@ pub use endpoint_card::wait_for_endpoint_model_card;
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
+pub mod direct_dispatch;
+pub use direct_dispatch::{
+    DIRECT_BACKEND_KEY, DirectDispatchProvider, LlmStreamingDispatch, direct_dispatch_provider,
+    register_direct_dispatch_provider,
+};
+
 mod worker_monitor;
 pub use worker_monitor::{
     KvWorkerMonitor, LoadThresholdConfig, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,

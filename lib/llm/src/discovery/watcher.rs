@@ -1724,6 +1724,30 @@ impl ModelWatcher {
             worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
+                // Direct-gRPC backend? Build its transport dispatch from the
+                // composition-root-registered provider so the router dispatches
+                // straight to the engine's gRPC server instead of the request plane.
+                let direct_dispatch = match card
+                    .runtime_config
+                    .runtime_data
+                    .get(crate::discovery::DIRECT_BACKEND_KEY)
+                    .and_then(|v| v.as_str())
+                {
+                    Some(backend) => match crate::discovery::direct_dispatch_provider(backend) {
+                        Some(provider) => Some(
+                            provider
+                                .build(card)
+                                .await
+                                .context("build direct-gRPC dispatch")?,
+                        ),
+                        None => anyhow::bail!(
+                            "model advertises direct_backend={backend:?} but no \
+                             DirectDispatchProvider is registered; the frontend was not \
+                             built/configured with that backend's provider"
+                        ),
+                    },
+                    None => None,
+                };
                 Some(
                     entrypoint::build_preprocessed_routing(
                         &client,
@@ -1735,6 +1759,7 @@ impl ModelWatcher {
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        direct_dispatch,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

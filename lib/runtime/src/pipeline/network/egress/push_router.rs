@@ -1466,6 +1466,13 @@ where
                             (tcp_endpoint.clone(), "transport.tcp.request")
                         }
                         TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                        // A direct model is routed by a gRPC `StreamingDispatch`, which
+                        // dials this address itself; the watcher rejects the model if no
+                        // provider is registered. A request-plane router reaching this arm
+                        // is a wiring bug.
+                        TransportType::Grpc(endpoint) => {
+                            (endpoint.clone(), "transport.grpc.request")
+                        }
                     };
                     (addr, kind, instance.clone())
                 })

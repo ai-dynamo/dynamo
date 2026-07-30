@@ -770,6 +770,7 @@ impl TransportType {
         match &self.inner {
             rs::component::TransportType::Nats(_) => "nats_tcp",
             rs::component::TransportType::Tcp(_) => "tcp",
+            rs::component::TransportType::Grpc(_) => "grpc",
         }
     }
 
