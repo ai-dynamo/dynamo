@@ -8,8 +8,10 @@
 //!   2. Optional TOML file pointed to by the `DYN_LOGGING_CONFIG_PATH` environment variable.
 //!   3. `/opt/dynamo/etc/logging.toml`.
 //!
-//! Logging can take two forms: `READABLE` or `JSONL`. The default is `READABLE`. `JSONL`
-//! can be enabled by setting the `DYN_LOGGING_JSONL` environment variable to `1`.
+//! Logging can take two console forms: `READABLE` or `JSONL`. Select one with
+//! `DYN_LOGGING_CONSOLE_FORMAT=readable|jsonl`; the default is `READABLE`.
+//! `DYN_LOGGING_JSONL=1` remains a legacy fallback when the new setting is unset or blank.
+//! Console presentation is independent of OpenTelemetry export.
 //!
 //! To use local timezone for logging timestamps, set the `DYN_LOG_USE_LOCAL_TZ` environment variable to `1`.
 //!
@@ -49,7 +51,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{
-    ConsoleLogFormat, console_log_format, disable_ansi_logging, env_is_truthy, span_events_enabled,
+    ConsoleLogFormat, console_log_format, disable_ansi_logging, env_is_truthy,
+    legacy_jsonl_logging_enabled, span_events_enabled,
 };
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
@@ -1299,11 +1302,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
     let otel_logs_filter_layer = filters(load_config());
     let console_format = console_log_format();
+    let legacy_jsonl_enabled = legacy_jsonl_logging_enabled();
     let otlp_enabled = otlp_exporter_enabled();
-    // Trace context (span CLOSE events, trace IDs, the OTel bridge) is required
-    // for OTLP export or when the console itself emits JSONL; the console
-    // format choice is decoupled from the OTel export decision.
-    let trace_context_enabled = otlp_enabled || console_format == ConsoleLogFormat::Jsonl;
+    // Keep the legacy JSONL switch as a trace-context signal even when the new
+    // setting overrides console presentation. Older deployments rely on it for
+    // downstream trace propagation without OTLP export.
+    let trace_context_enabled =
+        otlp_enabled || legacy_jsonl_enabled || console_format == ConsoleLogFormat::Jsonl;
     let span_events = if trace_context_enabled {
         span_events_for_logging()
     } else {
@@ -2864,6 +2869,7 @@ pub mod tests {
                 "--nocapture",
             ])
             .env("OTEL_EXPORT_ENABLED", "1")
+            .env_remove("DYN_LOGGING_CONSOLE_FORMAT")
             .env_remove("DYN_LOGGING_JSONL")
             .output()
             .expect("Failed to execute subprocess test");
@@ -3023,8 +3029,9 @@ pub mod tests {
                 "test",
                 "-p",
                 "dynamo-runtime",
-                "test_readable_console_with_otel_export_subprocess",
+                "logging::tests::test_readable_console_with_otel_export_subprocess",
                 "--",
+                "--exact",
                 "--nocapture",
             ])
             .env("DYN_TEST_LOGGING_READABLE_OTEL", "1")
@@ -3088,6 +3095,89 @@ pub mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_readable_console_preserves_legacy_trace_context() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_readable_console_preserves_legacy_trace_context_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_READABLE_LEGACY_TRACE", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "readable")
+            .env("DYN_LOGGING_JSONL", "1")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env("DYN_LOG", "info")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_readable_console_preserves_legacy_trace_context_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_READABLE_LEGACY_TRACE").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+
+        let span = tracing::info_span!("legacy_trace_context");
+        let trace_context = span.in_scope(get_distributed_tracing_context);
+        assert!(
+            trace_context.is_some(),
+            "legacy DYN_LOGGING_JSONL should keep local trace context enabled"
+        );
+
+        let mut headers = HashMap::new();
+        span.in_scope(|| inject_trace_headers_into_map(&mut headers));
+        assert!(
+            headers.contains_key("traceparent"),
+            "legacy trace context should remain available for propagation"
+        );
+
+        tracing::info!("readable console with legacy trace marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        assert!(
+            content.contains("readable console with legacy trace marker"),
+            "expected marker log in captured stderr, got: {content}"
+        );
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                serde_json::from_str::<Value>(line).is_err(),
+                "expected readable log line, got JSON: {line}"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Comprehensive test for span events covering:
     /// - SPAN_FIRST_ENTRY and SPAN_CLOSED event emission
     /// - Trace context (trace_id, span_id) in span events
@@ -3108,11 +3198,12 @@ pub mod tests {
                 "test",
                 "-p",
                 "dynamo-runtime",
-                "test_span_events_subprocess",
+                "logging::tests::test_span_events_subprocess",
                 "--",
                 "--exact",
                 "--nocapture",
             ])
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
             .env("DYN_LOGGING_JSONL", "1")
             .env("DYN_LOGGING_SPAN_EVENTS", "1")
             .env("DYN_LOG", "warn,dynamo_runtime::logging::tests=debug")

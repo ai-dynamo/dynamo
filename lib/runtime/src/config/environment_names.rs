@@ -34,7 +34,7 @@ pub mod logging {
     /// Enable JSONL logging format
     pub const DYN_LOGGING_JSONL: &str = "DYN_LOGGING_JSONL";
 
-    /// Console log format: "readable" or "jsonl"
+    /// Console log format: "readable" or "jsonl"; blank uses the legacy fallback
     pub const DYN_LOGGING_CONSOLE_FORMAT: &str = "DYN_LOGGING_CONSOLE_FORMAT";
 
     /// Disable ANSI terminal colors in logs
