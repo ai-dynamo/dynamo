@@ -28,18 +28,36 @@ If a component ever needs a real third-party dependency, this check has to be
 revisited together with a package.json + node_modules for the docs project —
 which is exactly what Fern's error message asks for.
 
-The constants below mirror fern-api's own bundler; keep them in sync when the
-pin in docs/fern/fern.config.json moves.
+The constants below are transcribed from fern-api's own bundler, so they are
+only correct for one release of it. DERIVED_FROM_FERN records which, and the
+run below refuses to report a clean tree when docs/fern/fern.config.json has
+moved past it — a stale allowlist fails closed but silently, which is the worst
+of both.
+
+To re-derive after a Fern bump:
+
+    npm pack fern-api@<version> && tar xzf fern-api-<version>.tgz
+    grep -o 'TZu=\\[[^]]*\\]' package/cli.cjs     # the allowlist
+    grep -o 'SGm="[^"]*"' package/cli.cjs        # the pinned rolldown version
+
+then update SPECIFIER, ALLOWLIST and DERIVED_FROM_FERN together.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
 
-COMPONENTS = Path(__file__).resolve().parents[1] / "components"
+FERN_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = FERN_ROOT.parents[1]
+COMPONENTS = FERN_ROOT / "components"
+FERN_CONFIG = FERN_ROOT / "fern.config.json"
 SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+
+# The fern-api release SPECIFIER and ALLOWLIST were transcribed from.
+DERIVED_FROM_FERN = "5.80.2"
 
 # Verbatim from fern-api's cli.cjs. re.ASCII is not cosmetic: JavaScript's \w is
 # ASCII-only, Python's is Unicode-aware, so without it a Unicode letter sitting
@@ -63,6 +81,43 @@ def package_name(specifier: str) -> str:
 
 def is_relative(specifier: str) -> bool:
     return specifier.startswith(("./", "../")) or specifier in {".", ".."}
+
+
+def pinned_fern_version() -> str | None:
+    """The fern-api version this repo actually builds docs with, or None."""
+    try:
+        return json.loads(FERN_CONFIG.read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def check_derivation() -> int:
+    """Refuse to vouch for a tree when the constants predate the Fern in use."""
+    if not FERN_CONFIG.is_file():
+        print(
+            f"check_component_imports: expected {FERN_CONFIG} — the script has "
+            "moved away from docs/fern/scripts/ and its paths need updating",
+            file=sys.stderr,
+        )
+        return 1
+    version = pinned_fern_version()
+    if version is None:
+        print(
+            f"check_component_imports: could not read a version from {FERN_CONFIG}",
+            file=sys.stderr,
+        )
+        return 1
+    if version != DERIVED_FROM_FERN:
+        print(
+            f"check_component_imports: SPECIFIER and ALLOWLIST were transcribed "
+            f"from fern-api {DERIVED_FROM_FERN}, but fern.config.json now pins "
+            f"{version}. Re-derive them (see this script's docstring) and update "
+            f"DERIVED_FROM_FERN, or this check silently vouches for the wrong "
+            f"bundler.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def offenders(text: str) -> list[str]:
@@ -133,9 +188,22 @@ def run_tests() -> int:
     return 1 if failed else 0
 
 
+USAGE = "usage: check_component_imports.py [--test]"
+
+
 def main() -> int:
-    if "--test" in sys.argv[1:]:
+    args = sys.argv[1:]
+    if args not in ([], ["--test"]):
+        print(
+            f"check_component_imports: unrecognized arguments {args}", file=sys.stderr
+        )
+        print(USAGE, file=sys.stderr)
+        return 2
+    if args == ["--test"]:
         return run_tests()
+    stale = check_derivation()
+    if stale:
+        return stale
     failures = 0
     for path in sorted(COMPONENTS.rglob("*")):
         if not path.is_file() or path.suffix not in SUFFIXES:
@@ -144,7 +212,7 @@ def main() -> int:
         if not found:
             continue
         failures += 1
-        rel = path.relative_to(COMPONENTS.parents[2])
+        rel = path.relative_to(REPO_ROOT)
         print(
             f"{rel}: Fern will bundle this file with rolldown because it reads "
             f"{', '.join(found)} as a third-party import.",
