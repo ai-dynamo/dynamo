@@ -378,7 +378,13 @@ navigation:
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: ../pages-dev/features/diffusion/text-to-text/README.md
-      # TODO: add Reinforcement Learning (RL) feature docs here when available.
+      - section: Reinforcement Learning
+        collapsed: true
+        icon: brain
+        slug: reinforcement-learning
+        contents:
+          - page: Overview
+            path: ../pages-dev/features/rl/README.md
       - section: Tool Calling & Reasoning
         collapsed: true
         icon: screwdriver-wrench
