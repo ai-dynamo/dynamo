@@ -200,8 +200,6 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
         self,
         token_ids: list[int],
         artifacts: Sequence[torch.Tensor],
-        *,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EmbedsPrompt | TokensPrompt:
         """Build a mixed prompt from per-image visual embedding tensors.
 
@@ -210,7 +208,6 @@ class LinearEmbedsAdapter(CustomEncoderAdapter[torch.Tensor]):
         Artifacts must appear in the same order as the image placeholders in
         ``token_ids``.
         """
-        del mm_processor_kwargs
         rows = list(artifacts)
         for index, tensor in enumerate(rows):
             if not isinstance(tensor, torch.Tensor):
