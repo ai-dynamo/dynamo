@@ -15,7 +15,7 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 | MoE Model Profiling | ✅ | 🚧 | 🚧 |
 | AI Configurator (Offline) | ✅ | ✅ | ✅ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
-| Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
+| Runtime Profiling Endpoints | ✅ | ❌ | ✅ |
 
 ## Quick Start
 

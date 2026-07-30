@@ -12,6 +12,14 @@ The TensorRT-LLM backend accepts Dynamo-specific arguments (model loading, paral
 - [TensorRT-LLM Configuration](trtllm-config-reference.mdx) — the `DYN_TRTLLM_*` backend flags.
 - [Runtime Configuration](../../reference/runtime-config-reference.mdx) — the `DYN_*` flags shared by every backend.
 
+## Default Thinking Mode
+
+To set the thinking mode used when a request omits an explicit control, pass
+`--dyn-default-thinking-mode enabled|disabled` to the TensorRT-LLM worker or
+set `DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
+adaptive thinking, take precedence. See
+[Deployment-Level Thinking Default](../../reasoning/README.md#deployment-level-thinking-default).
+
 ## Building a Custom Container
 
 The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream `nvcr.io/nvidia/tensorrt-llm/release` container — it does not build TensorRT-LLM from source. To rebuild it locally, pin a different upstream TRT-LLM tag, or plug in a TRT-LLM image you built from source, see the [Building a Custom Container](./trtllm-building-custom-container.md) guide.
