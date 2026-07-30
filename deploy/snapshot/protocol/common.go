@@ -32,6 +32,9 @@ const (
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 
+	// Optional newline-separated oldIPv4 newIPv4 mappings for distributed restore.
+	InetRemapAnnotation = "nvidia.com/snapshot-inet-remap"
+
 	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"
 
 	// Full keys are nvidia.com/snapshot-restore-status.<containerName>.

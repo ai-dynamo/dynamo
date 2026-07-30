@@ -33,6 +33,7 @@ type RestoreRequest struct {
 	PodName                     string
 	PodNamespace                string
 	TargetPodIP                 string
+	InetRemap                   string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
 }
@@ -200,12 +201,25 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
+	nsrestorePath := req.NSRestorePath
+	var nsrestoreFile *os.File
+	if strings.TrimSpace(req.InetRemap) != "" {
+		// The PoC reuses qualified placeholders that predate --inet-remap.
+		// Pass this agent image's static nsrestore through nsenter instead.
+		var err error
+		nsrestoreFile, err = os.Open(req.NSRestorePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open nsrestore for explicit INET remap: %w", err)
+		}
+		defer nsrestoreFile.Close()
+		nsrestorePath = "/proc/self/fd/3"
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
-		"--", req.NSRestorePath,
+		"--", nsrestorePath,
 		"--checkpoint-path", checkpointPath,
 	}
 	if snap.CUDADeviceMap != "" {
@@ -217,11 +231,23 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	if strings.TrimSpace(req.InetRemap) != "" {
+		args = append(args, "--inet-remap", req.InetRemap)
+	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+	if nsrestoreFile != nil {
+		cmd.ExtraFiles = []*os.File{nsrestoreFile}
+	}
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
-	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
+	if nsrestoreFile == nil {
+		log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
+	} else {
+		log.V(1).Info("Executing nsenter + nsrestore with explicit distributed INET remap",
+			"nsrestore_path", req.NSRestorePath,
+		)
+	}
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

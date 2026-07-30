@@ -25,6 +25,7 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		"nvidia.com/snapshot-restore-container-id":      "dead-container",
 		// Preserve the target-containers annotation across ApplyRestoreTargetMetadata.
 		TargetContainersAnnotation: "main",
+		InetRemapAnnotation:        "10.0.0.11 10.1.4.21",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
@@ -55,6 +56,9 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	}
 	if got := annotations[TargetContainersAnnotation]; got != "main" {
 		t.Fatalf("target-containers annotation must be preserved, got %q", got)
+	}
+	if got := annotations[InetRemapAnnotation]; got != "10.0.0.11 10.1.4.21" {
+		t.Fatalf("inet-remap annotation must be preserved, got %q", got)
 	}
 }
 

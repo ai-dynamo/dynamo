@@ -571,19 +571,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 
 	// Run the restore orchestrator (inspect + nsrestore).
-	req := executor.RestoreRequest{
-		CheckpointID:                checkpointID,
-		CheckpointLocation:          checkpointLocation.HostPath,
-		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
-		ContainerID:                 containerID,
-		StartedAt:                   startedAt,
-		NSRestorePath:               w.config.Restore.NSRestorePath,
-		PodName:                     pod.Name,
-		PodNamespace:                pod.Namespace,
-		TargetPodIP:                 pod.Status.PodIP,
-		ContainerName:               containerName,
-		Clientset:                   w.clientset,
-	}
+	req := w.restoreRequestForPod(pod, containerName, containerID, checkpointID, checkpointLocation, startedAt)
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
@@ -620,6 +608,28 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return err
 	}
 	return nil
+}
+
+func (w *NodeController) restoreRequestForPod(
+	pod *corev1.Pod,
+	containerName, containerID, checkpointID string,
+	checkpointLocation checkpointLocations,
+	startedAt time.Time,
+) executor.RestoreRequest {
+	return executor.RestoreRequest{
+		CheckpointID:                checkpointID,
+		CheckpointLocation:          checkpointLocation.HostPath,
+		ContainerCheckpointLocation: checkpointLocation.ContainerPath,
+		ContainerID:                 containerID,
+		StartedAt:                   startedAt,
+		NSRestorePath:               w.config.Restore.NSRestorePath,
+		PodName:                     pod.Name,
+		PodNamespace:                pod.Namespace,
+		TargetPodIP:                 pod.Status.PodIP,
+		InetRemap:                   pod.Annotations[snapshotprotocol.InetRemapAnnotation],
+		ContainerName:               containerName,
+		Clientset:                   w.clientset,
+	}
 }
 
 func (w *NodeController) tryAcquire(podKey string) bool {

@@ -20,6 +20,7 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	inetRemap := flag.String("inet-remap", "", "Explicit newline-separated oldIPv4 newIPv4 mappings for distributed restore")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -31,6 +32,7 @@ func main() {
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
+		InetRemap:      *inetRemap,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

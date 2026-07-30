@@ -302,6 +302,41 @@ func TestRestoreCheckpointReady(t *testing.T) {
 	})
 }
 
+func TestRestoreRequestForPodIncludesInetRemapAnnotation(t *testing.T) {
+	w := makeTestController(t)
+	w.config.Restore.NSRestorePath = "/usr/local/bin/nsrestore"
+	explicit := "10.0.0.11 10.1.4.21\n10.0.0.12 10.1.4.22"
+	pod := makePod(
+		"restore-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		nil,
+		map[string]string{snapshotprotocol.InetRemapAnnotation: explicit},
+	)
+	pod.Status.PodIP = "10.1.4.21"
+
+	req := w.restoreRequestForPod(
+		pod,
+		"main",
+		testContainerID,
+		"checkpoint-123",
+		checkpointLocations{
+			HostPath:      "/host/checkpoints/checkpoint-123",
+			ContainerPath: "/checkpoints/checkpoint-123",
+		},
+		time.Time{},
+	)
+
+	if req.InetRemap != explicit {
+		t.Fatalf("InetRemap = %q, want %q", req.InetRemap, explicit)
+	}
+	if req.TargetPodIP != pod.Status.PodIP {
+		t.Fatalf("TargetPodIP = %q, want %q", req.TargetPodIP, pod.Status.PodIP)
+	}
+}
+
 func TestReconcileRestorePod(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -713,4 +748,3 @@ func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
 		}
 	}
 }
-

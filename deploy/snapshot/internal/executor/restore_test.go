@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -51,6 +53,98 @@ func TestExecNSRestoreRejectsRelativeContainerCheckpointLocation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected absolute-path validation error, got: %v", err)
+	}
+}
+
+func TestExecNSRestorePassesExplicitInetRemap(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	nsenterPath := filepath.Join(binDir, "nsenter")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$NSENTER_ARGS_FILE"
+printf '{"restoredPID":321}\n'
+`
+	if err := os.WriteFile(nsenterPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NSENTER_ARGS_FILE", argsPath)
+
+	nsrestorePath := filepath.Join(t.TempDir(), "nsrestore")
+	if err := os.WriteFile(nsrestorePath, []byte("new nsrestore"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	explicit := "10.0.0.11 10.1.4.21\n10.0.0.12 10.1.4.22"
+	result, err := execNSRestore(
+		context.Background(),
+		testr.New(t),
+		RestoreRequest{
+			NSRestorePath: nsrestorePath,
+			TargetPodIP:   "10.1.4.21",
+			InetRemap:     explicit,
+		},
+		&types.RestoreContainerSnapshot{
+			CheckpointPath: "/host/checkpoints/abc123",
+			PlaceholderPID: 123,
+		},
+	)
+	if err != nil {
+		t.Fatalf("execNSRestore: %v", err)
+	}
+	if result.RestoredPID != 321 {
+		t.Fatalf("RestoredPID = %d, want 321", result.RestoredPID)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(args), "--inet-remap\n"+explicit+"\n") {
+		t.Fatalf("nsrestore args do not contain explicit remap: %q", args)
+	}
+	if !strings.Contains(string(args), "--\n/proc/self/fd/3\n") {
+		t.Fatalf("nsrestore did not use the inherited agent binary: %q", args)
+	}
+}
+
+func TestExecNSRestoreBlankInetRemapUsesPlaceholderBinary(t *testing.T) {
+	binDir := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	nsenterPath := filepath.Join(binDir, "nsenter")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$NSENTER_ARGS_FILE"
+printf '{"restoredPID":321}\n'
+`
+	if err := os.WriteFile(nsenterPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NSENTER_ARGS_FILE", argsPath)
+
+	_, err := execNSRestore(
+		context.Background(),
+		testr.New(t),
+		RestoreRequest{
+			NSRestorePath: "/usr/local/bin/nsrestore",
+			TargetPodIP:   "10.1.4.21",
+			InetRemap:     " \n\t",
+		},
+		&types.RestoreContainerSnapshot{
+			CheckpointPath: "/host/checkpoints/abc123",
+			PlaceholderPID: 123,
+		},
+	)
+	if err != nil {
+		t.Fatalf("execNSRestore: %v", err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(args), "--\n/usr/local/bin/nsrestore\n") {
+		t.Fatalf("nsrestore did not use the placeholder binary: %q", args)
+	}
+	if strings.Contains(string(args), "--inet-remap") {
+		t.Fatalf("blank explicit remap was forwarded: %q", args)
 	}
 }
 
