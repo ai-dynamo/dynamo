@@ -34,8 +34,7 @@ spec:
     podTemplate:
       spec:
         # vllm-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after. Stock vLLM v0.26.0 ships vllm-rs, whose
-        # gRPC matches the sidecar's vendored proto.
+        # starts before `main`, stops after.
         initContainers:
         - name: vllm-engine
           image: vllm/vllm-openai:v0.26.0
