@@ -101,11 +101,11 @@ class WorkloadSpec(BaseModel):
     )
     concurrency: Optional[float] = Field(
         default=None,
-        description="Concurrency is the target concurrency level. Required (or RequestRate) when the planner is disabled.",
+        description="Concurrency is the target concurrency level. Mutually exclusive with the requestRate field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.",
     )
     requestRate: Optional[float] = Field(
         default=None,
-        description="RequestRate is the target request rate (req/s). Required (or Concurrency) when the planner is disabled.",
+        description="RequestRate is the target request rate (req/s). Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.",
     )
 
 
@@ -255,6 +255,10 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     image: Optional[str] = Field(
         default=None,
         description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo < 1.1.0, use dynamo-frontend.',
+    )
+    runtimeVersionOverride: Optional[str] = Field(
+        default=None,
+        description="RuntimeVersionOverride supplies the default Dynamo runtime version for generated DynamoGraphDeployment components that do not set their own override. Set this when Image uses a non-semantic-version tag or digest, or when its tag does not identify the Dynamo runtime version. An explicit component value in overrides.dgd takes precedence.",
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

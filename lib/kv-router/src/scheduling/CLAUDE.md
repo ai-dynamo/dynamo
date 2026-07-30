@@ -49,8 +49,6 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── admission_policy: Option<ScheduledAdmissionPolicy>
-├── deferred: FxHashMap<AdmissionId, PolicyQueueEntry>    # Held by admission policy
 ├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
 ├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
 │   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
@@ -68,17 +66,8 @@ PolicyClassQueue("agents")
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
-## Policy-class admission lifecycle
-
-- **Decide:** A lifecycle-tracked request (`TrackedWithLifecycle`) and its cleanup handle (`RequestLifecycleLease`) enter `SchedulerQueueActor`, the single task that owns admission and queue state. The admission policy can opt out (`Bypass`), allow the request to proceed (`Ready`), or hold it (`Defer`).
-- **Wait or choose a worker:** A ready request runs now if capacity is available; otherwise it waits. A deferred request waits until the policy releases it with `MakeReady`. Choosing an exact worker may move the request to a different queue, but the original policy still receives its status updates. Queue limits apply when new requests arrive, not when an existing request moves.
-- **Give the router cleanup ownership:** After the actor records which version of the request it owns, it activates the cleanup handle. Selection returns the chosen worker, a context-token counter that only moves forward, and the handle. The LLM router puts both into `RequestGuard` before sending the request to the backend, so dispatch failure or cancellation still releases scheduler state.
-- **Run and stream:** After the backend accepts the request, `RequestGuard` first records that fact on the cleanup handle, then notifies the actor through the bounded command queue. Response items update the current context-token count. `Stop`, `EoS`, and `Length` mark the request complete before the item reaches the caller; a normal stream close also completes, while cancellation and errors abort.
-- **Release resources:** When `RequestGuard` finishes or is dropped, its cleanup handle is added to the shared cleanup queue. One bounded wake can cover a batch of dropped requests. The actor drains all pending cleanup, releases worker capacity, and tells the policy whether each request completed or aborted. Do not replace this with an unbounded channel or a new task for every dropped request.
-
 ## Guardrails
 
-- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up; cancellation and admission state are keyed by request ID.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery

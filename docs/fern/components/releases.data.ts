@@ -68,12 +68,12 @@ export const CURRENT_TAG = "1.3.0";
 export const CURRENT_WHEEL = "1.3.0.post1";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.15",
+  sglang: "0.5.16",
   trtllm: "1.3.0rc22",
-  vllm: "0.25.1",
+  vllm: "0.26.0",
   nixlSglang: "1.3.0",
   nixlTrtllm: "1.0.1",
-  nixlVllm: "1.1.0",
+  nixlVllm: "1.3.1",
 };
 
 const GH = "https://github.com/ai-dynamo/dynamo/releases/tag/";
@@ -501,10 +501,22 @@ export const FEATURES: Feature[] = [
     vllm: { status: "yes", note: "Eagle3" },
   },
   {
+    name: "GPU Memory Service",
+    sglang: { status: "yes", note: "Weights and KV; upstream integration remains in progress" },
+    trtllm: { status: "wip", note: "Weights only; multinode and upstream integration remain in progress" },
+    vllm: { status: "yes", note: "Weights and KV; upstream integration remains in progress" },
+  },
+  {
+    name: "Shadow Engine Failover",
+    sglang: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
+    trtllm: { status: "wip", note: "No KV-cache reuse or hardware fault tolerance" },
+    vllm: { status: "caveat", note: "Software-process failover only; no KV-cache reuse or hardware fault tolerance" },
+  },
+  {
     name: "Dynamo Snapshot",
-    sglang: { status: "yes" },
-    trtllm: { status: "no" },
-    vllm: { status: "yes" },
+    sglang: { status: "caveat", note: "Single-GPU supported; multi-GPU and multinode remain in progress" },
+    trtllm: { status: "wip", note: "Single-GPU aggregated text-worker path only" },
+    vllm: { status: "caveat", note: "Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress" },
   },
 ];
 
@@ -640,7 +652,7 @@ export const ARTIFACTS: Artifact[] = [
       {
         label: "helm install · dynamo-platform 1.3.0",
         clipboard:
-          "helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.3.0",
+          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.3.0.tgz",
       },
     ],
   },
@@ -652,7 +664,7 @@ export const ARTIFACTS: Artifact[] = [
     tags: [
       {
         label: "helm install · snapshot 1.3.0",
-        clipboard: "helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.3.0",
+        clipboard: "helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.3.0.tgz",
       },
     ],
   },
