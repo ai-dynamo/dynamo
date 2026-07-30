@@ -109,6 +109,15 @@ fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
         .into()
 }
 
+fn render_prompt_template(
+    formatter: &dyn OAIPromptFormatter,
+    request: &dyn OAIChatLikeRequest,
+) -> Result<String> {
+    formatter
+        .render(request)
+        .map_err(|error| invalid_argument_error(error.to_string()))
+}
+
 fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
@@ -1379,11 +1388,11 @@ impl OpenAIPreprocessor {
                     Some(prompt) => prompt,
                     None => {
                         tracing::warn!("Raw prompt requested but not available");
-                        self.formatter.render(request)?
+                        render_prompt_template(self.formatter.as_ref(), request)?
                     }
                 }
             } else {
-                self.formatter.render(request)?
+                render_prompt_template(self.formatter.as_ref(), request)?
             };
             Ok(Some(formatted_prompt))
         } else {
@@ -4935,6 +4944,84 @@ mod tests {
             OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
             Some(12)
         );
+    }
+
+    fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
+        let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+        match dynamo_renderer::PromptFormatter::from_parts(
+            template,
+            dynamo_renderer::ContextMixins::default(),
+            false,
+        )
+        .unwrap()
+        {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    fn assistant_only_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefill"}]
+        }))
+        .unwrap()
+    }
+
+    const REQUIRES_USER_TEMPLATE: &str = "\
+        {% set ns = namespace(has_user=false) %}\
+        {% for message in messages %}\
+            {% if message['role'] == 'user' %}{% set ns.has_user = true %}{% endif %}\
+        {% endfor %}\
+        {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
+        {{ messages[0]['content'] }}";
+
+    #[test]
+    fn test_assistant_only_request_accepted_when_template_accepts_it() {
+        let formatter = test_prompt_formatter(
+            "{% for message in messages %}{{ message['role'] }}:{{ message['content'] }}{% endfor %}",
+        );
+
+        let rendered =
+            render_prompt_template(formatter.as_ref(), &assistant_only_request()).unwrap();
+
+        assert_eq!(rendered, "assistant:prefill");
+    }
+
+    #[test]
+    fn test_assistant_only_template_error_is_invalid_argument() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+
+        let error = render_prompt_template(formatter.as_ref(), &assistant_only_request())
+            .context("Failed to apply prompt template")
+            .unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DynamoError>())
+            .expect("template render error should be classified as a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_error
+                .message()
+                .contains("No user query found in messages.")
+        );
+    }
+
+    #[test]
+    fn test_restrictive_template_accepts_request_with_user_message() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let rendered = render_prompt_template(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(rendered, "hello");
     }
 
     #[test]
