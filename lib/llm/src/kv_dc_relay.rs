@@ -7,6 +7,8 @@ mod actor;
 mod discovery;
 mod host;
 mod identity;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod load;
 mod pool_registry;
 #[cfg(feature = "kv-dc-relay-proto")]
 pub mod protocol;
@@ -14,6 +16,8 @@ pub mod protocol;
 mod publication_codec;
 #[cfg(feature = "kv-dc-relay-wan")]
 mod publication_hub;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod readiness;
 mod resolution;
 
 pub use host::{

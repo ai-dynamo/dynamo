@@ -13,6 +13,8 @@
 //! dedicated Relay campaign before changing this ownership model; further producer optimization
 //! will likely be needed for substantially larger DC-scale pools.
 
+#[cfg(feature = "kv-dc-relay-wan")]
+use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
@@ -23,10 +25,16 @@ use std::sync::atomic::Ordering;
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::CkfFailureAction;
+#[cfg(feature = "kv-dc-relay-wan")]
+use dynamo_kv_router::protocols::ActiveLoad;
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
 use dynamo_runtime::component::Component;
+#[cfg(feature = "kv-dc-relay-wan")]
+use dynamo_runtime::component::Instance;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+#[cfg(feature = "kv-dc-relay-wan")]
+use dynamo_runtime::transports::event_plane::EventSubscriber;
 use parking_lot::Mutex;
 use rand::TryRngCore;
 use serde::Serialize;
@@ -44,8 +52,12 @@ use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::readiness::EndpointServingFacts;
 use super::resolution::stable_dc_id;
 use crate::discovery::{KvSourceMembershipCoordinator, KvSourceMembershipWatch};
+#[cfg(feature = "kv-dc-relay-wan")]
+use crate::kv_router::KV_METRICS_SUBJECT;
 #[cfg(feature = "ckf-diagnostics")]
 use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
 use crate::kv_router::indexer::{
@@ -332,6 +344,49 @@ struct EndpointPoolRuntime {
     recovery: RecoverySupervisor<KvDcRelayRecoveryTarget>,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    serving_facts: EndpointServingFacts,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    load_runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    load_cancel: CancellationToken,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    load_task: JoinHandle<()>,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct EndpointAvailabilityWatch {
+    routable: watch::Receiver<Vec<WorkerId>>,
+    discovered: watch::Receiver<Vec<Instance>>,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+impl EndpointAvailabilityWatch {
+    fn has_initial_observation(&self) -> bool {
+        !self.discovered.borrow().is_empty() || !self.routable.borrow().is_empty()
+    }
+
+    async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        tokio::select! {
+            result = self.routable.changed() => result,
+            result = self.discovered.changed() => result,
+        }
+    }
+
+    fn live_workers(&self) -> HashSet<WorkerId> {
+        let discovered = self
+            .discovered
+            .borrow()
+            .iter()
+            .map(Instance::id)
+            .collect::<HashSet<_>>();
+        self.routable
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|worker_id| discovered.contains(worker_id))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,6 +949,12 @@ async fn run_endpoint_slot(
     let mut config_tx: Option<watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>> = None;
     let mut source_watch: Option<KvSourceMembershipWatch> = None;
     let mut runtime: Option<EndpointPoolRuntime> = None;
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let mut instance_rx = None;
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let mut availability_authoritative = false;
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let mut availability_retry_delay = Duration::from_millis(100);
     let mut layout_generation = 0u64;
     let mut retry_binding: Option<ActorBinding> = None;
     let mut retry_delay = Duration::from_millis(100);
@@ -909,6 +970,25 @@ async fn run_endpoint_slot(
             current.layout_generation = layout_generation;
             if runtime.is_none() {
                 current.lifecycle = inactive_slot_lifecycle(membership.as_ref());
+            }
+        }
+
+        #[cfg(feature = "kv-dc-relay-wan")]
+        if membership.is_some() && instance_rx.is_none() {
+            match instance_availability_watch(&component, &endpoint).await {
+                Ok(receiver) => {
+                    availability_authoritative = receiver.has_initial_observation();
+                    instance_rx = Some(receiver);
+                    availability_retry_delay = Duration::from_millis(100);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %endpoint,
+                        %error,
+                        retry_ms = availability_retry_delay.as_millis(),
+                        "Failed to observe routable endpoint instances for Relay readiness"
+                    );
+                }
             }
         }
 
@@ -986,6 +1066,11 @@ async fn run_endpoint_slot(
             if membership.is_none() {
                 config_tx = None;
                 source_watch = None;
+                #[cfg(feature = "kv-dc-relay-wan")]
+                {
+                    instance_rx = None;
+                    availability_authoritative = false;
+                }
                 let mut current = status.write().await;
                 current.lifecycle = SlotLifecycle::Lightweight;
                 #[cfg(feature = "ckf-diagnostics")]
@@ -1034,6 +1119,37 @@ async fn run_endpoint_slot(
             }
         }
 
+        #[cfg(feature = "kv-dc-relay-wan")]
+        if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref()) {
+            if active.load_runtime_configs != membership.runtime_configs {
+                match pools.replace_load_capacity(
+                    active.attachment.pool_id,
+                    active.attachment.layout_generation,
+                    &membership.runtime_configs,
+                ) {
+                    Ok(true) => active
+                        .load_runtime_configs
+                        .clone_from(&membership.runtime_configs),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        %endpoint,
+                        %error,
+                        "Failed to refresh KV DC Relay pool load capacity"
+                    ),
+                }
+            }
+            let facts = serving_facts(membership, instance_rx.as_ref(), availability_authoritative);
+            if facts != active.serving_facts
+                && pools.replace_serving_facts(
+                    active.attachment.pool_id,
+                    active.attachment.layout_generation,
+                    facts.clone(),
+                )
+            {
+                active.serving_facts = facts;
+            }
+        }
+
         if runtime.is_none()
             && !source_binding_pending
             && let (Some(binding), Some(membership), Some(membership_watch)) = (
@@ -1049,6 +1165,14 @@ async fn run_endpoint_slot(
                 endpoint.clone(),
                 binding.clone(),
                 membership.registrations.clone(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts(
+                    &membership,
+                    instance_rx.as_ref(),
+                    availability_authoritative,
+                ),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                membership.runtime_configs.clone(),
                 membership_watch,
                 rebuild_permit.clone(),
                 recovery_fetch_permit.clone(),
@@ -1095,12 +1219,33 @@ async fn run_endpoint_slot(
             Metadata,
             Source,
             SourceClosed,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            Instance,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            AvailabilityRetry,
             Fault(PendingActorAction),
             PoolUnavailable,
             Health,
             Retry,
             Cancelled,
         }
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let availability_input = async {
+            if let Some(instance_rx) = instance_rx.as_mut() {
+                return if instance_rx.changed().await.is_ok() {
+                    SlotInput::Instance
+                } else {
+                    SlotInput::AvailabilityRetry
+                };
+            }
+            if membership.is_some() {
+                tokio::time::sleep(availability_retry_delay).await;
+                return SlotInput::AvailabilityRetry;
+            }
+            std::future::pending().await
+        };
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
+        let availability_input = std::future::pending::<SlotInput>();
         if let Some(active) = runtime.as_mut() {
             pending_faults.drain_ready(&mut active.attachment.faults);
         }
@@ -1120,6 +1265,7 @@ async fn run_endpoint_slot(
             } => {
                 if changed.is_ok() { SlotInput::Source } else { SlotInput::SourceClosed }
             }
+            availability = availability_input => availability,
             fault = async {
                 if let Some(fault) = pending_faults.pop_front() {
                     return Some(fault);
@@ -1150,6 +1296,18 @@ async fn run_endpoint_slot(
         };
         match input {
             SlotInput::Metadata | SlotInput::Source | SlotInput::Health => {}
+            #[cfg(feature = "kv-dc-relay-wan")]
+            SlotInput::Instance => {
+                availability_authoritative = true;
+            }
+            #[cfg(feature = "kv-dc-relay-wan")]
+            SlotInput::AvailabilityRetry => {
+                instance_rx = None;
+                availability_authoritative = false;
+                availability_retry_delay = availability_retry_delay
+                    .saturating_mul(2)
+                    .min(Duration::from_secs(5));
+            }
             SlotInput::SourceClosed => {
                 tracing::debug!(%endpoint, "KV source membership watch closed; rebinding");
                 config_tx = None;
@@ -1264,6 +1422,43 @@ async fn run_endpoint_slot(
     current.lifecycle = SlotLifecycle::Lightweight;
 }
 
+#[cfg(feature = "kv-dc-relay-wan")]
+async fn instance_availability_watch(
+    component: &Component,
+    endpoint: &EndpointId,
+) -> anyhow::Result<EndpointAvailabilityWatch> {
+    let endpoint = component
+        .drt()
+        .namespace(&endpoint.namespace)?
+        .component(&endpoint.component)?
+        .endpoint(&endpoint.name);
+    let client = endpoint.client().await?;
+    Ok(EndpointAvailabilityWatch {
+        routable: client.instance_avail_watcher(),
+        discovered: client.instance_source.as_ref().clone(),
+    })
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+fn serving_facts(
+    membership: &EndpointMembership,
+    instance_rx: Option<&EndpointAvailabilityWatch>,
+    availability_authoritative: bool,
+) -> EndpointServingFacts {
+    let live_workers = availability_authoritative.then(|| {
+        instance_rx
+            .into_iter()
+            .flat_map(EndpointAvailabilityWatch::live_workers)
+            .filter(|worker_id| membership.worker_topology.contains_key(worker_id))
+            .collect::<HashSet<_>>()
+    });
+    EndpointServingFacts {
+        worker_topology: membership.worker_topology.clone(),
+        adapters: membership.adapters.clone(),
+        live_workers,
+    }
+}
+
 async fn diagnostic_tick() {
     #[cfg(feature = "ckf-diagnostics")]
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1278,6 +1473,8 @@ async fn start_endpoint_pool(
     endpoint: EndpointId,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
+    #[cfg(feature = "kv-dc-relay-wan")] serving_facts: EndpointServingFacts,
+    #[cfg(feature = "kv-dc-relay-wan")] runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
     membership_watch: KvSourceMembershipWatch,
     rebuild_permit: Arc<Semaphore>,
     recovery_fetch_permit: Arc<Semaphore>,
@@ -1290,6 +1487,10 @@ async fn start_endpoint_pool(
             pool_id: PoolId::new(binding.domain.id, ckf_dc_id),
             endpoint: endpoint.clone(),
             registrations: registrations.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            serving_facts: serving_facts.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            runtime_configs: runtime_configs.clone(),
         })
         .await?;
     let initial_recoveries = membership_watch
@@ -1309,6 +1510,8 @@ async fn start_endpoint_pool(
         initial_recoveries,
         recovery_attempt_timeout,
     );
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let load_cancel = cancel.child_token();
     let recovery = match start_target_subscriber(
         component.clone(),
         endpoint.clone(),
@@ -1331,11 +1534,28 @@ async fn start_endpoint_pool(
             return Err(error);
         }
     };
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let load_task = start_load_collector(
+        component,
+        endpoint,
+        attachment.pool_id,
+        attachment.layout_generation,
+        pools,
+        load_cancel.clone(),
+    );
     Ok(EndpointPoolRuntime {
         attachment,
         recovery,
         binding,
         registrations,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        serving_facts,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        load_runtime_configs: runtime_configs,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        load_cancel,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        load_task,
     })
 }
 
@@ -1356,6 +1576,10 @@ async fn retire_endpoint_pool(
         attachment,
         recovery,
         binding,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        load_cancel,
+        #[cfg(feature = "kv-dc-relay-wan")]
+        load_task,
         ..
     } = active;
     let PoolAttachment {
@@ -1365,7 +1589,7 @@ async fn retire_endpoint_pool(
         mut faults,
         ..
     } = attachment;
-    let teardown = async {
+    let actor_teardown = async {
         match mode {
             PoolRetirementMode::Graceful => {
                 recovery.shutdown().await;
@@ -1376,6 +1600,21 @@ async fn retire_endpoint_pool(
                 result
             }
         }
+    };
+    let teardown = async {
+        #[cfg(feature = "kv-dc-relay-wan")]
+        {
+            load_cancel.cancel();
+            let (result, load_result) = tokio::join!(actor_teardown, load_task);
+            if let Err(error) = load_result
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, %pool_id, "KV DC Relay load collector failed during pool retirement");
+            }
+            result
+        }
+        #[cfg(not(feature = "kv-dc-relay-wan"))]
+        actor_teardown.await
     };
     let result = withdraw_drain_and_remove_pool(
         pools,
@@ -1416,6 +1655,159 @@ async fn withdraw_drain_and_remove_pool<T>(
     let result = drain_faults_while(pool_id, faults, teardown).await;
     pools.remove(pool_id, layout_generation).await;
     result
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+fn start_load_collector(
+    component: Component,
+    endpoint: EndpointId,
+    pool_id: PoolId,
+    layout_generation: u64,
+    pools: Arc<PoolRegistry>,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let collector_cancel = cancel.clone();
+        let collector_pools = pools.clone();
+        let collector = tokio::spawn(run_load_collector(
+            component,
+            endpoint,
+            pool_id,
+            layout_generation,
+            collector_pools,
+            collector_cancel,
+        ));
+        let result = collector.await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        let reason = match result {
+            Ok(()) => "ActiveLoad collector stopped unexpectedly".to_string(),
+            Err(error) => format!("ActiveLoad collector task failed: {error}"),
+        };
+        pools.fence_generation(pool_id, layout_generation, &reason);
+    })
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+async fn run_load_collector(
+    component: Component,
+    endpoint: EndpointId,
+    pool_id: PoolId,
+    layout_generation: u64,
+    pools: Arc<PoolRegistry>,
+    cancel: CancellationToken,
+) {
+    let mut retry = LoadRetryBackoff::default();
+    loop {
+        let subscriber =
+            EventSubscriber::for_endpoint_id(component.drt(), &endpoint, KV_METRICS_SUBJECT).await;
+        let mut subscriber = match subscriber {
+            Ok(subscriber) => subscriber.typed::<ActiveLoad>(),
+            Err(error) => {
+                let failure = retry.failed();
+                if failure.first {
+                    tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "Failed to subscribe to KV DC Relay ActiveLoad stream");
+                } else {
+                    tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad subscription retry failed");
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(failure.delay) => {}
+                }
+                continue;
+            }
+        };
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return,
+                event = subscriber.next() => event,
+            };
+            match event {
+                Some(Ok((_envelope, load))) => {
+                    retry.succeeded();
+                    if !pools.observe_load(pool_id, layout_generation, load) {
+                        tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
+                    }
+                }
+                Some(Err(error)) => {
+                    pools.clear_load_observations(pool_id, layout_generation);
+                    let failure = retry.failed();
+                    if failure.first {
+                        tracing::warn!(%endpoint, %pool_id, layout_generation, %error, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed; resubscribing");
+                    } else {
+                        tracing::debug!(%endpoint, %pool_id, layout_generation, %error, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream failed again; resubscribing");
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = tokio::time::sleep(failure.delay) => {}
+                    }
+                    break;
+                }
+                None => {
+                    pools.clear_load_observations(pool_id, layout_generation);
+                    let failure = retry.failed();
+                    if failure.first {
+                        tracing::warn!(%endpoint, %pool_id, layout_generation, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed; resubscribing");
+                    } else {
+                        tracing::debug!(%endpoint, %pool_id, layout_generation, failures = failure.count, retry_ms = failure.delay.as_millis(), "KV DC Relay ActiveLoad stream closed again; resubscribing");
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = tokio::time::sleep(failure.delay) => {}
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+const LOAD_RETRY_INITIAL: Duration = Duration::from_millis(100);
+#[cfg(feature = "kv-dc-relay-wan")]
+const LOAD_RETRY_MAX: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct LoadRetryBackoff {
+    failures: u64,
+    next_delay: Duration,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+impl Default for LoadRetryBackoff {
+    fn default() -> Self {
+        Self {
+            failures: 0,
+            next_delay: LOAD_RETRY_INITIAL,
+        }
+    }
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+impl LoadRetryBackoff {
+    fn failed(&mut self) -> LoadRetryFailure {
+        self.failures = self.failures.saturating_add(1);
+        let failure = LoadRetryFailure {
+            count: self.failures,
+            delay: self.next_delay,
+            first: self.failures == 1,
+        };
+        self.next_delay = self.next_delay.saturating_mul(2).min(LOAD_RETRY_MAX);
+        failure
+    }
+
+    fn succeeded(&mut self) {
+        self.failures = 0;
+        self.next_delay = LOAD_RETRY_INITIAL;
+    }
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct LoadRetryFailure {
+    count: u64,
+    delay: Duration,
+    first: bool,
 }
 
 enum FaultCollection<T> {
@@ -1681,6 +2073,8 @@ mod tests {
             aliases: Vec::new(),
             roles: Vec::new(),
             runtime_configs: HashMap::new(),
+            worker_topology: HashMap::new(),
+            adapters: HashMap::new(),
             conflicts: Vec::new(),
         }
     }
@@ -1979,6 +2373,10 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -2019,6 +2417,10 @@ mod tests {
                 pool_id: PoolId::new(desired_binding.domain.id, DcId::new(7)),
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: new_registrations,
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -2218,6 +2620,10 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();
@@ -2392,6 +2798,10 @@ mod tests {
                     super::super::identity::CanonicalModelId::new("llama").unwrap(),
                     Vec::new(),
                 )],
+                #[cfg(feature = "kv-dc-relay-wan")]
+                serving_facts: EndpointServingFacts::default(),
+                #[cfg(feature = "kv-dc-relay-wan")]
+                runtime_configs: HashMap::new(),
             })
             .await
             .unwrap();

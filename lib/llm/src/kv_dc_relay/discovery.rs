@@ -167,6 +167,8 @@ pub(crate) struct EndpointMembership {
     pub(crate) aliases: Vec<String>,
     pub(crate) roles: Vec<String>,
     pub(crate) runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    pub(crate) worker_topology: HashMap<WorkerId, DomainWorkerTopology>,
+    pub(crate) adapters: HashMap<CanonicalModelId, AdapterMembership>,
     pub(crate) conflicts: Vec<MaterializationConflict>,
 }
 
@@ -174,6 +176,23 @@ impl EndpointMembership {
     pub(crate) fn is_materializable(&self) -> bool {
         self.domain.is_some() && !self.registrations.is_empty() && self.conflicts.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DomainWorkerTopology {
+    pub(crate) worker_type: Option<crate::worker_type::WorkerType>,
+    pub(crate) needs: Vec<Vec<crate::worker_type::WorkerType>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdapterWorkerMembership {
+    pub(crate) max_gpu_lora_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdapterMembership {
+    pub(crate) base_model: CanonicalModelId,
+    pub(crate) workers: HashMap<WorkerId, AdapterWorkerMembership>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -218,6 +237,8 @@ struct EndpointMembershipBuilder {
     domain: Option<KvCacheDomainKey>,
     claims: Vec<RegistrationClaim>,
     runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    worker_topology: HashMap<WorkerId, DomainWorkerTopology>,
+    adapters: HashMap<CanonicalModelId, AdapterMembership>,
     roles: HashSet<String>,
     conflicts: Vec<MaterializationConflict>,
 }
@@ -452,6 +473,8 @@ impl MembershipState {
                 domain,
                 claims: Vec::new(),
                 runtime_configs: HashMap::new(),
+                worker_topology: HashMap::new(),
+                adapters: HashMap::new(),
                 roles: HashSet::new(),
                 conflicts: Vec::new(),
             };
@@ -487,6 +510,13 @@ impl MembershipState {
                 builder
                     .runtime_configs
                     .insert(worker_id, projection.card.runtime_config.clone());
+                builder.worker_topology.insert(
+                    worker_id,
+                    DomainWorkerTopology {
+                        worker_type: projection.card.worker_type,
+                        needs: projection.card.needs.clone(),
+                    },
+                );
                 if let Some(worker_type) = projection.card.worker_type {
                     builder.roles.insert(worker_type.as_str().to_string());
                 }
@@ -553,9 +583,33 @@ impl MembershipState {
                 };
                 let aliases = diagnostics.valid_aliases(id, card, &adapter, &endpoint);
                 let target = ModelTarget::Lora {
-                    base_model,
+                    base_model: base_model.clone(),
                     adapter: adapter.clone(),
                 };
+                let adapter_membership =
+                    builder
+                        .adapters
+                        .entry(adapter.clone())
+                        .or_insert_with(|| AdapterMembership {
+                            base_model: base_model.clone(),
+                            workers: HashMap::new(),
+                        });
+                if adapter_membership.base_model != base_model {
+                    builder.conflicts.push(MaterializationConflict::Card {
+                        card: id.clone(),
+                        reason: "adapter resolves to conflicting backing base models".to_string(),
+                    });
+                    continue;
+                }
+                adapter_membership.workers.insert(
+                    worker_id,
+                    AdapterWorkerMembership {
+                        max_gpu_lora_count: card
+                            .lora
+                            .as_ref()
+                            .and_then(|lora| lora.max_gpu_lora_count),
+                    },
+                );
                 builder.claims.push(RegistrationClaim {
                     binding: BindingIdentity {
                         model: adapter,
@@ -635,6 +689,8 @@ impl MembershipState {
                 aliases: sorted(aliases),
                 roles: sorted(builder.roles),
                 runtime_configs: builder.runtime_configs,
+                worker_topology: builder.worker_topology,
+                adapters: builder.adapters,
                 conflicts: builder.conflicts,
             };
             if self.previous.get(&endpoint) != Some(&candidate) {
@@ -1220,8 +1276,20 @@ mod tests {
             registration.target(),
             &ModelTarget::Lora {
                 base_model: CanonicalModelId::new("llama").unwrap(),
-                adapter,
+                adapter: adapter.clone(),
             }
+        );
+        assert_eq!(
+            membership.worker_topology[&1].worker_type,
+            Some(WorkerType::Aggregated)
+        );
+        assert_eq!(
+            membership.adapters[&adapter].base_model,
+            CanonicalModelId::new("llama").unwrap()
+        );
+        assert_eq!(
+            membership.adapters[&adapter].workers[&1].max_gpu_lora_count,
+            Some(4)
         );
     }
 
