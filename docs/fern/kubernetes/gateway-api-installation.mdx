@@ -13,8 +13,7 @@ an Endpoint Picker Plugin (EPP). To use the default topology, continue to
 [KV-Aware Routing with the Dynamo Frontend](dgd-kv-routing.md).
 </Note>
 
-Install this integration after the [Dynamo platform](installation-guide.md). The Dynamo operator needs
-the GAIE `InferencePool` API before it can reconcile a `DynamoGraphDeployment` with an EPP component.
+Install this integration when you plan to route requests through a Gateway API data plane and GAIE `InferencePool`. For operator-managed DGD routing, install it after the [Dynamo platform](installation-guide.md) so the Dynamo operator can reconcile a `DynamoGraphDeployment` with an EPP component. For the experimental [Vanilla vLLM GAIE On-ramp](vanilla-vllm-onramp.mdx), the Dynamo operator is not required, but the same Gateway API, GAIE, and Gateway implementation prerequisites apply.
 
 <Steps toc={true} tocDepth={2}>
 
@@ -68,8 +67,7 @@ The script installs:
   controller). Its `http` listener sets `allowedRoutes.namespaces.from: All`, so `HTTPRoute` objects
   in `$NAMESPACE` attach to it across namespaces.
 
-The workload namespace `$NAMESPACE` still holds the model, EPP, `InferencePool`, and `HTTPRoute`.
-Only the Gateway itself lives in `$AGW_NAMESPACE`.
+The workload namespace `$NAMESPACE` still holds the model, EPP, `InferencePool`, and `HTTPRoute`. Only the Gateway itself lives in `$AGW_NAMESPACE`.
 
 The script pins compatible dependency versions. Review it before running it when your platform team
 owns Gateway API or agentgateway lifecycle.

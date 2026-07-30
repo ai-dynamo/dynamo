@@ -5,10 +5,7 @@ title: Gateway API Routing Reference
 subtitle: Dynamo Endpoint Picker Plugin fields, generated resources, runtime settings, and request contracts.
 ---
 
-Use this reference for a `DynamoGraphDeployment` (DGD) that routes requests through the Gateway API
-Inference Extension (GAIE) and the Dynamo Endpoint Picker Plugin (EPP). For the procedure, see
-[Route Requests with Gateway API](../../kubernetes/inference-gateway.mdx). For architecture, see
-[Gateway API Routing Architecture](../../design-docs/gateway-api-routing.md).
+Use this reference for Gateway API routing through the Gateway API Inference Extension (GAIE) and the Dynamo Endpoint Picker Plugin (EPP). For the operator-managed `DynamoGraphDeployment` (DGD) procedure, see [Route Requests with Gateway API](../../kubernetes/inference-gateway.mdx). For the standalone vanilla vLLM procedure, see [Vanilla vLLM GAIE On-ramp](../../kubernetes/vanilla-vllm-onramp.mdx). For architecture, see [Gateway API Routing Architecture](../../design-docs/gateway-api-routing.md) and [Vanilla vLLM GAIE On-ramp Architecture](../../design-docs/vanilla-vllm-gaie-onramp.md).
 
 ## DGD EPP Fields
 
@@ -257,6 +254,84 @@ mutated request to the selected Frontend sidecar.
 
 For supported body-bearing OpenAI requests, the EPP can inject precomputed token data into
 `nvext.token_data` so the Frontend sidecar does not repeat tokenization.
+
+## Standalone EPP Runtime Environment
+
+Standalone mode is an experimental operator-free EPP integration for GAIE deployments that route to upstream vLLM workers. Set these values on the standalone EPP container in `spec.template.spec.containers[].env`; for the task-oriented workflow, see [Vanilla vLLM GAIE On-ramp](../../kubernetes/vanilla-vllm-onramp.mdx).
+
+<ParamField path="DYN_EPP_MODE" type="string" required={true}>
+  Runs the embedded selection service without the Dynamo runtime.
+
+  <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>standalone</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_EPP_INFERENCE_POOL_NAME" type="string" required={true}>
+  Name of the `InferencePool` that drives worker discovery.
+</ParamField>
+
+<ParamField path="POD_NAMESPACE" type="string" required={true}>
+  Namespace containing the EPP, `InferencePool`, and workers. Inject it with the Kubernetes downward API.
+</ParamField>
+
+<ParamField path="DYN_MODEL_NAME" type="string" required={true}>
+  Served model ID. Requests must use the same `model` value.
+</ParamField>
+
+<ParamField path="DYN_EPP_TOKENIZER_SERVICE_URL" type="URL" required={true}>
+  Base URL of the vLLM render Service used for `/v1/chat/completions/render` tokenization.
+</ParamField>
+
+<ParamField path="DYN_EPP_TOKENIZER_PROTOCOL" type="string" required={true}>
+  Tokenizer wire protocol.
+
+  <span className="enum-values"><span className="enum-label">Value:</span> <Badge intent="note" minimal>vllm-render</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_KV_CACHE_BLOCK_SIZE" type="integer" required={true}>
+  Backend KV cache block size. Must equal vLLM `--block-size`; mismatches change prefix block hashes and produce incorrect overlap scores.
+</ParamField>
+
+<ParamField path="DYN_EPP_KV_EVENT_PORT" type="integer" default="5557">
+  Per-pod vLLM KV event port.
+</ParamField>
+
+<ParamField path="DYN_EPP_KV_EVENT_REPLAY_PORT" type="integer">
+  Per-pod replay port for KV event gap recovery.
+</ParamField>
+
+<ParamField path="DYN_EPP_MAX_NUM_BATCHED_TOKENS" type="integer">
+  vLLM maximum batched-token capacity used for load accounting. Set it to the worker `--max-num-batched-tokens` value when router queue thresholds are enabled.
+</ParamField>
+
+<ParamField path="DYN_EPP_TOTAL_KV_BLOCKS" type="integer">
+  Optional per-worker total KV block hint.
+</ParamField>
+
+<ParamField path="DYN_EPP_SELECTION_INDEXER_THREADS" type="integer" default="4">
+  KV indexer thread count.
+</ParamField>
+
+<ParamField path="DYN_EPP_TOKENIZATION_TIMEOUT_MS" type="integer" default="5000">
+  Render request timeout in milliseconds.
+</ParamField>
+
+<ParamField path="DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES" type="integer" default="16777216">
+  Maximum render response size.
+</ParamField>
+
+<ParamField path="DYN_EPP_MAX_INFLIGHT_REQUESTS" type="integer" default="1024">
+  Concurrent EPP request guardrail. Excess requests receive `503`.
+</ParamField>
+
+<ParamField path="DYN_EPP_PEER_SERVICE" type="string">
+  EPP Service used to discover sibling replicas for best-effort active-load synchronization.
+</ParamField>
+
+<ParamField path="POD_IP" type="string">
+  EPP pod IP used to exclude the local replica from its peer set. Required when `DYN_EPP_PEER_SERVICE` is set.
+</ParamField>
+
+The `InferencePool` remains the source of truth for the worker selector and target HTTP port. Do not duplicate those fields in EPP environment variables.
 
 ## Service Mesh Configuration
 
