@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -40,8 +41,28 @@ async def test_load_audio_rejects_http_by_default():
     """
     loader = AudioLoader(url_policy=UrlValidationPolicy())
 
-    with pytest.raises(ValueError, match="not allowed"):
+    with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_audio("http://example.com/x.wav")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+    ],
+)
+async def test_load_audio_preserves_client_error(client_error):
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=client_error
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_audio("https://example.com/x.wav")
+
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
@@ -100,6 +121,25 @@ async def test_load_audio_batch_rejects_malformed_items():
 
     with pytest.raises(ValueError, match="Invalid audio multimodal item"):
         await loader.load_audio_batch([{"bad_key": "value"}])
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_prioritizes_typed_client_error():
+    loader = AudioLoader()
+    client_error = UrlValidationError("blocked host")
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(UrlValidationError) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/bad.wav"},
+                {"Url": "https://localhost/private.wav"},
+            ]
+        )
+
+    assert exc_info.value is client_error
 
 
 @pytest.mark.asyncio
