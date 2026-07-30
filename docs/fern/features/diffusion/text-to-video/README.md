@@ -244,15 +244,15 @@ The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.
 
 ```bash
 # Blackwell (default)
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a" -t <my-registry/fastvideo-runtime:my-tag>
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a" -t <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 
 # Hopper, on a memory-constrained builder
 docker build examples/diffusers/ \
   --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a" \
   --build-arg MAX_JOBS=2 \
-  -t <my-registry/fastvideo-runtime:my-tag>
+  -t <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 
-docker push <my-registry/fastvideo-runtime:my-tag>
+docker push <nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 ```
 
 > [!WARNING]
@@ -297,7 +297,7 @@ To swap the image on an existing deployment quickly:
 
 ```bash
 export DEPLOYMENT_FILE=agg.yaml
-export FASTVIDEO_IMAGE=<my-registry/fastvideo-runtime:my-tag>
+export FASTVIDEO_IMAGE=<nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.4.0>
 
 yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FASTVIDEO_IMAGE)' \
   ${DEPLOYMENT_FILE} > ${DEPLOYMENT_FILE}.generated
