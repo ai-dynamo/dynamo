@@ -8,6 +8,8 @@ mod discovery;
 mod host;
 mod identity;
 mod pool_registry;
+#[cfg(feature = "kv-dc-relay-proto")]
+pub mod protocol;
 mod resolution;
 
 pub use host::{
