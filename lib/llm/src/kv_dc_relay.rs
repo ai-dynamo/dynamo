@@ -10,6 +10,10 @@ mod identity;
 mod pool_registry;
 #[cfg(feature = "kv-dc-relay-proto")]
 pub mod protocol;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_codec;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod publication_hub;
 mod resolution;
 
 pub use host::{
