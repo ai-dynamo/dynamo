@@ -100,10 +100,16 @@ impl SystemHealth {
         self.health_check_enabled
     }
 
-    /// Signal endpoint transport registration. Sets Ready when canary is disabled;
-    /// no-op when canary is enabled (canary will set Ready after verification).
+    /// Signal endpoint transport registration. Endpoints with a canary target stay
+    /// NotReady until verification succeeds. Payload-less endpoints cannot run a
+    /// canary, so transport registration is their readiness signal.
     pub fn set_endpoint_registered(&self, endpoint: &str) {
-        if !self.health_check_enabled {
+        let has_health_check_target = self
+            .health_check_targets
+            .read()
+            .unwrap()
+            .contains_key(endpoint);
+        if !self.health_check_enabled || !has_health_check_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
         }
     }
@@ -296,5 +302,57 @@ impl SystemHealth {
     /// Get the liveness check path
     pub fn live_path(&self) -> &str {
         &self.live_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::{Instance, TransportType};
+
+    fn system_health(health_check_enabled: bool) -> SystemHealth {
+        SystemHealth::new(
+            HealthStatus::NotReady,
+            vec!["generate".to_string()],
+            health_check_enabled,
+            "/health".to_string(),
+            "/live".to_string(),
+        )
+    }
+
+    #[test]
+    fn payloadless_endpoint_becomes_ready_when_registered() {
+        let health = system_health(true);
+
+        health.set_endpoint_registered("generate");
+
+        assert_eq!(
+            health.get_endpoint_health_status("generate"),
+            Some(HealthStatus::Ready)
+        );
+    }
+
+    #[test]
+    fn endpoint_with_canary_target_stays_not_ready_when_registered() {
+        let health = system_health(true);
+        health.register_health_check_target(
+            "generate",
+            Instance {
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+                namespace: "test".to_string(),
+                instance_id: 1,
+                transport: TransportType::Nats("generate".to_string()),
+                device_type: None,
+            },
+            serde_json::json!({"token_ids": [1]}),
+        );
+
+        health.set_endpoint_registered("generate");
+
+        assert_eq!(
+            health.get_endpoint_health_status("generate"),
+            Some(HealthStatus::NotReady)
+        );
     }
 }

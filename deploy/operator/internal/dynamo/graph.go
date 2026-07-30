@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -1871,6 +1872,12 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		workerHashSuffix = workerHash
 	}
 
+	var image string
+	if main := GetMainContainer(component); main != nil {
+		image = main.Image
+	}
+	resolvedRuntimeVersion, runtimeVersionErr := runtimeversion.Resolve(image, component.RuntimeVersionOverride)
+
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  string(component.ComponentType),
@@ -1880,6 +1887,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
+		RuntimeVersion:                 resolvedRuntimeVersion,
+		RuntimeVersionKnown:            runtimeVersionErr == nil,
 	}
 	return componentContext
 }
