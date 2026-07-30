@@ -39,3 +39,7 @@
 ^https://docs\.nvidia\.com/dynamo/dev/reference/releases/(release-history|v1-[0-9]+-[0-9]+)$
 ^https://github\.com/ai-dynamo/dynamo/blob/main/docs/fern/components/releases\.data\.ts$
 
+# The DGDR example manifests land with this docs refactor; the canonical
+# tree/main link in templates/dgdr.mdx 404s from CI until the PR is merged.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr$
+

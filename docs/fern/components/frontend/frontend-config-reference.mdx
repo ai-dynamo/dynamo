@@ -567,6 +567,40 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats, gRPC tun
   Environment variable: `DYN_INTERACTIVE`
 </ParamField>
 
+## Host memory allocator
+
+The frontend performs per-request host-memory allocations. Under high CPU load, allocator
+contention can cap frontend throughput before the GPU workers saturate. Dynamo runtime containers
+include jemalloc, but the frontend does not preload it by default.
+
+<ParamField path="LD_PRELOAD" type="string" default="unset">
+  Preload jemalloc for the frontend process. The library path depends on the container architecture:
+
+  ```bash
+  # x86_64
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
+  # arm64
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+  ```
+
+  In Kubernetes, set this variable on the frontend container rather than modifying the image. Locate
+  the installed path with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'` if the image uses a different
+  layout.
+</ParamField>
+
+<ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
+  Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
+  allocation. This is an empirical starting point, not a production default:
+
+  ```bash
+  export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+  ```
+
+  Validate allocator changes with the same AIPerf workload before and after enabling them. See
+  [Advanced Performance Tuning](../../performance/tuning.md).
+</ParamField>
+
 ## HTTP endpoints
 
 The frontend exposes the following HTTP endpoints.

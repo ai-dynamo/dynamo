@@ -37,21 +37,21 @@ pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
         stage: SimulationWorkerStage,
         worker_id: usize,
     },
-    /// A recurring planner heartbeat. Payload-free: the planner metrics are
+    /// A recurring scaling heartbeat. Payload-free: the scaling snapshot is
     /// gathered from live runtime state when the tick fires. Re-enqueues itself
-    /// at the time the planner hook returns (see `apply_planner_ticks`).
-    PlannerTick,
+    /// at the time the scaling policy returns.
+    ScalingTick,
 }
 
 impl<Events: EngineEventBatch> SimulationEventKind<Events> {
-    /// Tie-breaker among events at the *same* `at_ms`: a `PlannerTick` always
-    /// sorts after every other kind, so the planner observes a fully settled
+    /// Tie-breaker among events at the *same* `at_ms`: a `ScalingTick` always
+    /// sorts after every other kind, so the policy observes a fully settled
     /// timestamp (all worker completions / ready / handoff events at that time
     /// drain first). `seq_no` is globally unique, so this only ever reorders a
     /// tick relative to same-timestamp events — never two real events.
     fn ordering_rank(&self) -> u8 {
         match self {
-            SimulationEventKind::PlannerTick => 1,
+            SimulationEventKind::ScalingTick => 1,
             _ => 0,
         }
     }

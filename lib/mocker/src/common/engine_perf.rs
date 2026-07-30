@@ -15,6 +15,7 @@ use aiconfigurator_core::{
     BackendKind, DataType, ENGINE_CONFIG_SCHEMA_VERSION, EngineConfig, FPM_VERSION,
     ForwardPassMetrics, ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
     ParallelMapping, QuantizationConfig, QueuedRequestMetrics, ScheduledRequestMetrics,
+    SpeculativeConfig,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,6 @@ const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
 const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
 const AIC_NEXTN_KEY: &str = "nextn";
-const AIC_NEXTN_ACCEPT_RATES_KEY: &str = "nextn_accept_rates";
-const RAW_AIC_NEXTN_ACCEPT_RATES: &str = "0,0,0,0,0";
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -65,10 +64,31 @@ pub struct AicEngineConfig {
 }
 
 impl AicEngineConfig {
-    pub fn into_aic_config(self) -> Result<EngineConfig> {
+    pub fn into_aic_config(mut self) -> Result<EngineConfig> {
         // `model_arch` is intentionally not forwarded: aiconfigurator main
         // dropped it from `EngineConfig` (architecture is inferred from the HF
         // model_path) and its deserializer ignores a stray `model_arch` key.
+        // AIC core no longer consumes acceptance-rate/progress inputs, but it
+        // still needs `nextn` to compile the MTP verification work. Dynamo
+        // applies accepted-token progress above core.
+        //
+        // TODO: AIC FPM consumes already-packed telemetry. Before exercising
+        // MTP through this path, pack Dynamo's logical decode-request and KV
+        // counts by `(nextn + 1)`, or switch to an AIC API that accepts raw
+        // logical counts.
+        let nextn = self
+            .extra
+            .remove(AIC_NEXTN_KEY)
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid {AIC_NEXTN_KEY} value {value:?}"))
+            })
+            .transpose()?;
+        let speculative = match nextn {
+            Some(nextn) if nextn > 0 => Some(SpeculativeConfig { nextn: Some(nextn) }),
+            Some(_) | None => None,
+        };
         Ok(EngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: self.model_name,
@@ -77,12 +97,16 @@ impl AicEngineConfig {
             backend: parse_backend_kind(&self.backend)?,
             backend_version: self.backend_version,
             kv_block_size: self.kv_block_size,
+            perf_db_sources: Default::default(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             parallel: ParallelMapping {
                 tp_size: self.tp_size,
                 pp_size: self.pp_size,
                 attention_dp_size: self.attention_dp_size,
                 moe_tp_size: self.moe_tp_size,
                 moe_ep_size: self.moe_ep_size,
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: self
@@ -102,22 +126,10 @@ impl AicEngineConfig {
                     .map(parse_data_type)
                     .transpose()?,
             },
-            speculative: None,
+            speculative,
             extra: self.extra,
         })
     }
-}
-
-fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
-    config.extra.insert(
-        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
-    );
-    config
-}
-
-fn aic_engine_config_for_raw_iteration_time(config: AicEngineConfig) -> Result<EngineConfig> {
-    Ok(aic_config_for_raw_iteration_time(config.into_aic_config()?))
 }
 
 impl EnginePerfLimits {
@@ -150,17 +162,12 @@ impl EnginePerfLimits {
 }
 
 /// Capacity search objective.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OptimizationTarget {
+    #[default]
     Throughput,
     Latency,
-}
-
-impl Default for OptimizationTarget {
-    fn default() -> Self {
-        Self::Throughput
-    }
 }
 
 /// Capacity query request.
@@ -362,7 +369,7 @@ impl EnginePerfModel {
         let options = resolve_options(inputs.options, &limits);
         let load_averages = AggLoadAverages::new(options.max_observations);
         let aic_config = match inputs.aic_config {
-            Some(config) => Some(aic_engine_config_for_raw_iteration_time(config)?),
+            Some(config) => Some(config.into_aic_config()?),
             None => inputs
                 .engine_args
                 .as_ref()
@@ -416,7 +423,7 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
-        let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
+        let aic_config = aic_config.into_aic_config()?;
         let attention_dp_size = aic_config.parallel.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
@@ -1033,15 +1040,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     let Some(model_name) = args.aic_model_path.clone() else {
         bail!("aic_model_path is required when aic_backend is set");
     };
-    let mut extra = BTreeMap::new();
-    if let Some(nextn) = args.aic_nextn {
-        extra.insert(AIC_NEXTN_KEY.to_string(), nextn.to_string());
-    }
-    extra.insert(
-        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
-    );
-    Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
+    Ok(Some(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
         system_name: args
@@ -1067,6 +1066,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .aic_moe_ep_size
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
+            cp_size: None,
         },
         // Native analytics path: quant dtypes are parsed by `parse_data_type`
         // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
@@ -1097,9 +1097,20 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .map(parse_data_type)
                 .transpose()?,
         },
-        speculative: None,
-        extra,
-    })))
+        speculative: args
+            .aic_nextn
+            .filter(|&nextn| nextn > 0)
+            .map(|nextn| -> Result<SpeculativeConfig> {
+                Ok(SpeculativeConfig {
+                    nextn: Some(to_u32(nextn, "aic_nextn")?),
+                })
+            })
+            .transpose()?,
+        perf_db_sources: Default::default(),
+        database_mode: Default::default(),
+        transfer_policy: None,
+        extra: BTreeMap::new(),
+    }))
 }
 
 fn resolve_worker_type(
@@ -1558,13 +1569,9 @@ mod tests {
     }
 
     #[test]
-    fn raw_iteration_time_aic_config_forces_zero_accept_rates() {
+    fn aic_engine_config_maps_nextn_to_speculative_config() {
         let mut extra = BTreeMap::new();
         extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
-        extra.insert(
-            AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
-            "0.85,0.3,0,0,0".to_string(),
-        );
         let config = AicEngineConfig {
             model_name: "model".to_string(),
             model_arch: Some("arch".to_string()),
@@ -1584,17 +1591,15 @@ mod tests {
             extra,
         };
 
-        let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
+        let config = config.into_aic_config().unwrap();
 
-        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"3".to_string()));
-        assert_eq!(
-            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
-            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
-        );
+        assert!(config.extra.is_empty());
+        let speculative = config.speculative.expect("MTP config");
+        assert_eq!(speculative.nextn, Some(3));
     }
 
     #[test]
-    fn mock_engine_args_aic_config_forces_zero_accept_rates() {
+    fn mock_engine_args_aic_config_carries_only_nextn() {
         let args = MockEngineArgs::builder()
             .aic_backend(Some("vllm".to_string()))
             .aic_model_path(Some("model".to_string()))
@@ -1607,11 +1612,23 @@ mod tests {
 
         let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
 
-        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"2".to_string()));
-        assert_eq!(
-            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
-            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
-        );
+        assert!(config.extra.is_empty());
+        let speculative = config.speculative.expect("MTP config");
+        assert_eq!(speculative.nextn, Some(2));
+    }
+
+    #[test]
+    fn mock_engine_args_aic_config_ignores_zero_nextn() {
+        let args = MockEngineArgs::builder()
+            .aic_backend(Some("vllm".to_string()))
+            .aic_model_path(Some("model".to_string()))
+            .aic_nextn(Some(0))
+            .build()
+            .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert!(config.speculative.is_none());
     }
 
     #[test]
@@ -1720,7 +1737,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(50, 0.005)],
                 vec![prefill_observation(100, 0.010)],
             ])
@@ -1807,7 +1824,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Prefill, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.010)],
                 vec![prefill_observation(200, 0.020)],
             ])
@@ -1846,7 +1863,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(1, 0.001)],
                 vec![prefill_observation(2, 0.002)],
             ])
@@ -1867,7 +1884,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -1892,9 +1909,11 @@ mod tests {
 
     #[test]
     fn tune_with_fpms_accepts_multiple_attention_dp_ranks() {
-        let mut args = MockEngineArgs::default();
-        args.worker_type = WorkerType::Decode;
-        args.aic_attention_dp_size = Some(2);
+        let args = MockEngineArgs {
+            worker_type: WorkerType::Decode,
+            aic_attention_dp_size: Some(2),
+            ..Default::default()
+        };
         let mut model = EnginePerfModel::best_available(EnginePerfModelInputs {
             engine_args: Some(args),
             options: Some(fast_options()),
@@ -1902,7 +1921,7 @@ mod tests {
         })
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![
                     with_rank(decode_observation(1, 100, 0.010), 0),
                     with_rank(decode_observation(2, 200, 0.020), 1),
@@ -1924,9 +1943,11 @@ mod tests {
 
     #[test]
     fn attention_dp_rank_validation_rejects_duplicate_ranks() {
-        let mut args = MockEngineArgs::default();
-        args.worker_type = WorkerType::Decode;
-        args.aic_attention_dp_size = Some(2);
+        let args = MockEngineArgs {
+            worker_type: WorkerType::Decode,
+            aic_attention_dp_size: Some(2),
+            ..Default::default()
+        };
         let model = EnginePerfModel::best_available(EnginePerfModelInputs {
             engine_args: Some(args),
             options: Some(fast_options()),
@@ -1951,7 +1972,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(100, 1, 100, 0.020)],
                 vec![mixed_observation(100, 2, 200, 0.040)],
                 vec![mixed_observation(200, 1, 100, 0.030)],
@@ -1999,7 +2020,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(10, 1, 105, 0.011)],
                 vec![mixed_observation(25, 1, 105, 0.026)],
                 vec![mixed_observation(50, 1, 105, 0.051)],
@@ -2028,7 +2049,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2083,7 +2104,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(10, 1, 150, 0.010)],
                 vec![mixed_observation(50, 1, 150, 0.050)],
                 vec![mixed_observation(100, 1, 150, 0.100)],
@@ -2122,7 +2143,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![mixed_observation(1, 1, 2_147_483_648, 1.0e12)],
                 vec![mixed_observation(2, 1, 2_147_483_649, 1.0e12)],
             ])
@@ -2158,7 +2179,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.020)],
                 vec![prefill_observation(400, 0.050)],
             ])
@@ -2198,7 +2219,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.020)],
                 vec![prefill_observation(400, 0.080)],
             ])
@@ -2300,7 +2321,7 @@ mod tests {
         )
         .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2328,7 +2349,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Prefill, limits(), Some(fast_options()))
                 .unwrap();
         prefill
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![prefill_observation(100, 0.010)],
                 vec![prefill_observation(200, 0.020)],
             ])
@@ -2352,7 +2373,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         decode
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
@@ -2379,7 +2400,7 @@ mod tests {
             EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
                 .unwrap();
         model
-            .tune_with_fpms(&vec![
+            .tune_with_fpms(&[
                 vec![decode_observation(1, 100, 0.010)],
                 vec![decode_observation(2, 200, 0.020)],
             ])
