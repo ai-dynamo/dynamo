@@ -691,6 +691,27 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
+def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
+    """Use the language-model config when Transformers exposes a multimodal wrapper."""
+    from dynamo.mocker.utils import kv_cache
+
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        num_attention_heads=8,
+        hidden_size=64,
+        dtype="bfloat16",
+    )
+    config = SimpleNamespace(get_text_config=lambda: text_config)
+    monkeypatch.setattr(
+        kv_cache.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config,
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+
+
 def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
     # Offload KV-byte estimation must use the configured (normalized) KV dtype,
     # not always "auto".
@@ -764,21 +785,16 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     ]
 
 
-def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
-    monkeypatch, caplog
-):
-    def missing_memory(module_name):
-        raise ModuleNotFoundError(name=module_name)
+def test_build_mocker_engine_args_propagates_aic_estimator_error(monkeypatch):
+    def invalid_capacity(**_kwargs):
+        raise ValueError("invalid capacity request")
 
-    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", invalid_capacity)
 
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(aic_perf_model=True, model_path="/models/mock")
-    )
-
-    assert engine_args.num_gpu_blocks == 16384
-    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
-    assert "--num-gpu-blocks-override" in caplog.text
+    with pytest.raises(ValueError, match="invalid capacity request"):
+        CONFIG.build_mocker_engine_args(
+            make_args(aic_perf_model=True, model_path="/models/mock")
+        )
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):

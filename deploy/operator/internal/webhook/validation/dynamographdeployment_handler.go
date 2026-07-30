@@ -93,7 +93,7 @@ func (h *DynamoGraphDeploymentHandler) validateCreate(
 
 	// Create validator with manager for API group detection and perform validation
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
-	return validator.Validate(ctx, deployment)
+	return validator.Validate(ctx, deployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -132,7 +132,8 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
-	warnings, err := validator.Validate(ctx, newDeployment)
+	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, expectedGVK)
+	warnings, err := validator.Validate(ctx, newDeployment, runtimeVersionSourceDisabled)
 	if err != nil {
 		return warnings, err
 	}
@@ -148,7 +149,14 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(ctx, oldDeployment, newDeployment, userInfo, h.operatorPrincipal)
+	updateWarnings, err := validator.ValidateUpdate(
+		ctx,
+		oldDeployment,
+		newDeployment,
+		userInfo,
+		h.operatorPrincipal,
+		runtimeVersionSource,
+	)
 	if err != nil {
 		username := "<unknown>"
 		if userInfo != nil {

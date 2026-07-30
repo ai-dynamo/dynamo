@@ -24,7 +24,7 @@ use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, new_output_ids, output_ids_to_u32, terminal_from_meta,
 };
 
 pub struct SglangSidecarEngine {
@@ -87,7 +87,7 @@ impl SglangSidecarEngine {
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_mode(disaggregation_mode).to_string(),
+            component: disaggregation_mode.discovery_component().to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
@@ -242,6 +242,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
             let mut logprob_offset = 0_usize;
+            let mut token_offset = 0_usize;
             loop {
                 tokio::select! {
                     biased;
@@ -273,13 +274,22 @@ impl LLMEngine for SglangSidecarEngine {
                         if let Some(value) = meta_u32(&response.meta_info, "prompt_tokens") {
                             observed_prompt_tokens = value;
                         }
-                        let token_ids = match output_ids_to_u32(&response.output_ids) {
+                        // SGLang streams output_ids cumulatively (the whole sequence
+                        // so far, like its logprob metadata), so emit only the tokens
+                        // appended since the previous chunk.
+                        let token_ids = match output_ids_to_u32(new_output_ids(
+                            &response.output_ids,
+                            token_offset,
+                        )) {
                             Ok(ids) => ids,
                             Err(err) => {
                                 yield Err(err);
                                 break;
                             }
                         };
+                        // Never rewind: a regressive chunk (shorter than what we
+                        // already emitted) must not let later growth re-emit tokens.
+                        token_offset = token_offset.max(response.output_ids.len());
                         let (log_probs, top_logprobs, next_offset) =
                             match extract_logprobs(
                                 &response.meta_info,
@@ -418,14 +428,6 @@ fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoErr
         mode => Err(client::protocol_error(format!(
             "unsupported SGLang disaggregation_mode `{mode}`"
         ))),
-    }
-}
-
-fn component_for_mode(mode: DisaggregationMode) -> &'static str {
-    if mode.is_prefill() {
-        "prefill"
-    } else {
-        "backend"
     }
 }
 

@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: E402
-
 """End-to-end integration against the REAL dynamo replay (no stubs).
 
 Drives the full pipeline on a tiny mooncake trace: enumerate -> sample ->
 build_deployment -> ReplayEvaluator (planner bridge) -> score, and the whole
 ``run_smart_search`` loop with the Vizier sampler.
 
-Requires the dynamo bindings built with the ``aic-forward-pass`` Cargo feature
-(the AIC perf model the mocker needs); skips otherwise. See README "Real replay".
+Requires the planner image's ``aic-forward-pass`` and ``mocker-kvbm-offload``
+Cargo features. See README "Real replay".
 
 Uses meta-llama/Meta-Llama-3.1-8B / gb200 / trtllm: a dense GQA model the AIC perf
 DB fully covers (PASS in the gb200 support matrix). Bare ``deepseek-ai/DeepSeek-V3``
@@ -24,10 +22,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("dynamo.mocker")
-
-import dynamo._core as _core
-import dynamo.replay.main as _replay_main
 from aisimulate.spica.config import OptimizationTarget, SLATarget, SmartSearchConfig
 from aisimulate.spica.deploy import build_deployment
 from aisimulate.spica.evaluator import ReplayEvaluator
@@ -36,23 +30,13 @@ from aisimulate.spica.sample import unroll_sample
 from aisimulate.spica.score import objective_value
 from aisimulate.spica.search import run_smart_search
 from aisimulate.spica.search_space import enumerate_branches
+from dynamo import _core
 
+# FilterPy 1.4.5 contains non-raw math docstrings that Python 3.12 reports while
+# importing the planner predictors.
 pytestmark = pytest.mark.filterwarnings(
-    "ignore:\\[EXPERIMENTAL\\] Spica cannot apply KV-capacity filtering.*:UserWarning"
+    "ignore:invalid escape sequence.*:SyntaxWarning"
 )
-
-if not hasattr(_core, "RustEnginePerfModel"):
-    pytest.skip(
-        "dynamo bindings built without the aic-forward-pass feature (no AIC perf model)",
-        allow_module_level=True,
-    )
-
-if not hasattr(_replay_main, "SyntheticWorkload"):
-    pytest.skip(
-        "installed dynamo predates the planner load-modes API (ai-dynamo/dynamo#10888); "
-        "repin the [dynamo] dependency + rebuild to run these integration tests",
-        allow_module_level=True,
-    )
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
@@ -143,13 +127,12 @@ def test_static_path_emits_goodput():
     assert report["gpu_hours"] > 0.0
 
 
-@pytest.mark.skipif(
-    not getattr(_core, "MOCKER_KVBM_OFFLOAD_ENABLED", False),
-    reason="planner wheel is required for the mocker-kvbm-offload feature",
-)
 def test_static_path_runs_with_kvbm_host_offload():
     """The planner wheel must initialize and run replay with Spica's G2 knobs."""
 
+    assert (
+        _core.MOCKER_KVBM_OFFLOAD_ENABLED
+    ), "planner wheel must enable mocker-kvbm-offload"
     cfg = _config()
     cfg = cfg.model_copy(
         update={
