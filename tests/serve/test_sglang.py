@@ -15,6 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED, MULTIMODAL_VIDEO_URL
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
@@ -76,9 +77,11 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
-REMOTE_VIDEO_TEST_URI = (
-    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
-)
+# Video clips are served by the image_server fixture from the in-repo media
+# fixtures. This used to point at a third-party host, which made the SGLang
+# video tests depend on that host being reachable: a read timeout fetching the
+# clip failed the run with no relation to the code under test.
+VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
 # Each profile expands into one config per MmCase per topology with the
@@ -560,11 +563,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -613,11 +616,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             ),
@@ -626,11 +629,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 expected_log=["Embedding cache hit for VIDEO URL index 0"],
                 temperature=0.0,
                 max_tokens=100,

@@ -25,6 +25,12 @@ _MEDIA_DIR = os.path.join(WORKSPACE_DIR, "lib/llm/tests/data/media")
 _HTTP_SERVED_VIDEOS = ("240p_10.mp4", "240p_10_h264.mp4", "240p_10_h265.mp4")
 MULTIMODAL_VIDEO_H264_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h264.mp4"
 MULTIMODAL_VIDEO_H265_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h265.mp4"
+# VP9 source clip over http, for backends whose video path needs a URL rather
+# than a local file. Prefer this over any third-party URL: a remote host is an
+# availability dependency the test does not control.
+MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10.mp4"
+# Content of the synthetic clips above, for expected_response assertions.
+MULTIMODAL_VIDEO_EXPECTED = ["red", "static", "still"]
 
 
 def get_multimodal_test_image_bytes() -> bytes:

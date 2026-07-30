@@ -233,6 +233,10 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/comp
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+# The vllm and trtllm images already copy lib/; sglang did not, so its tests had
+# no lib/llm/tests/data/media fixtures and any test needing a local media clip
+# could only skip. ~32 MB, negligible here and it keeps the three consistent.
+COPY --chown=dynamo:0 lib /workspace/lib
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 # Enable forceful shutdown of inflight requests
