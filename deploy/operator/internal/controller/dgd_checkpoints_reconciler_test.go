@@ -401,6 +401,48 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	assert.Equal(t, ckpt.Name, controllerRef.Name)
 }
 
+func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
+	t.Log("Build a DGD and the GPU DeviceClass required by the checkpoint template")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	deviceClass := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(dgd, deviceClass).
+			Build(),
+		Recorder: record.NewFakeRecorder(10),
+	}
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+
+	t.Log("Synchronize the ResourceClaimTemplate before its checkpoint exists")
+	err := checkpointReconciler.syncCheckpointGMSResourceClaimTemplate(
+		ctx,
+		dgd,
+		"checkpoint-template",
+		1,
+		dra.DefaultDeviceClassName,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify the DGD temporarily controls the new template")
+	template := &resourcev1.ResourceClaimTemplate{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{
+		Name:      "checkpoint-template",
+		Namespace: "default",
+	}, template))
+	assert.True(t, metav1.IsControlledBy(template, dgd))
+}
+
 func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 	t.Log("Build a checkpoint component with graph-level defaults")
 	ctx := context.Background()
@@ -1449,6 +1491,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 }
 
 func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
+	t.Log("Build a rolling-update DGD with an active worker generation")
 	rollout := &dgdWorkerRolloutReconciler{}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1465,6 +1508,8 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 		},
 	})
 	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v1: "oldhash"})
+
+	t.Log("Compute the desired and checkpoint worker hashes")
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		t.Fatalf("desiredWorkerHashes() error = %v", err)
@@ -1475,6 +1520,8 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
 	want := activeWorkerHashForDCDGeneration(dgd, desired)
+
+	t.Log("Verify the checkpoint follows the active generation")
 	if workerHash != want {
 		t.Fatalf("checkpoint worker hash = %s, want active generated hash %s", workerHash, want)
 	}

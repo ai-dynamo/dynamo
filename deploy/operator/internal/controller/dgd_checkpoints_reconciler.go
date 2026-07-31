@@ -289,7 +289,7 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		}
 		if err := r.syncCheckpointGMSResourceClaimTemplate(
 			ctx,
-			dynamoDeployment.Namespace,
+			dynamoDeployment,
 			checkpointGMSClaimTemplateName,
 			checkpointGMSGPUCount,
 			checkpointGMSDeviceClassName,
@@ -352,16 +352,16 @@ func findPodTemplateContainer(podTemplate *corev1.PodTemplateSpec, containerName
 
 func (r *dgdCheckpointsReconciler) syncCheckpointGMSResourceClaimTemplate(
 	ctx context.Context,
-	namespace string,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	claimTemplateName string,
 	gpuCount int,
 	deviceClassName string,
 ) error {
-	_, _, err := commoncontroller.SyncResource(ctx, r, nil, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, namespace, gpuCount, deviceClassName)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dgd.Namespace, gpuCount, deviceClassName)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to sync checkpoint GMS ResourceClaimTemplate %s/%s: %w", namespace, claimTemplateName, err)
+		return fmt.Errorf("failed to sync checkpoint GMS ResourceClaimTemplate %s/%s: %w", dgd.Namespace, claimTemplateName, err)
 	}
 	return nil
 }

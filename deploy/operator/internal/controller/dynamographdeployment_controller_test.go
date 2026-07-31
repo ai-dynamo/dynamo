@@ -436,7 +436,7 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 					},
 				}).
 				Build()
-			recorder := record.NewFakeRecorder(1)
+			recorder := record.NewFakeRecorder(10)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   kubeClient,
 				Recorder: recorder,

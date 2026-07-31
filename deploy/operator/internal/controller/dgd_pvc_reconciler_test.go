@@ -58,12 +58,45 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		g.Expect(pvcs.Items).To(gomega.BeEmpty())
 	})
 
+	t.Run("missing preserved PVC with creation disabled returns an error", func(t *testing.T) {
+		t.Log("Build a converted alpha DGD that references a missing non-creatable PVC")
+		g := gomega.NewGomegaWithT(t)
+		ctx := context.Background()
+		create := false
+		pvcName := VolumeNameModelCache
+		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				PVCs: []v1alpha1.PVC{{
+					Create: &create,
+					Name:   &pvcName,
+				}},
+			},
+		})
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+			WithObjects(dgd).
+			Build()
+		reconciler := &DynamoGraphDeploymentReconciler{Client: fakeClient}
+
+		t.Log("Reconcile compatibility PVCs")
+		err := newDGDPVCReconciler(newTestDGDResourceSyncer(reconciler)).Reconcile(ctx, dgd)
+
+		t.Log("Verify the missing PVC is reported without creating one")
+		g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(
+			"does not exist and create is not enabled",
+		)))
+		pvcs := &corev1.PersistentVolumeClaimList{}
+		g.Expect(fakeClient.List(ctx, pvcs, client.InNamespace("default"))).NotTo(gomega.HaveOccurred())
+		g.Expect(pvcs.Items).To(gomega.BeEmpty())
+	})
+
 	t.Run("converted alpha DGD creates preserved top-level PVC", func(t *testing.T) {
 		t.Log("Build a converted alpha DGD with a preserved top-level PVC")
 		g := gomega.NewGomegaWithT(t)
 		ctx := context.Background()
 		create := true
-		pvcName := "model-cache"
+		pvcName := VolumeNameModelCache
 		storage := resource.MustParse("5Gi")
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
@@ -102,7 +135,7 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		ctx := context.Background()
 		create := true
-		pvcName := "model-cache"
+		pvcName := VolumeNameModelCache
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
 			Spec: v1alpha1.DynamoGraphDeploymentSpec{
