@@ -487,8 +487,14 @@ jobs:
       # Previews are themed too now, so this should be caught before merge --
       # this is the backstop that proves it on the site people actually read.
       # Retries cover CDN propagation.
+      #
+      # Runs on every main invocation, not only when has_changes: on a rerun
+      # the docs-website branch is already ahead of source-checkout, so
+      # has_changes flips false. The live pages still need re-verifying (a
+      # rerun is what a failed run turns into once triaged), so the check
+      # must not be gated on repository changes.
       - name: Verify published pages carry their component CSS
-        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
+        if: steps.ctx.outputs.is_main == 'true'
         run: python3 source-checkout/docs/fern/scripts/check_published_styles.py
 
   #############################################################################

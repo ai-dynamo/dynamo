@@ -91,6 +91,12 @@ repos:
       entry: python3 docs/fern/scripts/check_style_components.py
       language: system
       files: ^docs/fern/(components/.*Styles\.tsx|scripts/check_style_components\.py)$
+    - id: check-published-styles-selftest
+      name: Self-test the published-styles regex helpers
+      entry: python3 docs/fern/scripts/check_published_styles.py --test
+      language: system
+      files: ^docs/fern/scripts/check_published_styles\.py$
+      pass_filenames: false
     - id: pytest-marker-report
       name: Report pytest markers (static + inherited)
       entry: python3 tests/report_pytest_markers.py
