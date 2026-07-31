@@ -181,6 +181,7 @@ class GpuSampler:
         self._process = subprocess.Popen(
             [
                 "nvidia-smi",
+                "--id=0",
                 "--query-gpu=timestamp,utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
                 "--loop-ms=1000",
@@ -808,10 +809,12 @@ def _metadata(concurrencies: Sequence[int]) -> dict[str, Any]:
         "gpu": _command_output(
             [
                 "nvidia-smi",
+                "--id=0",
                 "--query-gpu=name,uuid,driver_version",
                 "--format=csv,noheader",
             ]
         ),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     }
 
 
@@ -1093,14 +1096,24 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
         for row in validated
         if row["role"] == COMBINED_ROLE
     }
+    encoder_client_isls = sorted(
+        {
+            float(row["input_sequence_length_avg"])
+            for row in validated
+            if row["role"] == ENCODER_ONLY_ROLE
+        }
+    )
+    encoder_client_isl_text = ", ".join(f"{value:g}" for value in encoder_client_isls)
     lines = [
         "# Parallel custom-encoder throughput benchmark",
         "",
         f"Both arms use Dynamo `{metadata['dynamo_commit']}` in "
         f"`{metadata['container_image']}`. Each measured AIPerf client sends "
-        f"{REQUESTS:,} streaming requests with exact ISL {TARGET_ISL}. The combined "
-        f"service generates exactly {TARGET_OSL} tokens; the encoder-only service "
-        "returns one dummy token.",
+        f"{REQUESTS:,} streaming requests from a workload whose multimodal processor "
+        f"ISL is exactly {TARGET_ISL}. The combined service reports exact ISL "
+        f"{TARGET_ISL} and generates exactly {TARGET_OSL} tokens. The encoder-only "
+        f"service returns one dummy token; without server token counting, AIPerf "
+        f"reports client text-tokenizer ISL {encoder_client_isl_text}.",
         "",
         "## Maximum observed throughput",
         "",
