@@ -617,14 +617,19 @@ sglang_configs = {
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2.5-VL-3B-Instruct",
+        # Deliberately does NOT set --multimodal-embedding-cache-capacity-gb, so
+        # the embedding cache stays at its default of 0 (disabled) and this
+        # exercises the branch a stock deployment actually takes. An earlier
+        # revision set 0.1 here, which routed the request through the cached
+        # encode path -- the only path that performed the NVDEC conversion --
+        # and so passed while default deployments failed outright. The cached
+        # path keeps its coverage in the encode-worker unit tests.
         script_args=[
             "--model",
             "Qwen/Qwen2.5-VL-3B-Instruct",
             "--chat-template",
             "qwen2-vl",
             "--single-gpu",
-            "--multimodal-embedding-cache-capacity-gb",
-            "0.1",
         ],
         timeout=420,
         env={

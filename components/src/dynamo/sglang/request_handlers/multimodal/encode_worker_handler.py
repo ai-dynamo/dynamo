@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -36,7 +37,6 @@ from dynamo.common.multimodal.media_source import (
     read_local_media_bytes,
 )
 from dynamo.common.multimodal.nvdec_decoder import (
-    decode_video_nvdec,
     nvdec_available,
     probe_video_codec,
     should_use_nvdec,
@@ -52,6 +52,10 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.multimodal.nvdec_video_decoder import (
+    SGLANG_VIDEO_DECODER_AVAILABLE,
+    NvdecVideoDecoder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +95,52 @@ _NVDEC_UNSAFE_MODEL_TYPES = frozenset(
 _NVDEC_SHIM_FPS = 24.0
 
 
+def _install_load_video_passthrough() -> None:
+    """Let a pre-constructed decoder survive SGLang's ``load_video``.
+
+    ``load_video`` (sglang.srt.utils.common, v0.5.16) returns
+    ``list``/``tuple``/``Tensor``/``ndarray`` untouched, but has no case for an
+    object that is already a ``VideoDecoderWrapper``: it falls through to
+    ``_normalize_video_input``, which returns ``None`` for that type, and raises
+    ``ValueError: Unsupported video input type``. Dynamo hands the encode path an
+    ``NvdecVideoDecoder`` so SGLang can drive frame selection itself, so teach
+    ``load_video`` to pass such objects through.
+
+    Patches the name bound in ``base_processor`` -- that module does
+    ``from sglang.srt.utils import load_video``, so rebinding
+    ``sglang.srt.utils.load_video`` alone would not affect the call site. Both are
+    patched for safety. Idempotent; a no-op when SGLang is unavailable.
+    """
+    if not SGLANG_VIDEO_DECODER_AVAILABLE:
+        return
+    try:
+        from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+    except (ImportError, OSError):
+        return
+
+    def _wrap(module, orig):
+        def _load_video_passthrough(video_file, *args, **kwargs):
+            if isinstance(video_file, VideoDecoderWrapper):
+                return video_file
+            return orig(video_file, *args, **kwargs)
+
+        _load_video_passthrough._dynamo_nvdec_passthrough = True  # type: ignore[attr-defined]
+        module.load_video = _load_video_passthrough
+
+    for module_path in (
+        "sglang.srt.multimodal.processors.base_processor",
+        "sglang.srt.utils",
+    ):
+        try:
+            module = importlib.import_module(module_path)
+        except (ImportError, OSError):
+            continue
+        orig = getattr(module, "load_video", None)
+        if orig is None or getattr(orig, "_dynamo_nvdec_passthrough", False):
+            continue
+        _wrap(module, orig)
+
+
 def _install_nvdec_video_metadata_shim() -> None:
     """Let SGLang accept pre-decoded frames under transformers >= 5.12.
 
@@ -103,11 +153,16 @@ def _install_nvdec_video_metadata_shim() -> None:
     ``MMEncoder._encode`` raises ``BadRequestError``. Wrap ``preprocess_video`` so
     a pre-decoded ndarray instead carries a valid metadata dict -- the same shape
     SGLang builds on its own torchvision path -- which ``list[dict]`` validation
-    accepts. This unblocks qwen2_5_vl (which ignores the metadata) and any other
-    pre-decoded-pixel path (frontend decoding), and supplies the ``fps`` /
-    ``frames_indices`` the qwen3_vl branch reads. Idempotent; a no-op when SGLang
-    is unavailable or already patched. Validated on gpu-ts against the real
-    ``MMEncoder._encode`` (before FAIL -> after PASS).
+    accepts. This unblocks any pre-decoded-pixel path -- frontend decoding
+    (``--frontend-decoding``) being the one that reaches it -- and supplies the
+    ``fps`` / ``frames_indices`` the qwen3_vl branch reads. Idempotent; a no-op
+    when SGLang is unavailable or already patched. Validated on GPU hardware
+    against the real ``MMEncoder._encode`` (before FAIL -> after PASS).
+
+    This is **not** the NVDEC path. NVDEC hands SGLang an ``NvdecVideoDecoder``,
+    which takes ``preprocess_video``'s decoder branch and returns real metadata,
+    so the synthesized values below never apply to it. The shim remains only for
+    genuine pre-decoded arrays.
     """
     try:
         from sglang.srt.disaggregation import encode_server as es
@@ -182,7 +237,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             rank=0,
         )
 
-        # Make SGLang's video processor accept pre-decoded NVDEC frames on
+        # Let SGLang accept the NVDEC-backed decoder this handler builds, so it
+        # keeps ownership of frame selection (see _install_load_video_passthrough).
+        _install_load_video_passthrough()
+
+        # Make SGLang's video processor accept pre-decoded frame arrays on
         # transformers >= 5.12 (see _install_nvdec_video_metadata_shim). Safe to
         # install unconditionally: it only rewrites the ``None`` metadata SGLang
         # emits for pre-decoded pixels, leaving the software-decoder path intact.
@@ -427,16 +486,26 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         model_type = getattr(self.encoder, "model_type", "") or ""
         return model_type not in _NVDEC_UNSAFE_MODEL_TYPES
 
-    async def _maybe_nvdec_frames(self, url: str) -> Optional[Any]:
-        """Decode an H.264/H.265 video URL to frames for SGLang's pre-decoded path.
+    async def _maybe_nvdec_decoder(self, url: str) -> Optional[Any]:
+        """Wrap an H.264/H.265 video URL in an NVDEC-backed decoder for SGLang.
 
         Reads the URL (SSRF-validated for http(s); policy-gated for ``file://``
-        and ``data:``), probes the container codec, and only H.264/H.265 are
-        hardware-decoded via NVDEC into a ``(T, H, W, 3)`` uint8 RGB ndarray.
-        SGLang's ``load_video`` passes ndarrays through untouched, so the frames
-        reach the video processor directly. Returns ``None`` to fall back to URL
-        passthrough (unsupported scheme, other codec, or any failure) -- NVDEC is
-        purely additive and never blocks the existing path.
+        and ``data:``), probes the container codec, and returns an
+        ``NvdecVideoDecoder`` only for H.264/H.265. Returns ``None`` to fall back
+        to URL passthrough (unsupported scheme, other codec, or any failure) --
+        NVDEC is purely additive and never blocks the existing path.
+
+        A decoder rather than decoded frames: SGLang's ``preprocess_video`` reads
+        the source frame count and fps off the decoder and applies the model's
+        own ``vision_config.video`` policy to choose which frames to pull. Handing
+        it pre-sampled pixels takes the ``return vr, None`` branch instead, which
+        silently replaces that policy with a backend-global frame count and
+        fabricated metadata. Passing the decoder keeps frame selection in SGLang
+        and reports true source values.
+
+        The fetch stays here rather than in SGLang because SGLang's
+        ``_normalize_video_input`` downloads http(s) with no policy check, which
+        would drop our SSRF validation.
 
         ``file://`` and ``data:`` are included because SGLang's own decoders are
         stripped from the codec-compliant image: without hardware decode those
@@ -454,10 +523,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 return None
             if not should_use_nvdec(probe_video_codec(content)):
                 return None
-            frames, _meta = await asyncio.to_thread(
-                decode_video_nvdec, content, self.num_video_frames
-            )
-            return frames
+            # Constructing the decoder opens the container and reads its frame
+            # index, so keep it off the event loop.
+            return await asyncio.to_thread(NvdecVideoDecoder, content)
         except Exception as exc:  # noqa: BLE001 - additive; fall back to URL
             logger.warning(
                 "NVDEC decode failed for video URL (%s); using URL passthrough",
@@ -466,21 +534,25 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             return None
 
     async def _build_encode_inputs(
-        self, uncached_urls: list[str], modality_name: str
+        self, urls: list[str], modality_name: str
     ) -> list[Any]:
-        """Map uncached video URLs to NVDEC frames where applicable.
+        """Map video URLs to NVDEC-backed decoders where applicable.
 
-        Returns a list positionally aligned with ``uncached_urls``: each entry
-        is either a decoded ndarray (H.264/H.265 via NVDEC) or the original URL
-        string. Non-video modalities and disabled/ineligible cases return the
-        URLs unchanged.
+        Returns a list positionally aligned with ``urls``: each entry is either
+        an ``NvdecVideoDecoder`` (H.264/H.265) or the original URL string.
+        Non-video modalities and disabled/ineligible cases return the URLs
+        unchanged.
+
+        Called from both the cached and uncached encode paths. The embedding
+        cache is disabled by default, so routing this only through the cached
+        path would leave hardware decode unreachable in a stock deployment.
         """
         if modality_name != "VIDEO" or not self._nvdec_video_enabled():
-            return list(uncached_urls)
+            return list(urls)
         encode_inputs: list[Any] = []
-        for url in uncached_urls:
-            frames = await self._maybe_nvdec_frames(url)
-            encode_inputs.append(frames if frames is not None else url)
+        for url in urls:
+            decoder = await self._maybe_nvdec_decoder(url)
+            encode_inputs.append(decoder if decoder is not None else url)
         return encode_inputs
 
     async def _encode_with_cache(
@@ -752,8 +824,18 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                             cached_entries,
                         ) = await self._encode_with_cache(urls, modality_enum)
                     else:
+                        # The embedding cache is off by default, so this is the
+                        # path a stock deployment takes. It must apply the same
+                        # NVDEC conversion as the cached branch -- otherwise raw
+                        # URLs reach SGLang, which has no video decoder in the
+                        # codec-compliant image, and every H.264/H.265 request
+                        # fails. Not hoisted above the branch because
+                        # _encode_with_cache converts only its uncached subset.
+                        encode_inputs = await self._build_encode_inputs(
+                            urls, modality_name
+                        )
                         grid_dim, embeddings, aux_data = await self.encoder._encode(
-                            urls, modality_enum
+                            encode_inputs, modality_enum
                         )
 
                 grid_list = self._ensure_batched_grid(grid_dim, len(urls))
