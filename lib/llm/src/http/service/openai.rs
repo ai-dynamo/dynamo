@@ -90,7 +90,7 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{SanitizedError, overload_status_code};
+use super::error::{BackendStatusAction, SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -332,6 +332,29 @@ impl ErrorMessage {
         )
     }
 
+    /// Answer a coerced backend 5xx: `500` on the status line, with the status
+    /// the engine asserted tunnelled into `details` as a bare number.
+    ///
+    /// The number is all that crosses the boundary. The backend's own message
+    /// stays server-side (logged by [`ErrorMessage::sanitized_with_details`]),
+    /// because a backend 5xx body may carry filesystem paths — the policy
+    /// established when HTTP error responses were sanitized, and the reason
+    /// `SanitizedError`'s `Display` renders every server error as the generic
+    /// "Internal server error".
+    fn coerced_backend_error(
+        asserted: StatusCode,
+        details: impl std::fmt::Display,
+    ) -> ErrorResponse {
+        let (status, mut body) = ErrorMessage::sanitized_with_details(
+            SanitizedError::Internal,
+            format!("backend asserted status {}: {details}", asserted.as_u16()),
+        );
+        body.0.details = Some(Box::new(
+            serde_json::json!({ "backend_status": asserted.as_u16() }),
+        ));
+        (status, body)
+    }
+
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
@@ -432,20 +455,33 @@ impl ErrorMessage {
     ///
     /// Parse first, then triage: a code outside the HTTP status space cannot
     /// escape into the response and falls back to a sanitized 500. Otherwise
-    /// [`SanitizedError::for_backend_status`] — the single source of truth for
-    /// the status → variant mapping, already used by the streaming preflight
-    /// and the Anthropic surface — decides the category. Backend 5xx statuses
-    /// round-trip so clients can distinguish a deliberate overload signal (529)
-    /// from a generic 500; only the body is sanitized, since a backend message
-    /// may carry internal paths or details.
+    /// [`BackendStatusAction::triage`] decides, layering the retry-semantics
+    /// allowlist over [`SanitizedError::for_backend_status`] — the base status
+    /// → variant mapping shared with the streaming preflight and the Anthropic
+    /// surface.
+    ///
+    /// A 5xx a worker asserted for itself keeps its identity on the status line
+    /// only when it carries retry semantics Dynamo already publishes: 503, or
+    /// the configured `DYN_HTTP_OVERLOAD_STATUS_CODE` (529 by default). That
+    /// keeps a deliberate load-shed signal distinguishable from a genuine
+    /// internal error without letting an arbitrary engine-chosen code — 501,
+    /// 507, a vendor extension — redefine Dynamo's public contract. Every other
+    /// backend 5xx answers 500 with the asserted status tunnelled into
+    /// `details`. In all 5xx cases the body text is sanitized, since a backend
+    /// message may carry internal paths.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
         let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
         };
-        match SanitizedError::for_backend_status(status) {
-            Some(variant) => ErrorMessage::sanitized_with_details(variant, err.message),
+        match BackendStatusAction::triage(status) {
+            BackendStatusAction::Sanitize(variant) => {
+                ErrorMessage::sanitized_with_details(variant, err.message)
+            }
+            BackendStatusAction::CoerceToInternal(asserted) => {
+                ErrorMessage::coerced_backend_error(asserted, err.message)
+            }
             // 4xx (non-499): protocol contract — forward backend message as-is.
-            None => (
+            BackendStatusAction::ForwardClientError => (
                 status,
                 Json(ErrorMessage {
                     message: err.message,
@@ -3979,13 +4015,19 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths. The
-        // *status*, by contrast, round-trips for 5xx so clients can tell a
-        // deliberate load-shed signal from a generic internal error; codes
-        // outside the 4xx/5xx range are still coerced to 500. This matches
-        // the streaming path's 503 round-trip
+        // forwarded to the client — they may include internal paths. Only the
+        // two statuses that carry retry semantics Dynamo itself publishes (503
+        // and the configured overload code) keep their identity on the status
+        // line; every other 5xx, plus anything outside 4xx/5xx, answers 500.
+        // The 503 row matches the streaming path
         // (`test_check_for_backend_error_with_503_preserves_status`).
-        for (code, expected_status) in [(399u16, 500u16), (500, 500), (501, 501)] {
+        for (code, expected_status) in [
+            (399u16, 500u16),
+            (500, 500),
+            (501, 500),
+            (503, 503),
+            (507, 500),
+        ] {
             let err = http_error_from_engine(code).unwrap_err();
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
             assert_eq!(response.0.as_u16(), expected_status, "status for {code}");
@@ -4066,6 +4108,85 @@ mod tests {
         assert_eq!(response.1.code, 500);
         assert_eq!(response.1.message, "Internal server error");
         assert!(!response.1.message.contains("/srv/backend.py"));
+    }
+
+    /// Read the tunnelled backend status out of an error response body.
+    fn tunnelled_backend_status(response: &ErrorResponse) -> Option<u64> {
+        response.1.details.as_ref()?.get("backend_status")?.as_u64()
+    }
+
+    #[test]
+    fn test_from_http_error_coerces_unlisted_5xx_and_tunnels_status() {
+        // An engine-chosen 5xx that carries no retry semantics Dynamo
+        // publishes must not redefine Dynamo's contract: the client sees a
+        // generic 500, while the asserted status survives in `details` for
+        // debugging. 507 is a WebDAV code no Dynamo component emits; 501 is
+        // the case the previous blanket pass-through forwarded verbatim.
+        for code in [501u16, 502, 504, 507] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code,
+                message: format!("engine failure {code} at /srv/pool.py:12"),
+            });
+            assert_eq!(
+                response.0,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {code}"
+            );
+            assert_eq!(response.1.code, 500, "body code {code}");
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                Some(u64::from(code)),
+                "asserted status must be tunnelled for {code}"
+            );
+            // The tunnel carries a number, never the backend's prose.
+            let serialized = serde_json::to_string(&response.1.0).unwrap();
+            assert!(
+                !serialized.contains("/srv/pool.py"),
+                "serialized body must not include the backend-supplied path for {code}"
+            );
+            assert!(
+                !serialized.contains("engine failure"),
+                "serialized body must not include the backend-supplied message for {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_retryable_5xx_without_tunnel() {
+        // 503 and the operator-configured overload code are the two statuses
+        // Dynamo already generates from its own admission control and already
+        // advertises, so they survive on the status line — no tunnelling
+        // needed, since nothing was suppressed.
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code: status.as_u16(),
+                message: "shedding load at /srv/pool.py:12".to_string(),
+            });
+            assert_eq!(response.0, status);
+            assert_eq!(response.1.code, status.as_u16());
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                None,
+                "a preserved status must not also be tunnelled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_forwards_4xx_verbatim() {
+        // The 4xx path is untouched by the 5xx allowlist: client errors are
+        // the protocol contract and the backend's own description of them is
+        // what the caller needs (e.g. the in-tree 415 from image loading).
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 415,
+            message: "Unsupported Media Type: image/tiff".to_string(),
+        });
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported Media Type: image/tiff");
+        assert_eq!(tunnelled_backend_status(&response), None);
     }
 
     #[test]

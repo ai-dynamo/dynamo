@@ -40,7 +40,7 @@ pub struct HttpError {
 /// `Display` impl that produces the user-safe message all live on this
 /// enum — clients see exactly what the enum says, never a backend error
 /// chain, file path, or panic stack.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanitizedError {
     /// 499 Client Closed Request.
     Cancelled,
@@ -139,6 +139,72 @@ impl SanitizedError {
     }
 }
 
+/// Retry-semantics allowlist for a **worker-asserted** 5xx status.
+///
+/// Only two server-error codes keep their identity on Dynamo's status line:
+/// `503 Service Unavailable` and whatever [`overload_status_code`] resolves to
+/// (`DYN_HTTP_OVERLOAD_STATUS_CODE`, 529 by default). Both are codes Dynamo
+/// already generates from its own admission control and already advertises in
+/// its OpenAPI document, so forwarding them promises the client nothing new.
+/// Every other engine-chosen 5xx — 500, 501, 502, 504, 507, vendor extensions —
+/// is coerced to a generic 500, because Dynamo's public contract should not
+/// change shape just because a particular backend picked an unusual code.
+///
+/// Deriving the allowlist from the env knob rather than hard-coding 529 means
+/// an operator who sets `DYN_HTTP_OVERLOAD_STATUS_CODE=503` gets one coherent
+/// overload code regardless of whether the signal came from Dynamo's router or
+/// from the worker itself.
+///
+/// Scope boundary: this decides only what goes *on the wire*. Whether a
+/// worker-local overload should instead be retried against a healthy replica is
+/// a routing-layer question tracked by
+/// <https://github.com/ai-dynamo/dynamo/issues/12383>. Today it cannot happen
+/// here: `ErrorType::ResourceExhausted` sits in `NON_MIGRATABLE` in
+/// `crate::migration` and `migration_limit` defaults to 0, so the request has
+/// already failed by the time this mapping runs — suppressing the status would
+/// not produce a successful response, only a less legible failure.
+fn keeps_retry_semantics(status: StatusCode) -> bool {
+    status == StatusCode::SERVICE_UNAVAILABLE || status == overload_status_code()
+}
+
+/// What to do with a status a backend worker asserted for itself.
+///
+/// Returned by [`BackendStatusAction::triage`]. Callers must match every arm,
+/// so the coercion policy cannot be silently skipped at a new call site the way
+/// a bare predicate could be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendStatusAction {
+    /// Non-499 4xx: the protocol contract. Forward the backend's status *and*
+    /// message verbatim — client errors are the engine's to describe.
+    ForwardClientError,
+    /// Answer with this sanitized variant, keeping the status it carries.
+    Sanitize(SanitizedError),
+    /// Answer `500 Internal Server Error`. The inner status is what the engine
+    /// asserted; callers tunnel it into the response body as a bare number so
+    /// the information survives for debugging without the status line
+    /// promising semantics Dynamo cannot honour.
+    CoerceToInternal(StatusCode),
+}
+
+impl BackendStatusAction {
+    /// Triage a worker-asserted status. Layers the retry-semantics allowlist
+    /// on top of [`SanitizedError::for_backend_status`], which stays the base
+    /// status → variant mapping shared with the streaming preflight and the
+    /// Anthropic surface.
+    pub fn triage(status: StatusCode) -> Self {
+        match SanitizedError::for_backend_status(status) {
+            // 4xx (non-499): caller forwards.
+            None => BackendStatusAction::ForwardClientError,
+            Some(SanitizedError::PreserveServerError(asserted))
+                if !keeps_retry_semantics(asserted) =>
+            {
+                BackendStatusAction::CoerceToInternal(asserted)
+            }
+            Some(variant) => BackendStatusAction::Sanitize(variant),
+        }
+    }
+}
+
 impl std::fmt::Display for SanitizedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -211,5 +277,57 @@ mod tests {
             SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
             Some(SanitizedError::Internal)
         ));
+    }
+
+    #[test]
+    fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
+        // 503 and the configured overload code are the codes Dynamo itself
+        // generates and advertises, so a worker asserting them says something
+        // Dynamo can honour; they stay on the status line.
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
+                "{status} should keep its status line"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
+        // Arbitrary engine-chosen server errors must not reach the client's
+        // status line, but the asserted code has to survive for the caller to
+        // tunnel into the body.
+        for code in [500u16, 501, 502, 504, 507, 599] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::CoerceToInternal(status),
+                "{code} should be coerced to 500 with the asserted status reported"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_leaves_client_errors_and_cancellation_alone() {
+        // The allowlist governs 5xx only; 4xx (non-499) still forwards and
+        // 499 still classifies as cancellation.
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::BAD_REQUEST),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(499).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Cancelled)
+        );
+        // A backend asserting a non-error status is still nonsense → 500.
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(399).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Internal)
+        );
     }
 }
