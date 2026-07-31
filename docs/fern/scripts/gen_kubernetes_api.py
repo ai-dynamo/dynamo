@@ -50,11 +50,7 @@ def _source_path(fern_root: Path) -> Path:
 
 def _mdx_shell_path(fern_root: Path) -> Path:
     return (
-        fern_root
-        / "pages"
-        / "reference"
-        / "kubernetes-api"
-        / "full-api-reference.mdx"
+        fern_root / "pages" / "reference" / "kubernetes-api" / "full-api-reference.mdx"
     )
 
 

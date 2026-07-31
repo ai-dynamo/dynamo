@@ -199,8 +199,7 @@ def test_reference_tab_lists_python_rust_and_kubernetes() -> None:
     """
     api_reference = _api_reference_section()
     api_reference_children = [
-        entry.get("section") or entry.get("page")
-        for entry in api_reference["contents"]
+        entry.get("section") or entry.get("page") for entry in api_reference["contents"]
     ]
     assert "Python API" in api_reference_children
     assert "Rust API" in api_reference_children
