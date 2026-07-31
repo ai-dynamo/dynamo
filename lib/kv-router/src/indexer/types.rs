@@ -371,15 +371,30 @@ impl MatchDetails {
 
     pub fn retain_router_hint_root_candidates(
         &mut self,
-        mut block_hashes: Vec<ExternalSequenceBlockHash>,
+        block_hashes: Vec<ExternalSequenceBlockHash>,
     ) {
+        self.retain_router_hint_root_candidates_with_filter(block_hashes, |_, blocks, _| blocks);
+    }
+
+    pub fn retain_router_hint_root_candidates_with_filter<F>(
+        &mut self,
+        mut block_hashes: Vec<ExternalSequenceBlockHash>,
+        mut compatible_prefix_blocks: F,
+    ) where
+        F: FnMut(WorkerWithDpRank, usize, &[ExternalSequenceBlockHash]) -> usize,
+    {
         let mut owner_prefix_blocks: Vec<_> = self
             .overlap_scores
             .scores
             .iter()
             .filter_map(|(worker, blocks)| {
-                let blocks = usize::try_from(*blocks).ok()?;
-                (blocks > 0 && blocks <= block_hashes.len()).then_some((*worker, blocks))
+                let blocks = usize::try_from(*blocks).ok()?.min(block_hashes.len());
+                if blocks == 0 {
+                    return None;
+                }
+                let compatible_blocks =
+                    compatible_prefix_blocks(*worker, blocks, &block_hashes[..blocks]).min(blocks);
+                (compatible_blocks > 0).then_some((*worker, compatible_blocks))
             })
             .collect();
         if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
