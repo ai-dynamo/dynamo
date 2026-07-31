@@ -13,6 +13,17 @@ from dynamo.common.constants import (
 )
 
 
+def _set_engine_specific(runtime_config: Any, key: str, value: Any) -> None:
+    """Publish an engine-specific runtime value.
+
+    The PyO3 binding for ``set_engine_specific`` parses its argument with
+    ``serde_json::from_str``, so every value must be JSON text. Routing all
+    writes through here keeps that contract explicit — a bare ``"prefill"``
+    is not valid JSON and would raise at registration.
+    """
+    runtime_config.set_engine_specific(key, json.dumps(value))
+
+
 def _get(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)
@@ -104,12 +115,10 @@ def enable_router_hint_support(
             "for all managed DP ranks"
         )
 
-    runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
-    runtime_config.set_engine_specific(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
-        router_hint_worker_type,
+    _set_engine_specific(runtime_config, ROUTER_HINT_RUNTIME_CAPABILITY_KEY, True)
+    _set_engine_specific(
+        runtime_config, ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, router_hint_worker_type
     )
-    runtime_config.set_engine_specific(
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        json.dumps(endpoints),
+    _set_engine_specific(
+        runtime_config, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints
     )
