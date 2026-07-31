@@ -506,14 +506,16 @@ class TestThoroughResolvesModelPath:
             model_path=str(local_dir),
         )
         worker_name = next(
-            name
-            for name in candidate_config["spec"]["services"]
-            if name not in {"Frontend", "Planner"}
+            component["name"]
+            for component in candidate_config["spec"]["components"]
+            if component["name"] not in {"Frontend", "Planner"}
         )
         dgdr = _make_dgdr(
             backend="vllm",
             modelCache=_pvc_model_cache(str(pvc_root), "model"),
             overrides=OverridesSpec(
+                # Keep an unversioned v1alpha1-shaped override to exercise the
+                # compatibility path against a generated v1beta1 blueprint.
                 dgd={
                     "spec": {
                         "services": {
@@ -539,9 +541,12 @@ class TestThoroughResolvesModelPath:
 
         def _apply_override(config, _override):
             result = copy.deepcopy(config)
-            main_container = result["spec"]["services"][worker_name]["extraPodSpec"][
-                "mainContainer"
-            ]
+            worker = next(
+                component
+                for component in result["spec"]["components"]
+                if component["name"] == worker_name
+            )
+            main_container = worker["podTemplate"]["spec"]["containers"][0]
             main_container["image"] = "example/vllm:override"
             main_container["args"] = [
                 "--model=/stale/path",
@@ -592,12 +597,15 @@ class TestThoroughResolvesModelPath:
                 _HF_ID,
                 str(local_dir),
             )
-            services = candidate.dgd_config["spec"]["services"]
-            worker = services[worker_name]
-            args = worker["extraPodSpec"]["mainContainer"]["args"]
-            assert worker["extraPodSpec"]["mainContainer"]["image"] == (
-                "example/vllm:override"
-            )
+            components = {
+                component["name"]: component
+                for component in candidate.dgd_config["spec"]["components"]
+            }
+            worker_container = components[worker_name]["podTemplate"]["spec"][
+                "containers"
+            ][0]
+            args = worker_container["args"]
+            assert worker_container["image"] == "example/vllm:override"
             assert [
                 arg for arg in args if arg == "--model" or arg.startswith("--model=")
             ] == ["--model"]
@@ -607,16 +615,21 @@ class TestThoroughResolvesModelPath:
                 if arg == "--served-model-name"
                 or arg.startswith("--served-model-name=")
             ] == ["--served-model-name"]
-            frontend_args = services["Frontend"]["extraPodSpec"]["mainContainer"][
-                "args"
-            ]
+            frontend_args = components["Frontend"]["podTemplate"]["spec"]["containers"][
+                0
+            ]["args"]
             assert frontend_args[frontend_args.index("--model-name") + 1] == _HF_ID
             assert frontend_args[frontend_args.index("--model-path") + 1] == str(
                 local_dir
             )
             assert all(
-                any(vm.get("name") == "model-cache" for vm in service["volumeMounts"])
-                for service in services.values()
+                any(
+                    volume_mount.get("name") == "model-cache"
+                    for volume_mount in component["podTemplate"]["spec"]["containers"][
+                        0
+                    ]["volumeMounts"]
+                )
+                for component in components.values()
             )
 
     async def _capture_task_config(self, dgdr, output_dir) -> MagicMock:
