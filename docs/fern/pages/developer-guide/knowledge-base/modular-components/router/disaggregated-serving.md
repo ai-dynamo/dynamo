@@ -114,8 +114,16 @@ Enable conditional disaggregation with `--router-conditional-disagg` on the fron
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
+    --router-conditional-disagg
+```
+
+Tune the policy with `--router-conditional-disagg-config`. For example:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
     --router-conditional-disagg \
-    --router-conditional-disagg-config '{"policy":"isl_bounding"}'
+    --router-conditional-disagg-config '{"policy":"isl_or_load","eff_isl_threshold":4096,"eff_isl_ratio_threshold":0.6}'
 ```
 
 ### Backend Requirements
