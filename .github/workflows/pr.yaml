@@ -679,9 +679,15 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
-      gpu_test_markers: pre_merge and vllm and gpu_1
-      gpu_test_timeout_minutes: 45
+      # TEMP-11836: widened to also run post_merge so this PR's post_merge video
+      # cases get exercised before merge. Revert to plain `pre_merge` before merge.
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      # TEMP-11836: 45 -> 150 while this job runs the doubled marker set. This
+      # budget is per stage, and in the last full post_merge (run 30513728452)
+      # vLLM's parallel stage used 78m of a 120m cap -- 65%, by far the tightest
+      # lane -- with 13m more in sequential. Revert with the markers above.
+      gpu_test_timeout_minutes: 150
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
@@ -701,8 +707,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'  # TEMP-11836
+      gpu_test_timeout_minutes: 60  # 19m used in run 30513728452; headroom is ample
     secrets: inherit
 
   sglang-test:
@@ -718,8 +724,15 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      # TEMP-11836: widened to also run post_merge so this PR's post_merge video
+      # cases get exercised before merge. Revert to plain `pre_merge` before merge.
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      # The 90m below already covers the doubled marker set: in the last full
+      # post_merge (run 30513728452) the busiest stage here used 26m, and the new
+      # NVDEC case adds at most 7m -- and skips outright on runners without the
+      # driver 'video' capability, which is every current CI runner.
+      #
       # TEMP-11836: 30m default -> 90m. NOT a capacity problem. In run
       # 30540988226 the parallel stage was killed after a single test
       # (test_sglang_indexers_sync[nats-tcp]) hung for 4253s against its own
@@ -749,8 +762,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'  # TEMP-11836
+      gpu_test_timeout_minutes: 60  # 6m used in run 30513728452; headroom is ample
     secrets: inherit
 
   trtllm-test:
@@ -766,8 +779,16 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
+      # TEMP-11836: widened to also run post_merge so this PR's post_merge video
+      # cases get exercised before merge. Revert to plain `pre_merge` before merge.
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      # TEMP-11836: the 30m default leaves too little room for the doubled marker
+      # set -- in the last full post_merge (run 30513728452) the busiest stage
+      # here used 21m with a 90m cap. The new NVDEC case adds at most 16m, and
+      # skips outright on runners without the driver 'video' capability, which is
+      # every current CI runner. Drop this line together with the markers above.
+      gpu_test_timeout_minutes: 90
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -788,8 +809,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'  # TEMP-11836
+      gpu_test_timeout_minutes: 60  # 9m used in run 30513728452; headroom is ample
     secrets: inherit
 
   planner-test:
