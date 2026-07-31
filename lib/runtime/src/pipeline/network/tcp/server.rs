@@ -88,7 +88,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -170,6 +170,35 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
     tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
 
+fn is_interface_bind_ip(addr: &IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => {
+            !v4.is_unspecified() && !v4.is_broadcast() && !v4.is_multicast() && !v4.is_link_local()
+        }
+        IpAddr::V6(v6) => !v6.is_unicast_link_local() && !v6.is_multicast() && !v6.is_unspecified(),
+    }
+}
+
+fn select_interface_bind_ip(interface: &str, candidates: Vec<(String, IpAddr)>) -> Option<IpAddr> {
+    candidates
+        .into_iter()
+        .find_map(|(name, addr)| (name == interface && is_interface_bind_ip(&addr)).then_some(addr))
+}
+
+fn resolve_interface_bind_ip(interface: &str) -> Result<IpAddr, PipelineError> {
+    if let Ok(addr) = interface.parse::<IpAddr>() {
+        return (!addr.is_unspecified()).then_some(addr).ok_or_else(|| {
+            PipelineError::Generic("TCP response stream host cannot be unspecified".to_string())
+        });
+    }
+
+    select_interface_bind_ip(interface, list_afinet_netifas()?).ok_or_else(|| {
+        PipelineError::Generic(format!(
+            "Interface not found or has no bindable unicast address: {interface}"
+        ))
+    })
+}
+
 impl TcpStreamServer {
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
@@ -184,18 +213,7 @@ impl TcpStreamServer {
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
         let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+            Some(interface) => resolve_interface_bind_ip(&interface)?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -220,13 +238,12 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
         let state = Arc::new(Mutex::new(State::default()));
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone())
+        let local_port = Self::start(local_ip, options.port, state.clone())
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
@@ -361,8 +378,8 @@ impl TcpStreamServer {
         state.removed_instances.remove(id);
     }
 
-    async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+    async fn start(local_ip: IpAddr, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
         {
@@ -442,7 +459,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -552,7 +569,7 @@ impl ResponseService for TcpStreamServer {
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
@@ -1065,6 +1082,45 @@ mod tests {
     use crate::pipeline::network::tcp::client::TcpClient;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn interface_bind_filter_rejects_invalid_addresses() {
+        for addr in [
+            "0.0.0.0",
+            "169.254.1.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "fe80::1",
+            "ff02::1",
+        ] {
+            assert!(!is_interface_bind_ip(&addr.parse().unwrap()));
+        }
+    }
+
+    #[test]
+    fn interface_bind_selector_accepts_loopback() {
+        let candidates = vec![("lo".to_string(), "127.0.0.1".parse().unwrap())];
+        assert_eq!(
+            select_interface_bind_ip("lo", candidates).unwrap(),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn literal_ips_bypass_filter_and_format_as_socket_addresses() {
+        for literal in ["127.0.0.1", "169.254.1.1"] {
+            assert_eq!(
+                resolve_interface_bind_ip(literal).unwrap(),
+                literal.parse::<IpAddr>().unwrap()
+            );
+        }
+        for wildcard in ["0.0.0.0", "::"] {
+            assert!(resolve_interface_bind_ip(wildcard).is_err());
+        }
+        let ip = resolve_interface_bind_ip("2001:db8::5").unwrap();
+        assert_eq!(SocketAddr::new(ip, 1234).to_string(), "[2001:db8::5]:1234");
+    }
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
