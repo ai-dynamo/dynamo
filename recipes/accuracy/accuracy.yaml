@@ -86,6 +86,9 @@ spec:
         - |
           set -euo pipefail
           export COLUMNS=200
+          # aiperf depends on crick, which has no Linux aarch64 wheel. ARM
+          # benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
           pip install --no-cache-dir "aiperf[accuracy]==0.11.0" > /dev/null
           EPOCH=$(date +%s)
 
