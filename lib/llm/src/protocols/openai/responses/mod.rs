@@ -699,39 +699,72 @@ fn convert_input_items_to_messages(
     Ok(messages)
 }
 
-/// Convert Responses API Tool to ChatCompletionTool.
-fn convert_tools(tools: &[Tool]) -> Vec<ChatCompletionTool> {
+/// Convert Responses API tools to the flat Chat Completions representation.
+///
+/// Bare function names are preserved for model compatibility. This is only
+/// reversible when every forwarded function name is unique across top-level
+/// and namespace tools, so reject collisions instead of guessing which
+/// namespace to restore on the response path.
+fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
+    let mut origins = HashMap::<String, String>::new();
+    let mut push_function = |name: &str,
+                             description: &Option<String>,
+                             parameters: &Option<serde_json::Value>,
+                             strict: Option<bool>,
+                             origin: String|
+     -> anyhow::Result<()> {
+        if let Some(previous_origin) = origins.get(name) {
+            return Err(anyhow::anyhow!(
+                "Responses function tool name '{name}' is ambiguous after namespace flattening: declared by {previous_origin} and {origin}"
+            ));
+        }
+        origins.insert(name.to_owned(), origin);
+        converted.push(ChatCompletionTool {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: name.to_owned(),
+                description: description.clone(),
+                parameters: parameters.clone(),
+                strict,
+            },
+        });
+        Ok(())
+    };
+
     for tool in tools {
         match tool {
-            Tool::Function(f) => converted.push(ChatCompletionTool {
-                r#type: ChatCompletionToolType::Function,
-                function: FunctionObject {
-                    name: f.name.clone(),
-                    description: f.description.clone(),
-                    parameters: f.parameters.clone(),
-                    strict: f.strict,
-                },
-            }),
+            Tool::Function(f) => push_function(
+                &f.name,
+                &f.description,
+                &f.parameters,
+                f.strict,
+                "a top-level function".to_string(),
+            )?,
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        converted.push(ChatCompletionTool {
-                            r#type: ChatCompletionToolType::Function,
-                            function: FunctionObject {
-                                name: f.name.clone(),
-                                description: f.description.clone(),
-                                parameters: f.parameters.clone(),
-                                strict: f.strict,
-                            },
-                        });
+                    match tool {
+                        NamespaceToolParamTool::Function(f) => push_function(
+                            &f.name,
+                            &f.description,
+                            &f.parameters,
+                            f.strict,
+                            format!("namespace '{}'", namespace.name),
+                        )?,
+                        NamespaceToolParamTool::Custom(custom) => {
+                            return Err(anyhow::anyhow!(
+                                "Responses namespace '{}' contains unsupported custom tool '{}'; namespace tools currently support function members only",
+                                namespace.name,
+                                custom.name
+                            ));
+                        }
                     }
                 }
             }
             _ => {} // Only function tools are forwarded to chat completions
         }
     }
-    converted
+    Ok(converted)
 }
 
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
@@ -869,6 +902,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .tools
             .as_ref()
             .map(|t| convert_tools(t))
+            .transpose()?
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
@@ -1312,10 +1346,9 @@ pub fn chat_completion_to_response(
 mod tests {
     use dynamo_protocols::types::responses::{
         CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
-        FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent,
-        InputImageContent, InputItem, InputMessage, InputOutputMessage, InputOutputMessageContent,
-        InputOutputTextContent, InputParam, InputRole, InputTextContent, Item, MessageItem,
-        Role as ResponseRole, Tool,
+        FunctionCallOutputItemParam, FunctionToolCall, InputContent, InputImageContent, InputItem,
+        InputMessage, InputOutputMessage, InputOutputMessageContent, InputOutputTextContent,
+        InputParam, InputRole, InputTextContent, Item, MessageItem, Role as ResponseRole,
     };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
@@ -1765,7 +1798,7 @@ mod tests {
     }
 
     #[test]
-    fn test_function_call_input_items() {
+    fn test_namespaced_function_call_input_items() {
         let req = NvCreateResponse {
             inner: CreateResponse {
                 input: InputParam::Items(vec![
@@ -1779,7 +1812,7 @@ mod tests {
                     InputItem::Item(Item::FunctionCall(FunctionToolCall {
                         arguments: r#"{"location":"SF"}"#.into(),
                         call_id: "call_123".into(),
-                        namespace: None,
+                        namespace: Some("weather".into()),
                         name: "get_weather".into(),
                         id: None,
                         status: None,
@@ -1801,10 +1834,13 @@ mod tests {
         let messages = &chat_req.inner.messages;
         assert_eq!(messages.len(), 3);
         assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
-        assert!(matches!(
-            messages[1],
-            ChatCompletionRequestMessage::Assistant(_)
-        ));
+        let ChatCompletionRequestMessage::Assistant(assistant) = &messages[1] else {
+            panic!("expected assistant tool-call message");
+        };
+        let tool_calls = assistant.tool_calls.as_ref().expect("expected tool call");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, r#"{"location":"SF"}"#);
         assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
     }
 
@@ -2514,34 +2550,120 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_conversion() {
-        let req = NvCreateResponse {
-            inner: CreateResponse {
-                input: InputParam::Text("hello".into()),
-                model: Some("test-model".into()),
-                tools: Some(vec![Tool::Function(FunctionTool {
-                    name: "get_weather".into(),
-                    parameters: Some(serde_json::json!({
+    fn test_top_level_and_namespace_function_tools_conversion() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather info",
+                    "parameters": {
                         "type": "object",
                         "properties": {
                             "location": {"type": "string"}
                         },
                         "required": ["location"]
-                    })),
-                    strict: Some(true),
-                    description: Some("Get weather info".into()),
-                    defer_loading: None,
-                })]),
-                ..Default::default()
-            },
-            nvext: None,
-        };
+                    },
+                    "strict": true
+                },
+                {
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "description": "Subagent tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "parameters": {"type": "object"}
+                        }
+                    ]
+                }
+            ]))
+            .unwrap(),
+        );
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert!(chat_req.inner.tools.is_some());
-        let tools = chat_req.inner.tools.unwrap();
-        assert_eq!(tools.len(), 1);
+        let tools = chat_req.inner.tools.expect("tools should reach backend");
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].function.name, "get_weather");
+        assert_eq!(tools[1].function.name, "spawn_agent");
+    }
+
+    #[test]
+    fn test_namespace_function_name_collision_is_rejected() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {
+                    "type": "namespace",
+                    "name": "crm",
+                    "description": "CRM tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                },
+                {
+                    "type": "namespace",
+                    "name": "billing",
+                    "description": "Billing tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                }
+            ]))
+            .unwrap(),
+        );
+
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Responses function tool name 'lookup' is ambiguous after namespace flattening: declared by namespace 'crm' and namespace 'billing'"
+        );
+    }
+
+    #[test]
+    fn test_top_level_namespace_function_name_collision_is_rejected() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type": "function", "name": "lookup"},
+                {
+                    "type": "namespace",
+                    "name": "crm",
+                    "description": "CRM tools",
+                    "tools": [{"type": "function", "name": "lookup"}]
+                }
+            ]))
+            .unwrap(),
+        );
+
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Responses function tool name 'lookup' is ambiguous after namespace flattening: declared by a top-level function and namespace 'crm'"
+        );
+    }
+
+    #[test]
+    fn test_namespace_custom_tool_is_rejected() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "namespace",
+                "name": "editors",
+                "description": "Editing tools",
+                "tools": [{
+                    "type": "custom",
+                    "name": "apply_diff",
+                    "description": "Apply a free-form patch",
+                    "format": {"type": "text"}
+                }]
+            }]))
+            .unwrap(),
+        );
+
+        let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Responses namespace 'editors' contains unsupported custom tool 'apply_diff'; namespace tools currently support function members only"
+        );
     }
 
     #[allow(deprecated)]
