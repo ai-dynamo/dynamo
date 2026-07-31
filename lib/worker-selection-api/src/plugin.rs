@@ -55,8 +55,9 @@ impl<'a> SelectionInput<'a> {
             return Err("worker columns are smaller than ABI v1");
         }
         let columns = unsafe { &*columns_ptr };
-        let provided_inputs = WorkerInputs::from_bits(columns.provided_inputs)
-            .ok_or("selection input contains unknown worker inputs")?;
+        let known_provided_bits = columns.provided_inputs & WorkerInputs::ALL.bits();
+        let provided_inputs = WorkerInputs::from_bits(known_provided_bits)
+            .expect("masking to known worker inputs must produce a valid bitset");
         if provided_inputs != provided_inputs.with_identity() {
             return Err("worker inputs require identity");
         }

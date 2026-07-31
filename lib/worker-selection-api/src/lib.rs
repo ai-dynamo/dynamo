@@ -219,6 +219,7 @@ impl WorkerSelectorCapacityV1 {
 pub struct WorkerSelectorColumnsV1 {
     pub struct_size: u32,
     pub _reserved: u32,
+    /// Worker-input bits materialized by the host. Older plugins ignore unknown bits.
     pub provided_inputs: u64,
     pub worker_ids: *const u64,
     pub dp_ranks: *const u32,
@@ -632,7 +633,7 @@ mod tests {
         let columns = WorkerSelectorColumnsV1 {
             struct_size: size_of::<WorkerSelectorColumnsV1>() as u32,
             _reserved: 0,
-            provided_inputs: WorkerInputs::ALL.bits(),
+            provided_inputs: WorkerInputs::ALL.bits() | (1 << 63),
             worker_ids: worker_ids.as_ptr(),
             dp_ranks: dp_ranks.as_ptr(),
             cached_tokens: cached_tokens.as_ptr(),

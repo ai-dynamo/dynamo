@@ -96,6 +96,7 @@ export_worker_selector_plugin!(LeastDecodeLoad);
 ## ABI Rules
 
 - Do not reorder, remove, or change v1 ABI fields or constants. Add a new ABI version for incompatible changes and update the layout test for every ABI change.
+- Hosts may advertise future worker-input bits; older plugins ignore unknown bits and expose only their declared inputs.
 - No Rust-owned allocation, trait object, reference, string, or collection crosses the dynamic-library boundary. The ABI uses C-layout values, raw pointers, lengths, and caller-owned error storage.
 - Treat every pointer, length, struct size, enum value, bitset, and returned worker index as untrusted at the boundary and validate it before use.
 - Worker columns are borrowed, demand-declared, and index-aligned. Materialization and allocation reuse remain host responsibilities.
