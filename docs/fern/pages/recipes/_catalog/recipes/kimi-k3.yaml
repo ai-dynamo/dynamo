@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: kimi-k3
+title: Kimi-K3
+page: pages/recipes/model-recipes/kimi-k3.mdx
+provider: moonshot
+model:
+  name: Kimi-K3
+  hf_id: moonshotai/Kimi-K3
+  precision: MXFP4 experts + BF16 dense, FP8 KV cache
+status: experimental  # Day-0
+targets:
+- id: vllm-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 32
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 24
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- GB200 manifests mount weights via node-local hostPath (GKE pattern); all four targets pin the public NGC image (1.4.0-kimi-k3-dev.1)
+- No perf assets in the recipe tree; no validated expected-performance numbers (Day-0)

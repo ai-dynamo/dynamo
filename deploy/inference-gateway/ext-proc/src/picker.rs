@@ -99,8 +99,29 @@ pub trait EndpointPicker: Send + Sync + 'static {
     /// Called when a request's response is fully complete (end-of-stream on the
     /// response body or trailers). Lets the picker free bookkeeping state.
     /// `booking_id` is as in [`Self::on_prefill_complete`]. Mirrors Go EPP's
-    /// PostResponse → FreeRequest.
+    /// PostResponse → FreeRequest. Prefer
+    /// [`Self::on_request_complete_with_usage`] when usage is needed.
     async fn on_request_complete(&self, _booking_id: &str) {}
+
+    /// Like [`Self::on_request_complete`], with optional parsed token usage.
+    /// Defaults to forwarding to [`Self::on_request_complete`].
+    async fn on_request_complete_with_usage(
+        &self,
+        booking_id: &str,
+        _usage: Option<ResponseUsage>,
+    ) {
+        self.on_request_complete(booking_id).await;
+    }
+}
+
+/// Token usage from the terminal response (`None` fields may be omitted).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    /// `usage.prompt_tokens_details.cached_tokens`
+    pub cached_tokens: Option<u64>,
 }
 
 /// Error from an endpoint picker. Variants map to distinct HTTP statuses at the

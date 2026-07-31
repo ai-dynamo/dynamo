@@ -3,14 +3,14 @@
 """Focused tests for the Dynamo Kubernetes API docs generator.
 
 Exercises the deterministic parser + renderer that turn the upstream
-``docs/fern/kubernetes/api-reference.md`` (crd-ref-docs output +
-header/footer + fix-api-anchors.py) into a typed model and thin MDX
-shell. The generator writes into a scratch workspace so a failing test
-can never mutate the tracked docs tree. Hermetic; no network, no Dynamo
-runtime. Invocation::
+``docs/fern/pages/reference/kubernetes-api/additional-resources/
+api-reference-k8s.md`` (crd-ref-docs output + header/footer +
+fix-api-anchors.py) into a typed model and thin MDX shell. The generator
+writes into a scratch workspace so a failing test can never mutate the
+tracked docs tree. Hermetic; no network, no Dynamo runtime. Invocation::
 
     uv run --no-project --python 3.13 --with pytest --with pyyaml \\
-        python3 -m pytest docs/fern/scripts/tests -c /dev/null -v
+        python3 -m pytest docs/fern/scripts/tests -v
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
-K8S_DIR = FERN_ROOT / "kubernetes"
-SOURCE_MD = K8S_DIR / "api-reference.md"
-TARGET_MDX = K8S_DIR / "api-reference-fern.mdx"
+K8S_DIR = FERN_ROOT / "pages" / "reference" / "kubernetes-api"
+SOURCE_MD = K8S_DIR / "additional-resources" / "api-reference-k8s.md"
+TARGET_MDX = K8S_DIR / "full-api-reference.mdx"
 # Stops at ``&`` as well as ``<``: the shipped MDX escapes the ``<br />``
 # that follows this URL, and the entity would otherwise be read as part of
 # it and defeat the comparison against the unescaped source.
@@ -95,8 +95,9 @@ def workspace(tmp_path: Path) -> Path:
     dst = ws / "docs" / "fern"
     dst.mkdir(parents=True)
     (dst / "components").mkdir()
-    (dst / "kubernetes").mkdir()
-    shutil.copy2(SOURCE_MD, dst / "kubernetes" / "api-reference.md")
+    k8s_dst = dst / "pages" / "reference" / "kubernetes-api" / "additional-resources"
+    k8s_dst.mkdir(parents=True)
+    shutil.copy2(SOURCE_MD, k8s_dst / "api-reference-k8s.md")
     return ws
 
 
@@ -362,7 +363,9 @@ def test_generator_writes_the_mdx_page(workspace: Path) -> None:
     fern = workspace / "docs" / "fern"
     rc = gen_kubernetes_api.main(["--fern-root", str(fern)])
     assert rc == 0
-    assert (fern / "kubernetes" / "api-reference-fern.mdx").is_file()
+    assert (
+        fern / "pages" / "reference" / "kubernetes-api" / "full-api-reference.mdx"
+    ).is_file()
 
 
 def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:
@@ -374,7 +377,7 @@ def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:
 def test_check_mode_flags_mdx_shell_drift(workspace: Path) -> None:
     fern = workspace / "docs" / "fern"
     assert gen_kubernetes_api.main(["--fern-root", str(fern)]) == 0
-    mdx = fern / "kubernetes" / "api-reference-fern.mdx"
+    mdx = fern / "pages" / "reference" / "kubernetes-api" / "full-api-reference.mdx"
     mdx.write_text(
         mdx.read_text(encoding="utf-8") + "\n<!-- drift -->\n", encoding="utf-8"
     )
@@ -387,7 +390,7 @@ def test_check_mode_flags_mdx_shell_drift(workspace: Path) -> None:
 
 
 def test_shipped_mdx_matches_regeneration_output() -> None:
-    """The shipped ``api-reference-fern.mdx`` is generator output; running
+    """The shipped ``full-api-reference.mdx`` is generator output; running
     the generator against the same source must produce byte-identical
     text. Any drift here means the tracked file is stale."""
     text = SOURCE_MD.read_text(encoding="utf-8")
@@ -421,8 +424,11 @@ def test_index_yml_still_registers_the_compact_mdx() -> None:
     the hidden agent Markdown source stays reachable by direct URL."""
     doc = yaml.safe_load((FERN_ROOT / "index.yml").read_text(encoding="utf-8"))
     paths = _collect_all_paths(doc)
-    assert "kubernetes/api-reference-fern.mdx" in paths
-    assert "kubernetes/api-reference.md" in paths
+    assert "pages/reference/kubernetes-api/full-api-reference.mdx" in paths
+    assert (
+        "pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md"
+        in paths
+    )
 
 
 # ---------------------------------------------------------------------------

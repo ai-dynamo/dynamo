@@ -27,7 +27,7 @@ resolution, which is unrelated to this generator)::
 
     uv run --no-project --python 3.13 --with 'griffe==2.1.0' \\
         --with pytest --with pyyaml \\
-        python3 -m pytest docs/fern/scripts/tests -c /dev/null -v
+        python3 -m pytest docs/fern/scripts/tests -v
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
 COMPONENTS_DIR = FERN_ROOT / "components"
-PY_PAGES_DIR = FERN_ROOT / "reference" / "api" / "python"
+PY_PAGES_DIR = FERN_ROOT / "pages" / "reference" / "api" / "python"
 PY_LANDING = PY_PAGES_DIR / "README.mdx"
 
 CURATED_MODULE_NAMES = {
@@ -131,7 +131,10 @@ def workspace(tmp_path: Path) -> Path:
     dst = ws / "docs" / "fern"
     dst.mkdir(parents=True)
     shutil.copytree(FERN_ROOT / "components", dst / "components")
-    shutil.copytree(FERN_ROOT / "reference", dst / "reference")
+    shutil.copytree(
+        FERN_ROOT / "pages" / "reference" / "api",
+        dst / "pages" / "reference" / "api",
+    )
     (ws / "lib" / "bindings" / "python").mkdir(parents=True)
     (ws / "lib" / "bindings" / "python" / "src").symlink_to(
         REPO_ROOT / "lib" / "bindings" / "python" / "src"
@@ -670,9 +673,9 @@ def test_generator_writes_landing_data_and_every_module_page(
     fern = workspace / "docs" / "fern"
     rc = gen_python_api.main(["--fern-root", str(fern)])
     assert rc == 0
-    assert (fern / "reference" / "api" / "python" / "README.mdx").is_file()
+    assert (fern / "pages" / "reference" / "api" / "python" / "README.mdx").is_file()
     for spec in api_discovery.MODULES:
-        page = fern / "reference" / "api" / "python" / f"{spec[1]}.mdx"
+        page = fern / "pages" / "reference" / "api" / "python" / f"{spec[1]}.mdx"
         assert page.is_file(), f"module page not written: {page}"
 
 
@@ -691,7 +694,7 @@ def test_check_mode_flags_module_page_drift(
 ) -> None:
     fern = workspace / "docs" / "fern"
     assert gen_python_api.main(["--fern-root", str(fern)]) == 0
-    page = fern / "reference" / "api" / "python" / "runtime.mdx"
+    page = fern / "pages" / "reference" / "api" / "python" / "runtime.mdx"
     page.write_text(
         page.read_text(encoding="utf-8") + "\n<!-- drift -->\n", encoding="utf-8"
     )
@@ -704,7 +707,7 @@ def test_check_mode_flags_landing_page_drift(
 ) -> None:
     fern = workspace / "docs" / "fern"
     assert gen_python_api.main(["--fern-root", str(fern)]) == 0
-    landing = fern / "reference" / "api" / "python" / "README.mdx"
+    landing = fern / "pages" / "reference" / "api" / "python" / "README.mdx"
     landing.write_text(
         landing.read_text(encoding="utf-8") + "\n<!-- drift -->\n", encoding="utf-8"
     )
@@ -750,13 +753,12 @@ def test_api_landing_links_resolve_through_the_file_graph() -> None:
     routes look right and silently rot -- the React hero these cards replaced
     pointed at ``api/python``, which never resolved.
     """
-    source = (FERN_ROOT / "reference" / "api" / "README.mdx").read_text(
+    source = (FERN_ROOT / "pages" / "reference" / "api" / "README.mdx").read_text(
         encoding="utf-8"
     )
     assert 'href="python/README.mdx"' in source
     assert 'href="rust/README.mdx"' in source
-    assert 'href="../../kubernetes/api-reference-fern.mdx"' in source
-    assert "kubernetes-api/full-api-reference" not in source
+    assert 'href="../kubernetes-api/full-api-reference.mdx"' in source
 
 
 def test_generated_pages_do_not_leak_maintainer_instructions() -> None:
@@ -771,18 +773,17 @@ def test_generated_pages_do_not_leak_maintainer_instructions() -> None:
 
 
 def test_index_yml_registers_every_generated_module_page() -> None:
-    """Every generated per-module MDX page under reference/api/python/
+    """Every generated per-module MDX page under pages/reference/api/python/
     must be referenced from docs/fern/index.yml; an unregistered page is
     unreachable and fails Fern's broken-link check."""
     index_text = (FERN_ROOT / "index.yml").read_text(encoding="utf-8")
     for spec in api_discovery.MODULES:
-        expected = f"reference/api/python/{spec[1]}.mdx"
+        expected = f"pages/reference/api/python/{spec[1]}.mdx"
         assert (
             expected in index_text
         ), f"index.yml does not reference generated page {expected}"
-    # The overview + landing must also be present.
-    assert "reference/api/README.mdx" in index_text
-    assert "reference/api/python/README.mdx" in index_text
+    assert "pages/reference/api/README.mdx" in index_text
+    assert "pages/reference/api/python/README.mdx" in index_text
 
 
 def test_index_yml_python_registrations_do_not_shadow_each_other() -> None:
@@ -790,8 +791,10 @@ def test_index_yml_python_registrations_do_not_shadow_each_other() -> None:
     navigation; a stale registration would 404 during Fern build."""
     doc = yaml.safe_load((FERN_ROOT / "index.yml").read_text(encoding="utf-8"))
     registered = _collect_python_pages(doc)
-    expected = {f"reference/api/python/{spec[1]}.mdx" for spec in api_discovery.MODULES}
-    expected.add("reference/api/python/README.mdx")
+    expected = {
+        f"pages/reference/api/python/{spec[1]}.mdx" for spec in api_discovery.MODULES
+    }
+    expected.add("pages/reference/api/python/README.mdx")
     unexpected = registered - expected
     assert not unexpected, f"index.yml references stale python pages: {unexpected}"
 
@@ -804,7 +807,7 @@ def test_python_landing_owns_the_python_section_slug() -> None:
     hidden-children pattern hid the whole surface from the sidebar.
     """
     doc = yaml.safe_load((FERN_ROOT / "index.yml").read_text(encoding="utf-8"))
-    landing = _find_node_by_path(doc, "reference/api/python/README.mdx")
+    landing = _find_node_by_path(doc, "pages/reference/api/python/README.mdx")
     assert landing.get("section") == "Python API"
     assert landing.get("slug") == "python"
     module_pages = landing.get("contents")
@@ -842,7 +845,7 @@ def _collect_python_pages(node: object) -> set[str]:
             found |= _collect_python_pages(item)
     elif isinstance(node, dict):
         path = node.get("path")
-        if isinstance(path, str) and path.startswith("reference/api/python/"):
+        if isinstance(path, str) and path.startswith("pages/reference/api/python/"):
             found.add(path)
         for value in node.values():
             found |= _collect_python_pages(value)

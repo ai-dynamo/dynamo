@@ -190,10 +190,96 @@ def _prose_block(text: str) -> list[str]:
     Escaping the block as a single string would let an unbalanced backtick
     pair across a blank line and swallow a whole paragraph into a false code
     span, so each line is escaped independently.
+
+    reST literal blocks introduced by ``::`` are lifted into Markdown code
+    fences before per-line escaping so the indented example body renders as
+    a code block rather than getting flattened into ordinary prose.
     """
-    return [
-        escape_mdx_prose(line) if line.strip() else "" for line in text.splitlines()
-    ]
+    normalized = _normalize_rest_literal_blocks(text)
+    output: list[str] = []
+    in_fence = False
+    for line in normalized.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            output.append(line)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            output.append(line)
+            continue
+        output.append(escape_mdx_prose(line) if stripped else "")
+    return output
+
+
+def _normalize_rest_literal_blocks(text: str) -> str:
+    """Convert reST ``::`` literal blocks into Markdown code fences.
+
+    A trailing ``::`` (either standalone or attached to the preceding word)
+    introduces an indented literal block after a blank line. The block ends
+    when a line dedents to at or below the paragraph indentation, matching
+    docutils. Standalone ``::`` is dropped entirely; an attached form drops
+    only the trailing double colon so the sentence keeps a single ``:``.
+    """
+    lines = text.splitlines()
+    result: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _introduces_literal_block(line):
+            result.append(line)
+            index += 1
+            continue
+        marker_indent = len(line) - len(line.lstrip(" "))
+        stripped = line.rstrip()
+        if stripped == "::":
+            head = None
+        else:
+            head = stripped[:-2].rstrip()
+            if head.endswith(":"):
+                head = head[:-1]
+        blank_index = index + 1
+        while blank_index < len(lines) and not lines[blank_index].strip():
+            blank_index += 1
+        block_start = blank_index
+        block_end = block_start
+        block_indent: int | None = None
+        while block_end < len(lines):
+            candidate = lines[block_end]
+            if not candidate.strip():
+                block_end += 1
+                continue
+            indent = len(candidate) - len(candidate.lstrip(" "))
+            if indent <= marker_indent:
+                break
+            if block_indent is None:
+                block_indent = indent
+            block_end += 1
+        if block_indent is None:
+            result.append(line)
+            index += 1
+            continue
+        if head is not None:
+            result.append(" " * marker_indent + head)
+        result.append("")
+        result.append("```")
+        for body_line in lines[block_start:block_end]:
+            if body_line.strip():
+                result.append(body_line[block_indent:])
+            else:
+                result.append("")
+        result.append("```")
+        index = block_end
+    return "\n".join(result)
+
+
+def _introduces_literal_block(line: str) -> bool:
+    """True when ``line`` ends in ``::`` (reST literal-block introducer)."""
+    stripped = line.rstrip()
+    if not stripped.endswith("::"):
+        return False
+    if stripped == "::":
+        return True
+    return len(stripped) >= 3 and stripped[-3] != ":"
 
 
 def _param_fields(terms: Iterable[DocTerm]) -> list[str]:

@@ -26,33 +26,38 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
 COMPONENTS_DIR = FERN_ROOT / "components"
-K8S_DIR = FERN_ROOT / "kubernetes"
+K8S_DIR = FERN_ROOT / "pages" / "reference" / "kubernetes-api"
+K8S_SOURCE_MD = K8S_DIR / "additional-resources" / "api-reference-k8s.md"
+K8S_TARGET_MDX = K8S_DIR / "full-api-reference.mdx"
 INDEX_YML = FERN_ROOT / "index.yml"
 DOCS_YML = FERN_ROOT / "docs.yml"
 REF_STYLES_COMPONENT = COMPONENTS_DIR / "ReferenceStyles.tsx"
-API_LANDING = FERN_ROOT / "reference" / "api" / "README.mdx"
+API_LANDING = FERN_ROOT / "pages" / "reference" / "api" / "README.mdx"
 
 
-def _reference_general_layout() -> list[dict[str, Any]]:
-    """Return the ``layout`` list of the Reference tab's General variant."""
+def _reference_layout() -> list[dict[str, Any]]:
+    """Return the ``layout`` list of the Reference tab."""
     nav = yaml.safe_load(INDEX_YML.read_text(encoding="utf-8"))
     reference_tab = next(
         entry for entry in nav["navigation"] if entry.get("tab") == "reference"
     )
-    general = next(
-        variant
-        for variant in reference_tab.get("variants", [])
-        if variant.get("title") == "General"
-    )
-    return general["layout"]
+    return reference_tab["layout"]
 
 
 def _api_reference_section() -> dict[str, Any]:
-    """Return the API Reference section from the General variant."""
-    for entry in _reference_general_layout():
+    """Return the API Reference section."""
+    for entry in _reference_layout():
         if entry.get("section") == "API Reference":
             return entry
-    raise AssertionError("API Reference section not found in General variant")
+    raise AssertionError("API Reference section not found under reference tab")
+
+
+def _kubernetes_api_section() -> dict[str, Any]:
+    """Return the Kubernetes API section."""
+    for entry in _reference_layout():
+        if entry.get("section") == "Kubernetes API":
+            return entry
+    raise AssertionError("Kubernetes API section not found under reference tab")
 
 
 def _python_api_section() -> dict[str, Any]:
@@ -125,64 +130,53 @@ def _iter_sections(node: Any) -> Iterator[dict[str, Any]]:
             yield from _iter_sections(value)
 
 
-def test_reference_sidebar_sections_are_expanded_by_default() -> None:
-    """The reference tab must open with its contents on screen.
+def test_api_reference_and_python_api_sections_are_expanded_by_default() -> None:
+    """The API Reference section and its Python API child must open on screen.
 
-    Fern collapses a section unless told otherwise, so the tab a reader
-    lands on to look something up shipped with the Python modules, the
-    Kubernetes types, and the release list all shut. Every visible section
-    in this tab therefore has to opt out explicitly.
+    Fern collapses a section unless told otherwise, so an API reference that
+    ships as a docs default should still surface its Python module pages the
+    moment a reader lands on the tab.
     """
-    still_collapsed = sorted(
-        section["section"]
-        for section in _iter_sections(_reference_general_layout())
-        if not section.get("hidden") and section.get("collapsed") is not False
+    api_reference = _api_reference_section()
+    assert api_reference.get("collapsed") is False, (
+        "API Reference must set 'collapsed: false' so its Python / Rust / "
+        "Kubernetes children are visible on tab entry"
     )
-
-    assert still_collapsed == [], (
-        "reference sections must set 'collapsed: false' so the sidebar opens "
-        f"expanded; still collapsed: {still_collapsed}"
-    )
-
-
-def test_legacy_kubernetes_full_reference_stays_hidden() -> None:
-    """The legacy K8s page is a duplicate, not a missing page.
-
-    ``kubernetes/api-reference.md`` is the raw generated Markdown twin of
-    ``kubernetes/api-reference-fern.mdx`` -- the same generator, the same
-    CRDs, and the MDX page cites the ``.md`` as its own source. Surfacing it
-    would put a second, untitled Kubernetes full reference directly beneath
-    the colocated one.
-    """
-    legacy = [
-        section
-        for section in _iter_sections(_reference_general_layout())
-        if section["section"] == "Additional Resources"
-    ]
-    assert len(legacy) == 1
-    assert legacy[0].get("hidden") is True, (
-        "Additional Resources duplicates the colocated Kubernetes API section; "
-        "it stays hidden while both are generated from the same CRDs"
+    python_section = _python_api_section()
+    assert python_section.get("collapsed") is False, (
+        "Python API must set 'collapsed: false' so the module pages surface "
+        "as sidebar entries"
     )
 
 
 def test_machine_readable_releases_page_stays_hidden() -> None:
     """The agent-facing releases mirror is not a sidebar entry.
 
-    ``reference/releases-data.mdx`` is a generated plain-markdown mirror of
-    ``releases.data.ts`` for agents, and it says so in its own subtitle. Its
-    human-facing content -- the CUDA toolkit and minimum driver history --
-    belongs on Compatibility, which carries that table directly. Unhiding
-    this page too would publish the same matrix twice under a name that
-    means nothing to a reader.
+    ``pages/reference/general/releases-machine-readable.mdx`` is a generated
+    plain-markdown mirror of ``releases.data.ts`` for agents, and it says so
+    in its own subtitle. Its human-facing content -- the CUDA toolkit and
+    minimum driver history -- belongs on Compatibility, which carries that
+    table directly. Unhiding this page too would publish the same matrix
+    twice under a name that means nothing to a reader.
     """
     entries = [
         entry
-        for entry in _reference_general_layout()
-        if entry.get("path") == "reference/releases-data.mdx"
+        for entry in _walk_nav(_reference_layout())
+        if entry.get("path") == "pages/reference/general/releases-machine-readable.mdx"
     ]
     assert len(entries) == 1
     assert entries[0].get("hidden") is True
+
+
+def _walk_nav(node: Any) -> Iterator[dict[str, Any]]:
+    """Yield every mapping node anywhere below ``node``."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _walk_nav(item)
+    elif isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk_nav(value)
 
 
 def test_python_module_pages_are_visible_in_sidebar() -> None:
@@ -196,66 +190,22 @@ def test_python_module_pages_are_visible_in_sidebar() -> None:
     assert hidden == [], f"Python module pages must not be hidden: {hidden}"
 
 
-def test_api_reference_colocates_python_rust_kubernetes() -> None:
-    """Python, Rust, and Kubernetes must appear as siblings under API Reference."""
+def test_reference_tab_lists_python_rust_and_kubernetes() -> None:
+    """The Reference tab must surface Python, Rust, and Kubernetes API sections.
+
+    Python and Rust live under the ``API Reference`` section; Kubernetes API
+    is its own top-level section within the tab so the CRD reference and
+    additional resources fold cleanly together in the sidebar.
+    """
     api_reference = _api_reference_section()
-    languages: list[str] = []
-    for entry in api_reference["contents"]:
-        title = entry.get("section") or entry.get("page")
-        if title in ("Python API", "Rust API", "Kubernetes API"):
-            languages.append(title)
-
-    assert set(languages) == {
-        "Python API",
-        "Rust API",
-        "Kubernetes API",
-    }, f"missing languages under API Reference: {sorted(set(languages))}"
-
-
-def test_reference_tab_no_longer_has_kubernetes_api_variant() -> None:
-    """The stand-alone Kubernetes API variant is removed once colocated."""
-    nav = yaml.safe_load(INDEX_YML.read_text(encoding="utf-8"))
-    reference_tab = next(
-        entry for entry in nav["navigation"] if entry.get("tab") == "reference"
-    )
-    variant_titles = [
-        variant.get("title") for variant in reference_tab.get("variants", [])
+    api_reference_children = [
+        entry.get("section") or entry.get("page")
+        for entry in api_reference["contents"]
     ]
+    assert "Python API" in api_reference_children
+    assert "Rust API" in api_reference_children
 
-    assert (
-        "Kubernetes API" not in variant_titles
-    ), f"Kubernetes API variant should be removed from reference tab, got {variant_titles}"
-
-
-# The section landing consumes the old "full-api-reference" slug because
-# it now owns kubernetes/api-reference-fern.mdx; the trimmed per-CRD
-# references keep their slugs as sibling pages inside the section.
-_EXPECTED_K8S_REDIRECTS: dict[str, str] = {
-    "/dynamo/dev/reference/kubernetes-api/full-api-reference": (
-        "/dynamo/dev/reference/api/kubernetes"
-    ),
-    "/dynamo/dev/reference/kubernetes-api/dynamographdeployment": (
-        "/dynamo/dev/reference/api/kubernetes/dynamographdeployment"
-    ),
-    "/dynamo/dev/reference/kubernetes-api/dynamographdeploymentrequest": (
-        "/dynamo/dev/reference/api/kubernetes/dynamographdeploymentrequest"
-    ),
-    "/dynamo/dev/reference/kubernetes-api/dynamocomponentdeployment": (
-        "/dynamo/dev/reference/api/kubernetes/dynamocomponentdeployment"
-    ),
-}
-
-
-def test_kubernetes_api_url_redirects_present() -> None:
-    """Legacy /reference/kubernetes-api/* URLs must redirect to /reference/api/kubernetes/*."""
-    docs = yaml.safe_load(DOCS_YML.read_text(encoding="utf-8"))
-    redirects = {r["source"]: r["destination"] for r in docs.get("redirects", [])}
-    for source, destination in _EXPECTED_K8S_REDIRECTS.items():
-        assert source in redirects, f"missing redirect for {source}"
-        assert redirects[source] == destination, (
-            f"unexpected redirect target for {source}: "
-            f"got {redirects[source]}, want {destination}"
-        )
+    _kubernetes_api_section()
 
 
 def test_api_landing_points_kubernetes_at_colocated_route() -> None:
@@ -268,11 +218,8 @@ def test_api_landing_points_kubernetes_at_colocated_route() -> None:
 
     assert card is not None, "Kubernetes card not found on the API landing page"
     assert (
-        card.group(1) == "../../kubernetes/api-reference-fern.mdx"
+        card.group(1) == "../kubernetes-api/full-api-reference.mdx"
     ), f"Kubernetes card must point at the colocated page, got {card.group(1)!r}"
-    assert (
-        "kubernetes-api/full-api-reference" not in source
-    ), "landing must not reference the removed kubernetes-api variant"
 
 
 _UNMERGED_DOCS_LINK_RE = re.compile(
@@ -282,8 +229,8 @@ _UNMERGED_DOCS_LINK_RE = re.compile(
 
 def _api_reference_pages() -> list[Path]:
     """Every committed page this reference owns."""
-    pages = sorted((FERN_ROOT / "reference" / "api").rglob("*.mdx"))
-    pages.append(K8S_DIR / "api-reference-fern.mdx")
+    pages = sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
+    pages.append(K8S_TARGET_MDX)
     return pages
 
 
@@ -375,7 +322,7 @@ def test_python_imports_use_the_public_alias_path() -> None:
 
 @pytest.fixture(scope="module")
 def kubernetes_page() -> _KubernetesPage:
-    source = (K8S_DIR / "api-reference.md").read_text(encoding="utf-8")
+    source = K8S_SOURCE_MD.read_text(encoding="utf-8")
     reference = kubernetes_api_discovery.parse_reference(source)
     return reference, kubernetes_api_rendering.render_mdx(reference)
 
@@ -468,7 +415,7 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
         "lib/bindings/python/src/**",
         "components/src/dynamo/**",
         "**/Cargo.toml",
-        "docs/fern/kubernetes/api-reference.md",
+        "docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md",
         # Navigation and the operator footer are read by the tests this job
         # runs, so an edit that touches only them still has to gate the job.
         "docs/fern/index.yml",
@@ -492,7 +439,10 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "api_docs: ${{ steps.changes.outputs.api_docs }}" in workflow
     assert "api-docs:" in workflow
     assert "needs.changed-files.outputs.api_docs == 'true'" in workflow
-    assert "pytest -c /dev/null -q docs/fern/scripts/tests" in workflow
+    assert "docs/fern/scripts/tests/test_gen_python_api.py" in workflow
+    assert "docs/fern/scripts/tests/test_gen_rust_api.py" in workflow
+    assert "docs/fern/scripts/tests/test_gen_kubernetes_api.py" in workflow
+    assert "-c /dev/null" not in workflow
     for generator in ("python", "rust", "kubernetes"):
         assert f"gen_{generator}_api.py --check" in workflow
     assert "griffe==2.1.0" in workflow
@@ -518,7 +468,7 @@ def test_pre_merge_runs_fern_from_docs_root() -> None:
 
 @pytest.fixture(scope="module")
 def kubernetes_package_pairs() -> _KubernetesPackagePairs:
-    source = (K8S_DIR / "api-reference.md").read_text(encoding="utf-8")
+    source = K8S_SOURCE_MD.read_text(encoding="utf-8")
     reference = kubernetes_api_discovery.parse_reference(source)
     package_text, _ = kubernetes_api_discovery._split_defaults_section(source)
     raw_packages = tuple(kubernetes_api_discovery._iter_packages(package_text))
@@ -608,13 +558,12 @@ def test_python_page_includes_signatures_and_methods() -> None:
 
 def test_kubernetes_sources_use_supported_admonitions() -> None:
     footer = REPO_ROOT / "deploy" / "operator" / "docs" / "footer.md"
-    source_paths = (footer, K8S_DIR / "api-reference.md")
+    source_paths = (footer, K8S_SOURCE_MD)
     for path in source_paths:
         text = path.read_text(encoding="utf-8")
         assert ":::{note}" not in text
         assert "> [!NOTE]" in text
-    rendered = (K8S_DIR / "api-reference-fern.mdx").read_text(encoding="utf-8")
-    assert "<Warning>" not in rendered
+    rendered = K8S_TARGET_MDX.read_text(encoding="utf-8")
     assert "> [!WARNING]" in rendered
 
 
@@ -632,7 +581,7 @@ def test_python_generator_detects_and_removes_orphaned_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fern = tmp_path / "fern"
-    pages = fern / "reference" / "api" / "python"
+    pages = fern / "pages" / "reference" / "api" / "python"
     pages.mkdir(parents=True)
     module = api_discovery.Module(
         name="sample",
@@ -703,7 +652,9 @@ def test_mdx_prose_keeps_unknown_colon_pairs_intact() -> None:
 def test_generated_python_pages_carry_no_sphinx_roles() -> None:
     """Guards the published output, not just the helper: every curated page
     is regenerated from docstrings that mix Google and Sphinx styles."""
-    for page in sorted((FERN_ROOT / "reference" / "api" / "python").glob("*.mdx")):
+    for page in sorted(
+        (FERN_ROOT / "pages" / "reference" / "api" / "python").glob("*.mdx")
+    ):
         text = page.read_text(encoding="utf-8")
         for role in (":class:`", ":meth:`", ":func:`", ":attr:`", ":mod:`"):
             assert role not in text, f"{page.name} still carries {role}"

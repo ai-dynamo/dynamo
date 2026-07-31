@@ -78,10 +78,28 @@ jobs:
       with:
         python-version: '3.13'
     - name: Install API docs test dependencies
-      # fsspec backs the storage.py doctest the suite executes.
-      run: python3 -m pip install 'griffe==2.1.0' 'pytest>=8.0' 'pyyaml>=6.0' 'fsspec'
+      # pydantic and pytest-benchmark satisfy the module-referencing
+      # filterwarnings entries in the repository's pyproject.toml so pytest
+      # can load them under the repository's shared config. fsspec backs the
+      # storage.py doctest the suite executes.
+      run: |
+        python3 -m pip install \
+          'griffe==2.1.0' \
+          'pytest>=8.0' \
+          'pyyaml>=6.0' \
+          'pydantic>=2' \
+          'pytest-benchmark>=4' \
+          'fsspec'
     - name: Test generated API references
-      run: python3 -m pytest -c /dev/null -q docs/fern/scripts/tests
+      # docs/fern/scripts/tests is an explicit path so it opts back into
+      # collection despite the pyproject's docs/* ignore-glob (which keeps
+      # the rendered docs site content out of the default suite).
+      run: |
+        python3 -m pytest -q \
+          docs/fern/scripts/tests/test_gen_python_api.py \
+          docs/fern/scripts/tests/test_gen_rust_api.py \
+          docs/fern/scripts/tests/test_gen_kubernetes_api.py \
+          docs/fern/scripts/tests/test_api_reference_regressions.py
     - name: Check generated API reference freshness
       run: |
         python3 docs/fern/scripts/gen_python_api.py --check
@@ -215,6 +233,10 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run Mocker AIC feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-mocker --features aic-forward-pass -- --nocapture
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -285,6 +307,14 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Run Mocker AIC feature clippy
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps -p dynamo-mocker --features aic-forward-pass --all-targets -- -D warnings
+    - name: Run Python bindings AIC feature clippy
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
     - name: Run KVBM offload Mooncake trace clippy
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

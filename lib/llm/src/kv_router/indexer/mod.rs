@@ -38,9 +38,10 @@ pub use self::side::SideIndexer;
 pub(crate) use recovery::WorkerQueryHealthSnapshot;
 pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
-    RecoverySupervisor, RecoveryTarget, SourceEpoch, TargetFaultDisposition,
-    start_target_subscriber,
+    RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+#[cfg(test)]
+pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
@@ -289,7 +290,7 @@ impl Indexer {
     /// Cold-reset one logical rank and wait until all local index tiers have completed the removal.
     ///
     /// NOTE: Unlike ordinary event application, rank removal is an infallible lane operation.
-    /// Its FIFO completion must be visible before source activation or clearing `reset_pending`.
+    /// Its FIFO completion must be visible before source activation or clearing a pending reset.
     pub(crate) async fn reset_worker_dp_rank_and_wait(
         &self,
         worker_id: WorkerId,

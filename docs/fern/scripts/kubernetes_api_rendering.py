@@ -60,8 +60,10 @@ _WARNING = (
     "**every** type across all three API packages: the deprecated "
     "`nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, "
     "and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` "
-    "configuration. The trimmed [DGD](dgd-reference.mdx), "
-    "[DGDR](dgdr-reference.mdx), and [DCD](dcd-reference.mdx) references cover "
+    "configuration. The trimmed "
+    "[DGD](dynamo-graph-deployment.mdx), "
+    "[DGDR](dynamo-graph-deployment-request.mdx), and "
+    "[DCD](dynamo-component-deployment.mdx) references cover "
     "only user-facing `v1beta1` fields. To edit the surface, change the Go "
     "types under `deploy/operator/api/` and let CI regenerate this page.\n"
 )
@@ -238,22 +240,68 @@ def _operator_defaults(defaults: OperatorDefaults) -> str:
 
 
 def _demote_headings(markdown: str) -> str:
-    """Prepend one ``#`` to every ATX heading line in ``markdown``."""
-    return "\n".join(
-        "#" + line if _is_atx_heading(line) else line for line in markdown.splitlines()
-    )
+    """Prepend one ``#`` to every ATX heading line in ``markdown``.
+
+    Lines inside fenced code blocks (```` ``` ```` or ``~~~``) are passed
+    through verbatim so ``#``-prefixed YAML or shell comments inside CRD
+    examples are not rewritten. Existing H6 headings stay at H6 because
+    ``#######`` is not a valid ATX heading and would render as literal
+    text.
+    """
+    fence_char: str | None = None
+    result: list[str] = []
+    for line in markdown.splitlines():
+        fence_open = _fence_delimiter(line)
+        if fence_char is None:
+            if fence_open is not None:
+                fence_char = fence_open
+                result.append(line)
+                continue
+            if _is_atx_heading(line) and _atx_level(line) < 6:
+                result.append("#" + line)
+            else:
+                result.append(line)
+        else:
+            if fence_open is not None and fence_open == fence_char:
+                fence_char = None
+            result.append(line)
+    return "\n".join(result)
+
+
+def _fence_delimiter(line: str) -> str | None:
+    """Return the fence character (``\\``` or ``~``) if ``line`` opens or
+    closes a fenced code block, else ``None``.
+
+    A fence is at least three consecutive fence characters at column 0 or
+    after up to three spaces of leading indentation, matching CommonMark.
+    """
+    stripped = line.lstrip(" ")
+    indent = len(line) - len(stripped)
+    if indent > 3:
+        return None
+    for fence in ("`", "~"):
+        if stripped.startswith(fence * 3):
+            return fence
+    return None
 
 
 def _is_atx_heading(line: str) -> bool:
     """True when ``line`` is an ATX Markdown heading (``#``..``######``)."""
+    return _atx_level(line) is not None
+
+
+def _atx_level(line: str) -> int | None:
+    """Return the ATX heading level (1..6) or ``None`` if ``line`` is not one."""
     stripped = line.lstrip()
     if not stripped.startswith("#"):
-        return False
+        return None
     prefix = stripped[: len(stripped) - len(stripped.lstrip("#"))]
     if len(prefix) < 1 or len(prefix) > 6:
-        return False
+        return None
     rest = stripped[len(prefix) :]
-    return rest.startswith(" ") or rest == ""
+    if rest.startswith(" ") or rest == "":
+        return len(prefix)
+    return None
 
 
 def _plain(text: str) -> str:

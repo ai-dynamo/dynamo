@@ -5,11 +5,12 @@
 
 Thin CLI/orchestrator that composes :mod:`kubernetes_api_discovery` (the
 deterministic Markdown parser) with :mod:`kubernetes_api_rendering` (the MDX
-serializer). Every run parses ``docs/fern/kubernetes/api-reference.md`` once
-and emits ``docs/fern/kubernetes/api-reference-fern.mdx``: one MDX page built
-from Fern's own ``<CardGroup>``, ``<Accordion>``, ``<ParamField>``, and
-``<Badge>`` components, followed by the twelve operator-default subsections as
-demoted Markdown headings.
+serializer). Every run parses
+``docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md``
+once and emits ``docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx``:
+one MDX page built from Fern's own ``<CardGroup>``, ``<Accordion>``,
+``<ParamField>``, and ``<Badge>`` components, followed by the twelve
+operator-default subsections as demoted Markdown headings.
 
 Usage (from any cwd; paths resolve relative to this file)::
 
@@ -37,11 +38,24 @@ DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
 
 
 def _source_path(fern_root: Path) -> Path:
-    return fern_root / "kubernetes" / "api-reference.md"
+    return (
+        fern_root
+        / "pages"
+        / "reference"
+        / "kubernetes-api"
+        / "additional-resources"
+        / "api-reference-k8s.md"
+    )
 
 
 def _mdx_shell_path(fern_root: Path) -> Path:
-    return fern_root / "kubernetes" / "api-reference-fern.mdx"
+    return (
+        fern_root
+        / "pages"
+        / "reference"
+        / "kubernetes-api"
+        / "full-api-reference.mdx"
+    )
 
 
 def _load_reference(fern_root: Path) -> KubernetesReference:
