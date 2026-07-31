@@ -95,6 +95,50 @@ fn softmax_sample_entries(
     *entries.last().unwrap()
 }
 
+struct MinCostPicker {
+    best_worker: Option<WorkerWithDpRank>,
+    best_cost: f64,
+    tie_count: usize,
+}
+
+impl MinCostPicker {
+    fn new() -> Self {
+        Self {
+            best_worker: None,
+            best_cost: f64::INFINITY,
+            tie_count: 0,
+        }
+    }
+
+    fn consider(
+        &mut self,
+        worker: WorkerWithDpRank,
+        cost: f64,
+        choose_tie: impl FnOnce(std::ops::Range<usize>) -> usize,
+    ) {
+        if cost < self.best_cost {
+            self.best_worker = Some(worker);
+            self.best_cost = cost;
+            self.tie_count = 1;
+            return;
+        }
+
+        if cost == self.best_cost {
+            self.tie_count += 1;
+            if choose_tie(0..self.tie_count) == 0 {
+                self.best_worker = Some(worker);
+            }
+        }
+    }
+
+    fn finish(self) -> (WorkerWithDpRank, f64) {
+        (
+            self.best_worker.expect("eligible worker rank non-empty"),
+            self.best_cost,
+        )
+    }
+}
+
 /// Default implementation matching the Python _cost_function.
 #[derive(Debug, Clone)]
 pub struct DefaultWorkerSelector {
@@ -301,6 +345,114 @@ impl DefaultWorkerSelector {
 
         logit
     }
+
+    fn score_worker<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        min_active_prefill_tokens: usize,
+        weights: LogitWeights,
+    ) -> f64 {
+        let base_score = self.worker_logit(
+            request,
+            worker,
+            block_size,
+            min_active_prefill_tokens,
+            weights,
+            "Formula",
+        );
+        let Some(config) = workers.get(&worker.worker_id) else {
+            return base_score;
+        };
+        match request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints())
+        {
+            // NOTE: This multiplicative bias assumes a non-negative score. Negative
+            // overlap scores expose its pre-existing sign sensitivity; keep it for now.
+            Some(multiplier) => base_score * multiplier,
+            None => base_score,
+        }
+    }
+
+    fn pick_worker<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+        weights: LogitWeights,
+        temperature: f64,
+    ) -> (WorkerWithDpRank, f64) {
+        let min_active_prefill_tokens =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let mut minimum = usize::MAX;
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+                });
+                debug_assert_ne!(minimum, usize::MAX);
+                minimum
+            } else {
+                0
+            };
+        let get_score = |worker| {
+            self.score_worker(
+                workers,
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+            )
+        };
+
+        #[cfg(any(test, feature = "bench"))]
+        let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
+            let mut candidates = Vec::new();
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                candidates.push(worker);
+            });
+            candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
+
+            let mut rng = rng.lock();
+            if temperature == 0.0 {
+                let mut picker = MinCostPicker::new();
+                for worker in candidates {
+                    picker.consider(worker, get_score(worker), |range| rng.usize(range));
+                }
+                return picker.finish();
+            }
+
+            let entries = candidates
+                .into_iter()
+                .map(|worker| (worker, get_score(worker)))
+                .collect();
+            softmax_sample_entries(entries, temperature, rng.f64())
+        });
+
+        let random_choice = || {
+            if temperature == 0.0 {
+                let mut picker = MinCostPicker::new();
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    picker.consider(worker, get_score(worker), fastrand::usize);
+                });
+                return picker.finish();
+            }
+
+            let mut worker_logits = FxHashMap::default();
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                worker_logits.insert(worker, get_score(worker));
+            });
+            softmax_sample(&worker_logits, temperature)
+        };
+
+        #[cfg(any(test, feature = "bench"))]
+        return deterministic_choice.unwrap_or_else(random_choice);
+        #[cfg(not(any(test, feature = "bench")))]
+        random_choice()
+    }
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
@@ -405,123 +557,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
-        let min_active_prefill_tokens =
-            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
-                let mut minimum = usize::MAX;
-                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
-                });
-                debug_assert_ne!(minimum, usize::MAX);
-                minimum
-            } else {
-                0
-            };
-        let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(
-                request,
-                worker,
-                block_size,
-                min_active_prefill_tokens,
-                weights,
-                "Formula",
-            );
-            let Some(config) = workers.get(&worker.worker_id) else {
-                return base_score;
-            };
-            match request
-                .routing_constraints
-                .preferred_taint_multiplier(config.taints())
-            {
-                // NOTE: This multiplicative bias assumes a non-negative score. Negative
-                // overlap scores expose its pre-existing sign sensitivity; keep it for now.
-                Some(multiplier) => base_score * multiplier,
-                None => base_score,
-            }
-        };
-
-        #[cfg(any(test, feature = "bench"))]
-        let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
-            let mut candidates = Vec::new();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                candidates.push(worker);
-            });
-            candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
-
-            let mut rng = rng.lock();
-            if temperature == 0.0 {
-                let mut best_worker = None;
-                let mut best_logit = f64::INFINITY;
-                let mut tie_count = 0usize;
-                for worker in candidates {
-                    let score = get_score(worker);
-                    if score < best_logit {
-                        best_worker = Some(worker);
-                        best_logit = score;
-                        tie_count = 1;
-                        continue;
-                    }
-
-                    if score == best_logit {
-                        tie_count += 1;
-                        if rng.usize(0..tie_count) == 0 {
-                            best_worker = Some(worker);
-                        }
-                    }
-                }
-                return (
-                    best_worker.expect("eligible worker rank non-empty"),
-                    best_logit,
-                );
-            }
-
-            let entries = candidates
-                .into_iter()
-                .map(|worker| (worker, get_score(worker)))
-                .collect();
-            softmax_sample_entries(entries, temperature, rng.f64())
-        });
-
-        let random_choice = || {
-            if temperature == 0.0 {
-                let mut best_worker = None;
-                let mut best_logit = f64::INFINITY;
-                let mut tie_count = 0usize;
-                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    let score = get_score(worker);
-                    if score < best_logit {
-                        best_worker = Some(worker);
-                        best_logit = score;
-                        tie_count = 1;
-                        return;
-                    }
-
-                    if score == best_logit {
-                        tie_count += 1;
-                        // Reservoir sampling keeps tied minima uniform without collecting workers.
-                        if fastrand::usize(0..tie_count) == 0 {
-                            best_worker = Some(worker);
-                        }
-                    }
-                });
-
-                return (
-                    best_worker.expect("eligible worker rank non-empty"),
-                    best_logit,
-                );
-            }
-
-            let mut worker_logits = FxHashMap::default();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                let score = get_score(worker);
-                worker_logits.insert(worker, score);
-            });
-
-            softmax_sample(&worker_logits, temperature)
-        };
-        #[cfg(any(test, feature = "bench"))]
-        let (best_worker, best_logit) = deterministic_choice.unwrap_or_else(random_choice);
-        #[cfg(not(any(test, feature = "bench")))]
-        let (best_worker, best_logit) = random_choice();
+        let (best_worker, best_logit) = self.pick_worker(
+            workers,
+            request,
+            eligibility,
+            block_size,
+            weights,
+            temperature,
+        );
 
         let best_host_pinned_overlap_blocks = request
             .overlap
@@ -850,7 +893,20 @@ mod tests {
     fn seeded_selector_is_stable_for_ties_and_temperature_sampling() {
         use crate::test_utils::SimpleWorkerConfig;
 
-        for temperature in [0.0, 0.7] {
+        for (temperature, expected_prefix) in [
+            (
+                0.0,
+                [
+                    10, 30, 10, 10, 30, 20, 10, 10, 10, 20, 10, 20, 30, 10, 20, 20,
+                ],
+            ),
+            (
+                0.7,
+                [
+                    30, 20, 30, 10, 20, 20, 30, 20, 30, 10, 10, 30, 30, 20, 30, 30,
+                ],
+            ),
+        ] {
             let config = KvRouterConfig {
                 router_temperature: temperature,
                 ..Default::default()
@@ -887,6 +943,14 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert_eq!(first_sequence, second_sequence);
+            assert_eq!(
+                first_sequence
+                    .iter()
+                    .take(expected_prefix.len())
+                    .map(|worker| worker.worker_id)
+                    .collect::<Vec<_>>(),
+                expected_prefix,
+            );
         }
     }
 
