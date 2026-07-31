@@ -99,7 +99,7 @@ func (*recordingGroveScaleInterface) Patch(
 	return nil, errors.New("unexpected scale patch")
 }
 
-func TestGroveScaler_ReconcileTargetsExpectedChildren(t *testing.T) {
+func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -124,7 +124,7 @@ func TestGroveScaler_ReconcileTargetsExpectedChildren(t *testing.T) {
 	})
 	scaleClient := &recordingGroveScaleClient{currentReplicas: 1}
 
-	err := newGroveScaler(scaleClient).reconcile(
+	err := newGroveScaler(scaleClient).Reconcile(
 		context.Background(),
 		dgd,
 		map[string]*checkpoint.CheckpointInfo{
@@ -180,7 +180,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 				),
 			},
 		}
-		require.NoError(t, newGroveScaler(scaleClient).reconcile(context.Background(), dgd, nil))
+		require.NoError(t, newGroveScaler(scaleClient).Reconcile(context.Background(), dgd, nil))
 		assert.Empty(t, scaleClient.updates)
 	})
 
@@ -188,7 +188,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 		scaleClient := &recordingGroveScaleClient{
 			getErrors: map[string]error{"graph-0-worker": errors.New("scale read failed")},
 		}
-		err := newGroveScaler(scaleClient).reconcile(context.Background(), dgd, nil)
+		err := newGroveScaler(scaleClient).Reconcile(context.Background(), dgd, nil)
 		require.ErrorContains(t, err, "scale read failed")
 	})
 }

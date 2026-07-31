@@ -66,7 +66,7 @@ func createTestDGD(name string, services map[string]*nvidiacomv1alpha1.DynamoCom
 
 type testReconcilerOption func(*fake.ClientBuilder)
 
-// withObjects seeds the fake client with additional runtime objects beyond the DGD.
+// withObjects seeds the rollout test client with runtime objects beyond the DGD.
 func withObjects(objs ...runtime.Object) testReconcilerOption {
 	return func(b *fake.ClientBuilder) {
 		b.WithRuntimeObjects(objs...)
@@ -81,7 +81,7 @@ func withInterceptor(funcs interceptor.Funcs) testReconcilerOption {
 	}
 }
 
-func createTestReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployment, opts ...testReconcilerOption) *DynamoGraphDeploymentReconciler {
+func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployment, opts ...testReconcilerOption) *DynamoGraphDeploymentReconciler {
 	scheme := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(scheme)
 	_ = nvidiacomv1beta1.AddToScheme(scheme)
@@ -106,6 +106,23 @@ func createTestReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 				return []string{}, nil
 			},
 		},
+	}
+}
+
+func createTestReconcilerWithStatus(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	opts ...testReconcilerOption,
+) *dgdWorkerRolloutReconciler {
+	reconciler := createTestDGDReconcilerWithStatus(dgd, opts...)
+	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
+}
+
+func newTestComponentWorkloadsReconciler(
+	rollout *dgdWorkerRolloutReconciler,
+) *componentWorkloadsReconciler {
+	return &componentWorkloadsReconciler{
+		syncer:  rollout.dgdResourceSyncer,
+		rollout: rollout,
 	}
 }
 
@@ -527,7 +544,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	}
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.False(t, (&componentProgram{reconciler: r}).supportsManagedRollingUpdate(dgd))
+	require.False(t, supportsManagedRollingUpdate(dgd))
 
 	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
@@ -589,9 +606,8 @@ func TestComponentProgram_SupportsManagedRollingUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := createTestDGD("test-dgd", tt.services)
-			r := createTestReconcilerWithStatus(dgd)
 
-			result := (&componentProgram{reconciler: r}).supportsManagedRollingUpdate(dgd)
+			result := supportsManagedRollingUpdate(dgd)
 			if result != tt.expected {
 				t.Errorf("supportsManagedRollingUpdate() = %v, expected %v", result, tt.expected)
 			}
@@ -1757,7 +1773,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 	})
 }
 
-func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
+func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testing.T) {
 	t.Run("worker DCD with hash suffix - finds annotation", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"frontend": {
@@ -1803,7 +1819,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD, workerDCD))
 		ctx := context.Background()
 
-		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+		annotations, err := newTestComponentWorkloadsReconciler(r).getExistingRestartAnnotationsDCD(ctx, dgd)
 		require.NoError(t, err)
 
 		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
@@ -1840,7 +1856,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
-		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+		annotations, err := newTestComponentWorkloadsReconciler(r).getExistingRestartAnnotationsDCD(ctx, dgd)
 		require.NoError(t, err)
 
 		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["worker"])
@@ -1876,7 +1892,7 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
-		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+		annotations, err := newTestComponentWorkloadsReconciler(r).getExistingRestartAnnotationsDCD(ctx, dgd)
 		require.NoError(t, err)
 
 		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
@@ -1911,14 +1927,14 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
-		annotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+		annotations, err := newTestComponentWorkloadsReconciler(r).getExistingRestartAnnotationsDCD(ctx, dgd)
 		require.NoError(t, err)
 
 		assert.Equal(t, "2025-01-01T00:00:00Z", annotations["frontend"])
 	})
 }
 
-func TestCheckComponentFullyUpdated(t *testing.T) {
+func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.T) {
 	t.Run("worker with hash suffix - finds DCD", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
@@ -1950,7 +1966,7 @@ func TestCheckComponentFullyUpdated(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
-		isReady, reason := r.checkComponentFullyUpdated(ctx, dgd, "worker")
+		isReady, reason := newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, "worker")
 		assert.True(t, isReady, "worker DCD should be ready")
 		assert.Empty(t, reason)
 	})
@@ -1988,7 +2004,7 @@ func TestCheckComponentFullyUpdated(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
-		isReady, reason := r.checkComponentFullyUpdated(ctx, dgd, "worker")
+		isReady, reason := newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, "worker")
 		assert.True(t, isReady, "worker DCD should be ready")
 		assert.Empty(t, reason)
 	})
@@ -2020,7 +2036,7 @@ func TestCheckComponentFullyUpdated(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
 		ctx := context.Background()
 
-		isReady, reason := r.checkComponentFullyUpdated(ctx, dgd, "frontend")
+		isReady, reason := newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, "frontend")
 		assert.True(t, isReady, "frontend DCD should be ready")
 		assert.Empty(t, reason)
 	})
@@ -2053,7 +2069,7 @@ func TestCheckComponentFullyUpdated(t *testing.T) {
 		r := createTestReconcilerWithStatus(dgd, withObjects(workerDCD))
 		ctx := context.Background()
 
-		isReady, reason := r.checkComponentFullyUpdated(ctx, dgd, "worker")
+		isReady, reason := newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, "worker")
 		assert.True(t, isReady, "worker DCD should be ready via fallback")
 		assert.Empty(t, reason)
 	})

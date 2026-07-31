@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func TestGroveProgram_ReconcileWorkloadsEvaluatesReadinessOnce(t *testing.T) {
+func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -101,9 +101,11 @@ func TestGroveProgram_ReconcileWorkloadsEvaluatesReadinessOnce(t *testing.T) {
 		},
 	}
 
-	result, err := newGroveProgram(reconciler).reconcileWorkloads(
+	result, err := reconciler.newGroveProgram().workloads.Reconcile(
 		context.Background(),
-		workloadReconcileRequest{DGD: dgd},
+		dgd,
+		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)

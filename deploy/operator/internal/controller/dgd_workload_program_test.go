@@ -22,6 +22,7 @@ import (
 	"errors"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
@@ -42,7 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
+func TestDGDWorkloadProgramSelection(t *testing.T) {
 	tests := []struct {
 		name         string
 		groveEnabled bool
@@ -85,10 +86,19 @@ func TestDynamoGraphDeploymentReconciler_selectWorkloadProgram(t *testing.T) {
 
 			assert.IsType(t, tt.wantProgram, got)
 			if component, ok := got.(*componentProgram); ok {
-				assert.Same(t, reconciler, component.reconciler)
+				assert.NotNil(t, component.rollout)
+				assert.NotNil(t, component.restart)
+				assert.NotNil(t, component.restartProgress)
+				assert.NotNil(t, component.workloads)
+				assert.NotNil(t, component.scalingAdapters)
 			}
 			if grove, ok := got.(*groveProgram); ok {
-				assert.Same(t, reconciler, grove.reconciler)
+				assert.NotNil(t, grove.rollout)
+				assert.NotNil(t, grove.restart)
+				assert.NotNil(t, grove.restartProgress)
+				assert.NotNil(t, grove.workloads)
+				assert.NotNil(t, grove.scalingAdapters)
+				assert.NotNil(t, grove.topology)
 			}
 		})
 	}
@@ -258,9 +268,12 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 			},
 		}).
 		Build()
-	program := &componentProgram{
-		reconciler: &DynamoGraphDeploymentReconciler{Client: kubeClient},
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
+	program := reconciler.newComponentProgram()
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
 		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
@@ -307,10 +320,13 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 			},
 		}).
 		Build()
-	program := newGroveProgram(&DynamoGraphDeploymentReconciler{
-		Client:   kubeClient,
-		Recorder: record.NewFakeRecorder(10),
-	})
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &commonController.RuntimeConfig{},
+	}
+	program := reconciler.newGroveProgram()
 	dgd.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{
 		State: nvidiacomv1beta1.DGDStatePending,
 		Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -353,8 +369,8 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
 	}
-	reconciler := createTestReconcilerWithStatus(dgd)
-	program := &componentProgram{reconciler: reconciler}
+	reconciler := createTestDGDReconcilerWithStatus(dgd)
+	program := reconciler.newComponentProgram()
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
@@ -411,12 +427,11 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				}).
 				Build()
 			recorder := record.NewFakeRecorder(1)
-			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Recorder: recorder}
+			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			require.NoError(t, reconcileUnsupportedWorkerRollout(
+			require.NoError(t, reconciler.ReconcileUnsupported(
 				context.Background(),
-				reconciler,
 				dgd,
 				true,
 			))
@@ -442,10 +457,10 @@ func TestRecordRestartTransitionQueuesSupersededTransition(t *testing.T) {
 	result.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
 		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
 	}
-	reconciler := &DynamoGraphDeploymentReconciler{}
+	reconciler := newDGDRestartReconciler()
 
 	t.Log("Resolve restart state against the program-owned status accumulator")
-	restart := reconciler.resolveProgramRestartState(
+	restart := reconciler.Resolve(
 		context.Background(),
 		dgd,
 		&result.Status,
@@ -473,8 +488,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
 		}
-		reconciler := createTestReconcilerWithStatus(dgd)
-		program := &componentProgram{reconciler: reconciler}
+		reconciler := createTestDGDReconcilerWithStatus(dgd)
+		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
@@ -496,21 +511,21 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
 		}
-		reconciler := createTestReconcilerWithStatus(dgd)
-		program := &componentProgram{reconciler: reconciler}
+		reconciler := createTestDGDReconcilerWithStatus(dgd)
+		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
 		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)
-		desired, err := reconciler.desiredWorkerHashes(dgd)
+		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
-		assert.True(t, currentWorkerHashesMatchDesired(reconciler.currentWorkerHashes(dgd), desired))
+		assert.True(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 	})
 }
 
-func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {
+func TestComponentWorkloadsReconciler_PreserveExistingBackendFramework(t *testing.T) {
 	tests := []struct {
 		name          string
 		dcdName       string
@@ -545,13 +560,14 @@ func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {
 					},
 				})
 			}
-			program := &componentProgram{
-				reconciler: &DynamoGraphDeploymentReconciler{
-					Client: fake.NewClientBuilder().
+			workloads := &componentWorkloadsReconciler{
+				syncer: newDGDResourceSyncer(
+					fake.NewClientBuilder().
 						WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 						WithObjects(objects...).
 						Build(),
-				},
+					nil,
+				),
 			}
 			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
@@ -561,7 +577,7 @@ func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {
 			}
 
 			t.Log("Resolve the backend value that can safely be synchronized")
-			require.NoError(t, program.preserveExistingBackendFramework(context.Background(), desired))
+			require.NoError(t, workloads.preserveExistingBackendFramework(context.Background(), desired))
 
 			t.Log("Verify updates preserve stored state while creates keep the inferred value")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
@@ -569,8 +585,8 @@ func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {
 	}
 }
 
-func TestComponentProgram_ApplyCheckpointStartupPolicy(t *testing.T) {
-	program := &componentProgram{}
+func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T) {
+	workloads := &componentWorkloadsReconciler{}
 	tests := []struct {
 		name              string
 		replicas          int32
@@ -633,7 +649,7 @@ func TestComponentProgram_ApplyCheckpointStartupPolicy(t *testing.T) {
 			}
 
 			t.Log("Apply the checkpoint startup policy before synchronizing the DCD")
-			require.NoError(t, program.applyCheckpointStartupPolicy(dcd, &tt.checkpointInfo))
+			require.NoError(t, workloads.applyCheckpointStartupPolicy(dcd, &tt.checkpointInfo))
 
 			t.Log("Verify the child checkpoint reference, startup policy, and replica gate")
 			require.NotNil(t, dcd.Spec.Experimental)

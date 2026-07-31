@@ -43,6 +43,7 @@ type groveWatchSetup struct {
 	reader client.Reader
 }
 
+// newGroveWatchSetup wires Grove-owned watch predicates and request mapping.
 func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 	return &groveWatchSetup{reader: reader}
 }

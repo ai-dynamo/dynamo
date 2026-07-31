@@ -33,97 +33,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// groveStatusResolver owns the provider-specific observations used to derive
-// restart progress and DGD status contributions. It never writes DGD status.
-type groveStatusResolver struct {
+// dgdGroveTopologyConditionReconciler projects Grove's topology observation
+// into the program-owned DGD status and queues any resulting status event. It
+// never writes the status subresource itself.
+type dgdGroveTopologyConditionReconciler struct {
 	reader client.Reader
 }
 
-func newGroveStatusResolver(reader client.Reader) *groveStatusResolver {
-	return &groveStatusResolver{reader: reader}
+func newDGDGroveTopologyConditionReconciler(
+	reader client.Reader,
+) *dgdGroveTopologyConditionReconciler {
+	return &dgdGroveTopologyConditionReconciler{reader: reader}
 }
 
-// getUpdatedInProgress returns the subset of components whose Grove workload
-// has not completed the requested restart.
-func (r *groveStatusResolver) getUpdatedInProgress(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	inProgress []string,
-) []string {
-	logger := log.FromContext(ctx)
-
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcsName := dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components)
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: pcsName, Namespace: dgd.Namespace}, pcs); err != nil {
-		logger.Error(err, "failed to get PodCliqueSet")
-		return inProgress
-	}
-
-	if pcs.Status.ObservedGeneration == nil {
-		logger.Info("PodCliqueSet observedGeneration is nil", "name", dgd.Name)
-		return inProgress
-	}
-	if *pcs.Status.ObservedGeneration < pcs.Generation {
-		logger.Info(
-			"PodCliqueSet not yet reconciled",
-			"name", dgd.Name,
-			"generation", pcs.Generation,
-			"observedGeneration", *pcs.Status.ObservedGeneration,
-		)
-		return inProgress
-	}
-
-	updatedInProgress := make([]string, 0, len(inProgress))
-	for _, componentName := range inProgress {
-		component := dgd.GetComponentByName(componentName)
-		if component == nil {
-			logger.V(1).Info("component not found in DGD", "componentName", componentName)
-			continue
-		}
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
-
-		var (
-			isReady bool
-			reason  string
-		)
-		// Any component represented by a PodCliqueScalingGroup must use the
-		// PCSG readiness path. Read failures conservatively keep the component
-		// in progress; authoritative readiness returns the error separately.
-		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
-			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(
-				ctx,
-				r.reader,
-				resourceName,
-				dgd.Namespace,
-				logger,
-			)
-		} else {
-			isReady, reason, _, _, _ = dynamo.CheckPodCliqueReady(
-				ctx,
-				r.reader,
-				resourceName,
-				dgd.Namespace,
-				logger,
-			)
-		}
-		if !isReady {
-			logger.V(1).Info(
-				"component not ready",
-				"componentName", componentName,
-				"resourceName", resourceName,
-				"reason", reason,
-			)
-			updatedInProgress = append(updatedInProgress, componentName)
-		}
-	}
-
-	return updatedInProgress
-}
-
-// projectTopologyCondition maps Grove's PodCliqueSet topology condition into
-// the program's accumulated DGD status. The outer reconciler remains the only
-// status-subresource writer.
-func (r *groveStatusResolver) projectTopologyCondition(
+func (r *dgdGroveTopologyConditionReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	result *workloadProgramResult,

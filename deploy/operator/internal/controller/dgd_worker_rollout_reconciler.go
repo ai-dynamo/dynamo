@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -42,6 +43,83 @@ type workerGenerationHashes struct {
 	v2 string
 }
 
+// dgdWorkerRolloutReconciler owns worker-generation metadata and the managed
+// rolling-update state machine. It carries the Kubernetes read/write access
+// required by that state machine and event recording, never the complete DGD
+// controller.
+type dgdWorkerRolloutReconciler struct {
+	dgdResourceSyncer
+}
+
+func newDGDWorkerRolloutReconciler(
+	kubeClient client.Client,
+	recorder record.EventRecorder,
+) *dgdWorkerRolloutReconciler {
+	return &dgdWorkerRolloutReconciler{
+		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
+	}
+}
+
+// ReconcileUnsupported advances compatibility hashes for a pathway that does
+// not support operator-managed rolling updates.
+func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	isGrove bool,
+) error {
+	logger := log.FromContext(ctx)
+
+	if r.currentWorkerHashes(dgd).empty() {
+		hashes, err := r.desiredWorkerHashes(dgd)
+		if err != nil {
+			logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+		}
+		r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(hashes.v2, hashes))
+		if err := r.Update(ctx, dgd); err != nil {
+			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
+			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+		}
+	}
+
+	triggerRollingUpdate, err := r.shouldTriggerRollingUpdate(dgd)
+	if err != nil {
+		logger.Error(err, "Failed to check rolling update trigger for unsupported pathway")
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !triggerRollingUpdate {
+		return nil
+	}
+
+	hashes, err := r.desiredWorkerHashes(dgd)
+	if err != nil {
+		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
+		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
+	}
+	r.setCurrentWorkerHashes(dgd, r.workerHashesForUnsupportedPathway(dgd, hashes))
+	if err := r.Update(ctx, dgd); err != nil {
+		// Preserve the existing best-effort behavior: the next reconciliation
+		// retries the metadata update and may emit another warning.
+		logger.Error(err, "Failed to update worker hash for unsupported pathway")
+		return nil
+	}
+
+	logger.Info(
+		"Worker spec change detected but rolling update not supported for this pathway",
+		"isGrove", isGrove,
+		"hasMultinode", dgd.HasAnyMultinodeComponent(),
+	)
+	if r.recorder != nil {
+		r.recorder.Event(
+			dgd,
+			corev1.EventTypeWarning,
+			"RollingUpdateNotSupported",
+			"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
+		)
+	}
+	return nil
+}
+
 func (h workerGenerationHashes) empty() bool {
 	return h.v1 == "" && h.v2 == ""
 }
@@ -53,7 +131,13 @@ func (h workerGenerationHashes) contains(hash string) bool {
 	return hash == h.v1 || hash == h.v2
 }
 
-func (r *DynamoGraphDeploymentReconciler) desiredWorkerHashes(
+func (r *dgdWorkerRolloutReconciler) desiredWorkerHashes(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (workerGenerationHashes, error) {
+	return desiredWorkerHashes(dgd)
+}
+
+func desiredWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (workerGenerationHashes, error) {
 	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
@@ -61,7 +145,7 @@ func (r *DynamoGraphDeploymentReconciler) desiredWorkerHashes(
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
 	}
 
-	current := r.currentWorkerHashes(dgd)
+	current := currentWorkerHashes(dgd)
 	v1Hash := v2Hash
 	if current.v2 != "" {
 		v1Hash = current.v1
@@ -80,12 +164,18 @@ func (r *DynamoGraphDeploymentReconciler) desiredWorkerHashes(
 	return workerGenerationHashes{v1: v1Hash, v2: v2Hash}, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) currentWorkerHashes(
+func (r *dgdWorkerRolloutReconciler) currentWorkerHashes(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) workerGenerationHashes {
+	return currentWorkerHashes(dgd)
+}
+
+func currentWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workerGenerationHashes {
 	return workerGenerationHashes{
-		v1: r.getCurrentWorkerHash(dgd),
-		v2: r.getCurrentWorkerHashV2(dgd),
+		v1: currentWorkerHash(dgd),
+		v2: currentWorkerHashV2(dgd),
 	}
 }
 
@@ -125,7 +215,7 @@ func workerHashesForCompletedGeneration(newWorkerHash string, desired workerGene
 	return desired
 }
 
-func (r *DynamoGraphDeploymentReconciler) workerHashesForUnsupportedPathway(
+func (r *dgdWorkerRolloutReconciler) workerHashesForUnsupportedPathway(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired workerGenerationHashes,
 ) workerGenerationHashes {
@@ -140,7 +230,7 @@ func (r *DynamoGraphDeploymentReconciler) workerHashesForUnsupportedPathway(
 // matches either current-worker-hash (v1) or current-worker-hash-v2. This keeps
 // the existing annotation/label meaning downgrade-safe while allowing the
 // controller to record the v2 hash that will become primary later.
-func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
+func (r *dgdWorkerRolloutReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
 	desired, err := r.desiredWorkerHashes(dgd)
@@ -157,7 +247,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 // managed rolling updates may already have worker DCDs without a hash label; in
 // that case we label those DCDs with the legacy sentinel and let the normal
 // rolling update path migrate from that sentinel to the desired compatibility hash.
-func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
+func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
@@ -198,8 +288,10 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 			return fmt.Errorf("failed to set legacy worker hash: %w", err)
 		}
 
-		r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "LegacyMigrationStarted",
-			"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
+		if r.recorder != nil {
+			r.recorder.Eventf(dgd, corev1.EventTypeNormal, "LegacyMigrationStarted",
+				"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
+		}
 		return nil
 	}
 
@@ -221,7 +313,7 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 
 // migrateCurrentWorkerHashIfNeeded fills in additive v2 worker-hash state while
 // the v1 hash still represents the active worker generation.
-func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
+func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
@@ -261,7 +353,9 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger.Info("Migrated worker hash annotations",
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
-	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated", eventMessage)
+	if r.recorder != nil {
+		r.recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated", eventMessage)
+	}
 
 	return nil
 }
@@ -270,18 +364,25 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 // DCD names and worker-hash labels in this reconcile. Existing bridge generations
 // keep their v1 identity until a worker change selects v2. Already v2-labeled
 // generations preserve that value.
-func (r *DynamoGraphDeploymentReconciler) activeWorkerHashForDCDGeneration(
+func (r *dgdWorkerRolloutReconciler) activeWorkerHashForDCDGeneration(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired workerGenerationHashes,
 ) string {
-	return r.activeWorkerHashCandidates(dgd, desired)[0]
+	return activeWorkerHashForDCDGeneration(dgd, desired)
 }
 
-func (r *DynamoGraphDeploymentReconciler) activeWorkerHashCandidates(
+func activeWorkerHashForDCDGeneration(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	desired workerGenerationHashes,
+) string {
+	return activeWorkerHashCandidates(dgd, desired)[0]
+}
+
+func activeWorkerHashCandidates(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired workerGenerationHashes,
 ) []string {
-	current := r.currentWorkerHashes(dgd)
+	current := currentWorkerHashes(dgd)
 	candidates := make([]string, 0, 2)
 	generated := workerHashForDCDGeneration(current, desired)
 	candidates = append(candidates, generated)
@@ -296,7 +397,7 @@ func (r *DynamoGraphDeploymentReconciler) activeWorkerHashCandidates(
 
 // findLegacyWorkerDCDs returns worker DCDs owned by this DGD that lack the worker hash label.
 // These are DCDs created by a pre-rolling-update operator version.
-func (r *DynamoGraphDeploymentReconciler) findLegacyWorkerDCDs(
+func (r *dgdWorkerRolloutReconciler) findLegacyWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
@@ -327,29 +428,28 @@ func (r *DynamoGraphDeploymentReconciler) findLegacyWorkerDCDs(
 	return legacyDCDs, nil
 }
 
-// supportsManagedRollingUpdate checks whether the component pathway can use
-// operator-managed rolling updates. Multinode component workloads rely on
-// external orchestration and retain the compatibility hash behavior instead.
-func (p *componentProgram) supportsManagedRollingUpdate(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) bool {
-	return !dgd.HasAnyMultinodeComponent()
-}
-
 // getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
 // It is empty after the DGD has converged to a v2-only generation.
-func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHash(
+func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) string {
+	return currentWorkerHash(dgd)
+}
+
+func currentWorkerHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	if dgd.Annotations == nil {
 		return ""
 	}
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHash]
 }
 
-func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashV2(
+func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHashV2(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) string {
+	return currentWorkerHashV2(dgd)
+}
+
+func currentWorkerHashV2(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	if dgd.Annotations == nil {
 		return ""
 	}
@@ -359,7 +459,7 @@ func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashV2(
 // setCurrentWorkerHashes stores the active worker hashes for one generation.
 // Empty fields are deleted, which is how v2-only generations intentionally drop
 // the downgrade-compatible v1 annotation.
-func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHashes(
+func (r *dgdWorkerRolloutReconciler) setCurrentWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hashes workerGenerationHashes,
 ) {
@@ -381,7 +481,7 @@ func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHashes(
 // setLegacyWorkerHash marks pre-rolling-update worker DCDs as the active
 // generation so the next reconcile can migrate them with the normal rolling
 // update lifecycle.
-func (r *DynamoGraphDeploymentReconciler) setLegacyWorkerHash(
+func (r *dgdWorkerRolloutReconciler) setLegacyWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) {
 	if dgd.Annotations == nil {
@@ -392,7 +492,7 @@ func (r *DynamoGraphDeploymentReconciler) setLegacyWorkerHash(
 }
 
 // getOrCreateRollingUpdateStatus returns the existing rolling update status or creates a new one.
-func (r *DynamoGraphDeploymentReconciler) getOrCreateRollingUpdateStatus(
+func (r *dgdWorkerRolloutReconciler) getOrCreateRollingUpdateStatus(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) *nvidiacomv1beta1.RollingUpdateStatus {
 	if status.RollingUpdate == nil {
@@ -404,7 +504,7 @@ func (r *DynamoGraphDeploymentReconciler) getOrCreateRollingUpdateStatus(
 }
 
 // isRollingUpdateInProgress returns true if a rolling update is currently active.
-func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
+func (r *dgdWorkerRolloutReconciler) isRollingUpdateInProgress(
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) bool {
 	if status.RollingUpdate == nil {
@@ -416,7 +516,7 @@ func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
 }
 
 // reconcileRollingUpdate handles the rolling update lifecycle.
-func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
+func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
@@ -512,7 +612,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 }
 
 // startRollingUpdate initializes a new rolling update.
-func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
+func (r *dgdWorkerRolloutReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
@@ -537,7 +637,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
-func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
+func (r *dgdWorkerRolloutReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
@@ -629,7 +729,7 @@ func workerGenerationComplete(
 
 // completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
 // This performs all cleanup atomically to avoid race conditions with subsequent reconciles.
-func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
+func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
@@ -726,7 +826,7 @@ func (s *dynamoNamespaceWorkerInfo) TotalReadyWorkers() int32 {
 
 // getWorkerInfoForWorkerHash queries DCDs for a specific worker hash and returns
 // aggregated worker info.
-func (r *DynamoGraphDeploymentReconciler) getWorkerInfoForWorkerHash(
+func (r *dgdWorkerRolloutReconciler) getWorkerInfoForWorkerHash(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	workerHash string,
@@ -777,7 +877,7 @@ func (r *DynamoGraphDeploymentReconciler) getWorkerInfoForWorkerHash(
 }
 
 // getOldWorkerInfo aggregates ready replicas across ALL non-current worker DCDs.
-func (r *DynamoGraphDeploymentReconciler) getOldWorkerInfo(
+func (r *dgdWorkerRolloutReconciler) getOldWorkerInfo(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -814,7 +914,7 @@ func (r *DynamoGraphDeploymentReconciler) getOldWorkerInfo(
 
 // getOldWorkerDCDsByComponent returns old DCDs grouped by component and per-component state
 // aggregated across all old generations.
-func (r *DynamoGraphDeploymentReconciler) getOldWorkerDCDsByComponent(
+func (r *dgdWorkerRolloutReconciler) getOldWorkerDCDsByComponent(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -883,7 +983,7 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	return true
 }
 
-func (r *DynamoGraphDeploymentReconciler) oldWorkerComponentDrained(
+func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
@@ -903,7 +1003,7 @@ func (r *DynamoGraphDeploymentReconciler) oldWorkerComponentDrained(
 // has fully shut down its old generation. Callers use this before accepting a
 // generation as complete, preventing a later scale-up from bypassing the
 // shutdown barrier after the new worker hash has been recorded.
-func (r *DynamoGraphDeploymentReconciler) recreateComponentsDrained(
+func (r *dgdWorkerRolloutReconciler) recreateComponentsDrained(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -944,7 +1044,7 @@ func (r *DynamoGraphDeploymentReconciler) recreateComponentsDrained(
 	return true, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
+func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
@@ -964,7 +1064,7 @@ func (r *DynamoGraphDeploymentReconciler) listDGDComponentPods(
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
-func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
+func (r *dgdWorkerRolloutReconciler) getDesiredWorkerReplicas(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) int32 {
 	var total int32
@@ -1077,7 +1177,7 @@ func replicaTargetsByDCDName(plans []oldWorkerReplicaPlan) map[string]int32 {
 // scaleOldWorkerDCDs patches the replicas field on old worker DCDs during a rolling update.
 // When multiple old generations exist for the same component, unavailable replicas are removed
 // before reducing old generations that are still serving traffic.
-func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
+func (r *dgdWorkerRolloutReconciler) scaleOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
@@ -1135,7 +1235,7 @@ func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
 
 // listOldWorkerDCDs returns all worker DCDs for this DGD whose worker hash label
 // does NOT match the given newWorkerHash. This captures all old generations (including legacy).
-func (r *DynamoGraphDeploymentReconciler) listOldWorkerDCDs(
+func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -1166,7 +1266,7 @@ func (r *DynamoGraphDeploymentReconciler) listOldWorkerDCDs(
 
 // deleteOldWorkerDCDs deletes all worker DCDs belonging to this DGD whose hash label
 // does NOT match the given newWorkerHash. This cleans up all old generations at once.
-func (r *DynamoGraphDeploymentReconciler) deleteOldWorkerDCDs(
+func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -1206,7 +1306,7 @@ func (r *DynamoGraphDeploymentReconciler) deleteOldWorkerDCDs(
 
 // aggregateOldWorkerComponentStatuses fetches all non-current worker DCDs and returns their
 // aggregated component statuses keyed by component name. Accumulates across multiple old generations.
-func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
+func (r *dgdWorkerRolloutReconciler) aggregateOldWorkerComponentStatuses(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
@@ -1326,7 +1426,7 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 }
 
 // buildRollingUpdateContext creates a RollingUpdateContext.
-func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
+func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (dynamo.RollingUpdateContext, error) {

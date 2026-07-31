@@ -41,9 +41,9 @@ func newGroveScaler(scaleClient scale.ScalesGetter) *groveScaler {
 	return &groveScaler{scaleClient: scaleClient}
 }
 
-// reconcile applies component replica changes to the Grove resources created
+// Reconcile applies component replica changes to the Grove resources created
 // asynchronously from the PodCliqueSet.
-func (s *groveScaler) reconcile(
+func (s *groveScaler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,

@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// groveWorkloadRenderer renders the desired Grove PodCliqueSet using read-only
+// groveWorkloadRenderer owns rendering of the desired Grove PodCliqueSet using read-only
 // Kubernetes access. It does not reconcile resources, register watches, own
 // finalizers, or write status.
 type groveWorkloadRenderer struct {
