@@ -1103,6 +1103,44 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
     }
 }
 
+/// Unrecognized media must be classified as filtered in `preprocess_with_reason`
+/// (reason `UnknownMedium`), so the listener records an intentional filter rather
+/// than accepting the event, burning a next_event_id, and dropping it only in
+/// conversion — an id gap the event processor misreads as an engine drop. This is
+/// the same trap the locality gate avoids. Recognized tiers are never filtered
+/// here: Device/HostPinned stay on the normalizer path and Disk/External bypass.
+#[test]
+fn test_preprocess_rejects_unknown_medium() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for medium in ["FS", "OBJ", "XYZ"] {
+            let mut normalizer = ZmqEventNormalizer::new(2);
+            let raw = raw_placement_event(event_kind, Some(medium), Some(Locality::Local));
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                ZmqEventFilterReason::UnknownMedium,
+                "medium={medium} must filter as unknown_medium"
+            );
+        }
+    }
+
+    // Recognized media are never rejected as unknown: GPU/CPU stay on the
+    // normalizer path and STORAGE takes the lower-tier bypass.
+    for medium in ["GPU", "CPU", "STORAGE"] {
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let raw = raw_placement_event(
+            TestEventKind::BlockStored,
+            Some(medium),
+            Some(Locality::Local),
+        );
+        assert!(
+            normalizer.preprocess_with_reason(raw, worker).is_ok(),
+            "recognized medium={medium} must pass preprocess"
+        );
+    }
+}
+
 /// Mixed-case locality (`"local"`, `"Remote"`) is not UPPERCASE, so it folds to
 /// `Unknown` and the event is dropped — it never decodes to a local placement.
 #[test]
@@ -1250,9 +1288,9 @@ fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
     }
 }
 
-/// Unrecognized media (vLLM 0.26.0 `FS` / `OBJ`) are hash-only lower-tier events
-/// too: they must bypass the normalizer and not flip a salted GPU hash to
-/// `Ambiguous`, so later salted GPU children keep inheriting the namespace.
+/// Unrecognized media (vLLM 0.26.0 `FS` / `OBJ`) fail closed in preprocess, so
+/// they never reach — let alone mutate — the salted-namespace state: a salted GPU
+/// hash stays `Namespaced` and later salted GPU children keep inheriting it.
 #[test]
 fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     let worker = WorkerWithDpRank::new(7, 0);
@@ -1261,9 +1299,14 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
     assert!(normalizer.preprocess(salted_gpu, worker).is_some());
 
-    // An FS event reusing the same hash must skip the normalizer entirely.
+    // An FS event reusing the same hash fails closed before any namespace work.
     let fs_same_hash = namespaced_block_stored(1, None, None, "FS");
-    assert!(normalizer.preprocess(fs_same_hash, worker).is_some());
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(fs_same_hash, worker)
+            .unwrap_err(),
+        ZmqEventFilterReason::UnknownMedium
+    );
     assert!(matches!(
         &normalizer.cache_namespaces[&(worker, 1)],
         CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"

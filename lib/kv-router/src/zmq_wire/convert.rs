@@ -47,7 +47,10 @@ pub fn convert_event(
 
     // Fail closed on unrecognized media instead of silently indexing them on
     // the device (G1) primary tree. vLLM 0.26.0 ships `FS` / `OBJ` (pre-#48123
-    // wire); those and any future medium strings are dropped, not misfiled.
+    // wire); those and any future medium strings are dropped, not misfiled. The
+    // normalizer's preprocess step classifies these as filtered first (so no
+    // event id is burned); this guard is a defensive backstop for direct
+    // convert_event callers that bypass preprocess, mirroring the locality gate.
     let storage_tier = match medium {
         None => StorageTier::Device,
         Some(medium) => match StorageTier::from_kv_medium(medium) {
