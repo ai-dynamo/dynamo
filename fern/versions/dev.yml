@@ -350,6 +350,8 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-dev/use-cases/multimodal-serving/overview.md
+          - page: Parallel Media Decoding
+            path: ../pages-dev/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Embedding Cache
             path: ../pages-dev/use-cases/multimodal-serving/embedding-cache.md
           - page: Multimodal KV Routing
