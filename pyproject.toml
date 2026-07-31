@@ -85,6 +85,7 @@ mocker = [
 ]
 
 simulation = [
+    # Placeholder until the standalone aisimulate wheel is published to the release package index.
     "aisimulate==0.1.0",
     "filterpy==1.4.5",
     "pmdarima==2.1.1",
