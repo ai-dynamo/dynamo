@@ -84,11 +84,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
-        # protobuf-compiler ships protoc but none of the well-known types.
-        # libprotobuf-dev provides /usr/include/google/protobuf/*.proto, which
-        # the vendored envoy protos under deploy/inference-gateway/ext-proc
-        # import. Without it `cargo check --workspace` fails with
-        # "google/protobuf/struct.proto: File not found".
         libprotobuf-dev \
         # Debugging / tracing
         gdb \
