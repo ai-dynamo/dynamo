@@ -1,0 +1,63 @@
+# KV-reuse POC dev pod (Workflow B: dev image + editable install).
+# Unpinned — let the scheduler place it. 1 GPU (TP=1, primary+shadow colocate).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mohammed-kvreuse-poc
+  namespace: mohammed-dev
+  labels:
+    app: kvreuse-poc
+    owner: mohammed
+spec:
+  restartPolicy: Never
+  imagePullSecrets:
+    - name: docker-imagepullsecret
+    - name: acr-token-secret
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: hf-cache
+      emptyDir: {}
+    - name: etcd-data
+      emptyDir: {}
+  containers:
+    - name: dev
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-290f96bc3eff3984a18a6a9f8f33b3a2d50fe2e0-vllm-runtime
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      env:
+        - name: ETCD_ENDPOINTS
+          value: "http://localhost:2379"
+        - name: NATS_SERVER
+          value: "nats://localhost:4222"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: HF_TOKEN
+        - name: HF_HOME
+          value: "/hf-cache"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        - { name: hf-cache, mountPath: /hf-cache }
+    - name: etcd
+      image: gcr.io/etcd-development/etcd:v3.5.17
+      command:
+        - /usr/local/bin/etcd
+        - --data-dir=/etcd-data
+        - --listen-client-urls=http://0.0.0.0:2379
+        - --advertise-client-urls=http://localhost:2379
+      volumeMounts:
+        - { name: etcd-data, mountPath: /etcd-data }
+    - name: nats
+      image: nats:2.10.21-alpine
+      args: ["-js", "-m", "8222"]
