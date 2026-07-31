@@ -564,15 +564,19 @@ shared:
   owners:
   - frontend
   - agents
-- glob: docs/fern/agents/
+- glob: docs/fern/pages/use-cases/agents/
   owners:
   - docs
   - agents
-- glob: docs/fern/digest/agentic-inference/
+- glob: docs/fern/pages/blog/2026/agentic-harness-support.mdx
   owners:
   - docs
   - agents
-- glob: docs/fern/backends/sglang/agents.md
+- glob: docs/fern/pages/blog/2026/agentic-inference-optimizations.mdx
+  owners:
+  - docs
+  - agents
+- glob: docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
   owners:
   - docs
   - agents
