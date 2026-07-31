@@ -14,9 +14,6 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
-#[allow(dead_code)] // Constructed by SelectionService in DYN-3711.
-mod composition;
-
 /// A trait that users can implement to define custom selection logic.
 ///
 /// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
@@ -113,6 +110,32 @@ struct LogitWeights {
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     shared_cache_multiplier: f64,
+}
+
+trait WorkerScorer<C: WorkerConfigLike> {
+    fn score(&self, worker: WorkerWithDpRank, config: &C) -> f64;
+}
+
+trait WorkerPicker<C: WorkerConfigLike, S: WorkerScorer<C>> {
+    fn pick(
+        &self,
+        scorer: &S,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+    ) -> (WorkerWithDpRank, f64);
+}
+
+struct DefaultWorkerScorer<'a> {
+    selector: &'a DefaultWorkerSelector,
+    request: &'a SchedulingRequest,
+    block_size: u32,
+    min_active_prefill_tokens: usize,
+    weights: LogitWeights,
+}
+
+struct DefaultWorkerPicker<'a> {
+    selector: &'a DefaultWorkerSelector,
 }
 
 impl DefaultWorkerSelector {
@@ -325,44 +348,17 @@ impl DefaultWorkerSelector {
 
         logit
     }
+}
 
-    fn score_worker<C: WorkerConfigLike>(
-        &self,
-        config: &C,
-        request: &SchedulingRequest,
-        worker: WorkerWithDpRank,
-        block_size: u32,
-        min_active_prefill_tokens: usize,
-        weights: LogitWeights,
-    ) -> f64 {
-        let base_score = self.worker_logit(
-            request,
-            worker,
-            block_size,
-            min_active_prefill_tokens,
-            weights,
-            "Formula",
-        );
-        match request
-            .routing_constraints
-            .preferred_taint_multiplier(config.taints())
-        {
-            // NOTE: This multiplicative bias assumes a non-negative score. Negative
-            // overlap scores expose its pre-existing sign sensitivity; keep it for now.
-            Some(multiplier) => base_score * multiplier,
-            None => base_score,
-        }
-    }
-
-    fn pick_worker<C: WorkerConfigLike>(
-        &self,
+impl<'a> DefaultWorkerScorer<'a> {
+    fn new<C: WorkerConfigLike>(
+        selector: &'a DefaultWorkerSelector,
         workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
+        request: &'a SchedulingRequest,
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
         weights: LogitWeights,
-        temperature: f64,
-    ) -> (WorkerWithDpRank, f64) {
+    ) -> Self {
         let min_active_prefill_tokens =
             if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
                 let mut minimum = usize::MAX;
@@ -374,19 +370,60 @@ impl DefaultWorkerSelector {
             } else {
                 0
             };
-        let get_score = |worker, config: &C| {
-            self.score_worker(
-                config,
-                request,
-                worker,
-                block_size,
-                min_active_prefill_tokens,
-                weights,
-            )
-        };
+        Self {
+            selector,
+            request,
+            block_size,
+            min_active_prefill_tokens,
+            weights,
+        }
+    }
+}
+
+impl<C: WorkerConfigLike> WorkerScorer<C> for DefaultWorkerScorer<'_> {
+    fn score(&self, worker: WorkerWithDpRank, config: &C) -> f64 {
+        let base_score = self.selector.worker_logit(
+            self.request,
+            worker,
+            self.block_size,
+            self.min_active_prefill_tokens,
+            self.weights,
+            "Formula",
+        );
+        match self
+            .request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints())
+        {
+            // NOTE: This multiplicative bias assumes a non-negative score. Negative
+            // overlap scores expose its pre-existing sign sensitivity; keep it for now.
+            Some(multiplier) => base_score * multiplier,
+            None => base_score,
+        }
+    }
+}
+
+impl<C, S> WorkerPicker<C, S> for DefaultWorkerPicker<'_>
+where
+    C: WorkerConfigLike,
+    S: WorkerScorer<C>,
+{
+    fn pick(
+        &self,
+        scorer: &S,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+    ) -> (WorkerWithDpRank, f64) {
+        let temperature = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.router_temperature)
+            .unwrap_or(self.selector.kv_router_config.router_temperature);
+        let get_score = |worker, config: &C| scorer.score(worker, config);
 
         #[cfg(any(test, feature = "bench"))]
-        let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
+        let deterministic_choice = self.selector.deterministic_rng.as_ref().map(|rng| {
             let mut candidates = Vec::new();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 candidates.push(worker);
@@ -551,19 +588,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             });
         }
 
-        let temperature = request
-            .router_config_override
-            .as_ref()
-            .and_then(|cfg| cfg.router_temperature)
-            .unwrap_or(self.kv_router_config.router_temperature);
-        let (best_worker, best_logit) = self.pick_worker(
-            workers,
-            request,
-            eligibility,
-            block_size,
-            weights,
-            temperature,
-        );
+        let scorer =
+            DefaultWorkerScorer::new(self, workers, request, eligibility, block_size, weights);
+        let picker = DefaultWorkerPicker { selector: self };
+        let (best_worker, best_logit) = picker.pick(&scorer, workers, request, eligibility);
 
         let best_host_pinned_overlap_blocks = request
             .overlap
