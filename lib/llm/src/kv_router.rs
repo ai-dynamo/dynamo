@@ -628,6 +628,7 @@ where
             if !target_config.supports_router_hints() {
                 return None;
             }
+            let target_worker_type = target_config.router_hint_worker_type()?;
 
             let prefix_blocks_to_beat =
                 usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
@@ -636,6 +637,7 @@ where
                     worker != target
                         && configs.get(&worker.worker_id).is_some_and(|config| {
                             config.supports_router_hints()
+                                && config.router_hint_worker_type() == Some(target_worker_type)
                                 && config
                                     .router_hint_source_control_endpoint_for_dp_rank(worker.dp_rank)
                                     .is_some_and(|endpoint| !endpoint.is_empty())
@@ -2011,10 +2013,21 @@ mod tests {
     }
 
     fn router_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
+        router_hint_runtime_config_with_worker_type(endpoint, "prefill")
+    }
+
+    fn router_hint_runtime_config_with_worker_type(
+        endpoint: Option<&str>,
+        worker_type: &str,
+    ) -> ModelRuntimeConfig {
         let mut runtime_config = ModelRuntimeConfig::default();
         runtime_config.runtime_data.insert(
             dynamo_kv_router::router_hint::ROUTER_HINT_RUNTIME_CAPABILITY_KEY.to_string(),
             serde_json::Value::Bool(true),
+        );
+        runtime_config.runtime_data.insert(
+            dynamo_kv_router::router_hint::ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY.to_string(),
+            serde_json::Value::String(worker_type.to_string()),
         );
         if let Some(endpoint) = endpoint {
             let mut endpoints = serde_json::Map::new();
@@ -2123,6 +2136,40 @@ mod tests {
 
             assert_eq!(hint, None);
         }
+    }
+
+    #[tokio::test]
+    async fn router_hint_skips_sources_with_different_worker_type() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            7,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23280"), "prefill"),
+        );
+        workers.insert(
+            8,
+            router_hint_runtime_config_with_worker_type(Some("tcp://127.0.0.1:23281"), "decode"),
+        );
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(7, 0),
+            },
+            None,
+            workers,
+        )
+        .await;
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![(WorkerWithDpRank::new(8, 0), 2)],
+        };
+
+        let hint =
+            router.router_hint_for_selection(WorkerWithDpRank::new(7, 0), 0, Some(&candidates));
+
+        assert_eq!(hint, None);
     }
 
     #[tokio::test]

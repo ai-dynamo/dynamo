@@ -9,6 +9,7 @@ from typing import Any
 from dynamo.common.constants import (
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
     ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
 )
 
 
@@ -66,8 +67,15 @@ def _router_hint_source_control_endpoints(
     return endpoints
 
 
-def _is_prefill_worker(worker_type: Any) -> bool:
-    return getattr(worker_type, "value", worker_type) == "prefill"
+def _router_hint_worker_type(worker_type: Any) -> str | None:
+    role = getattr(worker_type, "value", None)
+    if not isinstance(role, str):
+        role = str(worker_type)
+    if role == "agg":
+        role = "aggregated"
+    if role not in {"aggregated", "prefill", "decode"}:
+        return None
+    return role
 
 
 def enable_router_hint_support(
@@ -76,7 +84,8 @@ def enable_router_hint_support(
     worker_type: Any,
     dp_range: tuple[int, int] = (0, 1),
 ) -> None:
-    if not _is_prefill_worker(worker_type):
+    router_hint_worker_type = _router_hint_worker_type(worker_type)
+    if router_hint_worker_type is None:
         return
 
     router_hint_tiers = _router_hint_tiers(engine_args)
@@ -96,6 +105,10 @@ def enable_router_hint_support(
         )
 
     runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+    runtime_config.set_engine_specific(
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+        router_hint_worker_type,
+    )
     runtime_config.set_engine_specific(
         ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         json.dumps(endpoints),

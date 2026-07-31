@@ -276,6 +276,11 @@ pub trait WorkerConfigLike {
         false
     }
 
+    /// Backend worker role used to keep router-hint source and target selection compatible.
+    fn router_hint_worker_type(&self) -> Option<&str> {
+        None
+    }
+
     /// Advertised peer-control endpoint for a specific global DP rank.
     /// Backends that advertise router-hint support are responsible for publishing
     /// a usable endpoint for each managed DP rank.
