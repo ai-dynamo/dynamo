@@ -20,6 +20,11 @@ from gpu_memory_service.common.locks import (  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
+from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
+
+# Expected device type for parametrized assertions — matches what
+# GMSMemorySaverImpl will produce via get_vmm_device_type().
+_EXPECTED_DEVICE = torch.device("xpu", 0) if torch.xpu.is_available() else torch.device("cuda", 0)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -65,6 +70,14 @@ class _FakeManager:
 
 @pytest.fixture
 def build_impl(monkeypatch, tmp_path):
+    # Ensure get_vmm_device_type() returns the correct type for
+    # GMSMemorySaverImpl.__init__ which calls it to determine self._device.
+    _dev_type = VMMDeviceType.XPU if torch.xpu.is_available() else VMMDeviceType.CUDA
+    monkeypatch.setattr(
+        gms_memory_saver,
+        "get_vmm_device_type",
+        lambda: _dev_type,
+    )
     monkeypatch.setattr(
         gms_memory_saver,
         "get_socket_path",
@@ -107,9 +120,9 @@ def build_impl(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     ("tag", "weights_lock", "expected_pool_calls"),
     [
-        ("weights", GrantedLockType.RW, [("weights", torch.device("cuda", 0))]),
+        ("weights", GrantedLockType.RW, [("weights", _EXPECTED_DEVICE)]),
         ("weights", GrantedLockType.RO, []),
-        ("kv_cache", GrantedLockType.RW, [("kv_cache", torch.device("cuda", 0))]),
+        ("kv_cache", GrantedLockType.RW, [("kv_cache", _EXPECTED_DEVICE)]),
         ("cuda_graph", GrantedLockType.RW, []),
     ],
 )

@@ -234,7 +234,7 @@ def running_gms(monkeypatch, tmp_path):
     # Inject fake VMM into the process-global singleton so that
     # GMSAllocationManager and GMSClientMemoryManager both use it.
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
+    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.XPU)
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
@@ -930,7 +930,7 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
     fake_vmm = _CountingVMM()
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
+    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.XPU)
 
     allocations = GMSAllocationManager(device=0)
     info = await allocations.allocate(size=4096, tag="weights")
