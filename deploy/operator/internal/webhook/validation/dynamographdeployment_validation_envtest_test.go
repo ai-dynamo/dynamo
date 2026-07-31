@@ -47,6 +47,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+	powerDRAForbidden := fmt.Sprintf(
+		"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
+		consts.KubeAnnotationGPUPowerLimit,
+	)
 
 	tests := []struct {
 		name               string
@@ -515,6 +519,80 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 power annotation with intra-pod GMS DRA is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaIntraPodGMS(betaWorkerComponent(dgd))
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with inter-pod GMS DRA is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaInterPodGMS(betaWorkerComponent(dgd))
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with DRA claim template is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
+					Name:                      "gpu",
+					ResourceClaimTemplateName: k8sptr.To("gpu-template"),
+				})
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+			},
+		},
+		{
+			name: "v1beta1 power annotation with direct DRA claim is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
+					Name:              "gpu",
+					ResourceClaimName: k8sptr.To("gpu-claim"),
+				})
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+			},
+		},
+		{
+			name: "v1beta1 DRA claim without power annotation remains accepted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
+					Name:                      "device",
+					ResourceClaimTemplateName: k8sptr.To("device-template"),
+				})
+			}),
+		},
+		{
+			name: "v1beta1 power annotation cannot be added to a DRA component",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
+					Name:                      "device",
+					ResourceClaimTemplateName: k8sptr.To("device-template"),
+				})
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
+					Name:                      "device",
+					ResourceClaimTemplateName: k8sptr.To("device-template"),
+				})
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+			},
+		},
+		{
 			name: "v1beta1 power annotation change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
@@ -619,6 +697,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name: "v1alpha1 power annotation with GMS DRA is rejected after conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
+				dgd.Spec.Services[dgdAdmissionWorkerName].GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
 			},
 		},
 		{
@@ -2176,6 +2267,15 @@ func setBetaWorkerPowerInputs(
 		corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse(gpus),
 	}
 	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+}
+
+func setBetaWorkerResourceClaim(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	podClaim corev1.PodResourceClaim,
+) {
+	worker := betaWorkerComponent(dgd)
+	worker.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: podClaim.Name}}
+	worker.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{podClaim}
 }
 
 func setAlphaWorkerPowerInputs(

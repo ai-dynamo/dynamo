@@ -215,6 +215,27 @@ func dgdPowerLimit(
 	return value, exists
 }
 
+func dgdDRAPath(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Path {
+	if gpuMemoryServiceFor(component) != nil {
+		return fldPath.Child("experimental", "gpuMemoryService")
+	}
+	if component.PodTemplate == nil {
+		return nil
+	}
+
+	// The claim's DeviceClass is external to the DGD, so fail closed for every consumed claim.
+	containersPath := fldPath.Child("podTemplate", "spec", "containers")
+	for i := range component.PodTemplate.Spec.Containers {
+		if len(component.PodTemplate.Spec.Containers[i].Resources.Claims) != 0 {
+			return containersPath.Index(i).Child("resources", "claims")
+		}
+	}
+	return nil
+}
+
 func effectiveDGDGPUInput(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
@@ -224,9 +245,8 @@ func effectiveDGDGPUInput(
 		return dgdGPUInput{path: containersPath}
 	}
 
-	// The Planner reads this scalar value from the source DGD. Operator-generated DRA claims derive
-	// their device count from the same value later, so DRA adds no separate power input here. Read
-	// the limit before the request, as both consumers do.
+	// Phase-1 power admission rejects DRA-backed components, matching the Planner's scalar-only
+	// GPU count. Read the limit before the request, as the Planner does.
 	resourceName := corev1.ResourceName(consts.KubeResourceGPUNvidia)
 	for i := range component.PodTemplate.Spec.Containers {
 		container := &component.PodTemplate.Spec.Containers[i]
