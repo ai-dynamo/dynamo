@@ -133,11 +133,27 @@ def get_component_by_name(config: Config, name: str) -> Component | None:
     )
 
 
+def find_main_container(component: Component) -> Container | None:
+    """Return the component's ``main`` container when one is defined."""
+    return next(
+        (
+            container
+            for container in component.podTemplate.spec.containers
+            if container.name == "main"
+        ),
+        None,
+    )
+
+
 def get_main_container(component: Component) -> Container:
-    """Return the component's required ``main`` container."""
-    for container in component.podTemplate.spec.containers:
-        if container.name == "main":
-            return container
+    """Return the component's required ``main`` container.
+
+    Raises:
+        ValueError: If the component does not define a ``main`` container.
+    """
+    container = find_main_container(component)
+    if container is not None:
+        return container
     raise ValueError(f"Component {component.name!r} does not define a main container")
 
 
@@ -574,7 +590,14 @@ def update_image(config: dict, image: str) -> dict:
     for component in cfg.spec.components:
         if component.component_type == "planner":
             continue
-        get_main_container(component).image = image
+        container = find_main_container(component)
+        if container is None:
+            logger.debug(
+                "Skipping image update for component %s without a main container",
+                component.name,
+            )
+            continue
+        container.image = image
         logger.debug("Updated image for %s to %s", component.name, image)
 
     return cfg.model_dump()

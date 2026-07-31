@@ -21,7 +21,11 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
-    from dynamo.profiler.utils.defaults import EngineType, SearchStrategy
+    from dynamo.profiler.utils.defaults import (
+        DYNAMO_RUN_DEFAULT_PORT,
+        EngineType,
+        SearchStrategy,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         OverridesSpec,
@@ -103,6 +107,24 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
 
     assert dgd_config["apiVersion"] == "nvidia.com/v1beta1"
     assert dgd_config["kind"] == "DynamoGraphDeployment"
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_get_port_defaults_when_frontend_has_no_main_container(backend: str) -> None:
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "components": [
+                {
+                    "name": "Frontend",
+                    "type": "frontend",
+                    "podTemplate": {"spec": {"containers": []}},
+                }
+            ]
+        },
+    }
+
+    assert CONFIG_MODIFIERS[backend].get_port(config) == DYNAMO_RUN_DEFAULT_PORT
 
 
 def test_dgd_serialization_omits_unset_optional_fields() -> None:

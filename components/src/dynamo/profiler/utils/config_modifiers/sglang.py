@@ -11,6 +11,7 @@ from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
+    find_main_container,
     get_component_by_name,
     get_component_name_by_type,
     get_main_container,
@@ -381,7 +382,15 @@ class SGLangConfigModifier(BaseConfigModifier):
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
-        args = get_main_container(frontend_component).args
+        main_container = find_main_container(frontend_component)
+        if main_container is None:
+            logger.warning(
+                "Frontend main container not found, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = main_container.args
         if not args:
             logger.warning(
                 "No args found in Frontend configuration, using default port: %s",

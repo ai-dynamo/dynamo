@@ -180,3 +180,20 @@ def test_update_image_does_not_overwrite_planner_component_image():
         _main_container(components["Planner"])["image"]
         == "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3"
     )
+
+
+def test_update_image_skips_component_without_main_container():
+    config = _base_dgd_config("example/frontend:old")
+    config["spec"]["components"].append(
+        {
+            "name": "PartialWorker",
+            "type": "worker",
+            "podTemplate": {"spec": {"containers": []}},
+        }
+    )
+
+    updated = update_image(config, "example/worker:new")
+
+    components = _component_map(updated)
+    assert _main_container(components["Frontend"])["image"] == "example/worker:new"
+    assert components["PartialWorker"]["podTemplate"]["spec"]["containers"] == []
