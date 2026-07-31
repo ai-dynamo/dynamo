@@ -21,6 +21,15 @@ the matrix as one flat table instead -- the human cut is optimized for
 scanning, the agent cut for parsing, so the two spans are deliberately
 different renderings of the same rows rather than a redundant pair.
 
+reference/release-notes/README.mdx (Release History) carries a second
+human-facing span, ``release-stats``: the per-release PR, contributor,
+breaking-change, and known-issue counts. Those counts otherwise appeared
+only in releases-data.mdx, which is hidden from the sidebar, so on the page
+they had no reader-visible home at all. Both spans render from
+``release_stats_table`` so the visible table and the agent mirror cannot
+diverge. Like ``support-matrix`` it fails closed when its markers are
+missing, keeping placement under human control.
+
 It also emits three machine-readable outputs from the same parse:
 
   * pages/reference/general/releases-machine-readable.mdx — a "Releases (machine-readable)" page whose
@@ -726,6 +735,57 @@ def release_link(rel: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+RELEASE_STATS_COLUMNS = (
+    "Release",
+    "PRs",
+    "Contributors",
+    "First-time contributors",
+    "Breaking changes",
+    "Known issues",
+)
+
+
+def release_stats_table(data: dict) -> str:
+    """The release-statistics table, shared by both spans that render it.
+
+    Release History shows it to readers and releases-data.mdx mirrors it for
+    agents. Building both from here means the two cannot drift apart.
+    """
+    rows = [
+        [
+            version,
+            stats.get("prs"),
+            stats.get("contributors"),
+            stats.get("firstTimers"),
+            stats.get("breaking"),
+            stats.get("knownIssues"),
+        ]
+        for version, stats in data["RELEASE_STATS"].items()
+    ]
+    return md_table(list(RELEASE_STATS_COLUMNS), rows)
+
+
+def render_release_stats(data: dict) -> str:
+    """Human-facing release statistics for the Release History page.
+
+    Rows come from whatever RELEASE_STATS holds, so a new release picked up
+    by the per-release bump checklist appears here with no edit to this file.
+    """
+    if not data.get("RELEASE_STATS"):
+        raise TSParseError(
+            "RELEASE_STATS is empty -- the release-statistics table on "
+            "Release History would render with no rows"
+        )
+    return "\n\n".join(
+        [
+            "## Release statistics",
+            "Counts taken from each release's GitHub body. A dash means the "
+            "count was not recorded for that release, not that it was zero.",
+            release_stats_table(data),
+        ]
+    )
+
+
 def render_releases_data(data: dict) -> str:
     """Full releases.data.ts content as plain markdown (not <llms-only>)."""
     parts: list[str] = []
@@ -832,30 +892,7 @@ def render_releases_data(data: dict) -> str:
     parts.append(platform_lines(data))
 
     parts.append("## Release statistics")
-    stat_rows = [
-        [
-            version,
-            stats.get("prs"),
-            stats.get("contributors"),
-            stats.get("firstTimers"),
-            stats.get("breaking"),
-            stats.get("knownIssues"),
-        ]
-        for version, stats in data["RELEASE_STATS"].items()
-    ]
-    parts.append(
-        md_table(
-            [
-                "Release",
-                "PRs",
-                "Contributors",
-                "First-time contributors",
-                "Breaking changes",
-                "Known issues",
-            ],
-            stat_rows,
-        )
-    )
+    parts.append(release_stats_table(data))
 
     if data.get("NIGHTLIES_NOTE"):
         parts.append("## Nightlies")
@@ -1021,6 +1058,9 @@ PAGES: dict[str, tuple[Block, ...]] = {
     "releases-machine-readable.mdx": (
         Block("llms-tables", render_releases_data, False, True),
     ),
+    "releases/release-history.mdx": (
+        Block("release-stats", render_release_stats, False, False),
+    ),
 }
 
 # Standalone machine-readable outputs (path -> builder returning full text).
@@ -1097,7 +1137,13 @@ def main(argv: list[str]) -> int:
 
     stale = []
     for path, new_text in rendered.items():
-        name = path.name
+        # Relative to the reference root so pages in subdirectories are
+        # distinguishable -- several are named README.mdx.
+        name = (
+            str(path.relative_to(REFERENCE_DIR))
+            if path.is_relative_to(REFERENCE_DIR)
+            else path.name
+        )
         old_text = path.read_text(encoding="utf-8") if path.is_file() else None
         if new_text == old_text:
             print(f"{name}: unchanged")
