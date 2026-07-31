@@ -32,7 +32,36 @@ use crate::router_hint::RouterHintRootCandidates;
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
-type RouterHintExtensions = FxHashMap<WorkerWithDpRank, Vec<ExternalSequenceBlockHash>>;
+#[derive(Debug, Clone, Default)]
+pub struct RouterHintExtensions {
+    pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
+    pub owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize>,
+}
+
+impl RouterHintExtensions {
+    fn record_match<'a>(
+        &mut self,
+        pos: usize,
+        child_hash: ExternalSequenceBlockHash,
+        owners: impl IntoIterator<Item = &'a WorkerWithDpRank>,
+    ) {
+        match self
+            .block_hashes
+            .binary_search_by_key(&pos, |(existing_pos, _)| *existing_pos)
+        {
+            Ok(idx) => {
+                if self.block_hashes[idx].1 != child_hash {
+                    return;
+                }
+            }
+            Err(idx) => self.block_hashes.insert(idx, (pos, child_hash)),
+        }
+
+        for owner in owners {
+            self.owner_prefix_blocks.insert(*owner, pos + 1);
+        }
+    }
+}
 type WorkerBlockIndex =
     FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
 
@@ -171,7 +200,7 @@ pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
     pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
-    pub router_hint_extensions: Option<FxHashMap<WorkerWithDpRank, Vec<ExternalSequenceBlockHash>>>,
+    pub router_hint_extensions: Option<RouterHintExtensions>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -412,7 +441,8 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
-        let mut router_hint_extensions = retain_router_hint_extensions.then(FxHashMap::default);
+        let mut router_hint_extensions =
+            retain_router_hint_extensions.then(RouterHintExtensions::default);
 
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
@@ -745,9 +775,7 @@ fn advance_state_to_breakpoint(
 
         let child_hash = edge.child_hash();
         if let Some(extensions) = router_hint_extensions.as_deref_mut() {
-            for worker in &active {
-                extensions.entry(*worker).or_default().push(child_hash);
-            }
+            extensions.record_match(cur_pos, child_hash, active.iter());
         }
         cur_hash = Some(child_hash);
         cur_pos += 1;
@@ -816,7 +844,7 @@ fn advance_single_worker(
 
         let child_hash = edge.child_hash();
         if let Some(extensions) = router_hint_extensions.as_deref_mut() {
-            extensions.entry(worker).or_default().push(child_hash);
+            extensions.record_match(*cur_pos, child_hash, std::iter::once(&worker));
         }
         *cur_hash = Some(child_hash);
         *cur_pos += 1;
