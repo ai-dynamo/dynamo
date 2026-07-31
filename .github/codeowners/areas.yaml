@@ -1016,10 +1016,6 @@ shared:
   owners:
   - performance
   - kv-memory
-- glob: lib/mocker/src/replay/planner_handle.rs
-  owners:
-  - performance
-  - planner
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
