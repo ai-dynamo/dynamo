@@ -267,6 +267,19 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			}
 		}
 
+		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
+		if _, hasPowerLimit := dgdPowerLimit(component); hasPowerLimit {
+			if draPath := dgdDRAPath(component, componentPath); draPath != nil {
+				allErrs = append(allErrs, field.Forbidden(
+					draPath,
+					fmt.Sprintf(
+						"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
+						consts.KubeAnnotationGPUPowerLimit,
+					),
+				))
+			}
+		}
+
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
