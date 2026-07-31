@@ -74,7 +74,7 @@ impl KvDcRelayTransport {
         let load_updates = LoadUpdateHub::new(&source, load_window, config.load_fanout_capacity);
         let limits = SubscriberLimits::new(
             config.max_catalog_subscribers,
-            config.max_pool_subscribers,
+            config.max_pool_streams_total,
             config.max_readiness_subscribers,
             config.max_load_subscribers,
         );
@@ -418,7 +418,9 @@ mod tests {
             publication_queue_bytes: 8 * 1024 * 1024,
             publication_encoding_concurrency: 1,
             max_catalog_subscribers: 4,
-            max_pool_subscribers: 4,
+            max_pool_streams_total: 4,
+            max_subscribers_per_pool: 4,
+            max_initialized_pool_hubs: 4,
             max_readiness_subscribers: 4,
             max_load_subscribers: 4,
         }

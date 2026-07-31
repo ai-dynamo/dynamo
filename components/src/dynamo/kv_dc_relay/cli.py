@@ -36,7 +36,9 @@ class KvDcRelayCliConfig:
     publication_queue_bytes: int
     publication_encoding_concurrency: int
     max_catalog_subscribers: int
-    max_pool_subscribers: int
+    max_pool_streams_total: int
+    max_subscribers_per_pool: int
+    max_initialized_pool_hubs: int
     max_readiness_subscribers: int
     max_load_subscribers: int
 
@@ -150,7 +152,9 @@ def parse_args(
     parser.add_argument("--publication-queue-bytes", type=_positive_int)
     parser.add_argument("--publication-encoding-concurrency", type=_positive_int)
     parser.add_argument("--max-catalog-subscribers", type=_positive_int)
-    parser.add_argument("--max-pool-subscribers", type=_positive_int)
+    parser.add_argument("--max-pool-streams-total", type=_positive_int)
+    parser.add_argument("--max-subscribers-per-pool", type=_positive_int)
+    parser.add_argument("--max-initialized-pool-hubs", type=_positive_int)
     parser.add_argument("--max-readiness-subscribers", type=_positive_int)
     parser.add_argument("--max-load-subscribers", type=_positive_int)
 
@@ -351,10 +355,24 @@ def parse_args(
             64,
             parser,
         ),
-        max_pool_subscribers=_numeric_value(
-            parsed.max_pool_subscribers,
+        max_pool_streams_total=_numeric_value(
+            parsed.max_pool_streams_total,
             environment,
-            "DYN_RELAY_MAX_POOL_SUBSCRIBERS",
+            "DYN_RELAY_MAX_POOL_STREAMS_TOTAL",
+            64,
+            parser,
+        ),
+        max_subscribers_per_pool=_numeric_value(
+            parsed.max_subscribers_per_pool,
+            environment,
+            "DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL",
+            64,
+            parser,
+        ),
+        max_initialized_pool_hubs=_numeric_value(
+            parsed.max_initialized_pool_hubs,
+            environment,
+            "DYN_RELAY_MAX_INITIALIZED_POOL_HUBS",
             64,
             parser,
         ),

@@ -15,7 +15,7 @@ use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
 use dynamo_runtime::protocols::EndpointId;
 use parking_lot::Mutex;
 #[cfg(feature = "kv-dc-relay-wan")]
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +38,8 @@ use super::readiness::{EndpointServingFacts, ServingReadinessSnapshot, derive_en
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;
+#[cfg(feature = "kv-dc-relay-wan")]
+const DEFAULT_INITIALIZED_POOL_HUBS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PoolActorConfig {
@@ -98,12 +100,35 @@ struct PoolWanState {
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
+#[derive(Clone)]
+pub(super) struct PoolPublicationConfig {
+    pub(super) hub: PublicationHubConfig,
+    pub(super) max_initialized_pool_hubs: usize,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+impl Default for PoolPublicationConfig {
+    fn default() -> Self {
+        Self {
+            hub: PublicationHubConfig::default(),
+            max_initialized_pool_hubs: DEFAULT_INITIALIZED_POOL_HUBS,
+        }
+    }
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
 enum PoolHubState {
     Vacant,
     Initializing,
-    Ready(PublicationHub),
+    Ready(InitializedPublicationHub),
     Failed(String),
     Retired,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct InitializedPublicationHub {
+    hub: PublicationHub,
+    _permit: OwnedSemaphorePermit,
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -115,9 +140,19 @@ struct PoolHubSlot {
 #[cfg(feature = "kv-dc-relay-wan")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PoolPublicationMetricsSnapshot {
+    pub(super) requested_hubs: usize,
     pub(super) initialized_hubs: usize,
     pub(super) ready_hubs: usize,
+    pub(super) idle_hubs: usize,
     pub(super) terminal_failures: u64,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+#[derive(Default)]
+struct PoolHubMetricsSnapshot {
+    requested: bool,
+    initialized: bool,
+    health: Option<PublicationHubHealth>,
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -133,6 +168,8 @@ impl PoolHubSlot {
         self: &Arc<Self>,
         actor: KvDcRelayHandle,
         config: PublicationHubConfig,
+        initialization_permits: Arc<Semaphore>,
+        max_initialized_hubs: usize,
         generation_cancel: CancellationToken,
         terminal_failure: TerminalFailure,
     ) -> Result<PublicationHub, PublicationHubError> {
@@ -140,10 +177,10 @@ impl PoolHubSlot {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let should_start = {
+            let initialization_permit = {
                 let mut state = self.state.lock();
                 match &*state {
-                    PoolHubState::Ready(hub) => return Ok(hub.clone()),
+                    PoolHubState::Ready(initialized) => return Ok(initialized.hub.clone()),
                     PoolHubState::Failed(reason) => {
                         return Err(PublicationHubError::Unavailable(reason.clone()));
                     }
@@ -152,14 +189,21 @@ impl PoolHubSlot {
                             "pool generation retired".to_string(),
                         ));
                     }
-                    PoolHubState::Initializing => false,
+                    PoolHubState::Initializing => None,
                     PoolHubState::Vacant => {
+                        let permit =
+                            initialization_permits
+                                .clone()
+                                .try_acquire_owned()
+                                .map_err(|_| PublicationHubError::InitializedHubLimit {
+                                    limit: max_initialized_hubs,
+                                })?;
                         *state = PoolHubState::Initializing;
-                        true
+                        Some(permit)
                     }
                 }
             };
-            if should_start {
+            if let Some(initialization_permit) = initialization_permit {
                 let slot = self.clone();
                 let cancel = generation_cancel.clone();
                 let failure = terminal_failure.clone();
@@ -196,7 +240,12 @@ impl PoolHubSlot {
                         return;
                     }
                     match result {
-                        Ok(hub) => *slot.state.lock() = PoolHubState::Ready(hub),
+                        Ok(hub) => {
+                            *slot.state.lock() = PoolHubState::Ready(InitializedPublicationHub {
+                                hub,
+                                _permit: initialization_permit,
+                            });
+                        }
                         Err(reason) => {
                             *slot.state.lock() = PoolHubState::Failed(reason.clone());
                             failure(reason);
@@ -224,7 +273,7 @@ impl PoolHubSlot {
             let hub = {
                 let mut state = self.state.lock();
                 match std::mem::replace(&mut *state, PoolHubState::Retired) {
-                    PoolHubState::Ready(hub) => Some(hub),
+                    PoolHubState::Ready(initialized) => Some(initialized),
                     PoolHubState::Initializing => {
                         *state = PoolHubState::Initializing;
                         None
@@ -234,8 +283,8 @@ impl PoolHubSlot {
                     }
                 }
             };
-            if let Some(hub) = hub {
-                hub.shutdown().await;
+            if let Some(initialized) = hub {
+                initialized.hub.shutdown().await;
                 self.changed.notify_waiters();
                 return;
             }
@@ -254,27 +303,22 @@ impl PoolHubSlot {
         }
     }
 
-    fn metrics(&self) -> Option<PublicationHubHealth> {
-        let hub = match &*self.state.lock() {
-            PoolHubState::Ready(hub) => Some(hub.clone()),
-            PoolHubState::Vacant
-            | PoolHubState::Initializing
-            | PoolHubState::Failed(_)
-            | PoolHubState::Retired => None,
+    fn metrics(&self) -> PoolHubMetricsSnapshot {
+        let (requested, initialized, hub) = match &*self.state.lock() {
+            PoolHubState::Vacant | PoolHubState::Retired => (false, false, None),
+            PoolHubState::Initializing | PoolHubState::Failed(_) => (true, false, None),
+            PoolHubState::Ready(initialized) => (true, true, Some(initialized.hub.clone())),
         };
-        hub.map(|hub| hub.health())
-    }
-
-    fn is_initialized(&self) -> bool {
-        matches!(
-            &*self.state.lock(),
-            PoolHubState::Ready(_) | PoolHubState::Failed(_)
-        )
+        PoolHubMetricsSnapshot {
+            requested,
+            initialized,
+            health: hub.map(|hub| hub.health()),
+        }
     }
 
     fn retire(&self) {
         let hub = match &*self.state.lock() {
-            PoolHubState::Ready(hub) => Some(hub.clone()),
+            PoolHubState::Ready(initialized) => Some(initialized.hub.clone()),
             _ => None,
         };
         if let Some(hub) = hub {
@@ -360,6 +404,10 @@ pub(super) struct PoolRegistry {
     #[cfg(feature = "kv-dc-relay-wan")]
     publication_config: PublicationHubConfig,
     #[cfg(feature = "kv-dc-relay-wan")]
+    publication_hub_permits: Arc<Semaphore>,
+    #[cfg(feature = "kv-dc-relay-wan")]
+    max_initialized_pool_hubs: usize,
+    #[cfg(feature = "kv-dc-relay-wan")]
     readiness_tx: watch::Sender<ServingReadinessSnapshot>,
     #[cfg(feature = "kv-dc-relay-wan")]
     load_tx: watch::Sender<Vec<PoolLoadSnapshot>>,
@@ -373,7 +421,7 @@ impl PoolRegistry {
         return Self::new_with_publication_config(
             relay_identity,
             actor_config,
-            PublicationHubConfig::default(),
+            PoolPublicationConfig::default(),
         );
         #[cfg(not(feature = "kv-dc-relay-wan"))]
         Self::new_inner(relay_identity, actor_config)
@@ -383,7 +431,7 @@ impl PoolRegistry {
     pub(super) fn new_with_publication_config(
         relay_identity: DcRelayIdentity,
         actor_config: PoolActorConfig,
-        publication_config: PublicationHubConfig,
+        publication_config: PoolPublicationConfig,
     ) -> Self {
         Self::new_inner(relay_identity, actor_config, publication_config)
     }
@@ -404,8 +452,9 @@ impl PoolRegistry {
     fn new_inner(
         relay_identity: DcRelayIdentity,
         actor_config: PoolActorConfig,
-        publication_config: PublicationHubConfig,
+        publication_config: PoolPublicationConfig,
     ) -> Self {
+        debug_assert_ne!(publication_config.max_initialized_pool_hubs, 0);
         let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
         let (readiness_tx, _) = watch::channel(ServingReadinessSnapshot::default());
         let (load_tx, _) = watch::channel(Vec::new());
@@ -415,7 +464,11 @@ impl PoolRegistry {
             ckf_allocation_permits: Arc::new(Semaphore::new(DEFAULT_CKF_ALLOCATION_CONCURRENCY)),
             state: Mutex::new(PoolRegistryState::default()),
             catalog_tx,
-            publication_config,
+            publication_config: publication_config.hub,
+            publication_hub_permits: Arc::new(Semaphore::new(
+                publication_config.max_initialized_pool_hubs,
+            )),
+            max_initialized_pool_hubs: publication_config.max_initialized_pool_hubs,
             readiness_tx,
             load_tx,
             publication_terminal_failures: AtomicU64::new(0),
@@ -864,6 +917,8 @@ impl PoolRegistry {
             .get_or_start(
                 actor,
                 self.publication_config.clone(),
+                self.publication_hub_permits.clone(),
+                self.max_initialized_pool_hubs,
                 generation_cancel,
                 terminal_failure,
             )
@@ -919,9 +974,12 @@ impl PoolRegistry {
             ..PoolPublicationMetricsSnapshot::default()
         };
         for hub in hubs {
-            snapshot.initialized_hubs += usize::from(hub.is_initialized());
-            if let Some(health) = hub.metrics() {
+            let hub = hub.metrics();
+            snapshot.requested_hubs += usize::from(hub.requested);
+            snapshot.initialized_hubs += usize::from(hub.initialized);
+            if let Some(health) = hub.health {
                 snapshot.ready_hubs += usize::from(health.ready);
+                snapshot.idle_hubs += usize::from(health.ready && health.subscriber_count == 0);
             }
         }
         snapshot
@@ -1870,9 +1928,12 @@ mod tests {
     #[tokio::test]
     async fn cancelled_first_subscriber_does_not_cancel_hub_initialization() {
         let gate = Arc::new(Semaphore::new(0));
-        let publication_config = PublicationHubConfig {
-            initialization_gate: Some(gate.clone()),
-            ..PublicationHubConfig::default()
+        let publication_config = PoolPublicationConfig {
+            hub: PublicationHubConfig {
+                initialization_gate: Some(gate.clone()),
+                ..PublicationHubConfig::default()
+            },
+            ..PoolPublicationConfig::default()
         };
         let registry = Arc::new(PoolRegistry::new_with_publication_config(
             relay_identity(),
@@ -1916,9 +1977,12 @@ mod tests {
     #[tokio::test]
     async fn retirement_during_hub_initialization_publishes_no_hub() {
         let gate = Arc::new(Semaphore::new(0));
-        let publication_config = PublicationHubConfig {
-            initialization_gate: Some(gate),
-            ..PublicationHubConfig::default()
+        let publication_config = PoolPublicationConfig {
+            hub: PublicationHubConfig {
+                initialization_gate: Some(gate),
+                ..PublicationHubConfig::default()
+            },
+            ..PoolPublicationConfig::default()
         };
         let registry = Arc::new(PoolRegistry::new_with_publication_config(
             relay_identity(),
@@ -1949,6 +2013,62 @@ mod tests {
         assert!(registry.catalog().pools().is_empty());
         assert_eq!(registry.pool_count().await, 0);
         assert_eq!(registry.hub_phase_count("ready").await, 0);
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn initialized_hub_limit_is_held_until_pool_retirement() {
+        let registry = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity(),
+            config(),
+            PoolPublicationConfig {
+                max_initialized_pool_hubs: 1,
+                ..PoolPublicationConfig::default()
+            },
+        ));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let second = registry
+            .attach(request(pool(2), "slow.router.generate", "llama"))
+            .await
+            .unwrap();
+
+        let first_subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        drop(first_subscription);
+        assert_eq!(
+            registry.publication_metrics(),
+            PoolPublicationMetricsSnapshot {
+                requested_hubs: 1,
+                initialized_hubs: 1,
+                ready_hubs: 1,
+                idle_hubs: 1,
+                terminal_failures: 0,
+            }
+        );
+
+        let same_pool_subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        let error = registry
+            .subscribe_pool(pool(2))
+            .await
+            .err()
+            .expect("second pool must hit the initialized hub limit");
+        assert!(matches!(
+            error,
+            PublicationHubError::InitializedHubLimit { limit: 1 }
+        ));
+        assert_eq!(registry.catalog().pools().len(), 2);
+        drop(same_pool_subscription);
+
+        registry.detach(first).await.unwrap();
+        let second_subscription = registry.subscribe_pool(pool(2)).await.unwrap();
+        assert_eq!(
+            second_subscription.snapshot().identity(),
+            second.handle.identity()
+        );
+        drop(second_subscription);
+        registry.detach(second).await.unwrap();
     }
 
     #[cfg(feature = "kv-dc-relay-wan")]

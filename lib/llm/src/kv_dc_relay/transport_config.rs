@@ -23,7 +23,9 @@ pub struct KvDcRelayTransportConfig {
     pub publication_queue_bytes: usize,
     pub publication_encoding_concurrency: usize,
     pub max_catalog_subscribers: usize,
-    pub max_pool_subscribers: usize,
+    pub max_pool_streams_total: usize,
+    pub max_subscribers_per_pool: usize,
+    pub max_initialized_pool_hubs: usize,
     pub max_readiness_subscribers: usize,
     pub max_load_subscribers: usize,
 }
@@ -62,10 +64,12 @@ impl KvDcRelayTransportConfig {
         );
         anyhow::ensure!(
             self.max_catalog_subscribers != 0
-                && self.max_pool_subscribers != 0
+                && self.max_pool_streams_total != 0
+                && self.max_subscribers_per_pool != 0
+                && self.max_initialized_pool_hubs != 0
                 && self.max_readiness_subscribers != 0
                 && self.max_load_subscribers != 0,
-            "KV DC Relay WAN subscriber limits must be positive"
+            "KV DC Relay WAN stream and publication limits must be positive"
         );
         let minimum_message =
             super::protocol::wire::images::IMAGES_MAX_FRAME_BYTES + CBI1_ENVELOPE_HEADROOM;
@@ -107,7 +111,9 @@ mod tests {
             publication_queue_bytes: 16 * 1024 * 1024,
             publication_encoding_concurrency: 2,
             max_catalog_subscribers: 64,
-            max_pool_subscribers: 64,
+            max_pool_streams_total: 64,
+            max_subscribers_per_pool: 64,
+            max_initialized_pool_hubs: 64,
             max_readiness_subscribers: 64,
             max_load_subscribers: 64,
         }
@@ -125,7 +131,15 @@ mod tests {
         assert!(config.validate().is_err());
 
         let mut config = valid_config();
-        config.max_pool_subscribers = 0;
+        config.max_pool_streams_total = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = valid_config();
+        config.max_subscribers_per_pool = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = valid_config();
+        config.max_initialized_pool_hubs = 0;
         assert!(config.validate().is_err());
 
         let mut config = valid_config();

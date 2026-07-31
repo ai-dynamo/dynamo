@@ -49,7 +49,9 @@ impl KvDcRelay {
         publication_queue_bytes=16_777_216,
         publication_encoding_concurrency=2,
         max_catalog_subscribers=64,
-        max_pool_subscribers=64,
+        max_pool_streams_total=64,
+        max_subscribers_per_pool=64,
+        max_initialized_pool_hubs=64,
         max_readiness_subscribers=64,
         max_load_subscribers=64,
     ))]
@@ -81,7 +83,9 @@ impl KvDcRelay {
         publication_queue_bytes: usize,
         publication_encoding_concurrency: usize,
         max_catalog_subscribers: usize,
-        max_pool_subscribers: usize,
+        max_pool_streams_total: usize,
+        max_subscribers_per_pool: usize,
+        max_initialized_pool_hubs: usize,
         max_readiness_subscribers: usize,
         max_load_subscribers: usize,
     ) -> PyResult<Self> {
@@ -152,7 +156,9 @@ impl KvDcRelay {
                     publication_queue_bytes,
                     publication_encoding_concurrency,
                     max_catalog_subscribers,
-                    max_pool_subscribers,
+                    max_pool_streams_total,
+                    max_subscribers_per_pool,
+                    max_initialized_pool_hubs,
                     max_readiness_subscribers,
                     max_load_subscribers,
                 })
@@ -183,7 +189,9 @@ impl KvDcRelay {
             publication_queue_bytes,
             publication_encoding_concurrency,
             max_catalog_subscribers,
-            max_pool_subscribers,
+            max_pool_streams_total,
+            max_subscribers_per_pool,
+            max_initialized_pool_hubs,
             max_readiness_subscribers,
             max_load_subscribers,
         );

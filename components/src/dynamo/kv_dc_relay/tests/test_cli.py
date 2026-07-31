@@ -20,6 +20,9 @@ def test_local_only_defaults_require_explicit_watch_scope() -> None:
     assert config.bind is None
     assert config.expected_unique_blocks == 1_048_576
     assert config.publication_threshold == 16
+    assert config.max_pool_streams_total == 64
+    assert config.max_subscribers_per_pool == 64
+    assert config.max_initialized_pool_hubs == 64
 
 
 def test_environment_values_and_cli_precedence() -> None:
@@ -49,6 +52,27 @@ def test_environment_values_and_cli_precedence() -> None:
     assert config.namespaces == ("cli-a", "cli-b")
     assert config.endpoint_prefixes == ("cli-a.backend", "cli-b.backend")
     assert config.publication_threshold == 9
+
+
+def test_pool_capacity_environment_and_cli_precedence() -> None:
+    config = parse_args(
+        [
+            "--dc-id",
+            "dc-a",
+            "--watch-all",
+            "--max-pool-streams-total",
+            "81",
+        ],
+        {
+            "DYN_RELAY_MAX_POOL_STREAMS_TOTAL": "71",
+            "DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL": "8",
+            "DYN_RELAY_MAX_INITIALIZED_POOL_HUBS": "3",
+        },
+    )
+
+    assert config.max_pool_streams_total == 81
+    assert config.max_subscribers_per_pool == 8
+    assert config.max_initialized_pool_hubs == 3
 
 
 def test_environment_namespace_csv_and_prefixes_are_parsed() -> None:
@@ -158,7 +182,9 @@ def test_complete_mtls_configuration_is_accepted() -> None:
         "--readiness-heartbeat-interval-ms",
         "--load-fanout-capacity",
         "--publication-queue-capacity",
-        "--max-pool-subscribers",
+        "--max-pool-streams-total",
+        "--max-subscribers-per-pool",
+        "--max-initialized-pool-hubs",
         "--max-catalog-subscribers",
         "--max-readiness-subscribers",
         "--max-load-subscribers",

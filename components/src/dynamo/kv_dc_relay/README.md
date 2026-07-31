@@ -42,7 +42,8 @@ The Relay uses separate recovery boundaries for each exported fact:
   disappears before its actor drains.
 - The first `SubscribeKvPool` client initializes that pool's publication hub. The hub captures one
   CKF snapshot and then fans out contiguous deltas through bounded subscriber queues. A lagged
-  subscriber reconnects for a fresh snapshot.
+  subscriber reconnects for a fresh snapshot. An initialized hub keeps its mirror until the pool
+  generation retires, even when it has no subscribers.
 - Serving readiness is a revisioned projection of endpoint availability, worker topology, and LoRA
   adapter membership. Reconnecting the readiness stream does not rebuild CKF state.
 - Pool load is emitted as complete, latest-wins windows with independent coverage counts for each
@@ -101,6 +102,12 @@ listener. The server exposes these `dynamo.kvrelay.v1.KvEventRelay` methods:
 
 Set `DYN_SYSTEM_PORT` to expose Relay transport and publication metrics through Dynamo's system
 metrics endpoint. The health endpoint reports the WAN listener state and fatal transport errors.
+
+Pool publication capacity is configured independently with `--max-pool-streams-total`,
+`--max-subscribers-per-pool`, and `--max-initialized-pool-hubs` (all default to 64). The
+initialized-hub bound is a lifetime cap on per-pool CKF mirrors, not a count of currently subscribed
+pools. The equivalent environment variables are `DYN_RELAY_MAX_POOL_STREAMS_TOTAL`,
+`DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL`, and `DYN_RELAY_MAX_INITIALIZED_POOL_HUBS`.
 
 See [Multi-DC KV Routing and the DC Relay](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/components/router/multi-dc-kv-routing.md)
 for the pool, identity, consistency, and recovery contracts.

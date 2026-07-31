@@ -27,8 +27,9 @@ The `KvEventRelay` service has five methods:
 | `SubscribeKvPoolLoad` | A stream of complete load windows for all active pools. |
 
 Streaming requests require a non-empty `subscriber_id` of at most 128 bytes. The server enforces a
-separate subscriber limit for each stream type. Pool subscribers also have bounded message and byte
-queues.
+separate subscriber limit for each stream type. Pool publication has three independent bounds: the
+total number of active pool streams, the subscribers attached to one pool, and the pool generations
+with an initialized publication hub. Pool subscribers also have bounded message and byte queues.
 
 ## Identity
 
@@ -93,6 +94,12 @@ publication hub on the first subscription. Each client receives:
 Every `FilterUpdate` repeats the Relay and producer identities. Heartbeats contain no CBI1 payload
 and do not advance the sequence. A lagged subscriber is disconnected with `RESOURCE_EXHAUSTED`; it
 must open a new stream and install the replacement snapshot before applying deltas.
+
+An initialized hub retains its CKF mirror and its hub-capacity permit until that pool generation is
+retired, including periods with no subscribers. This lifetime bound prevents sequential
+subscribe/drop requests from materializing an unbounded number of mirrors. A subscription that
+reaches the total-stream, per-pool, or initialized-hub bound receives `RESOURCE_EXHAUSTED`; the pool
+remains cataloged and a client may retry after capacity becomes available.
 
 If snapshot encoding fails or the publication hub encounters an identity, lease, sequence, or
 bucket invariant failure, the Relay fences the producer generation. Catalog withdrawal is the

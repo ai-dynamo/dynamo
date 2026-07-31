@@ -67,7 +67,9 @@ async def worker(runtime: DistributedRuntime) -> None:
         publication_queue_bytes=args.publication_queue_bytes,
         publication_encoding_concurrency=args.publication_encoding_concurrency,
         max_catalog_subscribers=args.max_catalog_subscribers,
-        max_pool_subscribers=args.max_pool_subscribers,
+        max_pool_streams_total=args.max_pool_streams_total,
+        max_subscribers_per_pool=args.max_subscribers_per_pool,
+        max_initialized_pool_hubs=args.max_initialized_pool_hubs,
         max_readiness_subscribers=args.max_readiness_subscribers,
         max_load_subscribers=args.max_load_subscribers,
     )

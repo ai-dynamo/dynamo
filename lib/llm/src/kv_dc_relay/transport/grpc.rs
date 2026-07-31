@@ -24,7 +24,7 @@ use super::identity::{
     relay_identity_to_wire, unix_timestamp,
 };
 use super::load::LoadUpdateHub;
-use super::metrics::{StreamKind, TransportMetrics};
+use super::metrics::{StreamKind, SubscriberLimitScope, TransportMetrics};
 use super::source::WanPublicationSource;
 
 type CatalogStream =
@@ -36,38 +36,54 @@ type LoadStream =
     Pin<Box<dyn Stream<Item = Result<proto::KvPoolLoadUpdate, Status>> + Send + 'static>>;
 
 #[derive(Clone)]
+struct SubscriberLimit {
+    permits: Arc<Semaphore>,
+    maximum: usize,
+}
+
+impl SubscriberLimit {
+    fn new(maximum: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(maximum)),
+            maximum,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct SubscriberLimits {
-    catalog: Arc<Semaphore>,
-    pool: Arc<Semaphore>,
-    readiness: Arc<Semaphore>,
-    load: Arc<Semaphore>,
+    catalog: SubscriberLimit,
+    pool: SubscriberLimit,
+    readiness: SubscriberLimit,
+    load: SubscriberLimit,
 }
 
 impl SubscriberLimits {
     pub(crate) fn new(catalog: usize, pool: usize, readiness: usize, load: usize) -> Self {
         Self {
-            catalog: Arc::new(Semaphore::new(catalog)),
-            pool: Arc::new(Semaphore::new(pool)),
-            readiness: Arc::new(Semaphore::new(readiness)),
-            load: Arc::new(Semaphore::new(load)),
+            catalog: SubscriberLimit::new(catalog),
+            pool: SubscriberLimit::new(pool),
+            readiness: SubscriberLimit::new(readiness),
+            load: SubscriberLimit::new(load),
         }
     }
 
     #[allow(clippy::result_large_err)]
-    fn acquire(
-        &self,
-        stream: StreamKind,
-        metrics: &TransportMetrics,
-    ) -> Result<OwnedSemaphorePermit, Status> {
-        let semaphore = match stream {
+    fn acquire(&self, stream: StreamKind) -> Result<OwnedSemaphorePermit, Status> {
+        let limit = match stream {
             StreamKind::Catalog => &self.catalog,
             StreamKind::Pool => &self.pool,
             StreamKind::Readiness => &self.readiness,
             StreamKind::Load => &self.load,
         };
-        semaphore.clone().try_acquire_owned().map_err(|_| {
-            metrics.subscriber_limit_rejected(stream);
-            Status::resource_exhausted("Relay stream subscriber limit reached")
+        limit.permits.clone().try_acquire_owned().map_err(|_| {
+            let resource = match stream {
+                StreamKind::Catalog => "catalog stream",
+                StreamKind::Pool => "total pool stream",
+                StreamKind::Readiness => "readiness stream",
+                StreamKind::Load => "load stream",
+            };
+            Status::resource_exhausted(format!("Relay {resource} limit {} reached", limit.maximum))
         })
     }
 }
@@ -110,6 +126,15 @@ impl KvEventRelayService {
             snapshot_encoding_permits: config.snapshot_encoding_permits,
         }
     }
+
+    #[allow(clippy::result_large_err)]
+    fn acquire_stream_permit(&self, stream: StreamKind) -> Result<OwnedSemaphorePermit, Status> {
+        self.limits.acquire(stream).map_err(|status| {
+            self.metrics
+                .subscriber_limit_rejected(stream, SubscriberLimitScope::Total);
+            status
+        })
+    }
 }
 
 #[tonic::async_trait]
@@ -138,7 +163,7 @@ impl proto::KvEventRelay for KvEventRelayService {
         let request = request.into_inner();
         require_contract(request.contract_marker)?;
         let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
-        let permit = self.limits.acquire(StreamKind::Catalog, &self.metrics)?;
+        let permit = self.acquire_stream_permit(StreamKind::Catalog)?;
         tracing::debug!(%subscriber_id, "KV Relay pool catalog subscriber connected");
         let mut catalogs = self.source.watch_catalog();
         let cancel = self.cancel.clone();
@@ -181,11 +206,19 @@ impl proto::KvEventRelay for KvEventRelayService {
             .ok_or_else(|| Status::invalid_argument("SubscribeKvPool requires pool_id"))?;
         let pool_id = pool_id_from_wire(wire_pool_id)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let permit = self.limits.acquire(StreamKind::Pool, &self.metrics)?;
+        let permit = self.acquire_stream_permit(StreamKind::Pool)?;
         let subscription = match self.source.subscribe_pool(pool_id).await {
             Ok(subscription) => subscription,
             Err(error @ PublicationHubError::SubscriberLimit { .. }) => {
-                self.metrics.subscriber_limit_rejected(StreamKind::Pool);
+                self.metrics
+                    .subscriber_limit_rejected(StreamKind::Pool, SubscriberLimitScope::PerPool);
+                return Err(publication_status(error));
+            }
+            Err(error @ PublicationHubError::InitializedHubLimit { .. }) => {
+                self.metrics.subscriber_limit_rejected(
+                    StreamKind::Pool,
+                    SubscriberLimitScope::InitializedHub,
+                );
                 return Err(publication_status(error));
             }
             Err(error) => return Err(publication_status(error)),
@@ -228,7 +261,7 @@ impl proto::KvEventRelay for KvEventRelayService {
         let request = request.into_inner();
         require_contract(request.contract_marker)?;
         let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
-        let permit = self.limits.acquire(StreamKind::Readiness, &self.metrics)?;
+        let permit = self.acquire_stream_permit(StreamKind::Readiness)?;
         tracing::debug!(%subscriber_id, "KV Relay serving-readiness subscriber connected");
         let mut snapshots = self.source.watch_readiness();
         let cancel = self.cancel.clone();
@@ -268,7 +301,7 @@ impl proto::KvEventRelay for KvEventRelayService {
         let request = request.into_inner();
         require_contract(request.contract_marker)?;
         let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
-        let permit = self.limits.acquire(StreamKind::Load, &self.metrics)?;
+        let permit = self.acquire_stream_permit(StreamKind::Load)?;
         tracing::debug!(%subscriber_id, "KV Relay pool load subscriber connected");
         let mut updates = self.load_updates.subscribe();
         let initial = self.load_updates.current();
@@ -468,9 +501,9 @@ fn publication_status(error: PublicationHubError) -> Status {
     match error {
         PublicationHubError::UnknownPool(_) => Status::not_found(message),
         PublicationHubError::Unavailable(_) => Status::unavailable(message),
-        PublicationHubError::SubscriberLimit { .. } | PublicationHubError::SubscriberLagged(_) => {
-            Status::resource_exhausted(message)
-        }
+        PublicationHubError::SubscriberLimit { .. }
+        | PublicationHubError::InitializedHubLimit { .. }
+        | PublicationHubError::SubscriberLagged(_) => Status::resource_exhausted(message),
         _ => Status::failed_precondition(message),
     }
 }
@@ -520,6 +553,22 @@ mod tests {
     }
 
     #[test]
+    fn total_pool_stream_limit_is_configurable_and_releases_permits() {
+        const MAX_POOL_STREAMS: usize = 65;
+        let limits = SubscriberLimits::new(1, MAX_POOL_STREAMS, 1, 1);
+        let mut permits = (0..MAX_POOL_STREAMS)
+            .map(|_| limits.acquire(StreamKind::Pool).unwrap())
+            .collect::<Vec<_>>();
+
+        let error = limits.acquire(StreamKind::Pool).err().unwrap();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(error.message(), "Relay total pool stream limit 65 reached");
+
+        permits.pop();
+        assert!(limits.acquire(StreamKind::Pool).is_ok());
+    }
+
+    #[test]
     fn publication_status_distinguishes_absent_lagged_and_retired() {
         let pool_id = PoolId::new(
             dynamo_kv_router::identity::IndexerDomainId::new(
@@ -541,6 +590,18 @@ mod tests {
         assert_eq!(
             publication_status(PublicationHubError::SubscriberLagged(pool_id)).code(),
             tonic::Code::ResourceExhausted
+        );
+        let per_pool =
+            publication_status(PublicationHubError::SubscriberLimit { pool_id, limit: 7 });
+        assert_eq!(per_pool.code(), tonic::Code::ResourceExhausted);
+        assert!(per_pool.message().contains("subscriber limit 7"));
+        let initialized_hub =
+            publication_status(PublicationHubError::InitializedHubLimit { limit: 3 });
+        assert_eq!(initialized_hub.code(), tonic::Code::ResourceExhausted);
+        assert!(
+            initialized_hub
+                .message()
+                .contains("publication hub limit 3")
         );
         assert_eq!(
             publication_status(PublicationHubError::Unavailable("retired".to_string())).code(),

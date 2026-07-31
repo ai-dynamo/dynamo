@@ -48,12 +48,12 @@ use super::discovery::{
     KvDcRelayDiscoveryConfig, MaterializationConflict,
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity};
-#[cfg(feature = "kv-dc-relay-wan")]
-use super::pool_registry::PoolWanFacts;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
 };
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::pool_registry::{PoolPublicationConfig, PoolWanFacts};
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::publication_hub::PublicationHubConfig;
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -663,16 +663,19 @@ impl KvDcRelay {
             Some(transport) => PoolRegistry::new_with_publication_config(
                 relay_identity,
                 actor_config,
-                PublicationHubConfig {
-                    queue_capacity: transport.publication_queue_capacity,
-                    queue_bytes: transport.publication_queue_bytes,
-                    max_subscribers: transport.max_pool_subscribers,
-                    max_delta_images: super::protocol::wire::images::max_delta_images(),
-                    encoding_permits: Arc::new(Semaphore::new(
-                        transport.publication_encoding_concurrency,
-                    )),
-                    #[cfg(test)]
-                    initialization_gate: None,
+                PoolPublicationConfig {
+                    hub: PublicationHubConfig {
+                        queue_capacity: transport.publication_queue_capacity,
+                        queue_bytes: transport.publication_queue_bytes,
+                        max_subscribers: transport.max_subscribers_per_pool,
+                        max_delta_images: super::protocol::wire::images::max_delta_images(),
+                        encoding_permits: Arc::new(Semaphore::new(
+                            transport.publication_encoding_concurrency,
+                        )),
+                        #[cfg(test)]
+                        initialization_gate: None,
+                    },
+                    max_initialized_pool_hubs: transport.max_initialized_pool_hubs,
                 },
             ),
             None => PoolRegistry::new(relay_identity, actor_config),

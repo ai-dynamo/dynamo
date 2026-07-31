@@ -22,6 +22,13 @@ pub(crate) enum StreamKind {
     Load,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SubscriberLimitScope {
+    Total,
+    PerPool,
+    InitializedHub,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MetricsOwnerKey {
     registry_address: usize,
@@ -48,13 +55,17 @@ pub(crate) struct TransportMetrics {
     load_lagged_total: IntCounter,
     catalog_limit_rejected_total: IntCounter,
     pool_limit_rejected_total: IntCounter,
+    pool_per_pool_limit_rejected_total: IntCounter,
+    pool_initialized_hub_limit_rejected_total: IntCounter,
     readiness_limit_rejected_total: IntCounter,
     load_limit_rejected_total: IntCounter,
     pub(crate) pool_heartbeats_total: IntCounter,
     pub(crate) load_updates_total: IntCounter,
     catalog_pool_count: IntGauge,
+    requested_publication_hub_count: IntGauge,
     initialized_publication_hub_count: IntGauge,
     ready_publication_hub_count: IntGauge,
+    idle_publication_hub_count: IntGauge,
     terminal_publication_failures_total: IntCounter,
     degraded_load_coverage_pool_count: IntGauge,
     readiness_unknown_count: IntGauge,
@@ -121,8 +132,8 @@ impl TransportMetrics {
         )?;
         let rejected = metrics.create_intcountervec(
             "kv_dc_relay_subscriber_limit_rejected_total",
-            "Relay subscriptions rejected at the configured concurrency limit.",
-            &["stream"],
+            "Relay subscriptions rejected at a configured resource limit.",
+            &["stream", "scope"],
             &[],
         )?;
         let readiness = metrics.create_intgaugevec(
@@ -147,10 +158,13 @@ impl TransportMetrics {
             pool_lagged_total: lagged.with_label_values(&["pool"]),
             readiness_lagged_total: lagged.with_label_values(&["readiness"]),
             load_lagged_total: lagged.with_label_values(&["load"]),
-            catalog_limit_rejected_total: rejected.with_label_values(&["catalog"]),
-            pool_limit_rejected_total: rejected.with_label_values(&["pool"]),
-            readiness_limit_rejected_total: rejected.with_label_values(&["readiness"]),
-            load_limit_rejected_total: rejected.with_label_values(&["load"]),
+            catalog_limit_rejected_total: rejected.with_label_values(&["catalog", "total"]),
+            pool_limit_rejected_total: rejected.with_label_values(&["pool", "total"]),
+            pool_per_pool_limit_rejected_total: rejected.with_label_values(&["pool", "per_pool"]),
+            pool_initialized_hub_limit_rejected_total: rejected
+                .with_label_values(&["pool", "initialized_hub"]),
+            readiness_limit_rejected_total: rejected.with_label_values(&["readiness", "total"]),
+            load_limit_rejected_total: rejected.with_label_values(&["load", "total"]),
             pool_heartbeats_total: metrics.create_intcounter(
                 "kv_dc_relay_pool_heartbeats_total",
                 "Application-level heartbeats emitted across pool streams.",
@@ -166,14 +180,24 @@ impl TransportMetrics {
                 "Current pools in the Relay producer catalog.",
                 &[],
             )?,
+            requested_publication_hub_count: metrics.create_intgauge(
+                "kv_dc_relay_requested_publication_hub_count",
+                "Current pools whose lazy publication hub has been requested.",
+                &[],
+            )?,
             initialized_publication_hub_count: metrics.create_intgauge(
                 "kv_dc_relay_initialized_publication_hub_count",
-                "Current lazily initialized per-pool publication hubs.",
+                "Current per-pool publication hubs holding an initialized CKF mirror.",
                 &[],
             )?,
             ready_publication_hub_count: metrics.create_intgauge(
                 "kv_dc_relay_ready_publication_hub_count",
                 "Current publication hubs with a contiguous ready CKF mirror.",
+                &[],
+            )?,
+            idle_publication_hub_count: metrics.create_intgauge(
+                "kv_dc_relay_idle_publication_hub_count",
+                "Current ready publication hubs with no active subscribers.",
                 &[],
             )?,
             terminal_publication_failures_total: metrics.create_intcounter(
@@ -259,10 +283,14 @@ impl TransportMetrics {
         let load = pools.load_snapshots();
         self.catalog_pool_count
             .set(saturating_i64(catalog.pools().len()));
+        self.requested_publication_hub_count
+            .set(saturating_i64(publication.requested_hubs));
         self.initialized_publication_hub_count
             .set(saturating_i64(publication.initialized_hubs));
         self.ready_publication_hub_count
             .set(saturating_i64(publication.ready_hubs));
+        self.idle_publication_hub_count
+            .set(saturating_i64(publication.idle_hubs));
         if publication.terminal_failures >= active.last_terminal_failures {
             self.terminal_publication_failures_total.inc_by(
                 publication
@@ -294,8 +322,10 @@ impl TransportMetrics {
         self.readiness_subscribers.set(0);
         self.load_subscribers.set(0);
         self.catalog_pool_count.set(0);
+        self.requested_publication_hub_count.set(0);
         self.initialized_publication_hub_count.set(0);
         self.ready_publication_hub_count.set(0);
+        self.idle_publication_hub_count.set(0);
         self.degraded_load_coverage_pool_count.set(0);
         self.readiness_unknown_count.set(0);
         self.readiness_unavailable_count.set(0);
@@ -321,14 +351,28 @@ impl TransportMetrics {
         .inc();
     }
 
-    pub(crate) fn subscriber_limit_rejected(&self, stream: StreamKind) {
-        self.stream_counter(
-            stream,
-            &self.catalog_limit_rejected_total,
-            &self.pool_limit_rejected_total,
-            &self.readiness_limit_rejected_total,
-            &self.load_limit_rejected_total,
-        )
+    pub(crate) fn subscriber_limit_rejected(
+        &self,
+        stream: StreamKind,
+        scope: SubscriberLimitScope,
+    ) {
+        match scope {
+            SubscriberLimitScope::Total => self.stream_counter(
+                stream,
+                &self.catalog_limit_rejected_total,
+                &self.pool_limit_rejected_total,
+                &self.readiness_limit_rejected_total,
+                &self.load_limit_rejected_total,
+            ),
+            SubscriberLimitScope::PerPool => {
+                debug_assert!(matches!(stream, StreamKind::Pool));
+                &self.pool_per_pool_limit_rejected_total
+            }
+            SubscriberLimitScope::InitializedHub => {
+                debug_assert!(matches!(stream, StreamKind::Pool));
+                &self.pool_initialized_hub_limit_rejected_total
+            }
+        }
         .inc();
     }
 

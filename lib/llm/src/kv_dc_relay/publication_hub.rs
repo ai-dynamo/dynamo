@@ -131,6 +131,8 @@ pub(crate) enum PublicationHubError {
     Unavailable(String),
     #[error("pool {pool_id} reached its subscriber limit {limit}")]
     SubscriberLimit { pool_id: PoolId, limit: usize },
+    #[error("Relay reached its initialized publication hub limit {limit}")]
+    InitializedHubLimit { limit: usize },
     #[error("pool {0} subscriber exceeded its bounded publication queue")]
     SubscriberLagged(PoolId),
     #[error("publication identity changed from {expected:?} to {actual:?}")]
