@@ -67,3 +67,57 @@ Do not enable `--use-server-token-count`: the dummy response deliberately report
 zero prompt tokens. Compare request latency, TTFT, and request throughput with the
 combined custom-encoder-plus-decoder service. ITL and generated-token throughput are
 not meaningful because the encoder-only service emits one dummy content chunk.
+
+## Run the parallel throughput sweep
+
+The paired sweep compares one AIPerf client against the combined service with two
+simultaneous clients: one against the same combined service and one against the
+encoder-only service. Both clients use the selected concurrency, and a parallel cell
+finishes only after both clients complete. The report calculates aggregate throughput
+as 2,000 requests divided by that joint makespan.
+
+Generate the synthetic images on the benchmark host. Each measured client receives
+1,000 unique 500×500 JPEGs. Pools are disjoint between concurrency values and between
+the two parallel clients; the control and parallel combined clients share a pool so
+their payloads are directly comparable.
+
+```bash
+export RUN_DIR=/dynamo-tmp/logs/$(date -u +%m-%d)/qwen25-parallel-encoder
+export WORKLOAD_DIR="$RUN_DIR/workload"
+
+python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
+  generate \
+  --workload-dir "$WORKLOAD_DIR" \
+  --concurrencies 8 16 32 64
+
+python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
+  validate-workload \
+  --workload-dir "$WORKLOAD_DIR" \
+  --concurrencies 8 16 32 64
+```
+
+Set immutable source and image provenance before starting the GPU run:
+
+```bash
+export DYNAMO_BENCHMARK_COMMIT="$(git rev-parse HEAD)"
+export DYNAMO_BENCHMARK_BRANCH="$(git branch --show-current)"
+export DYNAMO_BENCHMARK_IMAGE=<exact-container-image>
+export DYNAMO_BASE_IMAGE_COMMIT=<full-main-commit-used-to-build-the-image>
+
+python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
+  run \
+  --workload-dir "$WORKLOAD_DIR" \
+  --output-dir "$RUN_DIR/measured" \
+  --concurrencies 8 16 32 64 \
+  --confirmation-runs 3
+
+python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
+  summarize "$RUN_DIR/measured"
+```
+
+Every measured AIPerf client sends 1,000 streaming requests after a separate
+20-request warmup. Combined requests use exact ISL 644 and OSL 7. Encoder-only
+requests use the same calibrated input and return one dummy token. The harness uses
+separate AIPerf IPC directories and a process barrier, rejects any failed request,
+and records command lines, joint timing, latency percentiles, GPU utilization, and
+source/image provenance.
