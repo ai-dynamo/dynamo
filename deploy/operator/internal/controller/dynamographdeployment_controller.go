@@ -444,8 +444,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 	program := r.selectWorkloadProgram(state)
 	if err := program.Reconcile(ctx, state); err != nil {
-		logger.Error(err, "Failed to reconcile Dynamo components deployments")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		logger.Error(err, "Failed to reconcile workload program")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile workload program: %w", err)
 	}
 	result := state.Result
 	result.RestartStatus = restartStatus

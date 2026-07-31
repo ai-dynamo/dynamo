@@ -202,125 +202,148 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 }
 
 func TestComponentProgram_PreserveExistingBackendFramework(t *testing.T) {
-	ctx := context.Background()
-	existing := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vllm-disagg-planner-frontend",
-			Namespace: "jsm",
+	tests := []struct {
+		name          string
+		dcdName       string
+		existing      bool
+		wantFramework string
+	}{
+		{
+			name:          "existing DCD preserves its immutable stored backend",
+			dcdName:       "vllm-disagg-planner-frontend",
+			existing:      true,
+			wantFramework: "",
 		},
-		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "",
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "Frontend",
-				ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
-			},
-		},
-	}
-	program := &componentProgram{
-		reconciler: &DynamoGraphDeploymentReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithObjects(existing).
-				Build(),
+		{
+			name:          "new DCD keeps its inferred backend",
+			dcdName:       "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			wantFramework: "vllm",
 		},
 	}
 
-	t.Log("Preserve the immutable stored backend when updating an existing DCD")
-	desiredExisting := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      existing.Name,
-			Namespace: existing.Namespace,
-		},
-		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "vllm",
-		},
-	}
-	require.NoError(t, program.preserveExistingBackendFramework(ctx, desiredExisting))
-	assert.Empty(t, desiredExisting.Spec.BackendFramework)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the desired DCD and any existing immutable API state")
+			objects := []client.Object{}
+			if tt.existing {
+				objects = append(objects, &nvidiacomv1beta1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
+					Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+							ComponentName: "Frontend",
+							ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+						},
+					},
+				})
+			}
+			program := &componentProgram{
+				reconciler: &DynamoGraphDeploymentReconciler{
+					Client: fake.NewClientBuilder().
+						WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+						WithObjects(objects...).
+						Build(),
+				},
+			}
+			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.dcdName, Namespace: "jsm"},
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					BackendFramework: "vllm",
+				},
+			}
 
-	t.Log("Keep the inferred backend when creating a new DCD")
-	desiredNew := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
-			Namespace: "jsm",
-		},
-		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: "vllm",
-		},
+			t.Log("Resolve the backend value that can safely be synchronized")
+			require.NoError(t, program.preserveExistingBackendFramework(context.Background(), desired))
+
+			t.Log("Verify updates preserve stored state while creates keep the inferred value")
+			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
+		})
 	}
-	require.NoError(t, program.preserveExistingBackendFramework(ctx, desiredNew))
-	assert.Equal(t, "vllm", desiredNew.Spec.BackendFramework)
 }
 
 func TestComponentProgram_ApplyCheckpointStartupPolicy(t *testing.T) {
 	program := &componentProgram{}
-
-	t.Run("immediate stamps stable restore candidate metadata", func(t *testing.T) {
-		dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-					Replicas: ptr.To(int32(2)),
-					PodTemplate: &corev1.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								snapshotprotocol.CheckpointIDLabel: "stale",
-							},
-							Annotations: map[string]string{
-								snapshotprotocol.CheckpointStatusAnnotation: "stale",
-							},
-						},
+	tests := []struct {
+		name              string
+		replicas          int32
+		podTemplate       *corev1.PodTemplateSpec
+		checkpointInfo    checkpoint.CheckpointInfo
+		wantReplicas      int32
+		wantStartupPolicy nvidiacomv1beta1.CheckpointStartupPolicy
+		wantCandidate     bool
+	}{
+		{
+			name:     "immediate stamps stable restore candidate metadata",
+			replicas: 2,
+			podTemplate: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						snapshotprotocol.CheckpointIDLabel: "stale",
+					},
+					Annotations: map[string]string{
+						snapshotprotocol.CheckpointStatusAnnotation: "stale",
 					},
 				},
 			},
-		}
-		info := &checkpoint.CheckpointInfo{
-			Enabled:        true,
-			Exists:         true,
-			Ready:          true,
-			Hash:           "checkpoint-id",
-			CheckpointName: "checkpoint-name",
-			StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
-		}
-
-		require.NoError(t, program.applyCheckpointStartupPolicy(dcd, info))
-
-		require.NotNil(t, dcd.Spec.Experimental)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Identity)
-		assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
-		assert.Equal(t, nvidiacomv1beta1.CheckpointStartupPolicyImmediate, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
-		assert.Equal(t, int32(2), *dcd.Spec.Replicas)
-		assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
-		assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
-		assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
-		assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
-	})
-
-	t.Run("wait for checkpoint gates replicas until ready", func(t *testing.T) {
-		dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-					Replicas: ptr.To(int32(3)),
-				},
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:        true,
+				Exists:         true,
+				Ready:          true,
+				Hash:           "checkpoint-id",
+				CheckpointName: "checkpoint-name",
+				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
 			},
-		}
-		info := &checkpoint.CheckpointInfo{
-			Enabled:        true,
-			Exists:         true,
-			Ready:          false,
-			CheckpointName: "checkpoint-name",
-			StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-		}
+			wantReplicas:      2,
+			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
+			wantCandidate:     true,
+		},
+		{
+			name:     "wait for checkpoint gates replicas until ready",
+			replicas: 3,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:        true,
+				Exists:         true,
+				Ready:          false,
+				CheckpointName: "checkpoint-name",
+				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			},
+			wantReplicas:      0,
+			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	}
 
-		require.NoError(t, program.applyCheckpointStartupPolicy(dcd, info))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a generated DCD and its resolved checkpoint observation")
+			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas:    ptr.To(tt.replicas),
+						PodTemplate: tt.podTemplate,
+					},
+				},
+			}
 
-		require.NotNil(t, dcd.Spec.Experimental)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
-		require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
-		assert.Equal(t, nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
-		assert.Equal(t, int32(0), *dcd.Spec.Replicas)
-	})
+			t.Log("Apply the checkpoint startup policy before synchronizing the DCD")
+			require.NoError(t, program.applyCheckpointStartupPolicy(dcd, &tt.checkpointInfo))
+
+			t.Log("Verify the child checkpoint reference, startup policy, and replica gate")
+			require.NotNil(t, dcd.Spec.Experimental)
+			require.NotNil(t, dcd.Spec.Experimental.Checkpoint)
+			require.NotNil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+			assert.Equal(t, "checkpoint-name", *dcd.Spec.Experimental.Checkpoint.CheckpointRef)
+			assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Identity)
+			assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
+			assert.Equal(t, tt.wantStartupPolicy, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
+			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
+			if !tt.wantCandidate {
+				return
+			}
+
+			t.Log("Verify immediate startup publishes stable restore-candidate metadata")
+			assert.Empty(t, dcd.Spec.PodTemplate.Labels[snapshotprotocol.CheckpointIDLabel])
+			assert.Equal(t, commonconsts.KubeLabelValueTrue, dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+			assert.Equal(t, "checkpoint-name", dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
+			assert.Equal(t, commonconsts.MainContainerName, dcd.Spec.PodTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation])
+		})
+	}
 }
