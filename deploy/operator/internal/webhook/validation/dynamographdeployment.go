@@ -279,13 +279,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	constraintPath := fldPath.Child("topologyConstraint")
-	hasAnyConstraint := spec.TopologyConstraint != nil
+	hasComponentConstraint := false
 	for i := range spec.Components {
 		if spec.Components[i].TopologyConstraint != nil {
-			hasAnyConstraint = true
+			hasComponentConstraint = true
 			break
 		}
 	}
+	hasAnyConstraint := spec.TopologyConstraint != nil || hasComponentConstraint
 	if hasAnyConstraint {
 		topologyErrs := field.ErrorList{}
 		if spec.TopologyConstraint == nil {
@@ -294,15 +295,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				"is required when any component topology constraint is set",
 			))
 		} else {
-			if spec.TopologyConstraint.PackDomain == "" {
-				for i := range spec.Components {
-					if spec.Components[i].TopologyConstraint == nil {
-						topologyErrs = append(topologyErrs, field.Required(
-							componentsPath.Index(i).Child("topologyConstraint"),
-							"is required because spec.topologyConstraint.packDomain is not set",
-						))
-					}
-				}
+			if spec.TopologyConstraint.PackDomain == "" && !hasComponentConstraint {
+				topologyErrs = append(topologyErrs, field.Required(
+					constraintPath.Child("packDomain"),
+					"is required when no component topologyConstraint is set",
+				))
 			}
 
 			var topologyInfo *clusterTopologyInfo

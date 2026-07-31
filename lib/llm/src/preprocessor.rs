@@ -1461,17 +1461,17 @@ impl OpenAIPreprocessor {
         hidden_eos_token_ids.len() != before
     }
 
+    /// Rendering is driven by the request, so its failures are reported as 400 rather than
+    /// 500, matching vLLM. A misconfigured template can also fail here, for instance a
+    /// `chat_template` map that omits the `tool_use` key, so log the cause chain before it
+    /// is flattened into the client-facing message.
     fn map_prompt_render_error(error: anyhow::Error) -> anyhow::Error {
-        if let Some(PromptRenderError::InvalidRequest(message)) =
-            error.downcast_ref::<PromptRenderError>()
-        {
-            return DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message(message.clone())
-                .build()
-                .into();
-        }
-        error
+        tracing::debug!(?error, "Chat template rendering failed");
+        let message = match error.downcast_ref::<PromptRenderError>() {
+            Some(PromptRenderError::InvalidRequest(message)) => message.clone(),
+            None => format!("{error:#}"),
+        };
+        invalid_argument_error(message)
     }
 
     pub fn apply_template<
@@ -4233,13 +4233,16 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_prompt_error_remains_internal() {
+    fn ordinary_prompt_error_maps_to_invalid_argument() {
         let mapped = OpenAIPreprocessor::map_prompt_render_error(anyhow::anyhow!(
             "template configuration failed"
         ));
+        let mapped = mapped
+            .downcast_ref::<DynamoError>()
+            .expect("any prompt render failure should map to a DynamoError");
 
-        assert!(mapped.downcast_ref::<DynamoError>().is_none());
-        assert_eq!(mapped.to_string(), "template configuration failed");
+        assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
+        assert_eq!(mapped.message(), "template configuration failed");
     }
 
     fn url_entry(u: &str) -> MultimodalData {
@@ -5332,6 +5335,93 @@ mod tests {
             OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
             Some(12)
         );
+    }
+
+    fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
+        let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+        match dynamo_renderer::PromptFormatter::from_parts(
+            template,
+            dynamo_renderer::ContextMixins::default(),
+            false,
+        )
+        .unwrap()
+        {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    fn assistant_only_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefill"}]
+        }))
+        .unwrap()
+    }
+
+    const REQUIRES_USER_TEMPLATE: &str = "\
+        {% set ns = namespace(has_user=false) %}\
+        {% for message in messages %}\
+            {% if message['role'] == 'user' %}{% set ns.has_user = true %}{% endif %}\
+        {% endfor %}\
+        {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
+        {{ messages[0]['content'] }}";
+
+    fn render_through_preprocessor(
+        formatter: &dyn OAIPromptFormatter,
+        request: &dyn OAIChatLikeRequest,
+    ) -> Result<RenderedPrompt> {
+        formatter
+            .render_prompt(request)
+            .map_err(OpenAIPreprocessor::map_prompt_render_error)
+    }
+
+    #[test]
+    fn test_assistant_only_request_accepted_when_template_accepts_it() {
+        let formatter = test_prompt_formatter(
+            "{% for message in messages %}{{ message['role'] }}:{{ message['content'] }}{% endfor %}",
+        );
+
+        let rendered =
+            render_through_preprocessor(formatter.as_ref(), &assistant_only_request()).unwrap();
+
+        assert_eq!(rendered.as_str(), "assistant:prefill");
+    }
+
+    #[test]
+    fn test_assistant_only_template_error_is_invalid_argument() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+
+        let error = render_through_preprocessor(formatter.as_ref(), &assistant_only_request())
+            .context("Failed to apply prompt template")
+            .unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DynamoError>())
+            .expect("template render error should be classified as a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_error
+                .message()
+                .contains("No user query found in messages.")
+        );
+    }
+
+    #[test]
+    fn test_restrictive_template_accepts_request_with_user_message() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(rendered.as_str(), "hello");
     }
 
     #[test]

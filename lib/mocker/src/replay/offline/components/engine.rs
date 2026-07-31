@@ -8,23 +8,32 @@ use anyhow::bail;
 use smallvec::SmallVec;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents, WorkerTopology};
-use super::super::events::SimulationWorkerStage;
-use super::super::runtime_utils::WorkerCompletionPayload;
+use super::super::events::{SimulationWorkerStage, WorkerCompletionPayload};
 #[cfg(test)]
 use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
 #[cfg(feature = "kvbm-offload")]
 use super::ObservedOffloadEffects;
-use super::{
-    EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation,
-    ScheduledWorkerCompletion,
-};
+use super::{EngineEffects, EnginePassMode, ObservedCommandEffects, ReplayEngineObservation};
 use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::{EnginePassResult, RouterEventVisibility, SchedulerCommand};
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
+}
+
+#[derive(Clone, Copy)]
+struct PassBoundary {
+    start_ms: f64,
+    end_ms: f64,
+    completion_capacity: usize,
+}
+
+impl PassBoundary {
+    fn wall_time_secs(self) -> f64 {
+        (self.end_ms - self.start_ms).max(0.0) / 1000.0
+    }
 }
 
 pub(in crate::replay::offline) struct EngineComponent<Observation = NoEngineEvents>
@@ -45,6 +54,8 @@ where
     worker_groups: Vec<Option<Vec<usize>>>,
     /// Number of non-tombstoned worker groups.
     live_group_count: usize,
+    /// Aggregate request ownership across all live DP-rank schedulers.
+    total_in_flight: usize,
     /// Logical workers that can start a pass, ordered by stable worker ID.
     ready_groups: BTreeSet<usize>,
     /// Ready groups that made no observable progress during the prior drive.
@@ -70,6 +81,7 @@ where
         workers: Vec<OfflineWorkerState>,
     ) -> Self {
         let count = workers.len();
+        let total_in_flight = workers.iter().map(OfflineWorkerState::in_flight).sum();
         debug_assert!(
             workers
                 .iter()
@@ -85,6 +97,7 @@ where
             workers,
             worker_groups,
             live_group_count: count,
+            total_in_flight,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
@@ -131,6 +144,7 @@ where
             workers,
             worker_groups,
             live_group_count: num_workers,
+            total_in_flight: 0,
             ready_groups: BTreeSet::new(),
             deferred_ready_groups: BTreeSet::new(),
             pending_removal: BTreeSet::new(),
@@ -157,8 +171,19 @@ where
         self.workers.get(rank_id)?.as_ref()
     }
 
-    fn worker_mut(&mut self, rank_id: usize) -> Option<&mut OfflineWorkerState> {
-        self.workers.get_mut(rank_id)?.as_mut()
+    fn update_worker<T>(
+        &mut self,
+        rank_id: usize,
+        update: impl FnOnce(&mut OfflineWorkerState) -> T,
+    ) -> Option<T> {
+        let (result, before, after) = {
+            let worker = self.workers.get_mut(rank_id)?.as_mut()?;
+            let before = worker.in_flight();
+            let result = update(worker);
+            (result, before, worker.in_flight())
+        };
+        self.record_in_flight_change(before, after);
+        Some(result)
     }
 
     fn required_worker(
@@ -221,6 +246,36 @@ where
         }
     }
 
+    fn record_in_flight_change(&mut self, before: usize, after: usize) {
+        if after >= before {
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_add(after - before)
+                .expect("offline engine in-flight request count overflow");
+        } else {
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_sub(before - after)
+                .expect("offline engine in-flight request count underflow");
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_total_in_flight(&self) {
+        let expected: usize = self
+            .workers
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(OfflineWorkerState::in_flight)
+            .sum();
+        debug_assert_eq!(
+            self.total_in_flight, expected,
+            "aggregate offline engine in-flight count drifted from workers"
+        );
+    }
+
     #[cfg(debug_assertions)]
     fn debug_assert_ready_frontier(&self) {
         let expected = (0..self.worker_groups.len())
@@ -253,6 +308,8 @@ where
         debug_assert_eq!(worker_id, self.worker_groups.len());
         self.worker_groups.push(Some(rank_ids));
         self.live_group_count += 1;
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
         worker_id
     }
 
@@ -263,10 +320,15 @@ where
             return false;
         };
         for rank_id in rank_ids {
-            self.workers
+            let worker = self
+                .workers
                 .get_mut(rank_id)
                 .and_then(Option::take)
                 .expect("live worker group referenced a missing rank");
+            self.total_in_flight = self
+                .total_in_flight
+                .checked_sub(worker.in_flight())
+                .expect("tombstoned worker exceeded aggregate in-flight count");
         }
         self.live_group_count = self
             .live_group_count
@@ -277,6 +339,8 @@ where
             self.worker_groups.iter().flatten().count(),
             "live worker group count drifted from storage"
         );
+        #[cfg(debug_assertions)]
+        self.debug_assert_total_in_flight();
         true
     }
 
@@ -475,9 +539,8 @@ where
         rank_id: usize,
         request: DirectRequest,
     ) -> anyhow::Result<()> {
-        self.worker_mut(rank_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
-            .receive_request(request);
+        self.update_worker(rank_id, |worker| worker.receive_request(request))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
         self.refresh_rank(rank_id);
         Ok(())
     }
@@ -488,9 +551,8 @@ where
         command: SchedulerCommand,
     ) -> anyhow::Result<ObservedCommandEffects<Observation::Batch>> {
         let mut effects = self
-            .worker_mut(rank_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?
-            .apply_command(command)?;
+            .update_worker(rank_id, |worker| worker.apply_command(command))
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))??;
         let engine_events = Observation::take_command_events(&mut effects);
         let observed = ObservedCommandEffects {
             result: effects.result,
@@ -509,6 +571,82 @@ where
             .worker(rank_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown rank {rank_id}"))?;
         Ok(worker.is_busy())
+    }
+
+    #[cfg_attr(feature = "profile", inline(never))]
+    fn lower_executed_pass(
+        workers: &mut [Option<OfflineWorkerState>],
+        stage: SimulationWorkerStage,
+        rank_id: usize,
+        boundary: PassBoundary,
+        mut executed: EnginePassResult,
+        align_collector: Option<&mut TraceCollector>,
+        effects: &mut EngineEffects<Observation::Batch>,
+    ) {
+        if let Some(fpm) = executed.fpm.as_mut() {
+            fpm.wall_time_secs = boundary.wall_time_secs();
+        }
+        if let Some(collector) = align_collector {
+            collector.align_pass_token_times(&executed.output_signals, boundary.end_ms);
+        }
+
+        let admitted_requests = !executed.admissions.is_empty();
+        let had_raw_observations = !executed.kv_events.is_empty();
+        let published_pass_start_kv = executed.router_event_visibility
+            == RouterEventVisibility::PassStart
+            && had_raw_observations;
+        let made_progress = admitted_requests
+            || published_pass_start_kv
+            || executed.completed_requests > 0
+            || !executed.output_signals.is_empty()
+            || !executed.lifecycle_events.is_empty()
+            || had_raw_observations
+            || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
+        let observed_events = Observation::take_pass_events(&mut executed);
+        effects.admissions.extend(executed.admissions);
+        let completion_events =
+            if executed.router_event_visibility == RouterEventVisibility::PassStart {
+                effects.pass_start_events.append(observed_events);
+                Observation::Batch::default()
+            } else {
+                observed_events
+            };
+        let payload = WorkerCompletionPayload {
+            stage,
+            worker_idx: rank_id,
+            completed_requests: executed.completed_requests,
+            output_signals: executed.output_signals,
+            lifecycle_events: executed.lifecycle_events,
+            engine_events: completion_events,
+            progress: EngineProgress {
+                made_progress,
+                had_raw_observations,
+            },
+            fpm: executed.fpm,
+            accept_length_output_tokens: executed.accept_length_output_tokens,
+            accept_length_decode_forwards: executed.accept_length_decode_forwards,
+        };
+
+        if boundary.end_ms > boundary.start_ms {
+            Self::required_worker_mut(workers, rank_id).mark_busy();
+            effects.schedule_completion(boundary.end_ms, payload, boundary.completion_capacity);
+            return;
+        }
+
+        // NOTE: Keep both lifecycle extremes in view when changing this gate.
+        // Tight-spin/livelock occurs when an effect-free, queued-only,
+        // zero-duration pass is repeatedly treated as progress at the same
+        // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
+        // quiescence while workers still own unfinished requests but have no
+        // concrete future event, deadline, or dependency notification. Stop
+        // same-time iteration when no observable state changed, but only after
+        // the owning subsystem can account for every unfinished request's
+        // future wakeup; an empty event queue alone is not quiescence.
+        if made_progress {
+            effects.progress.made_progress = true;
+            effects.progress.had_raw_observations |= had_raw_observations;
+            effects.immediate_completions.push(payload);
+        }
     }
 
     pub(in crate::replay::offline) fn drive_ready(
@@ -549,13 +687,9 @@ where
                 continue;
             }
 
-            let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
-                SmallVec::with_capacity(rank_ids.len());
-            for &rank_id in rank_ids {
-                if !Self::required_worker(&self.workers, rank_id).is_ready() {
-                    executed_by_rank.push(None);
-                    continue;
-                }
+            let mut effects = EngineEffects::default();
+            let group_end_ms = if rank_ids.len() == 1 {
+                let rank_id = rank_ids[0];
                 let executed = match self.pass_mode {
                     EnginePassMode::Visible => {
                         let Some(collector) = collector.as_deref_mut() else {
@@ -567,28 +701,75 @@ where
                     EnginePassMode::Hidden => Self::required_worker_mut(&mut self.workers, rank_id)
                         .try_execute_hidden_pass(now_ms),
                 }?;
-                executed_by_rank.push(Some(executed));
-            }
+                let group_end_ms = executed.end_ms.max(now_ms);
+                let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                    Some(
+                        collector
+                            .as_deref_mut()
+                            .expect("visible pass collector checked before execution"),
+                    )
+                } else {
+                    None
+                };
+                Self::lower_executed_pass(
+                    &mut self.workers,
+                    self.stage,
+                    rank_id,
+                    PassBoundary {
+                        start_ms: now_ms,
+                        end_ms: group_end_ms,
+                        completion_capacity: 1,
+                    },
+                    executed,
+                    align_collector,
+                    &mut effects,
+                );
+                group_end_ms
+            } else {
+                let completion_capacity = rank_ids.len();
+                let mut executed_by_rank: SmallVec<[Option<EnginePassResult>; 1]> =
+                    SmallVec::with_capacity(completion_capacity);
+                for &rank_id in rank_ids {
+                    if !Self::required_worker(&self.workers, rank_id).is_ready() {
+                        executed_by_rank.push(None);
+                        continue;
+                    }
+                    let executed = match self.pass_mode {
+                        EnginePassMode::Visible => {
+                            let Some(collector) = collector.as_deref_mut() else {
+                                bail!("offline replay visible engine pass requires a collector");
+                            };
+                            Self::required_worker_mut(&mut self.workers, rank_id)
+                                .try_execute_pass(collector, now_ms)
+                        }
+                        EnginePassMode::Hidden => {
+                            Self::required_worker_mut(&mut self.workers, rank_id)
+                                .try_execute_hidden_pass(now_ms)
+                        }
+                    }?;
+                    executed_by_rank.push(Some(executed));
+                }
 
-            let group_end_ms = executed_by_rank
-                .iter()
-                .filter_map(Option::as_ref)
-                .map(|executed| executed.end_ms)
-                .fold(now_ms, f64::max);
-            let group_wall_time_secs = (group_end_ms - now_ms).max(0.0) / 1000.0;
-            let mut effects = EngineEffects::default();
+                let group_end_ms = executed_by_rank
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(|executed| executed.end_ms)
+                    .fold(now_ms, f64::max);
+                let boundary = PassBoundary {
+                    start_ms: now_ms,
+                    end_ms: group_end_ms,
+                    completion_capacity,
+                };
 
-            for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
-                let Some(mut executed) = executed else {
-                    if group_end_ms > now_ms {
-                        // Empty ranks still participate in the barrier so work
-                        // arriving mid-epoch cannot start ahead of a sibling.
-                        Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                        effects
-                            .scheduled_completions
-                            .push(ScheduledWorkerCompletion {
-                                at_ms: group_end_ms,
-                                payload: WorkerCompletionPayload {
+                for (&rank_id, executed) in rank_ids.iter().zip(executed_by_rank) {
+                    let Some(executed) = executed else {
+                        if group_end_ms > now_ms {
+                            // Empty ranks still participate in the barrier so work
+                            // arriving mid-epoch cannot start ahead of a sibling.
+                            Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
+                            effects.schedule_completion(
+                                group_end_ms,
+                                WorkerCompletionPayload {
                                     stage: self.stage,
                                     worker_idx: rank_id,
                                     completed_requests: 0,
@@ -597,90 +778,39 @@ where
                                     engine_events: Observation::Batch::default(),
                                     progress: EngineProgress::default(),
                                     fpm: Some(ForwardPassSnapshot {
-                                        wall_time_secs: group_wall_time_secs,
+                                        wall_time_secs: boundary.wall_time_secs(),
                                         ..Default::default()
                                     }),
                                     accept_length_output_tokens: 0,
                                     accept_length_decode_forwards: 0,
                                 },
-                            });
-                    }
-                    continue;
-                };
-
-                if let Some(fpm) = executed.fpm.as_mut() {
-                    fpm.wall_time_secs = group_wall_time_secs;
-                }
-                if self.pass_mode == EnginePassMode::Visible {
-                    collector
-                        .as_deref_mut()
-                        .expect("visible pass collector checked before execution")
-                        .align_pass_token_times(&executed.output_signals, group_end_ms);
-                }
-
-                let admitted_requests = !executed.admissions.is_empty();
-                let had_raw_observations = !executed.kv_events.is_empty();
-                let published_pass_start_kv = executed.router_event_visibility
-                    == RouterEventVisibility::PassStart
-                    && had_raw_observations;
-                let made_progress = admitted_requests
-                    || published_pass_start_kv
-                    || executed.completed_requests > 0
-                    || !executed.output_signals.is_empty()
-                    || !executed.lifecycle_events.is_empty()
-                    || had_raw_observations
-                    || executed.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
-                let observed_events = Observation::take_pass_events(&mut executed);
-                effects.admissions.extend(executed.admissions);
-                let completion_events =
-                    if executed.router_event_visibility == RouterEventVisibility::PassStart {
-                        effects.pass_start_events.append(observed_events);
-                        Observation::Batch::default()
-                    } else {
-                        observed_events
+                                boundary.completion_capacity,
+                            );
+                        }
+                        continue;
                     };
-                let payload = WorkerCompletionPayload {
-                    stage: self.stage,
-                    worker_idx: rank_id,
-                    completed_requests: executed.completed_requests,
-                    output_signals: executed.output_signals,
-                    lifecycle_events: executed.lifecycle_events,
-                    engine_events: completion_events,
-                    progress: EngineProgress {
-                        made_progress,
-                        had_raw_observations,
-                    },
-                    fpm: executed.fpm,
-                    accept_length_output_tokens: executed.accept_length_output_tokens,
-                    accept_length_decode_forwards: executed.accept_length_decode_forwards,
-                };
 
-                if group_end_ms > now_ms {
-                    Self::required_worker_mut(&mut self.workers, rank_id).mark_busy();
-                    effects
-                        .scheduled_completions
-                        .push(ScheduledWorkerCompletion {
-                            at_ms: group_end_ms,
-                            payload,
-                        });
-                    continue;
+                    let align_collector = if self.pass_mode == EnginePassMode::Visible {
+                        Some(
+                            collector
+                                .as_deref_mut()
+                                .expect("visible pass collector checked before execution"),
+                        )
+                    } else {
+                        None
+                    };
+                    Self::lower_executed_pass(
+                        &mut self.workers,
+                        self.stage,
+                        rank_id,
+                        boundary,
+                        executed,
+                        align_collector,
+                        &mut effects,
+                    );
                 }
-
-                // NOTE: Keep both lifecycle extremes in view when changing this gate.
-                // Tight-spin/livelock occurs when an effect-free, queued-only,
-                // zero-duration pass is repeatedly treated as progress at the same
-                // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
-                // quiescence while workers still own unfinished requests but have no
-                // concrete future event, deadline, or dependency notification. Stop
-                // same-time iteration when no observable state changed, but only after
-                // the owning subsystem can account for every unfinished request's
-                // future wakeup; an empty event queue alone is not quiescence.
-                if made_progress {
-                    effects.progress.made_progress = true;
-                    effects.progress.had_raw_observations |= had_raw_observations;
-                    effects.immediate_completions.push(payload);
-                }
-            }
+                group_end_ms
+            };
 
             if !effects.is_empty() {
                 if group_end_ms <= now_ms {
@@ -710,16 +840,19 @@ where
             );
         }
         let rank_id = payload.worker_idx;
-        let worker = self.worker_mut(rank_id).ok_or_else(|| {
-            anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
-        })?;
-        worker.mark_idle();
-        worker.mark_completed(payload.completed_requests);
         let mut payload = payload;
-        payload
-            .lifecycle_events
-            .extend(worker.retry_pending_destinations());
-        let observed = Observation::drain_worker_events(worker);
+        let observed = self
+            .update_worker(rank_id, |worker| {
+                worker.mark_idle();
+                worker.mark_completed(payload.completed_requests);
+                payload
+                    .lifecycle_events
+                    .extend(worker.retry_pending_destinations());
+                Observation::drain_worker_events(worker)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("offline replay completion for unknown worker {}", rank_id)
+            })?;
         payload.progress.had_raw_observations |= observed.had_raw_observations;
         payload.progress.made_progress |= observed.had_raw_observations;
         payload.engine_events.append(observed.events);
@@ -728,11 +861,7 @@ where
     }
 
     pub(in crate::replay::offline) fn in_flight(&self) -> usize {
-        self.workers
-            .iter()
-            .filter_map(Option::as_ref)
-            .map(OfflineWorkerState::in_flight)
-            .sum()
+        self.total_in_flight
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {
@@ -836,11 +965,15 @@ mod tests {
         mut effects: EngineEffects<Events>,
     ) -> WorkerCompletionPayload<Events> {
         if let Some(payload) = effects.immediate_completions.pop() {
-            assert!(effects.scheduled_completions.is_empty());
+            assert!(effects.scheduled_completion.is_none());
             return payload;
         }
-        assert_eq!(effects.scheduled_completions.len(), 1);
-        effects.scheduled_completions.pop().unwrap().payload
+        let mut scheduled = effects
+            .scheduled_completion
+            .take()
+            .expect("one scheduled completion must be present");
+        assert_eq!(scheduled.payloads.len(), 1);
+        scheduled.payloads.pop().unwrap()
     }
 
     fn decode_engine_with_chunking(enable_chunked_prefill: bool) -> EngineComponent {
@@ -926,15 +1059,22 @@ mod tests {
 
         let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
 
-        assert_eq!(effects.scheduled_completions.len(), 2);
+        let scheduled = effects.scheduled_completion.as_ref().unwrap();
+        assert_eq!(scheduled.payloads.len(), 2);
         assert!(
-            effects
-                .scheduled_completions
-                .iter()
-                .all(|completion| (completion.at_ms - 9.0).abs() < f64::EPSILON)
+            (scheduled.at_ms - 9.0).abs() < f64::EPSILON,
+            "batch must fire at the slowest-rank boundary"
         );
-        assert!(effects.scheduled_completions.iter().all(|completion| {
-            (completion.payload.fpm.as_ref().unwrap().wall_time_secs - 0.009).abs() < f64::EPSILON
+        assert_eq!(
+            scheduled
+                .payloads
+                .iter()
+                .map(|payload| payload.worker_idx)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(scheduled.payloads.iter().all(|payload| {
+            (payload.fpm.as_ref().unwrap().wall_time_secs - 0.009).abs() < f64::EPSILON
         }));
         assert_eq!(collector.request_latencies(fast).unwrap().0, 9.0);
         assert_eq!(collector.request_latencies(slow).unwrap().0, 9.0);
@@ -948,15 +1088,15 @@ mod tests {
         let mut collector = TraceCollector::default();
         collector.on_arrival(slow, 0.0, 8, 1);
 
-        let first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert_eq!(first_epoch.scheduled_completions.len(), 2);
+        let mut first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        let first_scheduled = first_epoch.scheduled_completion.as_ref().unwrap();
+        assert_eq!(first_scheduled.payloads.len(), 2);
         assert!(engine.debug_snapshots().iter().all(|rank| rank.busy));
-        let idle_fpm = first_epoch
-            .scheduled_completions
+        let idle_fpm = first_scheduled
+            .payloads
             .iter()
-            .find(|completion| completion.payload.worker_idx == 1)
+            .find(|payload| payload.worker_idx == 1)
             .unwrap()
-            .payload
             .fpm
             .as_ref()
             .expect("idle DP rank must emit an empty FPM");
@@ -975,33 +1115,99 @@ mod tests {
                 .is_empty()
         );
 
-        for completion in first_epoch.scheduled_completions {
-            engine.on_scheduled_completion(completion.payload).unwrap();
+        for payload in first_epoch.scheduled_completion.take().unwrap().payloads {
+            engine.on_scheduled_completion(payload).unwrap();
         }
         let second_epoch = engine.drive_ready(9.0, Some(&mut collector)).unwrap();
-        assert_eq!(second_epoch.scheduled_completions.len(), 2);
-        assert!(
-            second_epoch
-                .scheduled_completions
-                .iter()
-                .all(|completion| (completion.at_ms - 14.0).abs() < f64::EPSILON)
-        );
+        let second_scheduled = second_epoch.scheduled_completion.as_ref().unwrap();
+        assert_eq!(second_scheduled.payloads.len(), 2);
+        assert!((second_scheduled.at_ms - 14.0).abs() < f64::EPSILON);
         assert_eq!(collector.request_latencies(mid_epoch).unwrap().0, 10.0);
     }
 
     #[test]
-    fn single_rank_group_keeps_local_completion_time() {
-        let mut engine = ranked_timing_engine(1);
-        let uuid = Uuid::from_u128(50);
-        engine.dispatch(0, timed_request(uuid, 4)).unwrap();
-        let mut collector = TraceCollector::default();
-        collector.on_arrival(uuid, 0.0, 4, 1);
+    fn single_rank_visible_timeline_matches_grouped_path() {
+        fn run(dp_size: u32, uuid: Uuid) -> (f64, f64) {
+            let mut engine = ranked_timing_engine(dp_size);
+            let mut request = timed_request(uuid, 4);
+            request.max_output_tokens = 3;
+            engine.dispatch(0, request).unwrap();
+            let mut collector = TraceCollector::default();
+            collector.on_arrival(uuid, 0.0, 4, 3);
 
-        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+            let mut now_ms = 0.0;
+            while engine.in_flight() > 0 {
+                let effects = engine.drive_ready(now_ms, Some(&mut collector)).unwrap();
+                assert!(effects.immediate_completions.is_empty());
+                let scheduled = effects.scheduled_completion.unwrap();
+                assert_eq!(scheduled.payloads.len(), dp_size as usize);
+                now_ms = scheduled.at_ms;
+                for payload in scheduled.payloads {
+                    engine.on_scheduled_completion(payload).unwrap();
+                }
+            }
+            collector.request_latencies(uuid).unwrap()
+        }
 
-        assert_eq!(effects.scheduled_completions.len(), 1);
-        assert_eq!(effects.scheduled_completions[0].at_ms, 5.0);
-        assert_eq!(collector.request_latencies(uuid).unwrap().0, 5.0);
+        let singleton = run(1, Uuid::from_u128(50));
+        let grouped = run(2, Uuid::from_u128(51));
+        assert_eq!(singleton, grouped);
+        assert_eq!(singleton, (5.0, 1.0));
+    }
+
+    #[test]
+    fn sglang_aggregate_in_flight_tracks_worker_ownership() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let worker = OfflineWorkerState::new(0, args.clone(), false);
+        let mut engine = EngineComponent::<NoEngineEvents>::new(
+            SimulationWorkerStage::Aggregated,
+            EnginePassMode::Visible,
+            vec![worker],
+        );
+        engine.set_scaling_args(args, false);
+        assert_eq!(engine.in_flight(), 0);
+
+        let cancelled = Uuid::from_u128(501);
+        engine.dispatch(0, timed_request(cancelled, 4)).unwrap();
+        assert_eq!(engine.in_flight(), 1);
+        let effects = engine
+            .apply_command(
+                0,
+                SchedulerCommand::CancelRequest {
+                    request_id: cancelled,
+                },
+            )
+            .unwrap();
+        assert_eq!(effects.result, SchedulerCommandResult::Applied);
+        assert_eq!(engine.in_flight(), 0);
+
+        let completed = Uuid::from_u128(502);
+        engine.dispatch(0, timed_request(completed, 4)).unwrap();
+        assert_eq!(engine.in_flight(), 1);
+        let effects = engine
+            .drive_ready(0.0, Some(&mut TraceCollector::default()))
+            .unwrap();
+        let completion = take_only_completion(effects);
+        assert_eq!(engine.in_flight(), 1);
+        engine.on_scheduled_completion(completion).unwrap();
+        assert_eq!(engine.in_flight(), 0);
+
+        engine.mark_for_removal(0);
+        assert_eq!(engine.try_remove_drained(), vec![0]);
+        assert_eq!(engine.in_flight(), 0);
     }
 
     #[test]
@@ -1175,7 +1381,13 @@ mod tests {
             )
             .unwrap();
         let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert_eq!(effects.scheduled_completions.len(), 1);
+        assert_eq!(
+            effects
+                .scheduled_completion
+                .as_ref()
+                .map(|scheduled| scheduled.payloads.len()),
+            Some(1)
+        );
 
         let (_, newly_marked, _) = engine.apply_target_count(1);
         assert_eq!(newly_marked, vec![1]);
@@ -1198,9 +1410,11 @@ mod tests {
 
         assert_eq!(engine.active_worker_ids().len(), 1);
         engine
-            .worker_mut(new_id)
-            .unwrap()
-            .receive_request(timed_request(Uuid::from_u128(60), 4));
+            .update_worker(new_id, |worker| {
+                worker.receive_request(timed_request(Uuid::from_u128(60), 4))
+            })
+            .unwrap();
+        assert_eq!(engine.in_flight(), 1);
         assert!(!engine.ready_groups.contains(&new_id));
         assert!(engine.mark_worker_ready(new_id));
         assert_eq!(engine.active_worker_ids().len(), 2);
@@ -1233,7 +1447,7 @@ mod tests {
         let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(second.admissions.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
-        assert!(second.scheduled_completions.is_empty());
+        assert!(second.scheduled_completion.is_none());
         let second = take_only_completion(second);
         assert_eq!(second.fpm.as_ref().unwrap().num_prefill_requests, 1);
         assert_eq!(second.completed_requests, 0);
@@ -1347,7 +1561,10 @@ mod tests {
             .unwrap();
         let mut collector = TraceCollector::default();
         let mut pass = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
-        assert_eq!(pass.scheduled_completions.len(), 1);
+        assert_eq!(
+            pass.scheduled_completion.as_ref().unwrap().payloads.len(),
+            1
+        );
 
         let handoff_id = HandoffId::from(Uuid::from_u128(2));
         let effects = engine
@@ -1377,8 +1594,14 @@ mod tests {
         assert!(engine.active_worker_ids().is_empty());
         assert_eq!(engine.worker_count(), 1);
 
-        let completion = pass.scheduled_completions.pop().unwrap();
-        let payload = engine.on_scheduled_completion(completion.payload).unwrap();
+        let payload = pass
+            .scheduled_completion
+            .take()
+            .unwrap()
+            .payloads
+            .pop()
+            .unwrap();
+        let payload = engine.on_scheduled_completion(payload).unwrap();
         assert!(payload.lifecycle_events.iter().any(|event| matches!(
             event,
             SchedulerLifecycleEvent::DestinationReserved {
@@ -1445,19 +1668,23 @@ mod tests {
                 .any(|event| { event.storage_tier == StorageTier::Device })
         );
         assert_eq!(
-            seed.immediate_completions.len() + seed.scheduled_completions.len(),
+            seed.immediate_completions.len() + usize::from(seed.scheduled_completion.is_some()),
             1,
             "seed request should produce exactly one completion boundary"
         );
         let completion = seed.immediate_completions.pop().unwrap_or_else(|| {
-            seed.scheduled_completions
-                .pop()
+            seed.scheduled_completion
+                .take()
                 .expect("seed request completion must be present")
-                .payload
+                .payloads
+                .pop()
+                .expect("singleton completion batch must contain one payload")
         });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.
-        engine.worker_mut(0).unwrap().mark_idle();
+        engine
+            .update_worker(0, OfflineWorkerState::mark_idle)
+            .unwrap();
 
         let handoff_id = HandoffId::from(Uuid::from_u128(102));
         let reserve = engine
@@ -1480,7 +1707,9 @@ mod tests {
             .expect("reservation eviction should start G1 to G2 DMA");
         assert!((deadline - 20.0).abs() < 0.01);
 
-        engine.worker_mut(0).unwrap().mark_busy();
+        engine
+            .update_worker(0, OfflineWorkerState::mark_busy)
+            .unwrap();
         assert_eq!(engine.earliest_offload_deadline(), Some(deadline));
         let transport = engine.tick_offload_engines(deadline);
         assert!(transport.lifecycle_events.is_empty());
