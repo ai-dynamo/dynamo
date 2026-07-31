@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::local_model::{LocalModel, register_model_card};
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
@@ -126,9 +126,9 @@ fn get_span_for_direct_context(
 
 // Helper to create request context with proper linking and cancellation handling
 fn create_request_context(
-    request: serde_json::Value,
+    request: rmpv::Value,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<serde_json::Value> {
+) -> RsContext<rmpv::Value> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
@@ -209,17 +209,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
-    #[cfg(feature = "aic-forward-pass")]
-    {
-        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
-        m.add_class::<llm::engine_perf::EngineCapacity>()?;
-        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
-        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
-        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
-    }
-    m.add_class::<llm::replay::PlannerReplayBridge>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -551,6 +540,19 @@ fn register_model<'p>(
         if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            // Preserve source_path for compatibility checks (LoRA vs base model).
+            // Only set if it differs from model_name to preserve legacy MDC checksums.
+            if source_path != model_name {
+                card.source_path = Some(source_path.clone());
+            }
+
+            // Populate lora_info if this is a LoRA registration.
+            if let Some(lora_name) = lora_identifier.clone() {
+                card.lora = Some(llm_rs::model_card::LoraInfo {
+                    name: lora_name,
+                    max_gpu_lora_count,
+                });
+            }
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.worker_type = worker_type_value;
@@ -566,20 +568,20 @@ fn register_model<'p>(
                 );
             }
 
-            card.runtime_config = runtime_config.inner;
+            // For base model (no lora_identifier), propagate LoRA slot capacity so
+            // frontend allocator can see idle-but-LoRA-capable workers before first adapter load.
+            let mut rc = runtime_config.inner;
+            if lora_identifier.is_none() {
+                rc.max_gpu_lora_count = max_gpu_lora_count;
+            }
+            card.runtime_config = rc;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
-            let discovery = endpoint.inner.drt().discovery();
-            let spec = rs::discovery::DiscoverySpec::from_model(
-                endpoint.inner.component().namespace().name().to_string(),
-                endpoint.inner.component().name().to_string(),
-                endpoint.inner.name().to_string(),
-                &card,
-            )
-            .map_err(to_pyerr)?;
-            discovery.register(spec).await.map_err(to_pyerr)?;
+            register_model_card(&endpoint.inner, &card)
+                .await
+                .map_err(|e| PyException::new_err(format!("{}", e)))?;
 
             return Ok(());
         }
@@ -746,7 +748,7 @@ struct ModelCardInstanceId {
 #[pyclass]
 #[derive(Clone)]
 struct Client {
-    router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    router: rs::pipeline::PushRouter<rmpv::Value, RsAnnotated<rmpv::Value>>,
     endpoint: rs::component::Endpoint,
 }
 
@@ -1411,12 +1413,13 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router = rs::pipeline::PushRouter::<
-                serde_json::Value,
-                RsAnnotated<serde_json::Value>,
-            >::from_client(client, router_mode.into())
-            .await
-            .map_err(to_pyerr)?;
+            let push_router =
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                    client,
+                    router_mode.into(),
+                )
+                .await
+                .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
                 endpoint: inner,
@@ -1602,7 +1605,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1636,7 +1639,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1674,7 +1677,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1711,7 +1714,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request: rmpv::Value = pythonize::depythonize(&request.into_bound(py))?;
         let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
@@ -1744,13 +1747,13 @@ impl Client {
 }
 
 async fn process_stream(
-    stream: EngineStream<RsAnnotated<serde_json::Value>>,
+    stream: EngineStream<RsAnnotated<rmpv::Value>>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
-        let annotated: RsAnnotated<serde_json::Value> = response;
+        let annotated: RsAnnotated<rmpv::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
             Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),

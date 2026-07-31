@@ -571,6 +571,9 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(body["overlap"]["dp"]["0"], 0);
     assert!(body.get("cached_tokens").is_none());
     assert!(body.get("effective_overlap_blocks").is_none());
+    assert!(body.get("sequence_hashes").is_none());
+    assert!(body.get("isl_tokens").is_none());
+    assert!(body.get("track_prefill_tokens").is_none());
 
     let loads_response = app
         .oneshot(
@@ -651,6 +654,17 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
+    assert_eq!(body["isl_tokens"], 4);
+    assert_eq!(body["track_prefill_tokens"], true);
+    let block_hashes = compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default());
+    let expected_sequence_hashes: Vec<i64> = compute_seq_hash_for_block(&block_hashes)
+        .iter()
+        .map(|hash| *hash as i64)
+        .collect();
+    assert_eq!(
+        body["sequence_hashes"],
+        serde_json::json!(expected_sequence_hashes)
+    );
 
     let loads_response = app
         .clone()
@@ -684,6 +698,68 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
         .await
         .unwrap();
     assert_eq!(free.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn explicit_replay_preserves_disabled_prefill_tracking() {
+    let source = app();
+    let peer = app();
+    for app in [source.clone(), peer.clone()] {
+        assert_eq!(
+            register_worker(app, None).await.status(),
+            StatusCode::CREATED
+        );
+    }
+
+    let response = post(
+        source.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated","router_config_override":{"track_prefill_tokens":false}}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let selected = response_json(response).await;
+    assert_eq!(selected["track_prefill_tokens"], false);
+
+    let reservation = serde_json::json!({
+        "model_name": "model",
+        "selection_id": "replicated",
+        "worker_id": selected["worker_id"],
+        "dp_rank": selected["dp_rank"],
+        "sequence_hashes": selected["sequence_hashes"],
+        "isl_tokens": selected["isl_tokens"],
+        "effective_prefill_tokens": selected["effective_prefill_tokens"],
+        "track_prefill_tokens": selected["track_prefill_tokens"]
+    });
+    let response = post(peer.clone(), "/reservations", &reservation.to_string()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    for app in [source, peer] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/loads")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loads = response_json(response).await;
+        assert_eq!(loads[0]["loads"][0]["active_requests"], 1);
+        assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+        assert_eq!(loads[0]["loads"][0]["potential_decode_blocks"], 1);
+
+        let response = post(
+            app,
+            "/potential_loads",
+            r#"{"model_name":"model","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":false}}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let potential = response_json(response).await;
+        assert_eq!(potential[0]["potential_decode_blocks"], 1);
+    }
 }
 
 #[tokio::test]

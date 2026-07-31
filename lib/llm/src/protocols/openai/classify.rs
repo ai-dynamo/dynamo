@@ -119,11 +119,15 @@ pub struct ClassificationData {
     pub num_classes: u32,
 }
 
-/// Usage information for a classification response.
+/// Usage information for a classification response. `completion_tokens` is
+/// always 0 (a classification pass generates nothing) but is kept for parity
+/// with vLLM's `UsageInfo`, which serializes it.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default)]
 pub struct ClassificationUsage {
     pub prompt_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
 }
 
 /// Response for the `/classify` endpoint.
@@ -302,6 +306,27 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["mm_processor_kwargs"]["do_resize"], false);
         assert_eq!(value["priority"], -2);
+    }
+
+    #[test]
+    fn usage_mirrors_vllm_usage_info() {
+        // vLLM's `ClassificationResponse.usage` is the shared `UsageInfo`,
+        // dumped without exclusions — so `completion_tokens` is always on the
+        // wire even though a classification pass generates nothing. A worker
+        // that omits it still parses, defaulting to 0.
+        let response: NvCreateClassifyResponse = serde_json::from_value(json!({
+            "id": "classify-1",
+            "object": "list",
+            "created": 1,
+            "model": "m",
+            "data": [{"index": 0, "label": "entailment", "probs": [0.9, 0.1], "num_classes": 2}],
+            "usage": {"prompt_tokens": 3, "total_tokens": 3}
+        }))
+        .unwrap();
+        assert_eq!(response.usage.completion_tokens, 0);
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["usage"]["completion_tokens"], 0);
     }
 
     #[test]

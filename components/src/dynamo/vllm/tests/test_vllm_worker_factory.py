@@ -34,15 +34,14 @@ pytestmark = [
 
 
 def _make_config(**overrides) -> Mock:
-    """Create a mock Config with all multimodal flags defaulting to False."""
+    """Create a mock Config with canonical worker settings."""
     defaults = {
-        "multimodal_encode_worker": False,
-        "multimodal_worker": False,
-        "multimodal_decode_worker": False,
+        "enable_multimodal": False,
         "omni": False,
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "realtime": False,
         "classify_worker": False,
     }
     defaults.update(overrides)
@@ -468,10 +467,10 @@ class TestCreate:
             setup_metrics_collection_fn=Mock(),
         )
         factory._create_multimodal_encode_worker = AsyncMock()  # type: ignore[assignment]
-        factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
@@ -527,13 +526,40 @@ class TestCreate:
     async def test_embedding_worker_takes_priority(
         self, factory: WorkerFactory
     ) -> None:
-        """--embedding-worker is checked first; disaggregation_mode is ignored."""
         config = _make_config(embedding_worker=True)
         shutdown_event = asyncio.Event()
 
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_embedding_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_realtime_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_realtime_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(realtime=True)
+        runtime = Mock()
+        shutdown_event = asyncio.Event()
+        shutdown_endpoints = []
+        snapshot_engine = Mock()
+
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+
+        factory._create_realtime_worker.assert_awaited_once_with(  # type: ignore[union-attr]
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+        factory._create_embedding_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
@@ -550,7 +576,7 @@ class TestCreate:
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
-        config = _make_config(multimodal_worker=True)
+        config = _make_config(enable_multimodal=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []

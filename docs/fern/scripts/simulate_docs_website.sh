@@ -21,6 +21,10 @@
 #   5. Pre-rework version files gain no shared-reference pointers.
 #   6. Round two: a page added to the General variant on a later main push
 #      propagates into the already-cut version's nav.
+#   7. The callout converter is published under fern/scripts/ and the legacy
+#      root-level copy is removed.
+#   8. Translation links resolve from authored relative paths to dev URLs in
+#      pages-dev and tag-pinned URLs in pages-<TAG>, with no /dev/ leakage.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -58,35 +62,48 @@ REF_SEL='.navigation[] | select(.tab == "reference") | .variants[] | select(.tit
 
 echo "=== SYNC JOB (replayed) ==="
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
-rsync -a \
-  --exclude='digest' --exclude='index.yml' --exclude='fern.config.json' \
-  --exclude='docs.yml' --exclude='components' --exclude='main.css' \
-  --exclude='products' --exclude='welcome.mdx' --exclude='convert_callouts.py' \
-  --exclude='.gitignore' --exclude='dev.sh' --exclude='watch.sh' \
-  "$SRC/" "$WT/fern/pages-dev/"
-rsync -a --include='*/' --include='*.md' --include='*.mdx' --exclude='*' --prune-empty-dirs \
-  "$SRC/components/" "$WT/fern/pages-dev/components/"
+rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
+"$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
 rsync -a --include='*/' --include='backends/*/deploy/**' --exclude='*' --prune-empty-dirs \
   "$REPO_ROOT/examples/" "$WT/examples/"
 
 cp "$SRC/index.yml" "$WT/fern/versions/dev.yml"
 cp "$SRC/fern.config.json" "$WT/fern/fern.config.json"
-[ -f "$SRC/README.md" ] && cp "$SRC/README.md" "$WT/fern/README.md" || true
-[ -f "$SRC/convert_callouts.py" ] && cp "$SRC/convert_callouts.py" "$WT/fern/convert_callouts.py" || true
+[ -f "$SRC/pages/community/contributing/documentation/building-and-publishing.md" ] && cp "$SRC/pages/community/contributing/documentation/building-and-publishing.md" "$WT/fern/README.md" || true
+rm -f "$WT/fern/convert_callouts.py"
+mkdir -p "$WT/fern/scripts"
+[ -f "$SRC/scripts/convert_callouts.py" ] && cp "$SRC/scripts/convert_callouts.py" "$WT/fern/scripts/convert_callouts.py" || true
 rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
 rm -rf "$WT/fern/products"
-cp "$SRC/welcome.mdx" "$WT/fern/welcome.mdx"
+cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
+perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"
 [ -d "$SRC/assets" ] && cp -r "$SRC/assets/." "$WT/fern/assets/" || true
-if [ -d "$SRC/digest" ]; then
-  rm -rf "$WT/fern/digest"; cp -r "$SRC/digest" "$WT/fern/digest"
+if [ -d "$SRC/pages/blog/_assets" ]; then
+  mkdir -p "$WT/fern/digest"; cp -r "$SRC/pages/blog/_assets/." "$WT/fern/digest/"
   perl -pi -e 's|(path: \.\./digest/.*)\.md$|$1.mdx|' "$WT"/fern/versions/v*.yml
 fi
 [ -f "$SRC/main.css" ] && cp "$SRC/main.css" "$WT/fern/main.css" || true
 [ -f "$SRC/custom.js" ] && cp "$SRC/custom.js" "$WT/fern/custom.js" || true
 
+if [ -d "$SRC/translations" ]; then
+  for d in "$WT"/fern/translations/*/pages-dev; do
+    [ -d "$d" ] || continue
+    lang=$(basename "$(dirname "$d")")
+    [ -d "$SRC/translations/$lang/pages" ] || rm -rf "$d"
+  done
+  for lang_dir in "$SRC"/translations/*/; do
+    lang=$(basename "$lang_dir")
+    if [ -d "$lang_dir/pages" ]; then
+      rm -rf "$WT/fern/translations/$lang/pages-dev"
+      mkdir -p "$WT/fern/translations/$lang"
+      cp -r "$lang_dir/pages" "$WT/fern/translations/$lang/pages-dev"
+    fi
+  done
+fi
+
 yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' "$WT/fern/versions/dev.yml"
-yq -i '(.. | select(has("path")).path) |= sub("^\./welcome\.mdx$", "../welcome.mdx")' "$WT/fern/versions/dev.yml"
-yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' "$WT/fern/versions/dev.yml"
+yq -i '(.. | select(has("path")).path) |= sub("^pages/home/index\.mdx$", "../index.mdx")' "$WT/fern/versions/dev.yml"
+yq -i '(.. | select(has("path")).path) |= sub("^pages/", "../pages-dev/")' "$WT/fern/versions/dev.yml"
 
 propagate_shared_reference() {
   yq "[$REF_SEL][0]" "$WT/fern/versions/dev.yml" > "$WT/.ref_general.yml"
@@ -100,12 +117,19 @@ propagate_shared_reference() {
 }
 propagate_shared_reference
 
-"$PY" "$WT/fern/convert_callouts.py" --dir "$WT/fern/pages-dev" >/dev/null
+"$PY" "$WT/fern/scripts/convert_callouts.py" --dir "$WT/fern/pages-dev" >/dev/null
+if [ -d "$WT/fern/translations" ]; then
+  "$PY" "$WT/fern/scripts/convert_callouts.py" --dir "$WT/fern/translations" >/dev/null
+  "$PY" "$SRC/scripts/resolve_translation_links.py" \
+    --nav "$SRC/index.yml" --translations-root "$WT/fern/translations" \
+    --site-root /dynamo --version-slug dev --pages-dir pages-dev >/dev/null
+fi
 
 cd "$WT/fern"
 yq '. as $doc | ([$doc.products[]? | select(.display-name == "Docs" or .display-name == "Dynamo")][0].versions // $doc.versions)' \
   docs.yml > "$WT/.preserved_versions.yml"
 cp "$SRC/docs.yml" docs.yml
+yq -i '."landing-page".path = "./index.mdx"' docs.yml
 PRESERVED="$WT/.preserved_versions.yml" \
   yq -i '.versions = load(strenv(PRESERVED))' docs.yml
 
@@ -121,9 +145,29 @@ yq "$REF_SEL | .. | select(has(\"path\")) | .path" fern/versions/dev.yml \
   done
 find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
 
+if [ -d "$SRC/translations" ]; then
+  for lang_dir in "$SRC"/translations/*/; do
+    lang=$(basename "$lang_dir")
+    if [ -d "$lang_dir/pages" ]; then
+      rm -rf "fern/translations/$lang/pages-$TAG"
+      mkdir -p "fern/translations/$lang/pages-$TAG"
+      rsync -a "$lang_dir/pages/" "fern/translations/$lang/pages-$TAG/"
+    fi
+  done
+fi
+
 find "fern/pages-$TAG" \( -name "*.md" -o -name "*.mdx" \) -print0 | xargs -0 perl -pi -e \
   "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g; s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g"
-"$PY" fern/convert_callouts.py --dir "fern/pages-$TAG" >/dev/null
+"$PY" fern/scripts/convert_callouts.py --dir "fern/pages-$TAG" >/dev/null
+for d in fern/translations/*/"pages-$TAG"; do
+  [ -d "$d" ] && "$PY" "$SRC/scripts/convert_callouts.py" --dir "$d" >/dev/null
+done
+if compgen -G "fern/translations/*/pages-$TAG" > /dev/null; then
+  "$PY" "$SRC/scripts/resolve_translation_links.py" \
+    --nav "$SRC/index.yml" --translations-root "fern/translations" \
+    --site-root /dynamo --version-slug "$TAG" --pages-dir "pages-$TAG" \
+    --github-ref "$TAG" >/dev/null
+fi
 
 VERSION_FILE="fern/versions/$TAG.yml"
 cp fern/versions/dev.yml "$VERSION_FILE"
@@ -145,14 +189,14 @@ yq -i ".versions[0].display-name = \"Latest ($TAG)\"" fern/docs.yml
 
 echo "=== ASSERTIONS ==="
 shared=$(grep -c "path: \.\./pages-dev/reference/" "$VERSION_FILE" || true)
-frozen=$(grep -c "path: \.\./pages-$TAG/reference/runtime-config-reference.mdx" "$VERSION_FILE" || true)
+frozen=$(grep -c "path: \.\./pages-$TAG/reference/components/runtime-configuration.mdx" "$VERSION_FILE" || true)
 [ "$shared" -ge 10 ] && s1=ok || s1=FAIL
 assert "2. $TAG.yml: General variant shared ($shared pages-dev refs)" "$s1"
 [ "$frozen" -eq 1 ] && s2=ok || s2=FAIL
-assert "2. $TAG.yml: Components variant frozen (runtime-config)" "$s2"
+assert "2. $TAG.yml: Components variant frozen (runtime configuration)" "$s2"
 
-[ ! -e "fern/pages-$TAG/reference/compatibility.mdx" ] && \
-  [ -e "fern/pages-$TAG/reference/runtime-config-reference.mdx" ] && \
+[ ! -e "fern/pages-$TAG/reference/general/compatibility.mdx" ] && \
+  [ -e "fern/pages-$TAG/reference/components/runtime-configuration.mdx" ] && \
   [ -d "fern/pages-$TAG/reference/observability" ] && s3=ok || s3=FAIL
 assert "3. snapshot drops shared files, keeps versioned reference/" "$s3"
 
@@ -174,6 +218,54 @@ grep -q "sim-test-page" "$VERSION_FILE" && s6=ok || s6=FAIL
 assert "6. round-two propagation reaches the cut version's nav" "$s6"
 # Undo before fern check (the fake page has no backing file).
 perl -ni -e 'print unless /sim-test-page|Sim Test Page/' "$WT/fern/versions/dev.yml" "$VERSION_FILE"
+
+[ -f "$WT/fern/scripts/convert_callouts.py" ] && \
+  [ ! -e "$WT/fern/convert_callouts.py" ] && s8=ok || s8=FAIL
+assert "7. converter moved to fern/scripts/ with no stale root copy" "$s8"
+
+read -r dev_relative dev_versioned tag_relative tag_dev_leaks tag_versioned < <(
+  "$PY" - "$WT/fern/translations" "$TAG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tag = sys.argv[2]
+link = re.compile(r"!?\[[^]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+
+def counts(trees, version: str):
+    relative = versioned = dev = 0
+    for tree in trees:
+        if not tree.exists():
+            continue
+        for page in tree.rglob("*"):
+            if page.suffix not in {".md", ".mdx"}:
+                continue
+            text = page.read_text(encoding="utf-8")
+            for target in link.findall(text):
+                if target.endswith((".md", ".mdx")) and not target.startswith(
+                    ("http://", "https://", "mailto:", "/")
+                ):
+                    relative += 1
+            dev += len(re.findall(r"/dynamo/(?:[^/]+/)?dev/", text))
+            versioned += len(
+                re.findall(rf"/dynamo/(?:[^/]+/)?{re.escape(version)}/", text)
+            )
+    return relative, dev, versioned
+
+
+dev_rel, _, dev_urls = counts(root.glob("*/pages-dev"), "dev")
+tag_rel, tag_dev, tag_urls = counts(root.glob(f"*/pages-{tag}"), tag)
+print(dev_rel, dev_urls, tag_rel, tag_dev, tag_urls)
+PY
+)
+printf '%s\n' \
+  "translation link counts: dev_relative=$dev_relative dev_urls=$dev_versioned" \
+  "tag_relative=$tag_relative tag_dev_leaks=$tag_dev_leaks tag_urls=$tag_versioned"
+[ "$dev_relative" -eq 0 ] && [ "$dev_versioned" -gt 0 ] && \
+  [ "$tag_relative" -eq 0 ] && [ "$tag_dev_leaks" -eq 0 ] && \
+  [ "$tag_versioned" -gt 0 ] && s9=ok || s9=FAIL
+assert "8. translated links resolve to dev and tag-pinned site URLs" "$s9"
 
 if command -v fern >/dev/null 2>&1; then
   fern_out=$(cd "$WT/fern" && fern check 2>&1 || true)
