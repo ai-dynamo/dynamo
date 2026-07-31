@@ -7,9 +7,34 @@ use crate::pipeline::{AsyncEngine, PipelineIO};
 mod base;
 mod common;
 
+struct PendingResponse<Out: PipelineIO> {
+    registration: Arc<()>,
+    sender: oneshot::Sender<Out>,
+}
+
+type PendingResponses<Out> = Arc<Mutex<HashMap<String, PendingResponse<Out>>>>;
+
+struct ResponseRegistration<Out: PipelineIO> {
+    request_id: String,
+    registration: Arc<()>,
+    pending: PendingResponses<Out>,
+}
+
+impl<Out: PipelineIO> Drop for ResponseRegistration<Out> {
+    fn drop(&mut self) {
+        let mut pending = self.pending.lock().unwrap();
+        let owns_entry = pending
+            .get(&self.request_id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.registration, &self.registration));
+        if owns_entry {
+            pending.remove(&self.request_id);
+        }
+    }
+}
+
 pub struct Frontend<In: PipelineIO, Out: PipelineIO> {
     edge: OnceLock<Edge<In>>,
-    sinks: Arc<Mutex<HashMap<String, oneshot::Sender<Out>>>>,
+    sinks: PendingResponses<Out>,
 }
 
 /// A [`ServiceFrontend`] is the interface for an [`AsyncEngine<SingleIn<Context<In>>, ManyOut<Annotated<Out>>, Error>`]

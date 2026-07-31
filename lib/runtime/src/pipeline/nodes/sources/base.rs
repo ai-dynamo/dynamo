@@ -38,7 +38,7 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
         let ctx = data.context();
 
         let mut sinks = self.sinks.lock().unwrap();
-        let tx = sinks
+        let pending = sinks
             .remove(ctx.id())
             .ok_or(PipelineError::DetachedStreamReceiver)
             .inspect_err(|_| {
@@ -46,7 +46,8 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
             })?;
         drop(sinks);
 
-        Ok(tx
+        Ok(pending
+            .sender
             .send(data)
             .map_err(|_| PipelineError::DetachedStreamReceiver)
             .inspect_err(|_| {
@@ -60,14 +61,26 @@ impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Fro
     async fn generate(&self, request: In) -> Result<Out, Error> {
         let (tx, rx) = oneshot::channel::<Out>();
         let request_id = request.id().to_string();
+        let registration = Arc::new(());
         {
             let mut sinks = self.sinks.lock().unwrap();
-            sinks.insert(request_id.clone(), tx);
+            sinks.insert(
+                request_id.clone(),
+                PendingResponse {
+                    registration: registration.clone(),
+                    sender: tx,
+                },
+            );
         }
-        if let Err(error) = self.on_next(request, private::Token {}).await {
-            self.sinks.lock().unwrap().remove(&request_id);
-            return Err(error);
-        }
+        // A response removes this entry in `on_data`. The guard handles every earlier
+        // exit, including a downstream error or cancellation, and its token prevents an
+        // older call from removing a newer registration which reused the same request ID.
+        let _registration = ResponseRegistration {
+            request_id,
+            registration,
+            pending: self.sinks.clone(),
+        };
+        self.on_next(request, private::Token {}).await?;
         Ok(rx.await.map_err(|_| PipelineError::DetachedStreamSender)?)
     }
 }
@@ -104,5 +117,28 @@ mod tests {
             PipelineError::NoEdge => (),
             _ => panic!("Expected NoEdge error"),
         }
+    }
+
+    #[test]
+    fn stale_registration_does_not_remove_replacement() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let old_registration = Arc::new(());
+        let new_registration = Arc::new(());
+        let (sender, _receiver) = oneshot::channel::<ManyOut<()>>();
+        pending.lock().unwrap().insert(
+            "reused-request-id".to_string(),
+            PendingResponse {
+                registration: new_registration,
+                sender,
+            },
+        );
+
+        drop(ResponseRegistration {
+            request_id: "reused-request-id".to_string(),
+            registration: old_registration,
+            pending: pending.clone(),
+        });
+
+        assert!(pending.lock().unwrap().contains_key("reused-request-id"));
     }
 }

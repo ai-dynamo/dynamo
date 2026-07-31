@@ -37,7 +37,7 @@ mod admission;
 mod conditional_bypass;
 mod query;
 
-use super::push_router::ConditionalDisaggAdmissionError;
+use super::push_router::ConditionalDisaggSelectionError;
 use admission::InnerPrefillRouter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +264,8 @@ impl
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
 
+                    // `routing_mut()` may create RoutingHints where the caller supplied none.
+                    // Fallback must restore the complete original value, not only the worker pin.
                     let original_routing = req.routing.clone();
                     let routing = req.routing_mut();
                     routing.decode_worker_id = Some(decision.worker.worker_id);
@@ -284,13 +286,15 @@ impl
                             return Ok(ResponseStream::new(Box::pin(merged), ctx));
                         }
                         Err(error) => {
-                            let error = match error.downcast::<ConditionalDisaggAdmissionError>() {
+                            // Only this error returns ownership of a request which is known not to
+                            // have been dispatched. Every other downstream error remains terminal.
+                            let error = match error.downcast::<ConditionalDisaggSelectionError>() {
                                 Ok(error) => error,
                                 Err(error) => return Err(error),
                             };
-                            let (failed_request, admission_error) = error.into_parts();
+                            let (failed_request, selection_error) = error.into_parts();
                             let restored_request =
-                                restore_after_failed_conditional_disagg_admission(
+                                restore_after_failed_conditional_disagg_selection(
                                     failed_request,
                                     original_routing,
                                 );
@@ -300,8 +304,8 @@ impl
 
                             tracing::warn!(
                                 request_id = %request_id,
-                                error = %admission_error,
-                                "Conditional-disagg decode admission failed before dispatch; falling back to remote prefill"
+                                error = %selection_error,
+                                "Conditional-disagg decode selection failed before dispatch; falling back to remote prefill"
                             );
                         }
                     }
@@ -493,7 +497,7 @@ impl
     }
 }
 
-fn restore_after_failed_conditional_disagg_admission(
+fn restore_after_failed_conditional_disagg_selection(
     mut request: SingleIn<PreprocessedRequest>,
     original_routing: Option<RoutingHints>,
 ) -> SingleIn<PreprocessedRequest> {
@@ -695,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_conditional_admission_restores_original_request() {
+    fn failed_conditional_selection_restores_original_request() {
         let original_routing = Some(RoutingHints {
             decode_worker_id: Some(41),
             dp_rank: Some(3),
@@ -725,7 +729,7 @@ mod tests {
         let original_context = request.context();
 
         let mut restored =
-            restore_after_failed_conditional_disagg_admission(request, original_routing);
+            restore_after_failed_conditional_disagg_selection(request, original_routing);
         let restored_context = restored.context();
 
         assert!(Arc::ptr_eq(&original_context, &restored_context));
@@ -743,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_conditional_admission_restores_absent_routing() {
+    fn failed_conditional_selection_restores_absent_routing() {
         let mut request = Context::new(
             PreprocessedRequest::builder()
                 .model("test".to_string())
@@ -758,7 +762,7 @@ mod tests {
         request.routing_mut().decode_worker_id = Some(99);
         request.routing_mut().dp_rank = Some(0);
 
-        let restored = restore_after_failed_conditional_disagg_admission(request, None);
+        let restored = restore_after_failed_conditional_disagg_selection(request, None);
 
         assert!(restored.routing.is_none());
         assert!(restored.annotations.is_empty());

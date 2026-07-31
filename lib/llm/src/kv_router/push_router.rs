@@ -42,15 +42,19 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
+/// Returns ownership of a marked conditional-disagg request when selection fails
+/// before request tracking or backend dispatch begins. Do not construct this after
+/// `select_with_affinity` succeeds. Cancellation is deliberately not wrapped because
+/// a stopped request must not be retried through remote prefill.
 #[derive(Debug, thiserror::Error)]
-#[error("conditional-disagg decode admission failed before dispatch: {source}")]
-pub(crate) struct ConditionalDisaggAdmissionError {
+#[error("conditional-disagg decode selection failed before dispatch: {source}")]
+pub(crate) struct ConditionalDisaggSelectionError {
     request: SingleIn<PreprocessedRequest>,
     #[source]
     source: Error,
 }
 
-impl ConditionalDisaggAdmissionError {
+impl ConditionalDisaggSelectionError {
     fn new(request: SingleIn<PreprocessedRequest>, source: Error) -> Self {
         Self { request, source }
     }
@@ -544,7 +548,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         {
             Ok(result) => result,
             Err(error) if conditional_disagg_bypass && !is_cancelled(&error) => {
-                return Err(ConditionalDisaggAdmissionError::new(request, error).into());
+                return Err(ConditionalDisaggSelectionError::new(request, error).into());
             }
             Err(error) => return Err(error),
         };
@@ -843,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conditional_disagg_admission_failure_returns_original_context() {
+    async fn conditional_disagg_selection_failure_returns_original_context() {
         let (router, runtime) = router(None).await;
         let started_before = router.request_metrics.requests_started_total().get();
         let metadata = BTreeMap::from([("policy-class".to_string(), "interactive".to_string())]);
@@ -861,10 +865,10 @@ mod tests {
         let original_context = request.context();
 
         let error = router.generate(request).await.unwrap_err();
-        let admission_error = error
-            .downcast::<ConditionalDisaggAdmissionError>()
-            .expect("marked pre-dispatch admission failure must return the request");
-        let (mut recovered, source) = admission_error.into_parts();
+        let selection_error = error
+            .downcast::<ConditionalDisaggSelectionError>()
+            .expect("marked pre-dispatch selection failure must return the request");
+        let (mut recovered, source) = selection_error.into_parts();
         let recovered_context = recovered.context();
 
         assert!(Arc::ptr_eq(&original_context, &recovered_context));
@@ -899,7 +903,7 @@ mod tests {
         let error = router.generate(request).await.unwrap_err();
         assert!(
             error
-                .downcast_ref::<ConditionalDisaggAdmissionError>()
+                .downcast_ref::<ConditionalDisaggSelectionError>()
                 .is_none()
         );
         assert!(match_error_chain(
@@ -925,7 +929,7 @@ mod tests {
         let error = router.generate(request).await.unwrap_err();
         assert!(
             error
-                .downcast_ref::<ConditionalDisaggAdmissionError>()
+                .downcast_ref::<ConditionalDisaggSelectionError>()
                 .is_none()
         );
 
