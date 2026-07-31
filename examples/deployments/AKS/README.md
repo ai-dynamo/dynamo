@@ -2,14 +2,14 @@
 
 Supported Helm values for AKS deployments.
 
-**Full guide:** [docs/kubernetes/cloud-providers/aks/aks.md](../../../docs/fern/kubernetes/cloud-providers/aks/aks.mdx)
+**Full guide:** [docs/kubernetes/cloud-providers/aks/aks.md](../../../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx)
 
 **Related guides:**
 
-- [Storage for model caching](../../../docs/fern/kubernetes/cloud-providers/aks/storage.md)
-- [Spot VMs](../../../docs/fern/kubernetes/cloud-providers/aks/spot-vms.mdx)
-- [RDMA / InfiniBand](../../../docs/fern/kubernetes/cloud-providers/aks/rdma-infiniband.mdx)
-- [Azure Lustre CSI Driver](../../../docs/fern/kubernetes/cloud-providers/aks/azure-lustre-csi.mdx)
+- [Storage for model caching](../../../docs/fern/pages/kubernetes/installation/model-storage/aks-storage.md)
+- [Spot VMs](../../../docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/spot-vms.mdx)
+- [RDMA / InfiniBand](../../../docs/fern/pages/kubernetes/installation/rdma-setup/infiniband-on-azure.mdx)
+- [Azure Lustre CSI Driver](../../../docs/fern/pages/kubernetes/installation/model-storage/azure-lustre-csi-driver.mdx)
 
 ## Contents
 
