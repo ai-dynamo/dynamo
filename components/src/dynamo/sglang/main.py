@@ -44,7 +44,9 @@ async def worker(argv: list[str] | None = None):
     if config.server_args.load_format == "gms":
         from gpu_memory_service.integrations.sglang import setup_gms
 
-        config.server_args.load_format = setup_gms(config.server_args)
+        config.server_args.override(
+            source="dynamo-gms", load_format=setup_gms(config.server_args)
+        )
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
