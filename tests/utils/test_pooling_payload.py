@@ -46,7 +46,11 @@ def test_classify_payload_validates_truncated_usage():
                     "num_classes": 3,
                 }
             ],
-            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            "usage": {
+                "prompt_tokens": 2,
+                "total_tokens": 2,
+                "completion_tokens": 0,
+            },
         }
     )
 

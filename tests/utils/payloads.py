@@ -1309,6 +1309,7 @@ class ClassifyPayload(BasePayload):
         usage = result.get("usage")
         assert isinstance(usage, dict), "Missing usage in classification response"
         assert usage.get("prompt_tokens") == usage.get("total_tokens")
+        assert usage.get("completion_tokens") == 0
         if self.expected_prompt_tokens is not None:
             assert usage.get("prompt_tokens") == self.expected_prompt_tokens
 
