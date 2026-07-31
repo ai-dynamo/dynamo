@@ -931,13 +931,23 @@ def validate_aiperf(path: Path, role: str, concurrency: int) -> dict[str, Any]:
         failures.append("connection_limit")
     if (role == COMBINED_ROLE) != ("--use-server-token-count" in command):
         failures.append("server_token_count_policy")
-    for metric_name, expected in (
-        ("input_sequence_length", TARGET_ISL),
-        ("output_sequence_length", expected_osl),
-    ):
+    exact_metrics = [("output_sequence_length", expected_osl)]
+    if role == COMBINED_ROLE:
+        exact_metrics.append(("input_sequence_length", TARGET_ISL))
+    for metric_name, expected in exact_metrics:
         for statistic_name in ("min", "avg", "max"):
             if _metric(data, metric_name, statistic_name) != float(expected):
                 failures.append(f"{metric_name}_{statistic_name}")
+    if role == ENCODER_ONLY_ROLE:
+        client_isl = [
+            _metric(data, "input_sequence_length", statistic_name)
+            for statistic_name in ("min", "avg", "max")
+        ]
+        if (
+            any(value is None or value <= 0 for value in client_isl)
+            or len(set(client_isl)) != 1
+        ):
+            failures.append("client_input_sequence_length")
     for metric_name in (
         "request_throughput",
         "request_latency",
@@ -951,6 +961,8 @@ def validate_aiperf(path: Path, role: str, concurrency: int) -> dict[str, Any]:
         "concurrency": concurrency,
         "accepted": not failures,
         "failures": failures,
+        "input_sequence_length_avg": _metric(data, "input_sequence_length"),
+        "output_sequence_length_avg": _metric(data, "output_sequence_length"),
         "request_throughput": _metric(data, "request_throughput"),
         "ttft_p50_ms": _metric(data, "time_to_first_token", "p50"),
         "ttft_p95_ms": _metric(data, "time_to_first_token", "p95"),

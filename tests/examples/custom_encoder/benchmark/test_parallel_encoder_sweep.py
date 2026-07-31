@@ -186,7 +186,9 @@ def test_aiperf_validation_distinguishes_dummy_output(tmp_path: Path) -> None:
             "endpoint": {"streaming": True},
             "loadgen": {"concurrency": 8},
         },
-        "input_sequence_length": _metric(644),
+        # AIPerf uses the text tokenizer for the encoder-only service. The
+        # workload manifest separately audits the multimodal processor ISL 644.
+        "input_sequence_length": _metric(312),
         "output_sequence_length": _metric(1),
         "request_throughput": {"avg": 50},
         "request_latency": _metric(20),
@@ -198,6 +200,7 @@ def test_aiperf_validation_distinguishes_dummy_output(tmp_path: Path) -> None:
     result = validate_aiperf(result_path, ENCODER_ONLY_ROLE, 8)
 
     assert result["accepted"]
+    assert result["input_sequence_length_avg"] == 312
     assert result["request_throughput"] == 50
 
 
