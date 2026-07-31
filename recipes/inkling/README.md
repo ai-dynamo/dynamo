@@ -33,7 +33,7 @@ Dynamo + SGLang deployment profile:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **Image pull secret** with access to `nvcr.io/nvstaging/nim` (staging registry):
    ```bash
    export NAMESPACE=your-namespace

@@ -17,7 +17,7 @@
  *   2. New page reference/release-notes/vX-Y-Z.mdx (ingest the GitHub body;
  *      ReleaseHeader and the UpgradePanel readingList read their counts
  *      from RELEASE_STATS — no per-page count props).
- *   3. reference/known-issues.mdx + reference/deprecations.mdx: new vXYZ
+ *   3. reference/general/releases/known-issues.mdx + reference/general/releases/deprecations.mdx: new vXYZ
  *      section + accordion retitles (titles read RELEASE_STATS).
  *   4. Nav: docs/fern/index.yml Release Notes section (+ explicit slug).
  *   5. Regenerate agent twins: python3 scripts/gen_llms_tables.py
