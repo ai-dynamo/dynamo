@@ -19,6 +19,7 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -65,7 +66,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	return allErrs
 }
 
-// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version runtime fields on update.
+// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version fields on update.
 // newSpec, oldSpec, and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdateV1alpha1(
 	newSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
@@ -85,6 +86,45 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			oldService,
 			servicesPath.Key(serviceName),
 		)...)
+
+		servicePath := servicesPath.Key(serviceName)
+		newPowerLimit, newHasPowerLimit := dgdPowerLimitV1Alpha1(newService)
+		oldPowerLimit, oldHasPowerLimit := dgdPowerLimitV1Alpha1(oldService)
+
+		// Reject transitions into, out of, or within the power-annotation contract.
+		if newHasPowerLimit != oldHasPowerLimit ||
+			(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+			var invalidValue any
+			if newHasPowerLimit {
+				invalidValue = newPowerLimit
+			}
+			allErrs = append(allErrs, field.Invalid(
+				servicePath.Child("extraPodMetadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+				invalidValue,
+				dgdPowerLimitImmutableDetail,
+			))
+		}
+		if !oldHasPowerLimit {
+			continue
+		}
+
+		// Keep the Planner's remaining cached per-replica power inputs stable.
+		newGPUInput := effectiveDGDGPUInputV1Alpha1(newService, servicePath)
+		oldGPUInput := effectiveDGDGPUInputV1Alpha1(oldService, servicePath)
+		if !newGPUInput.equal(oldGPUInput) {
+			allErrs = append(allErrs, field.Invalid(
+				newGPUInput.path,
+				newGPUInput.invalidValue(),
+				dgdGPUCountImmutableDetail,
+			))
+		}
+		if newService.GetNumberOfNodes() != oldService.GetNumberOfNodes() {
+			allErrs = append(allErrs, field.Invalid(
+				servicePath.Child("multinode", "nodeCount"),
+				newService.GetNumberOfNodes(),
+				dgdNodeCountImmutableDetail,
+			))
+		}
 	}
 	return allErrs
 }
