@@ -5,12 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use dynamo_data_gen::{
     MooncakeJsonlWriter,
     request_trace::{
-        agentic::lower_agentic_mooncake_rows, load::load_request_trace_records,
+        agentic::lower_agentic_mooncake_rows,
+        load::{RequestTraceMode, load_request_trace_records},
         mooncake::lower_mooncake_rows,
     },
 };
@@ -44,16 +45,21 @@ fn main() -> Result<()> {
     let loaded = load_request_trace_records(&args.input_path)?;
     let temporary_output = temporary_output_path(&args.output_file)?;
     let mut writer = MooncakeJsonlWriter::create(temporary_output.as_ref(), None)?;
-    let (kind, trace_block_size) = if args.agentic {
-        (
+    let (kind, trace_block_size) = match (loaded.mode()?, args.agentic) {
+        (RequestTraceMode::Agentic, true) => (
             "Agentic Mooncake",
             lower_agentic_mooncake_rows(loaded, |_, row| writer.write_agentic_row(&row))?,
-        )
-    } else {
-        (
+        ),
+        (RequestTraceMode::Standard, false) => (
             "Mooncake",
             lower_mooncake_rows(loaded.requests, |_, row| writer.write_row(&row))?,
-        )
+        ),
+        (RequestTraceMode::Agentic, false) => {
+            bail!("agentic request traces require --agentic")
+        }
+        (RequestTraceMode::Standard, true) => {
+            bail!("--agentic requires request traces with agent_context")
+        }
     };
     let stats = writer.finish()?;
     temporary_output.persist(&args.output_file)?;

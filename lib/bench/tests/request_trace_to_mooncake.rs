@@ -12,14 +12,18 @@ const FAILING_TRACE: &str = concat!(
     "\n",
 );
 
-fn convert(input: &std::path::Path, output: &std::path::Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_request_trace_to_mooncake"))
-        .args(["--input-path"])
-        .arg(input)
-        .args(["--output-file"])
-        .arg(output)
-        .output()
-        .expect("run request_trace_to_mooncake")
+fn convert(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    agentic: bool,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_request_trace_to_mooncake"));
+    command.args(["--input-path"]).arg(input);
+    command.args(["--output-file"]).arg(output);
+    if agentic {
+        command.arg("--agentic");
+    }
+    command.output().expect("run request_trace_to_mooncake")
 }
 
 #[test]
@@ -29,13 +33,29 @@ fn failed_conversion_does_not_publish_partial_output() {
     let output = temp.path().join("mooncake.jsonl");
     std::fs::write(&input, FAILING_TRACE).unwrap();
 
-    assert!(!convert(&input, &output).status.success());
+    assert!(!convert(&input, &output, false).status.success());
     assert!(!output.exists());
 
     std::fs::write(&output, "preserve this output\n").unwrap();
-    assert!(!convert(&input, &output).status.success());
+    assert!(!convert(&input, &output, false).status.success());
     assert_eq!(
         std::fs::read_to_string(output).unwrap(),
         "preserve this output\n"
     );
+}
+
+#[test]
+fn agentic_trace_requires_agentic_flag() {
+    let temp = tempdir().unwrap();
+    let input = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/pi_request_trace.jsonl.gz");
+    let output = temp.path().join("mooncake.jsonl");
+
+    let rejected = convert(&input, &output, false);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("require --agentic"));
+    assert!(!output.exists());
+
+    assert!(convert(&input, &output, true).status.success());
+    assert_eq!(std::fs::read_to_string(output).unwrap().lines().count(), 17);
 }
