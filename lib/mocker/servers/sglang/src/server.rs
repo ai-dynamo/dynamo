@@ -267,10 +267,14 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
             while let Some(signal) = signal_rx.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 output_tokens.push(token_id);
-                let output_id = i32::try_from(token_id)
+                let output_ids = output_tokens
+                    .iter()
+                    .copied()
+                    .map(i32::try_from)
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;
                 yield pb::GenerateResponse {
-                    output_ids: vec![output_id],
+                    output_ids,
                     meta_info: prepared.meta_info(&output_tokens, signal.completed),
                     finished: signal.completed,
                 };
