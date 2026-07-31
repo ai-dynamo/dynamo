@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 
-import torch
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_managers
 from gpu_memory_service.integrations.common.utils import torch_device
 

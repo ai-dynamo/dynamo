@@ -23,10 +23,9 @@ from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
-from gpu_memory_service.common.vmm import get_vmm_device_type
-from gpu_memory_service.integrations.common.utils import torch_device
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common.utils import (
     GMSCommittedMemoryStats,
     get_gms_lock_mode,
@@ -34,6 +33,7 @@ from gpu_memory_service.integrations.common.utils import (
     publish_gms_write,
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
+    torch_device,
 )
 
 if os.environ.get("MX_ENABLED", "0") == "1":

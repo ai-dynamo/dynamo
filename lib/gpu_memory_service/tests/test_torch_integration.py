@@ -16,7 +16,7 @@ import time
 from typing import cast
 
 import pytest
-from _deps import HAS_CUDA, HAS_GMS, HAS_GPU, HAS_TORCH, HAS_XPU
+from _deps import HAS_GMS, HAS_GPU, HAS_TORCH, HAS_XPU
 
 if not HAS_GMS:
     pytest.skip(
@@ -38,16 +38,23 @@ import torch
 # Device-agnostic helper: prefer XPU when available, fall back to CUDA.
 if HAS_XPU:
     _DEVICE = "xpu"
+
     def _synchronize():
         torch.xpu.synchronize()
+
     def _empty_cache():
         torch.xpu.empty_cache()
+
 else:
     _DEVICE = "cuda"
+
     def _synchronize():
         torch.cuda.synchronize()
+
     def _empty_cache():
         torch.cuda.empty_cache()
+
+
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
