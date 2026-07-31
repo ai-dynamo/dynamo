@@ -920,6 +920,46 @@ mod tests {
         }
     }
 
+    /// Streaming path: the final `message_delta` carries the same stable
+    /// cache-accounting shape as the non-streaming response, including an
+    /// explicit zero cache-creation count. Asserted on the emitted event rather
+    /// than on `conv.usage`, so this covers what a client actually receives.
+    #[test]
+    fn test_streaming_final_usage_emits_zero_cache_creation_tokens() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
+
+        let mut events = Vec::new();
+        conv.append_chunk_events(&usage_chunk(12, Some(5), 3), &mut events);
+        assert!(
+            events.is_empty(),
+            "usage-only chunk emits no content events"
+        );
+
+        let delta = conv.emit_end_events_tagged();
+        let message_delta = delta
+            .iter()
+            .find(|e| e.event_type == "message_delta")
+            .expect("message_delta present");
+        match &message_delta.data {
+            AnthropicStreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.input_tokens, 7);
+                assert_eq!(usage.cache_read_input_tokens, Some(5));
+                assert_eq!(usage.cache_creation_input_tokens, Some(0));
+                assert_eq!(usage.output_tokens, 3);
+            }
+            other => panic!("expected MessageDelta, got {other:?}"),
+        }
+
+        // `skip_serializing_if = "Option::is_none"` would drop the key for a
+        // `None`, so prove the zero reaches the serialized SSE payload.
+        let serialized =
+            serde_json::to_value(&message_delta.data).expect("message_delta serializes");
+        assert_eq!(serialized["usage"]["input_tokens"], 7);
+        assert_eq!(serialized["usage"]["cache_read_input_tokens"], 5);
+        assert_eq!(serialized["usage"]["cache_creation_input_tokens"], 0);
+        assert_eq!(serialized["usage"]["output_tokens"], 3);
+    }
+
     /// Regression test: text block must be closed (content_block_stop)
     /// before the tool_use block starts (content_block_start).
     ///
