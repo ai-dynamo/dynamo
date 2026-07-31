@@ -239,6 +239,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "total_tokens": prompt_tokens,
+                "completion_tokens": 0,
             },
         }
 

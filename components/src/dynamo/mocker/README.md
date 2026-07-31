@@ -1,7 +1,7 @@
 # Mocker engine
 
 The canonical user-facing documentation for the mocker lives at
-[`docs/dynosim/mocker.md`](../../../../docs/fern/dynosim/mocker.mdx).
+[`docs/dynosim/mocker.md`](../../../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx).
 
 Useful adjacent references:
 

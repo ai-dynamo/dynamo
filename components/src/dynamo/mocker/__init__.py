@@ -19,7 +19,6 @@ __all__ = ["__version__"]
 
 try:
     from dynamo._core import MockEngineArgs as MockEngineArgs
-    from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
     from dynamo._core import ReasoningConfig as ReasoningConfig
     from dynamo._core import SglangArgs as SglangArgs
     from dynamo._core import TrtllmArgs as TrtllmArgs
@@ -32,7 +31,6 @@ else:
     __all__.extend(
         [
             "MockEngineArgs",
-            "PlannerReplayBridge",
             "ReasoningConfig",
             "SglangArgs",
             "TrtllmArgs",
@@ -80,29 +78,3 @@ else:
             sla_itl_ms=sla_itl_ms,
             sla_e2e_ms=sla_e2e_ms,
         )
-
-
-try:
-    from dynamo._core import AicEngineConfig as AicEngineConfig
-    from dynamo._core import EngineCapacity as EngineCapacity
-    from dynamo._core import EngineCapacityRequest as EngineCapacityRequest
-    from dynamo._core import EnginePerfLimits as EnginePerfLimits
-    from dynamo._core import OptimizationTarget as OptimizationTarget
-    from dynamo._core import RustEnginePerfModel as RustEnginePerfModel
-    from dynamo._core import RustEnginePerfOptions as RustEnginePerfOptions
-except ImportError:
-    # These classes are available only when the Python extension is built with
-    # the optional aic-forward-pass Cargo feature.
-    pass
-else:
-    __all__.extend(
-        [
-            "AicEngineConfig",
-            "EngineCapacity",
-            "EngineCapacityRequest",
-            "EnginePerfLimits",
-            "OptimizationTarget",
-            "RustEnginePerfModel",
-            "RustEnginePerfOptions",
-        ]
-    )

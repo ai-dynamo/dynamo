@@ -250,6 +250,36 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
 
 
 @pytest.mark.timeout(30)
+def test_replay_cli_subprocess_online_trace_jsonl_and_sla(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "online_trace_report.json"
+    jsonl_path = tmp_path / "online_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "online",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--report-jsonl",
+        str(jsonl_path),
+        "--sla-e2e-ms",
+        "1000000",
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["goodput_completed_requests"] == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
+
+
+@pytest.mark.timeout(30)
 def test_replay_cli_subprocess_trace_disagg_smoke(tmp_path):
     trace_path = _write_cli_smoke_trace(tmp_path)
     report_path = tmp_path / "trace_disagg_report.json"
