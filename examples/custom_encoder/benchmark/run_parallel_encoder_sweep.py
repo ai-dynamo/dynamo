@@ -400,8 +400,6 @@ def _aiperf_command(
         str(concurrency),
         "--conversation-num",
         str(requests),
-        "--warmup-request-count",
-        "0",
         "--extra-inputs",
         f"max_tokens:{osl}",
         "--extra-inputs",

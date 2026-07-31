@@ -18,6 +18,7 @@ from examples.custom_encoder.benchmark.run_parallel_encoder_sweep import (
     ENCODER_ONLY_ROLE,
     PARALLEL_ARM,
     ProcessResult,
+    _aiperf_command,
     _arm_summary,
     _write_timing,
     audit_pool_disjointness,
@@ -26,6 +27,20 @@ from examples.custom_encoder.benchmark.run_parallel_encoder_sweep import (
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+def test_aiperf_command_uses_explicit_external_warmup(tmp_path: Path) -> None:
+    command = _aiperf_command(
+        role=COMBINED_ROLE,
+        port=8000,
+        concurrency=8,
+        requests=1000,
+        input_file=tmp_path / "inputs.json",
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert "--warmup-request-count" not in command
+    assert "--use-server-token-count" in command
 
 
 def _write_manifest(root: Path, encoded: str, decoded: str) -> None:
