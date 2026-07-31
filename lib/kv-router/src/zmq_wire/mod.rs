@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, WorkerWithDpRank};
+use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
 
 mod convert;
 mod deserialize;
@@ -30,7 +30,7 @@ pub use extra_keys::{
     extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
-pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
+pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, Locality, RawKvEvent};
 
 use filter::KvCacheEventMetadata;
 
@@ -65,6 +65,7 @@ struct KvCacheGroupMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
+    NonLocalLocality,
     AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
@@ -76,6 +77,7 @@ impl ZmqEventFilterReason {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::IgnoredEvent => "ignored_event",
+            Self::NonLocalLocality => "non_local_locality",
             Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
@@ -125,6 +127,30 @@ impl ZmqEventNormalizer {
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
+        }
+
+        // Non-local events are dropped by policy (no shared-index consumer yet).
+        // Classify them here, before the lower-tier bypass, so the gate covers
+        // every tier (including Disk/External). Otherwise the listener would
+        // accept the event, burn a next_event_id, and only drop it in
+        // conversion, leaving an id gap the event processor mistakes for an
+        // engine drop (engines_dropped_events).
+        if matches!(raw.locality(), Some(Locality::Remote | Locality::Unknown)) {
+            return Err(ZmqEventFilterReason::NonLocalLocality);
+        }
+
+        // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
+        // extra_keys/cache_namespace and must not mutate per-group metadata or
+        // the salted-namespace propagation chain; they are also outside the
+        // SW/SSM group filter's semantics, so route them straight to conversion.
+        // Device and host-pinned events (CPU offload, #10368) stay on the
+        // normalizer path so their salted namespaces still propagate.
+        if raw
+            .medium()
+            .and_then(StorageTier::from_kv_medium)
+            .is_some_and(|tier| matches!(tier, StorageTier::Disk | StorageTier::External))
+        {
+            return Ok(raw);
         }
 
         let metadata = raw.metadata();

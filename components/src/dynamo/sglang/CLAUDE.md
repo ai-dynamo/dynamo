@@ -355,7 +355,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (--disaggregation-mode=encode)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`

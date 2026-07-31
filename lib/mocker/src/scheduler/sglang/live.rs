@@ -10,9 +10,10 @@ use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
 use crate::scheduler::{
-    AdmissionEvent, LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
-    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerHandle,
-    SchedulerLifecycleEvent, spawn_live_scheduler,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerEventSender, SchedulerHandle, SchedulerLifecycleEvent,
+    SchedulerOutputSender, spawn_live_scheduler,
 };
 
 use super::core::SglangCore;
@@ -21,6 +22,7 @@ use super::core::SglangCore;
 pub struct SglangScheduler {
     inner: LiveSchedulerState,
 }
+
 impl SglangScheduler {
     pub fn new(
         args: MockEngineArgs,
@@ -30,58 +32,54 @@ impl SglangScheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        Self::new_with_output_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerOutputSender::from),
             kv_event_publishers,
             cancellation_token,
-            None,
             fpm_publisher,
         )
     }
 
-    pub(crate) fn new_with_admission(
+    pub(crate) fn new_with_output_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        let (scheduler, actor) = Self::spawn_with_event_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
-            admission_tx,
             fpm_publisher,
-        )
+        );
+        drop(actor);
+        scheduler
     }
 
-    fn new_internal(
+    pub(crate) fn spawn_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
-    ) -> Self {
-        Self {
-            inner: spawn_live_scheduler(
-                args,
-                dp_rank,
-                output_tx,
-                kv_event_publishers,
-                cancellation_token,
-                admission_tx,
-                fpm_publisher,
-                SglangCore::new_with_sink,
-            ),
-        }
+    ) -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (inner, actor) = spawn_live_scheduler(
+            args,
+            dp_rank,
+            event_tx,
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+            SglangCore::new_with_sink,
+        );
+        (Self { inner }, actor)
     }
 }
 
@@ -100,6 +98,10 @@ impl SchedulerHandle for SglangScheduler {
 
     fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
         self.inner.command_sender()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
     }
 
     fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
@@ -142,9 +144,12 @@ impl LiveBoundaryCore for SglangCore {
         pass_metrics
     }
 
-    fn execute_live_pass(&mut self, _scheduler_start: &Instant) -> LivePassExecution {
-        let pass = self.execute_pass_internal(None, 0.0);
+    fn execute_live_pass(
+        &mut self,
+        _scheduler_start: &Instant,
+    ) -> anyhow::Result<LivePassExecution> {
+        let pass = self.try_execute_pass_internal(None, 0.0)?;
         let duration = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
-        LivePassExecution { pass, duration }
+        Ok(LivePassExecution { pass, duration })
     }
 }
