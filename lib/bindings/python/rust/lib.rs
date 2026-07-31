@@ -72,6 +72,7 @@ impl From<RouterMode> for RsRouterMode {
 }
 
 mod backend;
+mod batched_egress;
 mod context;
 mod engine;
 pub mod errors;
@@ -1227,6 +1228,72 @@ impl Endpoint {
         // Register the engine in the local endpoint registry for in-process calls
         builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Serve an endpoint whose egress is batched ACROSS requests (DYN-3703).
+    ///
+    /// `submit` is an `async def submit(request, context)` coroutine-fn started
+    /// once per request; `drain` is an `async def drain()` async-generator-fn
+    /// yielding a whole engine step's `(request_id, chunk|None)` pairs as one
+    /// list. See `batched_egress.rs` + `request_handlers/batched_egress.py`.
+    #[pyo3(signature = (submit, drain, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    fn serve_endpoint_batched<'p>(
+        &self,
+        py: Python<'p>,
+        submit: PyObject,
+        drain: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let engine = Arc::new(batched_egress::new_engine(
+            submit,
+            drain,
+            self.event_loop.clone(),
+        ));
+        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+            engine,
+            python_payload::PythonIngressPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
+
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object()
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "health_check_payload must be a JSON object (dict)",
+            ));
+        }
+
+        let mut builder = self
+            .inner
+            .endpoint_builder()
+            .metrics_labels(metrics_labels)
+            .handler(ingress);
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
+        // NOTE: in-process (`register_local_engine`) calls are not wired for the
+        // batched path — MLPerf serving is over the network. Add if needed.
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder
