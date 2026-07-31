@@ -1000,6 +1000,13 @@ def _request_reasoning_metadata(
     return reasoning_ended, reasoning_parser_kwargs
 
 
+def apply_data_parallel_runtime_config(
+    runtime_config: ModelRuntimeConfig, dp_range: tuple[int, int]
+) -> None:
+    runtime_config.data_parallel_start_rank = dp_range[0]
+    runtime_config.data_parallel_size = dp_range[1]
+
+
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
     """
     Get the global DP rank range that this worker is responsible for based on vLLM config.
@@ -2112,6 +2119,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
+        apply_data_parallel_runtime_config(runtime_config, self.dp_range)
         runtime_config.context_length = self.model_max_len
         publish_vllm_token_budget(runtime_config, self.model_max_len)
         runtime_config.kv_event_publishing_enabled = getattr(
