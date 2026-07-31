@@ -23,9 +23,8 @@ using OperationCompleteFn = decltype(&cuCheckpointOperationComplete);
 
 #else
 
-// Temporary CUDA 13.4 ABI declarations for environments whose installed driver
-// exposes CustomStorage but whose build image still carries older toolkit headers.
-// Delete this compatibility block once all supported builders use CUDA 13.4.
+// Public CUDA 13.4 (13040) custom-storage ABI used while the image builds
+// against CUDA 13.0 headers. Keep these declarations local to this helper.
 struct Operation;
 using OperationHandle = Operation*;
 
@@ -58,18 +57,15 @@ using OperationCompleteFn = CUresult(CUDAAPI*)(OperationHandle);
 
 #endif
 
-
 inline OperationCompleteFn
-ResolveOperationComplete()
+ResolveOperationComplete(bool* available)
 {
   void* symbol = nullptr;
   CUdriverProcAddressQueryResult query_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
   const CUresult status =
       cuGetProcAddress("cuCheckpointOperationComplete", &symbol, 13040, CU_GET_PROC_ADDRESS_DEFAULT, &query_status);
-  if (status != CUDA_SUCCESS || symbol == nullptr || query_status != CU_GET_PROC_ADDRESS_SUCCESS) {
-    return nullptr;
-  }
-  return reinterpret_cast<OperationCompleteFn>(symbol);
+  *available = status == CUDA_SUCCESS && symbol != nullptr && query_status == CU_GET_PROC_ADDRESS_SUCCESS;
+  return *available ? reinterpret_cast<OperationCompleteFn>(symbol) : nullptr;
 }
 
 inline CUcheckpointCheckpointArgs*
@@ -84,24 +80,27 @@ NativeArgs(RestoreArgs* args)
   return reinterpret_cast<CUcheckpointRestoreArgs*>(args);
 }
 
-static_assert(sizeof(void*) == 8, "CUDA CustomStorage requires a 64-bit ABI");
+static_assert(sizeof(void*) == 8, "CUDA checkpoint custom storage requires a 64-bit ABI");
 static_assert(std::is_standard_layout_v<PerDeviceData>);
 static_assert(sizeof(PerDeviceData) == 24);
 static_assert(alignof(PerDeviceData) == 8);
 static_assert(offsetof(PerDeviceData, devPtr) == 0);
 static_assert(offsetof(PerDeviceData, size) == 8);
 static_assert(offsetof(PerDeviceData, stream) == 16);
+
 static_assert(std::is_standard_layout_v<StorageInfo>);
 static_assert(sizeof(StorageInfo) == 24);
 static_assert(alignof(StorageInfo) == 8);
 static_assert(offsetof(StorageInfo, handle) == 0);
 static_assert(offsetof(StorageInfo, perDeviceData) == 8);
 static_assert(offsetof(StorageInfo, deviceCount) == 16);
+
 static_assert(sizeof(CUcheckpointCheckpointArgs) == 64);
 static_assert(std::is_standard_layout_v<CheckpointArgs>);
 static_assert(sizeof(CheckpointArgs) == sizeof(CUcheckpointCheckpointArgs));
 static_assert(alignof(CheckpointArgs) == alignof(CUcheckpointCheckpointArgs));
 static_assert(offsetof(CheckpointArgs, customStorageInfo_out) == 0);
+
 static_assert(sizeof(CUcheckpointRestoreArgs) == 64);
 static_assert(std::is_standard_layout_v<RestoreArgs>);
 static_assert(sizeof(RestoreArgs) == sizeof(CUcheckpointRestoreArgs));

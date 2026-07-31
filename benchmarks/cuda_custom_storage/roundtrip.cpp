@@ -21,8 +21,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -31,19 +29,20 @@
 #include <utility>
 #include <vector>
 
-#include "cuda_checkpoint_compat.h"
+#include "custom_storage_operation.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 namespace compat = cuda_checkpoint_compat;
+namespace custom_storage = cuda_checkpoint_custom_storage;
 
 constexpr size_t kDefaultBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t kCopyChunkBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr unsigned int kLockTimeoutMs = 30'000;
 constexpr unsigned int kWatchdogSeconds = 120;
-constexpr std::string_view kManifestMagic = "cuda-custom-storage-roundtrip-v2";
+constexpr std::string_view kExtentFilename = "checkpoint.bin";
 
 volatile sig_atomic_t g_owned_child_pid = 0;
 
@@ -66,38 +65,17 @@ struct ReadyMessage {
 };
 
 struct Extent {
-  size_t index = 0;
   int device = 0;
   std::string device_uuid;
   uint64_t checkpoint_ptr = 0;
   uint64_t stream = 0;
   size_t size = 0;
-  std::string filename;
 };
 
 struct Artifact {
   uint64_t application_ptr = 0;
   size_t application_bytes = 0;
-  std::vector<Extent> extents;
-};
-
-struct TransferMetrics {
-  size_t bytes = 0;
-  double cuda_seconds = 0.0;
-  double storage_seconds = 0.0;
-  double durability_seconds = 0.0;
-};
-
-struct OperationMetrics {
-  TransferMetrics transfer;
-  double cuda_api_seconds = 0.0;
-  double completion_seconds = 0.0;
-  double total_seconds = 0.0;
-};
-
-struct CheckpointResult {
-  Artifact artifact;
-  OperationMetrics metrics;
+  Extent extent;
 };
 
 [[noreturn]] void
@@ -136,12 +114,6 @@ WarnCUDA(CUresult status, const char* operation) noexcept
   std::fprintf(
       stderr, "warning: %s failed during cleanup: %s (%d)\n", operation, name == nullptr ? "CUDA_ERROR_UNKNOWN" : name,
       static_cast<int>(status));
-}
-
-double
-SecondsSince(Clock::time_point start)
-{
-  return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
 std::string
@@ -545,70 +517,13 @@ class RetainedPrimaryContexts {
 };
 
 void
-WriteManifestTemporary(const fs::path& directory, const Artifact& artifact)
+ValidateExtentFile(const fs::path& path, size_t expected_size)
 {
-  const fs::path temporary = directory / "manifest.tmp";
-  std::ofstream output(temporary, std::ios::out | std::ios::trunc);
-  if (!output) {
-    throw std::runtime_error("failed to create temporary manifest");
+  std::error_code error;
+  const uintmax_t size = fs::file_size(path, error);
+  if (error || size != expected_size) {
+    throw std::runtime_error("checkpoint file has the wrong size");
   }
-  output << kManifestMagic << '\n';
-  output << artifact.application_ptr << ' ' << artifact.application_bytes << ' ' << artifact.extents.size() << '\n';
-  for (const Extent& extent : artifact.extents) {
-    output << extent.index << ' ' << extent.device << ' ' << extent.device_uuid << ' ' << extent.checkpoint_ptr << ' '
-           << extent.stream << ' ' << extent.size << ' ' << extent.filename << '\n';
-  }
-  output.flush();
-  if (!output) {
-    throw std::runtime_error("failed to write manifest");
-  }
-  output.close();
-}
-
-void
-PublishManifest(const fs::path& directory)
-{
-  fs::rename(directory / "manifest.tmp", directory / "manifest.txt");
-}
-
-Artifact
-ReadManifest(const fs::path& directory)
-{
-  std::ifstream input(directory / "manifest.txt");
-  if (!input) {
-    throw std::runtime_error("manifest.txt is missing");
-  }
-  std::string magic;
-  std::getline(input, magic);
-  if (magic != kManifestMagic) {
-    throw std::runtime_error("artifact manifest has an unsupported format");
-  }
-  Artifact artifact;
-  size_t extent_count = 0;
-  if (!(input >> artifact.application_ptr >> artifact.application_bytes >> extent_count) || extent_count != 1) {
-    throw std::runtime_error("artifact manifest header is invalid");
-  }
-  artifact.extents.reserve(extent_count);
-  for (size_t index = 0; index < extent_count; ++index) {
-    Extent extent;
-    if (!(input >> extent.index >> extent.device >> extent.device_uuid >> extent.checkpoint_ptr >> extent.stream >>
-          extent.size >> extent.filename) ||
-        extent.index != index || extent.size == 0 || extent.filename != "extent-" + std::to_string(index) + ".bin") {
-      throw std::runtime_error("artifact manifest extent is invalid");
-    }
-    const fs::path extent_path = directory / extent.filename;
-    std::error_code error;
-    const uintmax_t file_size = fs::file_size(extent_path, error);
-    if (error || file_size != extent.size) {
-      throw std::runtime_error("artifact extent has the wrong size: " + extent.filename);
-    }
-    artifact.extents.push_back(std::move(extent));
-  }
-  std::string trailing;
-  if (input >> trailing) {
-    throw std::runtime_error("artifact manifest has unexpected trailing data");
-  }
-  return artifact;
 }
 
 void
@@ -629,10 +544,9 @@ CorruptExtentSameSize(const fs::path& path, size_t size)
   }
 }
 
-TransferMetrics
+void
 CopyExtent(const compat::PerDeviceData& device_data, CUcontext context, const fs::path& path, bool checkpoint)
 {
-  TransferMetrics metrics{.bytes = device_data.size};
   CheckCUDA(cuCtxSetCurrent(context), "cuCtxSetCurrent");
 
   const size_t buffer_size = std::min(kCopyChunkBytes, device_data.size);
@@ -649,164 +563,95 @@ CopyExtent(const compat::PerDeviceData& device_data, CUcontext context, const fs
   for (size_t offset = 0; offset < device_data.size;) {
     const size_t length = std::min(pinned.size(), device_data.size - offset);
     if (checkpoint) {
-      const auto cuda_start = Clock::now();
       CheckCUDA(
           cuMemcpyDtoHAsync(pinned.data(), device_data.devPtr + offset, length, device_data.stream),
           "cuMemcpyDtoHAsync");
       CheckCUDA(cuStreamSynchronize(device_data.stream), "checkpoint stream synchronization");
-      metrics.cuda_seconds += SecondsSince(cuda_start);
-      const auto storage_start = Clock::now();
       PWriteAll(file.get(), pinned.data(), length, offset);
-      metrics.storage_seconds += SecondsSince(storage_start);
     } else {
-      const auto storage_start = Clock::now();
       PReadAll(file.get(), pinned.data(), length, offset);
-      metrics.storage_seconds += SecondsSince(storage_start);
-      const auto cuda_start = Clock::now();
       CheckCUDA(
           cuMemcpyHtoDAsync(device_data.devPtr + offset, pinned.data(), length, device_data.stream),
           "cuMemcpyHtoDAsync");
       CheckCUDA(cuStreamSynchronize(device_data.stream), "restore stream synchronization");
-      metrics.cuda_seconds += SecondsSince(cuda_start);
     }
     offset += length;
   }
   if (checkpoint) {
-    const auto durability_start = Clock::now();
     if (fsync(file.get()) != 0) {
       ThrowErrno("fsync artifact extent");
     }
-    metrics.durability_seconds = SecondsSince(durability_start);
   }
-  return metrics;
 }
 
 void
-Accumulate(TransferMetrics* total, const TransferMetrics& extent)
+ValidateStandaloneStorageInfo(const compat::StorageInfo* info)
 {
-  total->bytes += extent.bytes;
-  total->cuda_seconds += extent.cuda_seconds;
-  total->storage_seconds += extent.storage_seconds;
-  total->durability_seconds += extent.durability_seconds;
-}
-
-void
-ValidateStorageInfo(const compat::StorageInfo* info)
-{
-  if (info == nullptr || info->handle == nullptr || info->deviceCount != 1 || info->perDeviceData == nullptr) {
+  if (info == nullptr || info->deviceCount != 1 || info->perDeviceData == nullptr ||
+      info->perDeviceData[0].devPtr == 0 || info->perDeviceData[0].size == 0) {
     throw std::runtime_error("standalone proof requires exactly one valid CustomStorage device extent");
   }
-  for (unsigned int index = 0; index < info->deviceCount; ++index) {
-    if (info->perDeviceData[index].devPtr == 0 || info->perDeviceData[index].size == 0) {
-      throw std::runtime_error("CUDA returned an invalid CustomStorage device extent");
-    }
-  }
 }
 
-CheckpointResult
+Artifact
 CheckpointProcess(
     pid_t pid, const fs::path& directory, uint64_t application_ptr, size_t application_bytes, int requested_device,
     const std::string& device_uuid, CUcontext context, compat::OperationCompleteFn operation_complete)
 {
-  const auto total_start = Clock::now();
   CUcheckpointLockArgs lock_args{};
   lock_args.timeoutMs = kLockTimeoutMs;
   CheckCUDA(cuCheckpointProcessLock(pid, &lock_args), "cuCheckpointProcessLock");
   ExpectProcessState(pid, CU_PROCESS_STATE_LOCKED, "after_lock");
 
-  compat::StorageInfo* info = nullptr;
-  compat::CheckpointArgs checkpoint_args{};
-  checkpoint_args.customStorageInfo_out = &info;
-  const auto cuda_api_start = Clock::now();
-  CheckCUDA(cuCheckpointProcessCheckpoint(pid, compat::NativeArgs(&checkpoint_args)), "cuCheckpointProcessCheckpoint");
-  const double cuda_api_seconds = SecondsSince(cuda_api_start);
-  ValidateStorageInfo(info);
+  custom_storage::Operation operation;
+  CheckCUDA(operation.BeginCheckpoint(pid), "cuCheckpointProcessCheckpoint(CustomStorage)");
+  const compat::StorageInfo* info = operation.storage_info();
+  ValidateStandaloneStorageInfo(info);
 
   Artifact artifact{
       .application_ptr = application_ptr,
       .application_bytes = application_bytes,
-      .extents = {},
+      .extent =
+          {
+              .device = requested_device,
+              .device_uuid = device_uuid,
+              .checkpoint_ptr = info->perDeviceData[0].devPtr,
+              .stream = reinterpret_cast<uintptr_t>(info->perDeviceData[0].stream),
+              .size = info->perDeviceData[0].size,
+          },
   };
-  TransferMetrics transfer;
-  artifact.extents.reserve(info->deviceCount);
-  for (unsigned int index = 0; index < info->deviceCount; ++index) {
-    Extent extent{
-        .index = index,
-        .device = requested_device,
-        .device_uuid = device_uuid,
-        .checkpoint_ptr = info->perDeviceData[index].devPtr,
-        .stream = reinterpret_cast<uintptr_t>(info->perDeviceData[index].stream),
-        .size = info->perDeviceData[index].size,
-        .filename = "extent-" + std::to_string(index) + ".bin",
-    };
-    Accumulate(&transfer, CopyExtent(info->perDeviceData[index], context, directory / extent.filename, true));
-    artifact.extents.push_back(std::move(extent));
-  }
-  WriteManifestTemporary(directory, artifact);
-  double completion_seconds = 0.0;
+  const fs::path checkpoint_file = directory / kExtentFilename;
+  CopyExtent(info->perDeviceData[0], context, checkpoint_file, true);
   try {
-    const auto completion_start = Clock::now();
-    CheckCUDA(operation_complete(info->handle), "cuCheckpointOperationComplete(checkpoint)");
-    completion_seconds = SecondsSince(completion_start);
+    CheckCUDA(operation.Complete(operation_complete), "cuCheckpointOperationComplete(checkpoint)");
     ExpectProcessState(pid, CU_PROCESS_STATE_CHECKPOINTED, "after_checkpoint_completion");
-    PublishManifest(directory);
   }
   catch (...) {
     std::error_code ignored;
-    (void)fs::remove(directory / "manifest.tmp", ignored);
-    (void)fs::remove(directory / "manifest.txt", ignored);
+    (void)fs::remove(checkpoint_file, ignored);
     throw;
   }
-  return {
-      .artifact = std::move(artifact),
-      .metrics =
-          {
-              .transfer = transfer,
-              .cuda_api_seconds = cuda_api_seconds,
-              .completion_seconds = completion_seconds,
-              .total_seconds = SecondsSince(total_start),
-          },
-  };
+  return artifact;
 }
 
-OperationMetrics
+void
 RestoreProcess(
     pid_t pid, const fs::path& directory, const Artifact& artifact, CUcontext context,
     compat::OperationCompleteFn operation_complete)
 {
-  const auto total_start = Clock::now();
-  compat::StorageInfo* info = nullptr;
-  compat::RestoreArgs restore_args{};
-  restore_args.customStorageInfo_out = &info;
-  const auto cuda_api_start = Clock::now();
-  CheckCUDA(cuCheckpointProcessRestore(pid, compat::NativeArgs(&restore_args)), "cuCheckpointProcessRestore");
-  const double cuda_api_seconds = SecondsSince(cuda_api_start);
-  ValidateStorageInfo(info);
-  if (info->deviceCount != artifact.extents.size()) {
-    throw std::runtime_error("restore returned a different device extent count");
+  custom_storage::Operation operation;
+  CheckCUDA(operation.BeginRestore(pid), "cuCheckpointProcessRestore(CustomStorage)");
+  const compat::StorageInfo* info = operation.storage_info();
+  ValidateStandaloneStorageInfo(info);
+  if (info->perDeviceData[0].size != artifact.extent.size) {
+    throw std::runtime_error("restore returned a different device extent size");
   }
-  TransferMetrics transfer;
-  for (unsigned int index = 0; index < info->deviceCount; ++index) {
-    if (info->perDeviceData[index].size != artifact.extents[index].size) {
-      throw std::runtime_error("restore returned a different device extent size");
-    }
-    Accumulate(
-        &transfer,
-        CopyExtent(info->perDeviceData[index], context, directory / artifact.extents[index].filename, false));
-  }
-  const auto completion_start = Clock::now();
-  CheckCUDA(operation_complete(info->handle), "cuCheckpointOperationComplete(restore)");
-  const double completion_seconds = SecondsSince(completion_start);
+  CopyExtent(info->perDeviceData[0], context, directory / kExtentFilename, false);
+  CheckCUDA(operation.Complete(operation_complete), "cuCheckpointOperationComplete(restore)");
   ExpectProcessState(pid, CU_PROCESS_STATE_LOCKED, "after_restore_completion");
   CUcheckpointUnlockArgs unlock_args{};
   CheckCUDA(cuCheckpointProcessUnlock(pid, &unlock_args), "cuCheckpointProcessUnlock");
   ExpectProcessState(pid, CU_PROCESS_STATE_RUNNING, "after_unlock");
-  return {
-      .transfer = transfer,
-      .cuda_api_seconds = cuda_api_seconds,
-      .completion_seconds = completion_seconds,
-      .total_seconds = SecondsSince(total_start),
-  };
 }
 
 void
@@ -992,37 +837,32 @@ Run(const Options& options)
   CheckCUDA(cuInit(0), "controller cuInit");
   RetainedPrimaryContexts retained_context(options.device);
   const std::string device_uuid = DeviceUUID(retained_context.device());
-  const compat::OperationCompleteFn operation_complete = compat::ResolveOperationComplete();
-  if (operation_complete == nullptr) {
+  bool custom_storage_available = false;
+  const compat::OperationCompleteFn operation_complete = compat::ResolveOperationComplete(&custom_storage_available);
+  if (!custom_storage_available) {
     throw std::runtime_error("CUDA driver does not expose CUDA 13.4 CustomStorage");
   }
   ExpectProcessState(child.pid(), CU_PROCESS_STATE_RUNNING, "before_lock");
 
-  const CheckpointResult checkpoint = CheckpointProcess(
+  const Artifact artifact = CheckpointProcess(
       child.pid(), options.artifact_dir, ready.device_ptr, ready.bytes, options.device, device_uuid,
       retained_context.context(), operation_complete);
-  const Artifact artifact = ReadManifest(options.artifact_dir);
   if (artifact.application_ptr != ready.device_ptr || artifact.application_bytes != ready.bytes ||
-      artifact.extents.front().device != options.device || artifact.extents.front().device_uuid != device_uuid) {
-    throw std::runtime_error("manifest application or device identity changed");
+      artifact.extent.device != options.device || artifact.extent.device_uuid != device_uuid) {
+    throw std::runtime_error("checkpoint application or device identity changed");
   }
 
-  size_t storage_bytes = 0;
-  for (const Extent& extent : checkpoint.artifact.extents) {
-    storage_bytes += extent.size;
-    std::cout << "extent index=" << extent.index << " device=" << extent.device << " device_uuid=" << extent.device_uuid
-              << " checkpoint_ptr=0x" << std::hex << extent.checkpoint_ptr << " stream=0x" << extent.stream << std::dec
-              << " bytes=" << extent.size << " file=" << extent.filename << '\n';
-  }
-  if (checkpoint.metrics.transfer.bytes != storage_bytes) {
-    throw std::runtime_error("checkpoint transfer did not cover every storage byte");
-  }
+  std::cout << "extent device=" << artifact.extent.device << " device_uuid=" << artifact.extent.device_uuid
+            << " checkpoint_ptr=0x" << std::hex << artifact.extent.checkpoint_ptr << " stream=0x"
+            << artifact.extent.stream << std::dec << " bytes=" << artifact.extent.size << " file=" << kExtentFilename
+            << '\n';
 
-  const fs::path first_extent = options.artifact_dir / artifact.extents.front().filename;
+  const fs::path checkpoint_file = options.artifact_dir / kExtentFilename;
+  ValidateExtentFile(checkpoint_file, artifact.extent.size);
   if (options.corruption == CorruptionMode::kTruncate) {
-    fs::resize_file(first_extent, artifact.extents.front().size - 1);
+    fs::resize_file(checkpoint_file, artifact.extent.size - 1);
     try {
-      (void)ReadManifest(options.artifact_dir);
+      ValidateExtentFile(checkpoint_file, artifact.extent.size);
       throw std::runtime_error("truncated artifact was incorrectly accepted");
     }
     catch (const std::runtime_error& error) {
@@ -1031,18 +871,16 @@ Run(const Options& options)
       }
     }
     child.KillAndWait();
-    std::cout << "corruption_check=passed mode=truncated detection=manifest_size_validation\n";
+    std::cout << "corruption_check=passed mode=truncated detection=file_size_validation\n";
     return 0;
   }
   if (options.corruption == CorruptionMode::kSameSize) {
-    CorruptExtentSameSize(first_extent, artifact.extents.front().size);
-    (void)ReadManifest(options.artifact_dir);
+    CorruptExtentSameSize(checkpoint_file, artifact.extent.size);
+    ValidateExtentFile(checkpoint_file, artifact.extent.size);
   }
 
-  OperationMetrics restore;
   try {
-    restore =
-        RestoreProcess(child.pid(), options.artifact_dir, artifact, retained_context.context(), operation_complete);
+    RestoreProcess(child.pid(), options.artifact_dir, artifact, retained_context.context(), operation_complete);
   }
   catch (const std::exception& error) {
     if (options.corruption == CorruptionMode::kSameSize) {
@@ -1051,9 +889,6 @@ Run(const Options& options)
       return 0;
     }
     throw;
-  }
-  if (restore.transfer.bytes != storage_bytes) {
-    throw std::runtime_error("restore transfer did not cover every storage byte");
   }
 
   const char verify = 'V';
@@ -1076,19 +911,8 @@ Run(const Options& options)
     throw std::runtime_error("workload did not verify restored bytes and post-restore CUDA execution");
   }
 
-  std::cout << std::fixed << std::setprecision(6) << "roundtrip=passed application_ptr=0x" << std::hex
-            << ready.device_ptr << std::dec << " application_bytes=" << ready.bytes
-            << " storage_bytes=" << storage_bytes << " checkpoint_total_seconds=" << checkpoint.metrics.total_seconds
-            << " checkpoint_cuda_api_seconds=" << checkpoint.metrics.cuda_api_seconds
-            << " checkpoint_d2h_seconds=" << checkpoint.metrics.transfer.cuda_seconds
-            << " checkpoint_storage_write_seconds=" << checkpoint.metrics.transfer.storage_seconds
-            << " checkpoint_fsync_seconds=" << checkpoint.metrics.transfer.durability_seconds
-            << " checkpoint_complete_seconds=" << checkpoint.metrics.completion_seconds
-            << " restore_total_seconds=" << restore.total_seconds
-            << " restore_cuda_api_seconds=" << restore.cuda_api_seconds
-            << " restore_storage_read_seconds=" << restore.transfer.storage_seconds
-            << " restore_h2d_seconds=" << restore.transfer.cuda_seconds
-            << " restore_complete_seconds=" << restore.completion_seconds << '\n';
+  std::cout << "roundtrip=passed application_ptr=0x" << std::hex << ready.device_ptr << std::dec
+            << " application_bytes=" << ready.bytes << " storage_bytes=" << artifact.extent.size << '\n';
   return 0;
 }
 

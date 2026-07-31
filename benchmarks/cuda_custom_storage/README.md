@@ -8,18 +8,23 @@ SPDX-License-Identifier: Apache-2.0
 This single-GPU harness validates the CUDA 13.4 CustomStorage checkpoint contract without
 Snapshot, CRIU, GMS, HVBM, NIXL, or Kubernetes.
 
+The target-PID CustomStorage operation and capability handling live in
+`deploy/snapshot/cmd/cuda-checkpoint-helper/custom_storage_operation.*`. The harness is
+their smallest consumer. It deliberately supplies its own single-buffer POSIX transfer
+instead of depending on Snapshot's daemon, NIXL engine, or artifact format.
+
 It forks a standalone CUDA workload that allocates a deterministic local device
 buffer. The controller process then:
 
 1. locks the workload;
 2. requests a CustomStorage checkpoint;
-3. requires one driver-provided device extent and records its requested device ordinal,
+3. requires one driver-provided device extent and reports its requested device ordinal,
    UUID, pointer, size, and stream;
-4. copies those checkpoint extents to POSIX files through a bounded pinned buffer;
+4. copies that extent to one POSIX file through one bounded pinned buffer;
 5. completes the checkpoint operation;
-6. validates the complete artifact before mutating restore state;
-7. restores every extent and unlocks the workload; and
-8. asserts the documented RUNNING → LOCKED → CHECKPOINTED → LOCKED → RUNNING states;
+6. validates the file size before mutating restore state;
+7. restores the extent and unlocks the workload;
+8. asserts the documented RUNNING → LOCKED → CHECKPOINTED → LOCKED → RUNNING states; and
 9. asks the workload to verify its original bytes and execute another CUDA operation.
 
 An internal 120-second watchdog kills the child workload and exits the controller if a
@@ -59,11 +64,10 @@ timeout 130s benchmarks/cuda_custom_storage/cuda-custom-storage-roundtrip \
   --bytes 67108864
 ```
 
-Expected output lists the CUDA-provided extents and ends with `roundtrip=passed` plus
-separate CUDA API, D2H, filesystem write/fsync, filesystem read, H2D, operation
-completion, and total timings.
-The artifact contains `manifest.txt` plus one `extent-N.bin` file per returned device
-extent.
+Expected output reports the CUDA-provided extent and ends with `roundtrip=passed`.
+The output directory contains one `checkpoint.bin` file. Its metadata remains in
+memory for the duration of the test; the harness does not define a persistent artifact
+format.
 
 ## Verify truncated-artifact rejection
 
@@ -77,7 +81,7 @@ timeout 130s benchmarks/cuda_custom_storage/cuda-custom-storage-roundtrip \
   --truncate-before-restore
 ```
 
-The harness intentionally truncates the first extent, rejects it before invoking CUDA
+The harness intentionally truncates the checkpoint file, rejects it before invoking CUDA
 restore, terminates the now-checkpointed test workload, and reports
 `corruption_check=passed`.
 
