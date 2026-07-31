@@ -356,7 +356,7 @@ trtllm_configs = {
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
-        timeout=900,
+        timeout=300,
         health_check_workers=True,
         request_payloads=[
             multimodal_payload_default(
