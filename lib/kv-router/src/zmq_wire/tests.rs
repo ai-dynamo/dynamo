@@ -114,6 +114,50 @@ fn test_deserialize_map_block_stored_cache_salt() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
+/// An empty-string `medium` is normalized to absent (like empty `cache_salt`),
+/// so an unset medium stays on the device tier and is indexed rather than
+/// failing closed as an unknown medium. Covers store and remove.
+#[test]
+fn test_deserialize_empty_medium_normalizes_to_absent_device() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    let stored = to_vec_named(&MapBlockStoredFixture {
+        medium: Some(String::new()),
+        ..Default::default()
+    })
+    .unwrap();
+    let stored: RawKvEvent = from_slice(&stored).unwrap();
+    assert_eq!(
+        stored.medium(),
+        None,
+        "empty medium must normalize to absent"
+    );
+    let placement =
+        convert_placement(stored, worker).expect("empty-medium store must be indexed, not dropped");
+    assert_eq!(placement.placement.tier, StorageTier::Device);
+
+    let removed = to_vec_named(&MapBlockRemovedFixtureWithMedium {
+        event_type: "BlockRemoved",
+        block_hashes: vec![BlockHashValue::Unsigned(11)],
+        medium: Some(String::new()),
+    })
+    .unwrap();
+    let removed: RawKvEvent = from_slice(&removed).unwrap();
+    assert_eq!(
+        removed.medium(),
+        None,
+        "empty medium must normalize to absent"
+    );
+}
+
+#[derive(Serialize)]
+struct MapBlockRemovedFixtureWithMedium {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<BlockHashValue>,
+    medium: Option<String>,
+}
+
 #[test]
 fn test_deserialize_extra_keys_cache_namespace_fallback() {
     let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
