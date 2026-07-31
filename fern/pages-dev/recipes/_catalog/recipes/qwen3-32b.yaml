@@ -3,7 +3,7 @@
 #
 id: qwen3-32b
 title: Qwen3-32B
-page: recipes/qwen3-32b.mdx
+page: pages/recipes/model-recipes/qwen3-32b.mdx
 provider: qwen
 model:
   name: Qwen3-32B

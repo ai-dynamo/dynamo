@@ -3,7 +3,7 @@
 #
 id: qwen3-235b-a22b-fp8
 title: Qwen3-235B-A22B FP8
-page: recipes/qwen3-235b-a22b-fp8.mdx
+page: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
 provider: qwen
 model:
   name: Qwen3-235B-A22B (MoE, ~22B active)

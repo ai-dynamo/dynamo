@@ -7,8 +7,8 @@ subtitle: Every environment variable that controls Dynamo metrics, tracing, logg
 
 This page catalogs the environment variables that govern Dynamo observability. Set them on every
 frontend, router, or worker that should emit a signal. For local procedures, see
-[Observe a Local Deployment](../../observability/local-observability.mdx) and
-[Observe a Local Deployment](../../observability/local-observability.mdx#check-deployment-health).
+[Observe a Local Deployment](../../cli/operations/observability.mdx) and
+[Observe a Local Deployment](../../cli/operations/observability.mdx#check-deployment-health).
 
 The canonical list of variable names lives in [`lib/runtime/src/config/environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs), which groups them by area (logging, OTLP, system server, canary, request trace). The logging and OTLP variables are read in [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`; the `DYN_SYSTEM_*` and health variables are read by the system-status server. The backend log-level variables (`VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL`) are read by the respective engines, not the Dynamo runtime.
 
@@ -42,7 +42,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
     Use `python -m dynamo.sglang` or `python -m dynamo.trtllm` for the other backends, and `python -m dynamo.router` for a standalone router.
   </Tab>
   <Tab title="Kubernetes">
-    Set the variables on the [`DynamoGraphDeployment`](../../kubernetes/dgd-reference.mdx) (DGD) — at graph level in `spec.envs` (prepended to every component) or per-component under `services.<name>.extraPodSpec.mainContainer.env`. A component-level entry overrides a graph-level one of the same name.
+    Set the variables on the [`DynamoGraphDeployment`](../kubernetes-api/dynamo-graph-deployment.mdx) (DGD) — at graph level in `spec.envs` (prepended to every component) or per-component under `services.<name>.extraPodSpec.mainContainer.env`. A component-level entry overrides a graph-level one of the same name.
 
     ```yaml
     apiVersion: nvidia.com/v1alpha1
@@ -68,7 +68,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
     ```
 
     <Note>
-      A [`DynamoGraphDeploymentRequest`](../../kubernetes/dgdr-reference.mdx) (DGDR) has no environment-variable fields of its own. To set these under a DGDR, put them in the embedded DGD it produces via `spec.overrides.dgd`. You never set these on the operator deployment itself — the operator only writes them into the workload pods it creates; it never reads them from its own environment.
+      A [`DynamoGraphDeploymentRequest`](../kubernetes-api/dynamo-graph-deployment-request.mdx) (DGDR) has no environment-variable fields of its own. To set these under a DGDR, put them in the embedded DGD it produces via `spec.overrides.dgd`. You never set these on the operator deployment itself — the operator only writes them into the workload pods it creates; it never reads them from its own environment.
     </Note>
   </Tab>
 </Tabs>
@@ -262,7 +262,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   Number of segments retained independently for each producer.
 </ParamField>
 
-See [Forward Pass Metrics Trace Reference](forward-pass-metrics-tracing.mdx) for topology support and file semantics.
+See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for topology support and file semantics.
 
 ## Request tracing
 
@@ -346,11 +346,11 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-tracing.mdx) for
   Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. Values are not redacted.
 </ParamField>
 
-See [Request Trace Reference](request-tracing.mdx) for compatibility aliases, sink behavior, and record semantics.
+See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
 
 ## Related
 
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
-- [Local Resource Monitor (Local)](local-resource-monitor.mdx) — host-side per-process exporter.
+- [Local Resource Monitor (Local)](local-resource-monitor-local.mdx) — host-side per-process exporter.

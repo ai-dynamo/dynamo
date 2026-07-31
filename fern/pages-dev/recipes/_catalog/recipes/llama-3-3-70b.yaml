@@ -3,7 +3,7 @@
 #
 id: llama-3-3-70b
 title: Llama-3.3-70B FP8
-page: recipes/llama-3-3-70b.mdx
+page: pages/recipes/model-recipes/llama-3-3-70b-fp8.mdx
 provider: meta
 model:
   name: Llama-3.3-70B-Instruct

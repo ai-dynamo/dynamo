@@ -3,7 +3,7 @@
 #
 id: nemotron-3-ultra
 title: Nemotron-3-Ultra
-page: recipes/nemotron-3-ultra.mdx
+page: pages/recipes/model-recipes/nemotron-3-ultra.mdx
 provider: nvidia
 model:
   name: Nemotron-3-Ultra-550B-A55B

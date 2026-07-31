@@ -3,7 +3,7 @@
 #
 id: qwen3-32b-fp8
 title: Qwen3-32B FP8
-page: recipes/qwen3-32b-fp8.mdx
+page: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
 provider: qwen
 model:
   name: Qwen3-32B-FP8

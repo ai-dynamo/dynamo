@@ -3,7 +3,7 @@
 #
 id: kimi-k3
 title: Kimi-K3
-page: recipes/kimi-k3.mdx
+page: pages/recipes/model-recipes/kimi-k3.mdx
 provider: moonshot
 model:
   name: Kimi-K3

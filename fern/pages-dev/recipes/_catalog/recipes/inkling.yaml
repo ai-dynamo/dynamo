@@ -3,7 +3,7 @@
 #
 id: inkling
 title: Inkling NVFP4
-page: recipes/inkling.mdx
+page: pages/recipes/model-recipes/inkling-nvfp4.mdx
 provider: thinkingmachines
 model:
   name: Inkling

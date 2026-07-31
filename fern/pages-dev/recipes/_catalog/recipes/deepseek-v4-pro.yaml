@@ -3,7 +3,7 @@
 #
 id: deepseek-v4-pro
 title: DeepSeek-V4-Pro
-page: recipes/deepseek-v4-pro.mdx
+page: pages/recipes/model-recipes/deepseek-v4-pro.mdx
 provider: deepseek
 model:
   name: DeepSeek-V4-Pro

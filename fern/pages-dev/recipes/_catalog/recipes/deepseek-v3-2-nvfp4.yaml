@@ -3,7 +3,7 @@
 #
 id: deepseek-v3-2-nvfp4
 title: DeepSeek V3.2 NVFP4
-page: recipes/deepseek-v3-2-nvfp4.mdx
+page: pages/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
 provider: deepseek
 model:
   name: DeepSeek-V3.2

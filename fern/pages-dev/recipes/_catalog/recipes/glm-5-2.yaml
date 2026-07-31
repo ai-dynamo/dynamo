@@ -3,7 +3,7 @@
 #
 id: glm-5-2
 title: GLM-5.2
-page: recipes/glm-5-2.mdx
+page: pages/recipes/model-recipes/glm-5-2.mdx
 provider: zai
 model:
   name: GLM-5.2

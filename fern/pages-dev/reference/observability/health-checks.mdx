@@ -7,7 +7,7 @@ subtitle: Health endpoints, status codes, paths, and active-check configuration
 
 Dynamo exposes two related health interfaces: HTTP status endpoints for external observers and
 optional canary requests that actively exercise idle worker endpoints. For a local procedure, see
-[Observe a Local Deployment](../../observability/local-observability.mdx#check-deployment-health).
+[Observe a Local Deployment](../../cli/operations/observability.mdx#check-deployment-health).
 
 ## Endpoint Summary
 
@@ -116,10 +116,10 @@ selection in the current runtime.
 Each backend supplies a minimal inference payload. Dynamo marks the request as a health check and
 uses the backend's normal endpoint path, so the check covers request handling and engine execution
 rather than only process reachability. For the lifecycle and rationale, see
-[Observability Architecture](../../design-docs/observability.md#active-worker-health-checks).
+[Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
 
 ## Related Reference
 
 - [Environment Variables](environment-variables.mdx#health-checks)
 - [Local Observability Stack](local-stack.mdx)
-- [Configure Kubernetes Health Probes](../../kubernetes/observability/metrics.mdx#check-and-customize-health-probes)
+- [Configure Kubernetes Health Probes](../../kubernetes/operations/observability.mdx#check-and-customize-health-probes)

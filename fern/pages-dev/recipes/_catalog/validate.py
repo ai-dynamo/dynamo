@@ -27,7 +27,7 @@ bool, int, and PyYAML-style soft-wrapped long scalar values). Run mode is
 reported in the output.
 
 Runnable from the repo root as:
-    python3 docs/fern/recipes/_catalog/validate.py
+    python3 docs/fern/pages/recipes/_catalog/validate.py
 """
 
 import json
@@ -35,12 +35,12 @@ import os
 import sys
 
 # --- Locate repo root relative to this script ---------------------------------
-# This script lives at <repo>/docs/fern/recipes/_catalog/validate.py
+# This script lives at <repo>/docs/fern/pages/recipes/_catalog/validate.py
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", ".."))
 DOCS_DIR = os.path.join(REPO_ROOT, "docs", "fern")
-RECIPES_CAT = os.path.join(DOCS_DIR, "recipes", "_catalog")
-BENCH_CAT = os.path.join(DOCS_DIR, "benchmarks", "_catalog")
+RECIPES_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "_catalog")
+BENCH_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "feature-benchmarks", "_catalog")
 
 # --- Optional deps -------------------------------------------------------------
 try:

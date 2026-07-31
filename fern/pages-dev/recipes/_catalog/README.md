@@ -12,27 +12,27 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
 
 <Info>
 The picker is **pure CSS** (no JavaScript). Every allowed dimension value is
-hardcoded in `fern/main.css`. A page that uses a value not listed below will After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the footer's SITE_CSS mirror stays in sync (pre-commit enforces this).
+hardcoded in `docs/fern/main.css`. A page that uses a value not listed below will After editing `main.css`, run `python3 docs/fern/scripts/sync_site_css.py` so the footer's SITE_CSS mirror stays in sync (pre-commit enforces this).
 render the picker but **filter nothing** — adding a new value requires a
-`fern/main.css` edit (see [Adding a new axis value](#adding-a-new-axis-value)).
+`docs/fern/main.css` edit (see [Adding a new axis value](#adding-a-new-axis-value)).
 </Info>
 
 ## Steps to add a page
 
-1. **Write the MDX** at `docs/recipes/<slug>.mdx` (or `docs/benchmarks/<slug>.mdx`),
+1. **Write the MDX** at `docs/fern/pages/recipes/<slug>.mdx` (or `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`),
    following the [page blueprint](#page-blueprint) below.
 2. **Add a catalog entry** — create one per-entry file at
-   `docs/recipes/_catalog/recipes/<id>.yaml` (or
-   `docs/benchmarks/_catalog/benchmarks/<id>.yaml`) and add its `<id>` to the
+   `docs/fern/pages/recipes/_catalog/recipes/<id>.yaml` (or
+   `docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/<id>.yaml`) and add its `<id>` to the
    matching `index.yaml`. Each file holds exactly one object that validates
    against `schema.json`; every deploy/perf asset path must resolve in the repo.
    See [the machine-readable catalog](#the-machine-readable-catalog) below, then
-   run `python3 docs/recipes/_catalog/validate.py`.
-3. **Wire navigation** in `docs/index.yml` (add the `- page:` under the Recipes
+   run `python3 docs/fern/pages/recipes/_catalog/validate.py`.
+3. **Wire navigation** in `docs/fern/index.yml` (add the `- page:` under the Recipes
    tab or the Feature Benchmarks section).
-4. **Patch `fern/main.css` only if** the page introduces a picker axis value not
+4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not
    already supported (see below).
-5. Add the landing-page card (`docs/recipes/README.mdx`) and update the model /
+5. Add the landing-page card (`docs/fern/pages/recipes/model-recipes/overview.mdx`) and update the model /
    target counts.
 6. Run `fern check` and `fern docs broken-links`; preview with `fern docs dev`.
 
@@ -48,12 +48,12 @@ the former monolithic `recipes.yaml` / `benchmarks.yaml`, which reduced merge
 conflicts and gave a cleaner per-entry ownership/validation path):
 
 ```
-docs/recipes/_catalog/
+docs/fern/pages/recipes/_catalog/
   index.yaml            # ordering + inclusion only (recipes + deferred_recipes)
   schema.json           # JSON Schema (draft 2020-12) for ONE recipe object
   recipes/<id>.yaml     # one recipe object per file (active AND deferred)
   validate.py           # catalog validator (covers BOTH catalogs)
-docs/benchmarks/_catalog/
+docs/fern/pages/recipes/feature-benchmarks/_catalog/
   index.yaml            # ordering + inclusion only (benchmarks)
   schema.json           # JSON Schema for ONE benchmark object
   benchmarks/<id>.yaml  # one benchmark object per file
@@ -62,7 +62,7 @@ docs/benchmarks/_catalog/
 - **`index.yaml`** controls sidebar/landing order. The `recipes:` list is the
   active (customer-visible) recipes in nav order; `deferred_recipes:` lists
   recipes held back from the rendered surface (no rendered page). Active order
-  matches the Recipes tab in `docs/index.yml`; benchmark order matches the
+  matches the Recipes tab in `docs/fern/index.yml`; benchmark order matches the
   Feature Benchmarks section. Every id must have a matching `<id>.yaml` file and
   vice-versa.
 - **`<id>.yaml`** holds exactly one entry object as a top-level document, with
@@ -77,12 +77,12 @@ docs/benchmarks/_catalog/
 Run from the repo root:
 
 ```bash
-python3 docs/recipes/_catalog/validate.py
+python3 docs/fern/pages/recipes/_catalog/validate.py
 ```
 
 (The single script validates **both** catalogs.) It checks: index ↔ file
 correspondence (no orphans, no dangling entries), internal-`id`/filename match,
-no duplicate ids, schema conformance, that every `page:` resolves under `docs/`,
+no duplicate ids, schema conformance, that every `page:` resolves under `docs/fern/`,
 that every deploy/perf/benchmark asset path resolves in the repo, and
 cross-catalog referential integrity (recipe `related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
@@ -95,7 +95,7 @@ For full schema validation, `pip install pyyaml jsonschema`.
 
 <Note>
 CI does not yet run this validator. **Follow-up:** wire
-`python3 docs/recipes/_catalog/validate.py` into the docs CI job so catalog
+`python3 docs/fern/pages/recipes/_catalog/validate.py` into the docs CI job so catalog
 changes are gated on it.
 </Note>
 
@@ -159,7 +159,7 @@ matching `data-*` attributes. Space-separated values mean "applies to several"
 
 ## CSS-coupled vocabulary
 
-The hide/highlight rules in `fern/main.css` enumerate every allowed value.
+The hide/highlight rules in `docs/fern/main.css` enumerate every allowed value.
 A new value renders but filters nothing until CSS is added.
 
 | Dimension (`name=`) | Supported `value=` |
@@ -168,7 +168,7 @@ A new value renders but filters nothing until CSS is added.
 | `recipe-usecase` | `chat`, `agentic` |
 | `recipe-variant` | `agg`, `disagg`, `disagg-single-node`, `disagg-multi-node`, `trtllm-agg`, `trtllm-disagg`, `vllm-disagg`, `standard`, `efa`, `kvbm` |
 
-Landing-page filter chips (`docs/recipes/README.mdx`) are a separate
+Landing-page filter chips (`docs/fern/pages/recipes/model-recipes/overview.mdx`) are a separate
 vocabulary — `provider`, `runtime`, `hardware`, `technique`, `workload` — also
 hardcoded in CSS; a chip that matches no card is a dead end, so only add a chip
 when a card carries the matching `data-*` token.
@@ -177,7 +177,7 @@ when a card carries the matching `data-*` token.
 
 To support, e.g., an `mi300` SKU or a `disagg-3node` topology:
 
-1. In `fern/main.css`, find the picker `body:has(...)` block and add the
+1. In `docs/fern/main.css`, find the picker `body:has(...)` block and add the
    hide rule:
    ```css
    body:has(input[name="recipe-sku"][value="mi300"]:checked) [data-sku]:not([data-sku~="mi300"]) { display: none; }
@@ -197,6 +197,6 @@ Hidden variants use `display: none` (clean a11y tree); comparison tables dim
 non-selected rows with `opacity` so every row stays readable.
 
 This component styling lives entirely under the `dynamo-*` namespace and only
-renders when `fern/main.css` is applied — see the preview-vs-production note in
+renders when `docs/fern/main.css` is applied — see the preview-vs-production note in
 `.github/workflows/fern-docs.yml` (PR previews skip the global theme so project
 CSS renders).

@@ -3,7 +3,7 @@
 #
 id: nemotron-3-super
 title: Nemotron-3-Super
-page: recipes/nemotron-3-super.mdx
+page: pages/recipes/model-recipes/nemotron-3-super.mdx
 provider: nvidia
 model:
   name: Nemotron-3-Super-120B-A12B

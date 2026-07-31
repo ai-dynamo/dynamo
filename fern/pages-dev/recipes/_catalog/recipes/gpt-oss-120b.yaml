@@ -3,7 +3,7 @@
 #
 id: gpt-oss-120b
 title: GPT-OSS-120B
-page: recipes/gpt-oss-120b.mdx
+page: pages/recipes/model-recipes/gpt-oss-120b.mdx
 provider: openai
 model:
   name: GPT-OSS-120B

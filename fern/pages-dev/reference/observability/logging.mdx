@@ -7,7 +7,7 @@ subtitle: Log formats, levels, correlation fields, and backend controls
 
 Dynamo writes readable text or newline-delimited JSON (JSONL) to standard error. With OTLP export
 enabled, it also sends structured log records to the configured OpenTelemetry Collector. For a local
-Loki workflow, see [Observe a Local Deployment](../../observability/local-observability.mdx#inspect-traces-and-exported-logs).
+Loki workflow, see [Observe a Local Deployment](../../cli/operations/observability.mdx#inspect-traces-and-exported-logs).
 
 ## Output Formats
 
@@ -103,7 +103,7 @@ Canceled and failed chat requests retain the request payload and omit the respon
 `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` to capture selected request headers. Captured values
 are unredacted, so do not allowlist credentials.
 
-For limits and record semantics, see [Request Trace Reference](request-tracing.mdx).
+For limits and record semantics, see [Request Trace Reference](request-traces.mdx).
 
 ## Request Correlation
 
@@ -112,7 +112,7 @@ context and records it as `x_request_id` on participating spans and log events. 
 `trace_id` and `span_id`, allowing Loki results to link to the corresponding Tempo trace.
 
 For the span hierarchy and propagation model, see
-[Observability Architecture](../../design-docs/observability.md#trace-and-log-correlation).
+[Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#trace-and-log-correlation).
 
 ## Backend Engine Controls
 

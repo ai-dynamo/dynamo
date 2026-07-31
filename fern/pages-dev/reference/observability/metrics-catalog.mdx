@@ -5,7 +5,7 @@ title: Metrics Catalog
 subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
 ---
 
-Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../observability/local-observability.mdx#view-metrics-and-dashboards).
+Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
 
 ## Metric types
 
@@ -31,7 +31,7 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
 
-Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves and are cataloged separately — see [Metrics Comparison](../../observability/metrics-comparison.md). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
+Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves and are cataloged separately — see [Metrics Comparison](metrics-comparison.md). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
 
 ## Frontend metrics
 
@@ -121,7 +121,7 @@ The ratio is defined only when the model has an active L1 cache and observed tok
 
 ### Migration
 
-Counters for [request migration](../../fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../design-docs/request-migration.md) for the internals.
+Counters for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.
 
 <ParamField path="dynamo_frontend_model_migration_total" type="counter">
   Total request migrations due to worker unavailability. Labeled by `model` and [`migration_type`](metric-labels.mdx#migration_type) (`new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection).
@@ -133,7 +133,7 @@ Counters for [request migration](../../fault-tolerance/request-migration.md), th
 
 ### Cancellation and rejection
 
-Counters for requests that end early: [cancellations](../../design-docs/request-cancellation.md) (the client or frontend aborts an in-flight request) and [rejections](../../fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 529 by default when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
+Counters for requests that end early: [cancellations](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md) (the client or frontend aborts an in-flight request) and [rejections](../../kubernetes/fault-tolerance/request-rejection.md) (the Frontend sheds load with HTTP 529 by default when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
 
 <ParamField path="dynamo_frontend_model_cancellation_total" type="counter">
   Total request cancellations detected by the frontend (client disconnect or stream close). Labeled by `model`, `endpoint` (the API route — `chat_completions`, `completions`, `embeddings`, …), and [`request_type`](metric-labels.mdx#request_type) (`unary` or `stream`).
@@ -228,10 +228,10 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
 </ParamField>
 
 <ParamField path="dynamo_component_cancellation_total" type="counter">
-  Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../design-docs/request-cancellation.md).
+  Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
-The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../design-docs/request-rejection.md#worker-side-request-admission).
+The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
 
 <ParamField path="dynamo_rejection_request_total" type="counter">
   Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
@@ -333,7 +333,7 @@ The frontend registers these metrics when queueing is enabled by `--router-queue
   KV cache events applied to the router's radix-tree index. Includes events applied to the device tier and lower tiers such as host-pinned memory and disk. Appears only when `--router-kv-overlap-score-credit` is greater than 0 and workers publish KV events. Labeled by `status` and `event_type` — see [Metric-specific labels](metric-labels.mdx#metric-specific-labels).
 </ParamField>
 
-The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../components/router/standalone-indexer.md).
+The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer](../../developer-guide/knowledge-base/modular-components/router/standalone-indexer.md).
 
 ### Availability by configuration
 
@@ -368,4 +368,4 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to these metrics.
 - [Environment Variables](environment-variables.mdx) — variables that enable and configure metric emission.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes operator metrics catalog.
-- [Metrics Comparison](../../observability/metrics-comparison.md) — engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`).
+- [Metrics Comparison](metrics-comparison.md) — engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`).
