@@ -23,6 +23,8 @@ from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     rebind_nonparameter_tensors,
 )
+from gpu_memory_service.common.vmm import get_vmm_device_type
+from gpu_memory_service.integrations.common.utils import torch_device
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
@@ -218,7 +220,7 @@ def register_gms_loader(load_format: str = "gms") -> None:
             self.default_loader.load_weights(model, model_config)
 
         def load_model(self, vllm_config, model_config, prefix="") -> torch.nn.Module:
-            device = torch.cuda.current_device()
+            device = torch_device().current_device()
             extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
             mode = get_gms_lock_mode(extra)
             gms_client = get_or_create_gms_client_memory_manager(
@@ -236,7 +238,7 @@ def register_gms_loader(load_format: str = "gms") -> None:
                     vllm_config,
                     model_config,
                     self.default_loader,
-                    torch.device("cuda", device),
+                    torch.device(get_vmm_device_type().value, device),
                 )
 
 
@@ -325,7 +327,7 @@ def _load_write_mode(
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)
 
-            torch.cuda.empty_cache()
+            torch_device().empty_cache()
 
     stats = prepare_gms_write(gms_client, model)
     # The private clones must exist before vLLM profiles memory so the

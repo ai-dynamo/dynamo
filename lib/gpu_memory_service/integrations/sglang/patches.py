@@ -64,8 +64,9 @@ def patch_torch_memory_saver() -> None:
             # In GMS mode we install only the strict GMS implementation:
             # weights + kv_cache go through GMS, generic unsupported tags stay
             # no-ops/warnings, and cuda_graph remains unsupported.
-            # Get device from torch.cuda.current_device() (already set by SGLang)
-            device_index = torch.cuda.current_device()
+            # Get device from the active VMM device module (already set by SGLang)
+            from gpu_memory_service.integrations.common.utils import torch_device
+            device_index = torch_device().current_device()
 
             # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
             gms_impl = GMSMemorySaverImpl(
