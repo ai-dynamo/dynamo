@@ -332,15 +332,10 @@ impl ErrorMessage {
         )
     }
 
-    /// Answer a coerced backend 5xx: `500` on the status line, with the status
-    /// the engine asserted tunnelled into `details` as a bare number.
+    /// Answer 500, with the status the engine asserted in `details`.
     ///
-    /// The number is all that crosses the boundary. The backend's own message
-    /// stays server-side (logged by [`ErrorMessage::sanitized_with_details`]),
-    /// because a backend 5xx body may carry filesystem paths — the policy
-    /// established when HTTP error responses were sanitized, and the reason
-    /// `SanitizedError`'s `Display` renders every server error as the generic
-    /// "Internal server error".
+    /// The number is all that crosses the boundary; the backend's own message
+    /// stays server-side, because a 5xx body may carry filesystem paths.
     fn coerced_backend_error(
         asserted: StatusCode,
         details: impl std::fmt::Display,
@@ -453,22 +448,11 @@ impl ErrorMessage {
 
     /// Convert a backend-supplied [`HttpError`] into a client response.
     ///
-    /// Parse first, then triage: a code outside the HTTP status space cannot
-    /// escape into the response and falls back to a sanitized 500. Otherwise
-    /// [`BackendStatusAction::triage`] decides, layering the retry-semantics
-    /// allowlist over [`SanitizedError::for_backend_status`] — the base status
-    /// → variant mapping shared with the streaming preflight and the Anthropic
-    /// surface.
-    ///
-    /// A 5xx a worker asserted for itself keeps its identity on the status line
-    /// only when it carries retry semantics Dynamo already publishes: 503, or
-    /// the configured `DYN_HTTP_OVERLOAD_STATUS_CODE` (529 by default). That
-    /// keeps a deliberate load-shed signal distinguishable from a genuine
-    /// internal error without letting an arbitrary engine-chosen code — 501,
-    /// 507, a vendor extension — redefine Dynamo's public contract. Every other
-    /// backend 5xx answers 500 with the asserted status tunnelled into
-    /// `details`. In all 5xx cases the body text is sanitized, since a backend
-    /// message may carry internal paths.
+    /// Parse first, so a code outside the HTTP status space cannot reach the
+    /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
+    /// its own status only when it is 503 or the configured overload code,
+    /// which is what makes a deliberate load shed distinguishable from an
+    /// internal error. The body text is sanitized either way.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
         let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
@@ -480,7 +464,7 @@ impl ErrorMessage {
             BackendStatusAction::CoerceToInternal(asserted) => {
                 ErrorMessage::coerced_backend_error(asserted, err.message)
             }
-            // 4xx (non-499): protocol contract — forward backend message as-is.
+            // 4xx (non-499): forward the backend's own message.
             BackendStatusAction::ForwardClientError => (
                 status,
                 Json(ErrorMessage {
@@ -4015,12 +3999,10 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths. Only the
-        // two statuses that carry retry semantics Dynamo itself publishes (503
-        // and the configured overload code) keep their identity on the status
-        // line; every other 5xx, plus anything outside 4xx/5xx, answers 500.
-        // The 503 row matches the streaming path
-        // (`test_check_for_backend_error_with_503_preserves_status`).
+        // forwarded to the client — they may include internal paths. 503 keeps
+        // its status, matching the streaming path
+        // (`test_check_for_backend_error_with_503_preserves_status`); the rest
+        // answer 500.
         for (code, expected_status) in [
             (399u16, 500u16),
             (500, 500),
@@ -4058,10 +4040,8 @@ mod tests {
 
     #[test]
     fn test_from_http_error_preserves_529_overload_status() {
-        // A backend that deliberately load-sheds with 529 must remain
-        // distinguishable from a genuine internal error: the status and code
-        // survive and the wire type classifies as overload. The body is still
-        // sanitized, because the backend message may carry internal paths.
+        // A deliberate load shed must stay distinguishable from an internal
+        // error. The body is still sanitized: it may carry internal paths.
         let err = HttpError {
             code: 529,
             message: "site overloaded at /srv/pool.py:12".to_string(),
@@ -4082,9 +4062,8 @@ mod tests {
 
     #[test]
     fn test_from_http_error_529_classifies_as_overload_for_metrics() {
-        // Observability half of the same bug: while the status was squashed to
-        // 500 the metric recorded Internal, hiding load-shedding behind generic
-        // internal errors.
+        // Observability half of the same bug: the metric recorded Internal
+        // while the status was squashed, hiding load shedding.
         let response = ErrorMessage::from_http_error(HttpError {
             code: 529,
             message: "site overloaded".to_string(),
@@ -4097,8 +4076,7 @@ mod tests {
 
     #[test]
     fn test_from_http_error_rejects_out_of_range_code() {
-        // Codes outside the HTTP status space cannot escape into the response;
-        // they fall back to a sanitized 500.
+        // Codes outside the HTTP status space fall back to a sanitized 500.
         let err = HttpError {
             code: 1000,
             message: "bogus status from /srv/backend.py:7".to_string(),
@@ -4117,11 +4095,9 @@ mod tests {
 
     #[test]
     fn test_from_http_error_coerces_unlisted_5xx_and_tunnels_status() {
-        // An engine-chosen 5xx that carries no retry semantics Dynamo
-        // publishes must not redefine Dynamo's contract: the client sees a
-        // generic 500, while the asserted status survives in `details` for
-        // debugging. 507 is a WebDAV code no Dynamo component emits; 501 is
-        // the case the previous blanket pass-through forwarded verbatim.
+        // The client sees a generic 500 while the asserted status survives in
+        // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
+        // what the previous blanket pass-through forwarded verbatim.
         for code in [501u16, 502, 504, 507] {
             let response = ErrorMessage::from_http_error(HttpError {
                 code,
@@ -4139,7 +4115,7 @@ mod tests {
                 Some(u64::from(code)),
                 "asserted status must be tunnelled for {code}"
             );
-            // The tunnel carries a number, never the backend's prose.
+            // `details` carries a number, never the backend's prose.
             let serialized = serde_json::to_string(&response.1.0).unwrap();
             assert!(
                 !serialized.contains("/srv/pool.py"),
@@ -4154,10 +4130,7 @@ mod tests {
 
     #[test]
     fn test_from_http_error_preserves_retryable_5xx_without_tunnel() {
-        // 503 and the operator-configured overload code are the two statuses
-        // Dynamo already generates from its own admission control and already
-        // advertises, so they survive on the status line — no tunnelling
-        // needed, since nothing was suppressed.
+        // These two survive on the status line, so nothing lands in `details`.
         for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
             let response = ErrorMessage::from_http_error(HttpError {
                 code: status.as_u16(),
@@ -4176,8 +4149,7 @@ mod tests {
 
     #[test]
     fn test_from_http_error_forwards_4xx_verbatim() {
-        // The 4xx path is untouched by the 5xx allowlist: client errors are
-        // the protocol contract and the backend's own description of them is
+        // The 5xx allowlist leaves 4xx alone: the backend's own description is
         // what the caller needs (e.g. the in-tree 415 from image loading).
         let response = ErrorMessage::from_http_error(HttpError {
             code: 415,
