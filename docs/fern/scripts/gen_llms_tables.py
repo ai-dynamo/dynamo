@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate agent-facing twins of the Reference-page component data.
 
-Three Reference pages (reference/compatibility.mdx,
-reference/release-artifacts.mdx, reference/model-early-access-builds.mdx)
+Three Reference pages (pages/reference/general/compatibility.mdx,
+reference/general/release-artifacts.mdx, reference/general/model-early-access-builds.mdx)
 render their data through custom React components, whose output may be absent
 from Fern's agent-facing markdown exports (.md endpoints, llms.txt). This
 script reads the single source of truth ``components/releases.data.ts`` and
@@ -32,7 +32,7 @@ missing, keeping placement under human control.
 
 It also emits three machine-readable outputs from the same parse:
 
-  * reference/releases-data.mdx — a "Releases (machine-readable)" page whose
+  * pages/reference/general/releases-machine-readable.mdx — a "Releases (machine-readable)" page whose
     body (between the same idempotent markers, NOT <llms-only>-wrapped) is the
     full releases.data.ts content as plain markdown tables.
   * assets/releases.json — a stable-schema JSON serialization of the parsed
@@ -80,7 +80,7 @@ from typing import Callable, NamedTuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_TS = SCRIPT_DIR.parent / "components" / "releases.data.ts"
-REFERENCE_DIR = SCRIPT_DIR.parent / "reference"
+REFERENCE_DIR = SCRIPT_DIR.parent / "pages" / "reference" / "general"
 ASSETS_DIR = SCRIPT_DIR.parent / "assets"
 JSON_PATH = ASSETS_DIR / "releases.json"
 ATOM_PATH = ASSETS_DIR / "releases-atom.xml"
@@ -410,7 +410,7 @@ def feature_cell(fc: dict) -> str:
 
 # ---------------------------------------------------------------------------
 # Shared section renderers (composed by both the per-page <llms-only> twins
-# and the machine-readable releases-data.mdx page; each returns a headerless
+# and the machine-readable releases-machine-readable.mdx page; each returns a headerless
 # fragment so every call site can supply its own heading style).
 # ---------------------------------------------------------------------------
 
@@ -663,7 +663,7 @@ def render_support_matrix(data: dict) -> str:
         "Every released line — stable releases and their patches, grouped by "
         "minor line, newest first. Platform previews and model-specific "
         "builds are not listed individually; the notes below cover their "
-        "toolkit support, and [Releases (machine-readable)](releases-data.mdx) "
+        "toolkit support, and [Releases (machine-readable)](releases-machine-readable.mdx) "
         "has the full release inventory.",
     ]
     for line, line_versions in groups.items():
@@ -731,7 +731,7 @@ def release_link(rel: dict) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Machine-readable page (reference/releases-data.mdx)
+# Machine-readable page (pages/reference/general/releases-machine-readable.mdx)
 # ---------------------------------------------------------------------------
 
 
@@ -982,7 +982,7 @@ def build_atom(data: dict) -> str:
     dated.sort(key=lambda item: (item[0], -item[1]), reverse=True)
 
     feed_updated = dated[0][0] + "T00:00:00Z"
-    notes_index = f"{PROD_BASE}/dev/reference/releases/release-history"
+    notes_index = f"{PROD_BASE}/dev/reference/releases"
 
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
@@ -1041,8 +1041,8 @@ class Block(NamedTuple):
 
 
 # The three component-backed pages get <llms-only> twins (humans see the React
-# components); releases-data.mdx IS the page body, human-viewable and
-# machine-consumable alike. compatibility.mdx additionally carries the
+# components); releases-machine-readable.mdx IS the page body, human-viewable
+# and machine-consumable alike. compatibility.mdx additionally carries the
 # human-facing support-matrix accordion at a fixed spot in the page.
 PAGES: dict[str, tuple[Block, ...]] = {
     "compatibility.mdx": (
@@ -1055,8 +1055,10 @@ PAGES: dict[str, tuple[Block, ...]] = {
     "model-early-access-builds.mdx": (
         Block("llms-tables", render_model_ea_builds, True, True),
     ),
-    "releases-data.mdx": (Block("llms-tables", render_releases_data, False, True),),
-    "release-notes/README.mdx": (
+    "releases-machine-readable.mdx": (
+        Block("llms-tables", render_releases_data, False, True),
+    ),
+    "releases/release-history.mdx": (
         Block("release-stats", render_release_stats, False, False),
     ),
 }

@@ -493,6 +493,17 @@ fn require_port(value: &Struct, key: &str) -> BoxedStatusResult<u16> {
         {
             Ok(*value as u16)
         }
+        // The vLLM sidecar sends remote_port as a string so vLLM renders a valid
+        // NIXL side-channel ZMQ URL (a protobuf Struct number would arrive as a
+        // double like `5600.0`); accept a string-encoded port too.
+        Some(Value {
+            kind: Some(Kind::StringValue(text)),
+        }) => text.parse::<u16>().map_err(|_| {
+            Status::invalid_argument(format!(
+                "decode KV transfer field '{key}' must be an integer port",
+            ))
+            .into()
+        }),
         _ => Err(Status::invalid_argument(format!(
             "decode KV transfer field '{key}' must be an integer port",
         ))

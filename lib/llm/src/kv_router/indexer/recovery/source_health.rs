@@ -408,7 +408,6 @@ mod tests {
         KvSourceMembershipView {
             serving_endpoint: endpoint.clone(),
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
-            lifecycle_generations: sources.keys().map(|worker| (*worker, 0)).collect(),
             recovery_expected: HashMap::new(),
             kv_event_publishing_enabled: capabilities.into_iter().collect(),
             sources,
