@@ -568,13 +568,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
 
-		// Enforce DGD-owned power inputs against the request's source-version fields.
-		if !v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
-			continue
-		}
+		// Enforce DGD-owned power inputs after conversion to the canonical v1beta1 representation.
 		componentPath := componentsPath.Index(i)
-		newPowerLimit, newHasPowerLimit := dgdPowerLimitV1Beta1(newComponent)
-		oldPowerLimit, oldHasPowerLimit := dgdPowerLimitV1Beta1(oldComponent)
+		newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
+		oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
 
 		// Reject transitions into, out of, or within the power-annotation contract.
 		if newHasPowerLimit != oldHasPowerLimit ||
@@ -594,8 +591,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		}
 
 		// Keep the Planner's remaining cached per-replica power inputs stable.
-		newGPUInput := effectiveDGDGPUInputV1Beta1(newComponent, componentPath)
-		oldGPUInput := effectiveDGDGPUInputV1Beta1(oldComponent, componentPath)
+		newGPUInput := effectiveDGDGPUInput(newComponent, componentPath)
+		oldGPUInput := effectiveDGDGPUInput(oldComponent, componentPath)
 		if !newGPUInput.equal(oldGPUInput) {
 			allErrs = append(allErrs, field.Invalid(
 				newGPUInput.path,

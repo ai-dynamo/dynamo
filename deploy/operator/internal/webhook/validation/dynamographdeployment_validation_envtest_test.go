@@ -613,7 +613,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 power annotation change is rejected by the webhook",
+			name: "v1alpha1 power annotation change is rejected after conversion by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
@@ -621,11 +621,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.services[worker].extraPodMetadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
+				`spec.components[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
 			},
 		},
 		{
-			name: "v1alpha1 effective GPU change is rejected by the webhook",
+			name: "v1alpha1 effective GPU change is rejected after conversion by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
@@ -633,11 +633,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "300", "2", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.services[worker].resources.limits.gpu: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
+				`spec.components[0].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
 			},
 		},
 		{
-			name: "v1alpha1 power node count change is rejected by the webhook",
+			name: "v1alpha1 power node count change is rejected after conversion by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
@@ -645,7 +645,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 3)
 			}),
 			wantWebhookErrs: []string{
-				"spec.services[worker].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
+				"spec.components[0].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
 			},
 		},
 		{

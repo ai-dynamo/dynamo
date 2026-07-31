@@ -205,7 +205,7 @@ func componentsByName(
 	return byName
 }
 
-func dgdPowerLimitV1Beta1(
+func dgdPowerLimit(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (string, bool) {
 	if component.PodTemplate == nil {
@@ -215,17 +215,7 @@ func dgdPowerLimitV1Beta1(
 	return value, exists
 }
 
-func dgdPowerLimitV1Alpha1(
-	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-) (string, bool) {
-	if component.ExtraPodMetadata == nil {
-		return "", false
-	}
-	value, exists := component.ExtraPodMetadata.Annotations[consts.KubeAnnotationGPUPowerLimit]
-	return value, exists
-}
-
-func effectiveDGDGPUInputV1Beta1(
+func effectiveDGDGPUInput(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) dgdGPUInput {
@@ -260,53 +250,6 @@ func effectiveDGDGPUInputV1Beta1(
 		return dgdGPUInput{path: resourcesPath}
 	}
 	return dgdGPUInput{path: containersPath}
-}
-
-func effectiveDGDGPUInputV1Alpha1(
-	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
-	fldPath *field.Path,
-) dgdGPUInput {
-	resourcesPath := fldPath.Child("resources")
-	if component.Resources == nil {
-		return dgdGPUInput{path: resourcesPath}
-	}
-
-	// Resolve limits before requests, preserving the v1alpha1 custom-resource precedence.
-	if input := dgdGPUInputFromResourceItemV1Alpha1(
-		component.Resources.Limits,
-		resourcesPath.Child("limits"),
-	); input.present {
-		return input
-	}
-	return dgdGPUInputFromResourceItemV1Alpha1(
-		component.Resources.Requests,
-		resourcesPath.Child("requests"),
-	)
-}
-
-func dgdGPUInputFromResourceItemV1Alpha1(
-	item *nvidiacomv1alpha1.ResourceItem,
-	fldPath *field.Path,
-) dgdGPUInput {
-	if item == nil {
-		return dgdGPUInput{path: fldPath}
-	}
-	if value, exists := item.Custom[consts.KubeResourceGPUNvidia]; exists {
-		return dgdGPUInput{
-			value:   value,
-			present: true,
-			path:    fldPath.Child("custom").Key(consts.KubeResourceGPUNvidia),
-		}
-	}
-	if item.GPU != "" &&
-		(item.GPUType == "" || item.GPUType == consts.KubeResourceGPUNvidia) {
-		return dgdGPUInput{
-			value:   item.GPU,
-			present: true,
-			path:    fldPath.Child("gpu"),
-		}
-	}
-	return dgdGPUInput{path: fldPath}
 }
 
 func sortedComponentNames(
