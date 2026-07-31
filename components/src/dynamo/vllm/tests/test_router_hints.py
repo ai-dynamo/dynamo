@@ -10,6 +10,7 @@ import pytest
 from dynamo.common.constants import (
     ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
     ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
 from dynamo.vllm.router_hints import enable_router_hint_support
@@ -46,8 +47,59 @@ def test_enable_router_hint_support_publishes_single_dp_rank_endpoint():
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
     )
     runtime_config.set_engine_specific.assert_any_call(
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill"
+    )
+    runtime_config.set_engine_specific.assert_any_call(
         ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         json.dumps({"0": "tcp://127.0.0.1:23280"}),
+    )
+
+
+def test_enable_router_hint_support_publishes_aggregated_worker_type():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "worker-a",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Aggregated)
+
+    runtime_config.set_engine_specific.assert_any_call(
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "aggregated"
+    )
+
+
+def test_enable_router_hint_support_publishes_decode_worker_type():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "worker-a",
+                        "control_port": "23280",
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Decode)
+
+    runtime_config.set_engine_specific.assert_any_call(
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "decode"
     )
 
 
@@ -108,7 +160,7 @@ def test_enable_router_hint_support_fails_with_multiple_router_hint_tiers():
     runtime_config.set_engine_specific.assert_not_called()
 
 
-def test_enable_router_hint_support_skips_for_non_prefill_workers():
+def test_enable_router_hint_support_skips_for_unsupported_worker_roles():
     runtime_config = MagicMock()
     engine_args = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -126,7 +178,7 @@ def test_enable_router_hint_support_skips_for_non_prefill_workers():
         )
     )
 
-    enable_router_hint_support(runtime_config, engine_args, WorkerType.Decode)
+    enable_router_hint_support(runtime_config, engine_args, WorkerType.Encode)
 
     runtime_config.set_engine_specific.assert_not_called()
 

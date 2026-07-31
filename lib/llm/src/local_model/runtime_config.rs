@@ -14,6 +14,7 @@ use dynamo_kv_router::{
     protocols::KvTransferEnforcement,
     router_hint::{
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
     },
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
@@ -328,6 +329,14 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
             Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
         }
+    }
+
+    fn router_hint_worker_type(&self) -> Option<&str> {
+        let worker_type = self
+            .runtime_data
+            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .as_str()?;
+        (!worker_type.is_empty()).then_some(worker_type)
     }
 
     fn router_hint_source_control_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<String> {
@@ -805,6 +814,12 @@ mod tests {
             .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
             .unwrap();
         assert!(!config.supports_router_hints());
+
+        assert!(config.router_hint_worker_type().is_none());
+        config
+            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .unwrap();
+        assert_eq!(config.router_hint_worker_type(), Some("prefill"));
 
         assert!(
             config
