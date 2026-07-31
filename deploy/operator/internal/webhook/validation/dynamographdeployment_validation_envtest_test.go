@@ -47,10 +47,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
-	powerDRAForbidden := fmt.Sprintf(
-		"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
-		consts.KubeAnnotationGPUPowerLimit,
-	)
 
 	tests := []struct {
 		name               string
@@ -525,7 +521,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
+				`spec.components[1].experimental.gpuMemoryService: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
@@ -535,7 +531,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
+				`spec.components[1].experimental.gpuMemoryService: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
@@ -548,7 +544,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				})
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+				`spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
@@ -561,7 +557,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				})
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+				`spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
@@ -589,7 +585,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				})
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: " + powerDRAForbidden,
+				`spec.components[1].podTemplate.spec.containers[0].resources.claims: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
@@ -709,7 +705,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[0].experimental.gpuMemoryService: Forbidden: " + powerDRAForbidden,
+				`spec.components[0].experimental.gpuMemoryService: Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`,
 			},
 		},
 		{
