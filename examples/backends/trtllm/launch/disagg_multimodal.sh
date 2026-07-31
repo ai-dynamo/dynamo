@@ -28,17 +28,15 @@ fi
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Disaggregated Multimodal Serving (2 GPUs)" "$MODEL_PATH" "$HTTP_PORT"
 
-# run frontend
-# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
-
-# Prevent port collisions: prefill and decode each run their own status server.
-# Preserve DYN_SYSTEM_PORT as the base when only the single-worker convention
-# is provided, while allowing either worker port to be overridden explicitly.
+# Set worker ports before launching the frontend so it does not inherit the shared port.
 SYSTEM_PORT_BASE="${DYN_SYSTEM_PORT:-8081}"
 DYN_SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-$SYSTEM_PORT_BASE}"
 DYN_SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-$((SYSTEM_PORT_BASE + 1))}"
 unset DYN_SYSTEM_PORT
+
+# run frontend
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 
 # run prefill worker
 DYN_SYSTEM_PORT=$DYN_SYSTEM_PORT1 \
