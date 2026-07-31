@@ -886,17 +886,17 @@ mod embedding_without_chat_template {
 
     #[tokio::test]
     #[serial]
-    async fn request_add_special_tokens_is_tri_state() {
+    async fn request_add_special_tokens_defaults_to_true() {
         temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
             let preprocessor = embedding_preprocessor_without_template();
             let omitted = token_ids(&preprocessor, None).await;
             let explicit_false = token_ids(&preprocessor, Some(false)).await;
             let explicit_true = token_ids(&preprocessor, Some(true)).await;
 
-            assert_eq!(omitted, explicit_false);
-            assert_ne!(omitted, explicit_true);
+            assert_eq!(omitted, explicit_true);
+            assert_ne!(omitted, explicit_false);
             assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
-            assert_ne!(omitted[0].first(), Some(&128000));
+            assert_ne!(explicit_false[0].first(), Some(&128000));
         })
         .await;
     }
@@ -926,13 +926,16 @@ mod embedding_without_chat_template {
 
     #[tokio::test]
     #[serial]
-    async fn invalid_env_add_special_tokens_preserves_legacy_behavior() {
+    async fn invalid_env_add_special_tokens_fails_construction() {
         temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("yes-please"))], async {
-            let preprocessor = embedding_preprocessor_without_template();
-            assert_ne!(
-                token_ids(&preprocessor, None).await[0].first(),
-                Some(&128000)
-            );
+            let mut mdc = embedding_mdc(MODEL_PATH);
+            mdc.prompt_formatter = None;
+            mdc.chat_template_file = None;
+            let err = match OpenAIPreprocessor::new_for_embeddings(mdc) {
+                Ok(_) => panic!("invalid environment value must fail construction"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains("expected true/false/yes/no/1/0"));
         })
         .await;
     }

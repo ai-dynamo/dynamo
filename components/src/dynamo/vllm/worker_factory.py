@@ -56,14 +56,17 @@ EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMet
 
 def _embedding_model_input() -> ModelInput:
     """Select whether the Dynamo frontend or vLLM tokenizes embedding text."""
-    frontend_tokenization = os.environ.get(
-        "DYN_EMBEDDING_FRONTEND_TOKENIZATION", "0"
-    ).strip().lower()
-    return (
-        ModelInput.Tokens
-        if frontend_tokenization not in ("", "0", "false", "no")
-        else ModelInput.Text
-    )
+    env_name = "DYN_EMBEDDING_FRONTEND_TOKENIZATION"
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return ModelInput.Text
+
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes"):
+        return ModelInput.Tokens
+    if value in ("0", "false", "no"):
+        return ModelInput.Text
+    raise ValueError(f"Invalid {env_name}={raw!r}; expected true/false/yes/no/1/0")
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:

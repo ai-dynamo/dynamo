@@ -286,28 +286,37 @@ fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
     }
 }
 
-fn embedding_add_special_tokens_env() -> Option<bool> {
+fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
     match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
         Ok(value) => match parse_embedding_add_special_tokens(&value) {
-            Some(value) => Some(value),
-            None => {
-                tracing::warn!(
-                    env_var = EMBEDDING_ADD_SPECIAL_TOKENS_ENV,
-                    value,
-                    "invalid value for DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS; \
-                     expected true/false/yes/no/1/0; using per-request behavior"
-                );
-                None
-            }
+            Some(value) => Ok(Some(value)),
+            None => bail!(
+                "invalid value {value:?} for {EMBEDDING_ADD_SPECIAL_TOKENS_ENV}; \
+                 expected true/false/yes/no/1/0"
+            ),
         },
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            tracing::warn!(
-                env_var = EMBEDDING_ADD_SPECIAL_TOKENS_ENV,
-                "non-Unicode value for DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS; \
-                 expected true/false/yes/no/1/0; using per-request behavior"
-            );
-            None
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => bail!(
+            "{EMBEDDING_ADD_SPECIAL_TOKENS_ENV} must be valid Unicode and one of \
+             true/false/yes/no/1/0"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod embedding_add_special_tokens_env_tests {
+    use super::parse_embedding_add_special_tokens;
+
+    #[test]
+    fn parser_uses_the_documented_truth_table() {
+        for value in ["1", "true", "yes", " TRUE ", "Yes"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(true));
+        }
+        for value in ["0", "false", "no", " FALSE ", "No"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(false));
+        }
+        for value in ["", "on", "off", "yes-please"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), None);
         }
     }
 }
@@ -660,7 +669,7 @@ impl OpenAIPreprocessor {
                 (None, None)
             };
         let embedding_add_special_tokens_default = if supports_embedding {
-            embedding_add_special_tokens_env()
+            embedding_add_special_tokens_env()?
         } else {
             None
         };
@@ -2092,9 +2101,10 @@ impl OpenAIPreprocessor {
 
         let effective_add_special_tokens = request
             .add_special_tokens
-            .or(self.embedding_add_special_tokens_default);
+            .or(self.embedding_add_special_tokens_default)
+            .unwrap_or(true);
         let tokenizer = match effective_add_special_tokens {
-            Some(true) => self
+            true => self
                 .embedding_tokenizer_with_special_tokens
                 .clone()
                 .ok_or_else(|| {
@@ -2102,13 +2112,12 @@ impl OpenAIPreprocessor {
                         "embedding special-token tokenizer is unavailable for a non-embedding model"
                     )
                 })?,
-            Some(false) => self
+            false => self
                 .embedding_tokenizer_without_special_tokens
                 .clone()
                 .ok_or_else(|| {
                     anyhow::anyhow!("embedding tokenizer is unavailable for a non-embedding model")
                 })?,
-            None => self.tokenizer.clone(),
         };
         let all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {

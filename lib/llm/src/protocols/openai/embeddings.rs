@@ -19,9 +19,9 @@ pub struct NvCreateEmbeddingRequest {
 
     /// Whether raw-text inputs should include model-declared special tokens.
     ///
-    /// This vLLM-compatible extension is optional. When omitted, Dynamo does
-    /// not override the tokenizer path's existing behavior. It is ignored
-    /// when the caller supplies token IDs.
+    /// This vLLM-compatible extension is optional. When omitted, raw text
+    /// includes model-declared special tokens, matching vLLM's pooling
+    /// default. It is ignored when the caller supplies token IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_special_tokens: Option<bool>,
 
