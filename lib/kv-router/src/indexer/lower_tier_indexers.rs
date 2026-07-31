@@ -202,7 +202,6 @@ pub fn query_lower_tiers(
 
 fn merge_router_hint_tier_candidates(
     device_candidates: Option<&RouterHintRootCandidates>,
-    continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
     tier_matches: &LowerTierMatchDetails,
 ) -> Option<RouterHintRootCandidates> {
     let mut block_hashes = device_candidates
@@ -218,48 +217,33 @@ fn merge_router_hint_tier_candidates(
         return device_candidates.cloned();
     };
 
-    let mut extension_rows = extensions
-        .iter()
-        .filter_map(|(worker, hashes)| {
-            let continuation = continuations.get(worker)?;
-            (!hashes.is_empty()).then_some((*worker, continuation.start_pos, hashes.as_slice()))
-        })
-        .collect::<Vec<_>>();
-    // Router hints intentionally retain one compact root-aligned chain. Positional
-    // equality assumes ExternalSequenceBlockHash is stable across workers and tiers
-    // for the same request-prefix position. If workers diverge at the same extension
-    // position, this deterministic order decides which branch is represented beyond
-    // the shared prefix.
-    extension_rows.sort_unstable_by_key(|(worker, start_pos, _)| (*start_pos, *worker));
-
-    for (worker, start_pos, hashes) in extension_rows {
-        if block_hashes.len() < start_pos {
-            continue;
+    // Router hints intentionally retain one compact root-aligned chain. The
+    // lower-tier walk records each matched child hash once at its request-block
+    // position and tracks per-owner depths separately, avoiding per-worker hash
+    // copies on the lookup hot path. Positional equality assumes
+    // ExternalSequenceBlockHash is stable across workers and tiers for the same
+    // request-prefix position.
+    for (pos, hash) in &extensions.block_hashes {
+        if block_hashes.len() < *pos {
+            break;
         }
 
-        let original_len = block_hashes.len();
-        let mut valid = true;
-        for (offset, hash) in hashes.iter().copied().enumerate() {
-            let pos = start_pos + offset;
-            if pos < block_hashes.len() {
-                if block_hashes[pos] != hash {
-                    valid = false;
-                    break;
-                }
-            } else if pos == block_hashes.len() {
-                block_hashes.push(hash);
-            } else {
-                valid = false;
+        if *pos < block_hashes.len() {
+            if block_hashes[*pos] != *hash {
                 break;
             }
-        }
-
-        if valid {
-            owner_prefix_blocks.insert(worker, start_pos + hashes.len());
         } else {
-            block_hashes.truncate(original_len);
+            block_hashes.push(*hash);
         }
     }
+
+    owner_prefix_blocks.extend(
+        extensions
+            .owner_prefix_blocks
+            .iter()
+            .filter(|(_, blocks)| **blocks <= block_hashes.len())
+            .map(|(worker, blocks)| (*worker, *blocks)),
+    );
 
     let mut owner_prefix_blocks = owner_prefix_blocks
         .into_iter()
@@ -332,7 +316,6 @@ pub fn query_lower_tiers_with_options(
         if retain_router_hint_chain {
             tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
                 device_matches.router_hint_root_candidates.as_ref(),
-                &continuations,
                 &tier_matches,
             );
         }
