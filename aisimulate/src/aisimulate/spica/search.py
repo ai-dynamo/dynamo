@@ -31,6 +31,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from multiprocessing.util import Finalize
 from typing import Any
@@ -38,8 +39,11 @@ from typing import Any
 from tqdm import tqdm
 
 from .adapter import (
+    AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
+    RuntimeHookSpec,
+    SearchSpaceFragment,
     SimulationAdapter,
     SweepContext,
 )
@@ -48,7 +52,13 @@ from .deploy import build_backend_deployment
 from .discovery import resolve_adapters
 from .kv_estimate import resolve_backend_version
 from .kv_load import InfeasibleKVCapacity, resolve_kv_load
-from .replay import REPLAY_SPEC_API_VERSION, ReplaySpec, Runner, RunnerFactory
+from .replay import (
+    REPLAY_SPEC_API_VERSION,
+    ReplaySpec,
+    Runner,
+    RunnerFactory,
+    canonical_json,
+)
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
 from .score import is_feasible, make_candidate, pareto_front, rank
@@ -99,16 +109,25 @@ def _prepare_adapters(
     show_progress: bool,
 ) -> tuple[dict[str, SimulationAdapter], dict[str, AdapterSearchPlan]]:
     adapters = resolve_adapters(config.adapters, injected=injected)
-    context = SweepContext(
+    base_context = SweepContext(
         core_search_space=config.search_space.model_dump(mode="json"),
         workload=config.workload.model_dump(mode="json"),
         goal=config.goal.model_dump(mode="json"),
         show_progress=show_progress,
     )
-    plans = {
-        name: adapter.generate_search_space(config.adapters[name].search_space, context)
-        for name, adapter in adapters.items()
-    }
+    plans: dict[str, AdapterSearchPlan] = {}
+    for name, adapter in adapters.items():
+        context = SweepContext(
+            core_search_space=deepcopy(base_context.core_search_space),
+            workload=deepcopy(base_context.workload),
+            goal=deepcopy(base_context.goal),
+            show_progress=base_context.show_progress,
+        )
+        plan = adapter.generate_search_space(
+            deepcopy(config.adapters[name].search_space), context
+        )
+        _validate_search_plan(name, plan)
+        plans[name] = plan
     configured_modes = set(config.search_space.deployment_mode)
     for name, plan in plans.items():
         unknown = (
@@ -121,6 +140,40 @@ def _prepare_adapters(
                 f"{sorted(unknown)}"
             )
     return adapters, plans
+
+
+def _validate_search_plan(name: str, plan: Any) -> None:
+    if not isinstance(plan, AdapterSearchPlan):
+        raise TypeError(
+            f"adapter {name!r} generate_search_space must return AdapterSearchPlan"
+        )
+    if not isinstance(plan.fragment, SearchSpaceFragment):
+        raise TypeError(f"adapter {name!r} returned an invalid SearchSpaceFragment")
+    if not all(
+        isinstance(hook, RuntimeHookSpec) for hook in plan.potential_runtime_hooks
+    ):
+        raise TypeError(f"adapter {name!r} returned an invalid potential runtime hook")
+    try:
+        canonical_json(plan)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"adapter {name!r} returned a non-JSON search plan: {exc}"
+        ) from exc
+
+
+def _validate_adapter_replay_spec(name: str, spec: Any) -> None:
+    if not isinstance(spec, AdapterReplaySpec):
+        raise TypeError(
+            f"adapter {name!r} materialize_replay must return AdapterReplaySpec"
+        )
+    if not all(isinstance(hook, RuntimeHookSpec) for hook in spec.runtime_hooks):
+        raise TypeError(f"adapter {name!r} returned an invalid runtime hook")
+    try:
+        canonical_json(spec)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"adapter {name!r} returned a non-JSON replay spec: {exc}"
+        ) from exc
 
 
 def _merge_adapter_spaces(
@@ -239,19 +292,20 @@ def _materialize_one(
         backend_deployment = build_backend_deployment(
             sample, backend_version=backend_version
         )
-        candidate_context = CandidateContext(
-            sample=sample,
-            backend_deployment=backend_deployment,
-            concurrency=concurrency,
-        )
-        adapter_specs = {
-            name: adapter.materialize_replay(
-                adapter_plans[name],
+        adapter_specs: dict[str, AdapterReplaySpec] = {}
+        for name, adapter in adapters.items():
+            candidate_context = CandidateContext(
+                sample=deepcopy(sample),
+                backend_deployment=deepcopy(backend_deployment),
+                concurrency=concurrency,
+            )
+            adapter_spec = adapter.materialize_replay(
+                deepcopy(adapter_plans[name]),
                 _adapter_selection(selection, name),
                 candidate_context,
             )
-            for name, adapter in adapters.items()
-        }
+            _validate_adapter_replay_spec(name, adapter_spec)
+            adapter_specs[name] = adapter_spec
         replay_spec = ReplaySpec(
             backend_deployment=backend_deployment,
             workload=config.workload.model_dump(mode="json"),
@@ -259,6 +313,7 @@ def _materialize_one(
             concurrency=concurrency,
             adapters=adapter_specs,
         )
+        canonical_json(replay_spec)
         runner_factory.capabilities().require_compatible(replay_spec)
         if adapter_specs:
             sample["adapters"] = {

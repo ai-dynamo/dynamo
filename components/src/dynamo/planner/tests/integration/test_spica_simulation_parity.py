@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Real Replay parity gates for the Spica adapter/runner composition.
 
@@ -13,6 +15,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from aisimulate.spica.adapter import CandidateContext, SweepContext
 from aisimulate.spica.config import OptimizationTarget, SmartSearchConfig

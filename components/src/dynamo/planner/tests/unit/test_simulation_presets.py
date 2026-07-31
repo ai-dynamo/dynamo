@@ -1,9 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Golden parity tests for Planner simulation presets moved out of Spica core."""
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from dynamo.planner.simulation.presets import (
     SCALING_POLICIES,

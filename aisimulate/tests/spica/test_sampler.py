@@ -146,6 +146,33 @@ def test_adapter_dict_choice_decodes_via_index():
         assert isinstance(entry, (str, dict))
 
 
+def test_arbitrary_json_choices_decode_via_index(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    choices = [True, None, ["nested"], {"mode": "structured"}, "literal", 1.5]
+    pc = ReplicaParallelConfig(
+        ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=1
+    )
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(pc,),
+        supported_backends={pc: frozenset({"vllm"})},
+        knob_choices={
+            "backend": ["vllm"],
+            "adapter::example::json_choice": choices,
+        },
+    )
+
+    sampler = make_branch_sampler(branch, study_id="test_json_choice_index")
+    suggestions = sampler.suggest(count=12)
+
+    assert suggestions
+    for suggestion in suggestions:
+        selected = suggestion.selection["adapter::example::json_choice"]
+        assert any(
+            type(selected) is type(choice) and selected == choice for choice in choices
+        )
+
+
 def test_parallel_suggestions_project_to_valid_configs(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     branch = _branch()

@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Parity tests for the Planner-owned Spica simulation adapter."""
 
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from aisimulate.spica.adapter import CandidateContext, SweepContext
 from aisimulate.spica.replay import BackendDeploymentSpec

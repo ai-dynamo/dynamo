@@ -37,7 +37,7 @@ class RuntimeHookSpec:
 
 @dataclass(frozen=True)
 class SweepContext:
-    """Immutable core context supplied while an adapter prepares its search."""
+    """Adapter-local core context supplied while an adapter prepares its search."""
 
     core_search_space: Mapping[str, JSONValue]
     workload: Mapping[str, JSONValue]
@@ -47,7 +47,7 @@ class SweepContext:
 
 @dataclass(frozen=True)
 class CandidateContext:
-    """Resolved core candidate available during adapter materialization."""
+    """Isolated resolved candidate available during adapter materialization."""
 
     sample: Mapping[str, JSONValue]
     backend_deployment: BackendDeploymentSpec

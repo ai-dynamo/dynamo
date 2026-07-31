@@ -1,19 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Tests for the transitional Dynamo Spica replay runner."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 import dynamo.replay.simulation as simulation
 from aisimulate.spica.adapter import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.spica.replay import BackendDeploymentSpec, ReplaySpec
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.planner,
+]
 
 
 class _FakeEngineArgs:
@@ -23,6 +36,12 @@ class _FakeEngineArgs:
     @classmethod
     def from_json(cls, payload: str):
         return cls(payload)
+
+
+class _FakeRouterConfig:
+    @classmethod
+    def from_json(cls, payload: str):
+        return json.loads(payload)
 
 
 def _agg_deployment() -> BackendDeploymentSpec:
@@ -49,7 +68,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "KvRouterConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),

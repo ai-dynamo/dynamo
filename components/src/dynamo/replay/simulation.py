@@ -151,7 +151,7 @@ class DynamoReplayRunner:
                     raise TypeError(
                         "Dynamo Router hook config requires a router_config mapping"
                     )
-                router_config = KvRouterConfig(**raw_config)
+                router_config = KvRouterConfig.from_json(json.dumps(raw_config))
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
@@ -166,18 +166,23 @@ class DynamoReplayRunner:
     @staticmethod
     def _arrival_speedup_ratio(spec: ReplaySpec) -> float:
         if DynamoReplayRunner._is_trace(spec):
-            return float(spec.workload.get("arrival_speedup_ratio", 1.0))
+            return _float_value(
+                spec.workload.get("arrival_speedup_ratio", 1.0),
+                "arrival_speedup_ratio",
+            )
         return 1.0
 
     @staticmethod
     def _effective_in_flight_cap(spec: ReplaySpec) -> int | None:
         if DynamoReplayRunner._is_trace(spec):
             value = spec.workload.get("replay_concurrency")
-            return int(value) if value is not None else None
+            return (
+                _int_value(value, "replay_concurrency") if value is not None else None
+            )
         if spec.concurrency is not None:
             return spec.concurrency
         value = spec.workload.get("concurrency")
-        return int(value) if value is not None else None
+        return _int_value(value, "concurrency") if value is not None else None
 
     @staticmethod
     def _goodput_sla_kwargs(spec: ReplaySpec) -> dict[str, float | None]:
@@ -185,9 +190,9 @@ class DynamoReplayRunner:
         if not isinstance(raw_sla, dict):
             return {}
         return {
-            "sla_ttft_ms": _optional_float(raw_sla.get("ttft_ms")),
-            "sla_itl_ms": _optional_float(raw_sla.get("itl_ms")),
-            "sla_e2e_ms": _optional_float(raw_sla.get("e2e_ms")),
+            "sla_ttft_ms": _optional_float(raw_sla.get("ttft_ms"), "sla.ttft_ms"),
+            "sla_itl_ms": _optional_float(raw_sla.get("itl_ms"), "sla.itl_ms"),
+            "sla_e2e_ms": _optional_float(raw_sla.get("e2e_ms"), "sla.e2e_ms"),
         }
 
     @staticmethod
@@ -238,29 +243,39 @@ class DynamoReplayRunner:
         workload = spec.workload
         request_rate = workload.get("request_rate")
         arrival_interval_ms = (
-            1000.0 / float(request_rate) if request_rate is not None else None
+            1000.0 / _float_value(request_rate, "request_rate")
+            if request_rate is not None
+            else None
         )
         load: float
         if spec.concurrency is not None:
             load = float(spec.concurrency)
         elif workload.get("concurrency") is not None:
-            load = float(workload["concurrency"])
+            load = _float_value(workload["concurrency"], "concurrency")
         elif request_rate is not None:
-            load = float(request_rate)
+            load = _float_value(request_rate, "request_rate")
         else:
             raise ValueError(
                 "synthetic replay requires concrete concurrency or request_rate"
             )
-        ratio = float(workload["num_request_ratio"])
+        ratio = _float_value(workload["num_request_ratio"], "num_request_ratio")
         return {
-            "input_tokens": int(workload["isl"]),
-            "output_tokens": int(workload["osl"]),
+            "input_tokens": _int_value(workload["isl"], "isl"),
+            "output_tokens": _int_value(workload["osl"], "osl"),
             "request_count": max(1, round(ratio * load)),
             "arrival_interval_ms": arrival_interval_ms,
-            "turns_per_session": int(workload.get("turns_per_session", 1)),
-            "shared_prefix_ratio": float(workload.get("shared_prefix_ratio", 0.0)),
-            "num_prefix_groups": int(workload.get("num_prefix_groups", 0)),
-            "inter_turn_delay_ms": float(workload.get("inter_turn_delay_ms", 0.0)),
+            "turns_per_session": _int_value(
+                workload.get("turns_per_session", 1), "turns_per_session"
+            ),
+            "shared_prefix_ratio": _float_value(
+                workload.get("shared_prefix_ratio", 0.0), "shared_prefix_ratio"
+            ),
+            "num_prefix_groups": _int_value(
+                workload.get("num_prefix_groups", 0), "num_prefix_groups"
+            ),
+            "inter_turn_delay_ms": _float_value(
+                workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
+            ),
         }
 
     @staticmethod
@@ -304,5 +319,19 @@ def _plain(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
 
-def _optional_float(value: JSONValue) -> float | None:
-    return float(value) if value is not None else None
+def _numeric_value(value: JSONValue, name: str) -> str | int | float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError(f"replay field {name} must be numeric")
+    return value
+
+
+def _float_value(value: JSONValue, name: str) -> float:
+    return float(_numeric_value(value, name))
+
+
+def _int_value(value: JSONValue, name: str) -> int:
+    return int(_numeric_value(value, name))
+
+
+def _optional_float(value: JSONValue, name: str) -> float | None:
+    return _float_value(value, name) if value is not None else None

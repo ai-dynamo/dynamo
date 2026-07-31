@@ -47,6 +47,6 @@ candidates = run_smart_search(
 The standalone module validates configuration but intentionally has no implicit replay runtime.
 KVBM sweep fields have been removed; native G2 is their replacement.
 
-Read the [Spica documentation](../docs/fern/components/aisimulate/spica/README.md)
+Read the [Spica documentation](../docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md)
 for its configuration, search-space, and replay behavior. Runnable configurations and tools live
 under [`examples/aisimulate/spica`](../examples/aisimulate/spica/README.md).

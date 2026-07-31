@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -82,22 +82,38 @@ _HOOK = RuntimeHookSpec(
 )
 
 
+def _default_scaling_policies() -> list[str | dict[str, Any]]:
+    return list(SCALING_POLICIES)
+
+
+def _default_fpm_sampling() -> list[str | dict[str, Any]]:
+    return list(FPM_SAMPLING)
+
+
+def _default_load_sensitivity() -> list[str | dict[str, Any]]:
+    return list(LOAD_SENSITIVITY)
+
+
+def _default_load_predictors() -> list[str | dict[str, Any]]:
+    return list(LOAD_PREDICTOR_PRESETS)
+
+
 class PlannerSearchSpace(BaseModel):
     """Validated Planner-owned search space."""
 
     model_config = ConfigDict(extra="forbid")
 
     scaling_policy: list[str | dict[str, Any]] = Field(
-        default_factory=lambda: list(SCALING_POLICIES)
+        default_factory=_default_scaling_policies
     )
     fpm_sampling: list[str | dict[str, Any]] = Field(
-        default_factory=lambda: list(FPM_SAMPLING)
+        default_factory=_default_fpm_sampling
     )
     load_sensitivity: list[str | dict[str, Any]] = Field(
-        default_factory=lambda: list(LOAD_SENSITIVITY)
+        default_factory=_default_load_sensitivity
     )
     load_predictor_candidates: list[str | dict[str, Any]] = Field(
-        default_factory=lambda: list(LOAD_PREDICTOR_PRESETS)
+        default_factory=_default_load_predictors
     )
     min_endpoint: int | None = Field(default=None, ge=1)
 
@@ -208,6 +224,24 @@ def _deployment_modes(
     return [str(mode) for mode in raw_modes]
 
 
+def _json_choices(values: list[str | dict[str, Any]]) -> list[JSONValue]:
+    return cast(list[JSONValue], deepcopy(values))
+
+
+def _int_value(values: Mapping[str, JSONValue], name: str) -> int:
+    value = values[name]
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError(f"Planner candidate field {name} must be numeric")
+    return int(value)
+
+
+def _float_value(values: Mapping[str, JSONValue], name: str) -> float:
+    value = values[name]
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise TypeError(f"Planner candidate field {name} must be numeric")
+    return float(value)
+
+
 class DynamoPlannerSimulationAdapter:
     """Planner search-space preparation and replay-spec materialization."""
 
@@ -250,10 +284,12 @@ class DynamoPlannerSimulationAdapter:
             fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
             for fields in (scaling_fields(policy) for policy in kept)
         )
-        local_choices: dict[str, list[JSONValue]] = {"scaling_policy": deepcopy(kept)}
+        local_choices: dict[str, list[JSONValue]] = {
+            "scaling_policy": _json_choices(kept)
+        }
         if planner_enabled:
-            local_choices["fpm_sampling"] = deepcopy(space.fpm_sampling)
-            local_choices["load_sensitivity"] = deepcopy(space.load_sensitivity)
+            local_choices["fpm_sampling"] = _json_choices(space.fpm_sampling)
+            local_choices["load_sensitivity"] = _json_choices(space.load_sensitivity)
         fragment = SearchSpaceFragment(
             choices_by_branch={
                 mode: deepcopy(local_choices)
@@ -267,7 +303,7 @@ class DynamoPlannerSimulationAdapter:
             "load_predictor": predictor_result.to_state(),
         }
         diagnostics: dict[str, JSONValue] = {
-            "dropped_scaling_policies": deepcopy(dropped),
+            "dropped_scaling_policies": _json_choices(dropped),
             "load_predictor_reason": predictor_result.reason,
             "load_predictor_losses": predictor_result.to_state()["losses"],
         }
@@ -367,29 +403,29 @@ def _planner_config_payload(
         if key in candidate_config:
             payload[key] = candidate_config[key]
     if sample.get("gpu_budget") is not None:
-        payload["max_gpu_budget"] = int(sample["gpu_budget"])
+        payload["max_gpu_budget"] = _int_value(sample, "gpu_budget")
     if sample.get("min_gpu_budget") is not None:
-        payload["min_gpu_budget"] = int(sample["min_gpu_budget"])
+        payload["min_gpu_budget"] = _int_value(sample, "min_gpu_budget")
     if min_endpoint is not None:
         payload["min_endpoint"] = min_endpoint
 
     if mode == "disagg":
-        payload["prefill_engine_num_gpu"] = int(sample["prefill_tp"]) * int(
-            sample["prefill_attention_dp"]
-        )
-        payload["decode_engine_num_gpu"] = int(sample["decode_tp"]) * int(
-            sample["decode_attention_dp"]
+        payload["prefill_engine_num_gpu"] = _int_value(
+            sample, "prefill_tp"
+        ) * _int_value(sample, "prefill_attention_dp")
+        payload["decode_engine_num_gpu"] = _int_value(sample, "decode_tp") * _int_value(
+            sample, "decode_attention_dp"
         )
     else:
-        payload["decode_engine_num_gpu"] = int(sample["tp"]) * int(
-            sample["attention_dp"]
+        payload["decode_engine_num_gpu"] = _int_value(sample, "tp") * _int_value(
+            sample, "attention_dp"
         )
 
     if optimization_target == "sla" and sla is not None:
         if sla.get("ttft_ms") is not None:
-            payload["ttft_ms"] = float(sla["ttft_ms"])
+            payload["ttft_ms"] = _float_value(sla, "ttft_ms")
         if sla.get("itl_ms") is not None:
-            payload["itl_ms"] = float(sla["itl_ms"])
+            payload["itl_ms"] = _float_value(sla, "itl_ms")
     return payload
 
 

@@ -53,7 +53,7 @@ test = [
 
 [project.urls]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
-Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/components/aisimulate"
+Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisimulate"]

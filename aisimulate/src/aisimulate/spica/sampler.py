@@ -74,9 +74,7 @@ def _decoder_for(choices: list[Any]) -> Callable[[Any], Any]:
 
 
 def _index_decoder(choices: list[Any]) -> Callable[[Any], Any]:
-    """Decode a categorical *index* back to the chosen entry. Used when a knob's
-    choices include dicts (a composite knob with pinned-dict entries) — dicts can't
-    be Vizier categorical values, so we categorize over the index instead."""
+    """Decode a categorical index back to an arbitrary JSON choice."""
     return lambda v: choices[round(float(v))]
 
 
@@ -163,27 +161,32 @@ class VizierBranchSampler:
             )
             self._decoders[knob] = float
         for knob, choices in branch.knob_choices.items():
-            if not any(isinstance(c, dict) for c in choices):
-                # defensively dedupe hashable choices (order-preserving); duplicates
-                # would otherwise crash Vizier study construction with an opaque error.
-                # Composite (dict-bearing) knobs are left alone — dicts are unhashable
-                # and their categorical decode is index-based, not value-based.
+            # Dedupe scalar choices before passing them to Vizier. Structured and
+            # heterogeneous choices are encoded by index below, so duplicate decoded
+            # values are harmless and do not need hashing.
+            all_strings = all(isinstance(choice, str) for choice in choices)
+            all_numeric = all(
+                isinstance(choice, (int, float)) and not isinstance(choice, bool)
+                for choice in choices
+            )
+            if all_strings or all_numeric:
                 choices = list(dict.fromkeys(choices))
             if len(choices) <= 1:
                 if choices:
                     self._constants[knob] = choices[0]  # fixed -> inject, not a param
                 continue
-            if any(isinstance(c, dict) for c in choices):
-                # composite knob with pinned-dict entries -> categorical over index
-                root.add_categorical_param(knob, [str(i) for i in range(len(choices))])
-                self._decoders[knob] = _index_decoder(choices)
-            elif all(isinstance(c, str) for c in choices):
+            if all_strings:
                 kwargs = {"default_value": choices[0]} if knob == "backend" else {}
                 root.add_categorical_param(knob, list(choices), **kwargs)
                 self._decoders[knob] = _decoder_for(choices)
-            else:
+            elif all_numeric:
                 root.add_discrete_param(knob, sorted(float(c) for c in choices))
                 self._decoders[knob] = _decoder_for(choices)
+            else:
+                # Preserve arbitrary JSON choices (including booleans, null, lists,
+                # dicts, and heterogeneous values) through a categorical index.
+                root.add_categorical_param(knob, [str(i) for i in range(len(choices))])
+                self._decoders[knob] = _index_decoder(choices)
 
         # GP designers reject a zero-dimensional study. A fully pinned request still
         # needs one internal constant so it can use the same ask/tell lifecycle.

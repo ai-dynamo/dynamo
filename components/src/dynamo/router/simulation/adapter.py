@@ -106,6 +106,13 @@ def _deployment_modes(
     return [str(mode) for mode in raw_modes]
 
 
+def _float_selection(selection: Mapping[str, JSONValue], name: str) -> float:
+    value = selection[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"Router {name} selection must be numeric")
+    return float(value)
+
+
 class DynamoRouterSimulationAdapter:
     """Router search-space preparation and replay-spec materialization."""
 
@@ -159,9 +166,9 @@ class DynamoRouterSimulationAdapter:
             raise ValueError(f"unsupported Router mode {mode!r}")
 
         router_config: dict[str, JSONValue] = {
-            "overlap_score_credit": float(selection["overlap_score_credit"]),
-            "prefill_load_scale": float(selection["prefill_load_scale"]),
-            "router_temperature": float(selection["temperature"]),
+            "overlap_score_credit": _float_selection(selection, "overlap_score_credit"),
+            "prefill_load_scale": _float_selection(selection, "prefill_load_scale"),
+            "router_temperature": _float_selection(selection, "temperature"),
         }
         concrete_config: dict[str, JSONValue] = {
             "mode": mode,

@@ -8,11 +8,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from tqdm import tqdm
+from tqdm import tqdm  # type: ignore[import-untyped]
 
 from .presets import throughput_intervals
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig
 
 LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
     "constant_last": {"family": "constant", "log1p": False},
@@ -231,7 +234,7 @@ def _new_predictors(preset: dict[str, Any], interval_s: int):
     from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 
     predictor_class = LOAD_PREDICTORS[preset["family"]]
-    config = _make_config(preset, interval_s)
+    config = cast("PlannerConfig", _make_config(preset, interval_s))
     return predictor_class(config), predictor_class(config), predictor_class(config)
 
 

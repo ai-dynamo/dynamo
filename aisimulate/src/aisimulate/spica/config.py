@@ -4,7 +4,7 @@
 """Input schema for a Spica smart-search run.
 
 These Pydantic models are the single source of truth for the search inputs. See
-``docs/fern/components/aisimulate/spica/overview.md`` for the experimental design:
+``docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/search-flow.md`` for the experimental design:
 
 - :class:`SearchSpace`        — the knobs to sweep + pinned context, per component
 - :class:`Workload`           — the traffic every candidate is evaluated against

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Parity tests for the Router-owned Spica simulation adapter."""
 
@@ -7,11 +9,21 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
+
 from aisimulate.spica.adapter import CandidateContext, SweepContext
 from aisimulate.spica.replay import BackendDeploymentSpec
 from dynamo.router.simulation import create_adapter
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.planner,
+]
 
 
 def _sweep_context() -> SweepContext:

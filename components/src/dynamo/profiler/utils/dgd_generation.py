@@ -92,7 +92,7 @@ def assemble_final_config(
        priority 1 of its bootstrap chain, superseding AIC and files.
     4. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
-       initialize the Rust perf shim with native AIC identity. When
+       initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
     5. **Profile data** — attach interpolation-data ConfigMap when mocker
@@ -425,7 +425,7 @@ def add_planner_to_config(
         aic_spec: AIC interpolation spec (rapid mode). When set, the planner
             runs AIC in-process at bootstrap instead of reading NPZ files.
         aic_perf_model: Native AIC forward-pass perf model identity for
-            real-time Rust shim queries.
+            real-time Planner engine queries.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
@@ -659,10 +659,10 @@ def build_aic_perf_model_spec(
     resolved_backend: str,
     system: str,
 ) -> Optional[AICPerfModelSpec]:
-    """Build native AIC identity for the planner's Rust perf shim.
+    """Build native AIC identity for the Planner's AIC core integration.
 
     This is intentionally independent from AIC interpolation. It does not
-    request a sweep; it only gives the shim enough identity and parallelism
+    request a sweep; it only gives the Planner enough identity and parallelism
     data to try native forward-pass estimation before falling back to
     observed-FPM regression.
     """

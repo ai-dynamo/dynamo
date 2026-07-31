@@ -77,6 +77,13 @@ class _Adapter:
         )
 
 
+class _MutatingAdapter(_Adapter):
+    def materialize_replay(self, plan, selection, context):
+        context.sample["backend"] = "mutated"
+        context.backend_deployment.agg_engine_args["max_num_seqs"] = 1
+        return super().materialize_replay(plan, selection, context)
+
+
 class _Sampler:
     def __init__(self, branch, study_id, objectives=None):
         del study_id, objectives
@@ -207,3 +214,75 @@ def test_runner_hook_capability_is_checked_before_runner_creation(monkeypatch) -
         )
 
     assert factory.created == 0
+
+
+def test_adapter_candidate_context_is_isolated_from_core_candidate(monkeypatch) -> None:
+    _stub_branch(monkeypatch)
+    factory = _RunnerFactory()
+
+    candidates = search_module.run_smart_search(
+        _config(),
+        runner_factory=factory,
+        adapters={"test.feature": _MutatingAdapter()},
+        sampler_factory=_Sampler,
+        show_progress=False,
+    )
+
+    spec = factory.runner.specs[0]
+    assert spec.backend_deployment.backend == "vllm"
+    assert spec.backend_deployment.agg_engine_args["max_num_seqs"] == 256
+    assert candidates[0].config["backend"] == "vllm"
+
+
+def test_adapter_search_contexts_are_isolated() -> None:
+    config_data = _config().model_dump(mode="python")
+    config_data["adapters"] = {
+        "mutator": {"search_space": {}},
+        "observer": {"search_space": {}},
+    }
+    config = SmartSearchConfig.model_validate(config_data)
+    observed_backends = []
+
+    class Mutator:
+        name = "mutator"
+        api_version = 1
+
+        def generate_search_space(self, search_spec, context):
+            context.core_search_space["backend"].append("mutated")
+            return AdapterSearchPlan()
+
+        def materialize_replay(self, plan, selection, context):
+            return AdapterReplaySpec()
+
+    class Observer:
+        name = "observer"
+        api_version = 1
+
+        def generate_search_space(self, search_spec, context):
+            observed_backends.extend(context.core_search_space["backend"])
+            return AdapterSearchPlan()
+
+        def materialize_replay(self, plan, selection, context):
+            return AdapterReplaySpec()
+
+    search_module._prepare_adapters(
+        config,
+        injected={"mutator": Mutator(), "observer": Observer()},
+        show_progress=False,
+    )
+
+    assert observed_backends == ["vllm"]
+
+
+def test_adapter_contract_rejects_non_json_values_before_worker_submission() -> None:
+    with pytest.raises(TypeError, match="test.feature.*non-JSON replay spec"):
+        search_module._validate_adapter_replay_spec(
+            "test.feature",
+            AdapterReplaySpec(config={"invalid": object()}),
+        )
+
+    with pytest.raises(TypeError, match="test.feature.*non-JSON search plan"):
+        search_module._validate_search_plan(
+            "test.feature",
+            AdapterSearchPlan(state={"invalid": object()}),
+        )

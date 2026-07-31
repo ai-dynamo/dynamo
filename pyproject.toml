@@ -383,6 +383,13 @@ module = ["dynamo.planner.manual.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
+# AI Simulate is a separate, optional distribution. Check Dynamo's adapters,
+# but do not recursively analyze the standalone package from this mypy target.
+module = ["aisimulate", "aisimulate.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # Skip mypy analysis on backend framework internals.
 # ignore_missing_imports silences import-not-found only when the backend
 # is not installed (e.g. sglang/trtllm missing in the vllm container).

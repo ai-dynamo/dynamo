@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before the simulation imports.
+# ruff: noqa: E402
 
 """Golden parity tests for the Planner adapter's load-predictor pre-sweep."""
 
 import math
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.spica",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 import dynamo.planner.simulation.load_predictor as load_predictor
 from dynamo.planner.simulation.load_predictor import (
