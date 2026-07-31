@@ -51,7 +51,7 @@ DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
 
 ## Prerequisites
 
-- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/fern/kubernetes/quickstart.mdx))
+- Dynamo Kubernetes Platform installed (see [Kubernetes Quickstart](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx))
 - Cluster Prometheus scraping router metrics via PodMonitor
 - HuggingFace token secret:
   ```bash
@@ -191,7 +191,7 @@ This is why planner configs and router endpoints use the full `${K8S_NAMESPACE}-
 
 ## Further Reading
 
-- [Global Planner Deployment Guide](../../docs/fern/components/planner/global-planner.md)
+- [Global Planner Deployment Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
 - [Global Planner README](../../components/src/dynamo/global_planner/README.md)
-- [Planner Configuration Guide](../../docs/fern/components/planner/planner-guide.md)
+- [Planner Configuration Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
 - [Global Router README](../../components/src/dynamo/global_router/README.md)

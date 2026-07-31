@@ -146,7 +146,7 @@ operator:
   - 'deploy/operator/.*'
   # Operator imports the local snapshot module.
   - 'deploy/snapshot/**'
-  - 'docs/fern/kubernetes/api-reference.md'
+  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'

@@ -40,7 +40,7 @@
 ^https://github\.com/ai-dynamo/dynamo/blob/main/docs/fern/components/releases\.data\.ts$
 
 # The DGDR example manifests land with this docs refactor; the canonical
-# tree/main link in templates/dgdr.mdx 404s from CI until the PR is merged.
+# tree/main link in recipes/kubernetes-templates/dgdr.mdx 404s from CI until the PR is merged.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr$
 
 # The standalone on-ramp agg.yaml is added in this same PR, so blob/main links to
