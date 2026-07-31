@@ -41,6 +41,9 @@ def test_aiperf_command_uses_explicit_external_warmup(tmp_path: Path) -> None:
 
     assert "--warmup-request-count" not in command
     assert "--use-server-token-count" in command
+    zmq_dir = command[command.index("--zmq-ipc-path") + 1]
+    assert zmq_dir.startswith("/tmp/aiperf-combined-")
+    assert len(f"{zmq_dir}/event_bus_proxy_frontend.ipc") <= 107
 
 
 def _write_manifest(root: Path, encoded: str, decoded: str) -> None:

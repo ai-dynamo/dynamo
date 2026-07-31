@@ -16,6 +16,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -379,8 +380,7 @@ def _aiperf_command(
     artifact_dir: Path,
 ) -> list[str]:
     osl = TARGET_OSL if role == COMBINED_ROLE else 1
-    zmq_dir = artifact_dir / "zmq"
-    zmq_dir.mkdir(parents=True, exist_ok=True)
+    zmq_dir = Path(tempfile.mkdtemp(prefix=f"aiperf-{role}-", dir="/tmp"))
     command = [
         "aiperf",
         "profile",
