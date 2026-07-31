@@ -8,12 +8,16 @@
 pub mod input;
 pub use input::{PreprocessedRouting, build_preprocessed_routing};
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{env, future::Future};
 
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
-use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use dynamo_runtime::{
+    config::environment_names::router::DYN_ENCODER_CUDA_TO_CPU_RATIO,
+    discovery::ModelCardInstanceId,
+    pipeline::{RouterMode, resolve_non_cpu_to_cpu_ratio},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -52,6 +56,10 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
+    /// Optional non-CPU-to-CPU capacity ratio for device-aware weighted routing.
+    /// When unset or below 1, the legacy environment variable fallback is used.
+    #[serde(default)]
+    pub non_cpu_to_cpu_ratio: Option<usize>,
 }
 
 impl RouterConfig {
@@ -62,6 +70,7 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
+            non_cpu_to_cpu_ratio: None,
         }
     }
 
@@ -81,6 +90,18 @@ impl RouterConfig {
     pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
         self.session_affinity_ttl_secs = Some(ttl_secs);
         self
+    }
+
+    pub fn with_non_cpu_to_cpu_ratio(mut self, ratio: usize) -> Self {
+        self.non_cpu_to_cpu_ratio = Some(ratio);
+        self
+    }
+
+    pub fn resolved_non_cpu_to_cpu_ratio(&self) -> usize {
+        resolve_non_cpu_to_cpu_ratio(
+            self.non_cpu_to_cpu_ratio,
+            env::var(DYN_ENCODER_CUDA_TO_CPU_RATIO).ok().as_deref(),
+        )
     }
 }
 

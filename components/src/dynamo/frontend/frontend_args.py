@@ -159,6 +159,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
         self.validate_rejection_thresholds()
+        self.validate_non_cpu_to_cpu_ratio()
         self.log_rejection_thresholds()
 
 

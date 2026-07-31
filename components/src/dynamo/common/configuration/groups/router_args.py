@@ -30,6 +30,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
+    "non_cpu_to_cpu_ratio",
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -73,6 +74,7 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
+    non_cpu_to_cpu_ratio: Optional[int]
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
@@ -99,6 +101,12 @@ class RouterConfigBase(ConfigBase):
             raise ValueError(
                 "--active-prefill-tokens-threshold-frac must be a finite value >= 0"
             )
+
+    def validate_non_cpu_to_cpu_ratio(self) -> None:
+        """Validate the optional device-aware weighted router capacity ratio."""
+        ratio = self.non_cpu_to_cpu_ratio
+        if ratio is not None and ratio < 1:
+            raise ValueError("--encoder-non-cpu-to-cpu-ratio must be >= 1")
 
     def log_rejection_thresholds(self) -> None:
         """Log which independently configured rejection checks are active."""
@@ -203,6 +211,17 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+        )
+        g.add_argument(
+            "--encoder-non-cpu-to-cpu-ratio",
+            default=None,
+            type=int,
+            dest="non_cpu_to_cpu_ratio",
+            help=(
+                "Device-aware weighted routing capacity ratio between non-CPU "
+                "encoder workers and CPU encoder workers. When unset, the Rust "
+                "router falls back to env var DYN_ENCODER_CUDA_TO_CPU_RATIO and then 8."
+            ),
         )
         add_argument(
             g,

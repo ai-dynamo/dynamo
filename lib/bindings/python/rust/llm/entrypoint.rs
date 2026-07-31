@@ -456,12 +456,15 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    non_cpu_to_cpu_ratio: Option<usize>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, non_cpu_to_cpu_ratio=None))]
+    // PyO3 keeps this constructor aligned with the Python keyword API.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -470,6 +473,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        non_cpu_to_cpu_ratio: Option<usize>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -483,6 +487,9 @@ impl RouterConfig {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
+        }
+        if non_cpu_to_cpu_ratio.is_some_and(|ratio| ratio < 1) {
+            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
         }
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
@@ -498,7 +505,22 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            non_cpu_to_cpu_ratio,
         })
+    }
+
+    #[getter(non_cpu_to_cpu_ratio)]
+    fn non_cpu_to_cpu_ratio(&self) -> Option<usize> {
+        self.non_cpu_to_cpu_ratio
+    }
+
+    #[setter(non_cpu_to_cpu_ratio)]
+    fn set_non_cpu_to_cpu_ratio(&mut self, value: Option<usize>) -> PyResult<()> {
+        if value.is_some_and(|ratio| ratio < 1) {
+            return Err(PyValueError::new_err("non_cpu_to_cpu_ratio must be >= 1"));
+        }
+        self.non_cpu_to_cpu_ratio = value;
+        Ok(())
     }
 }
 
@@ -514,6 +536,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            non_cpu_to_cpu_ratio: rc.non_cpu_to_cpu_ratio,
         }
     }
 }

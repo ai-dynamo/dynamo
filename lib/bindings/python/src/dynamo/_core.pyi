@@ -1672,6 +1672,7 @@ class RouterConfig:
     """How to route the request"""
     router_mode: RouterMode
     kv_router_config: KvRouterConfig
+    non_cpu_to_cpu_ratio: Optional[int]
 
     def __init__(
         self,
@@ -1682,6 +1683,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        non_cpu_to_cpu_ratio: Optional[int] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1694,6 +1696,7 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            non_cpu_to_cpu_ratio: Device-aware weighted non-CPU-to-CPU capacity ratio.
         """
         ...
 

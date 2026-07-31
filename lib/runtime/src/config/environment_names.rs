@@ -627,6 +627,9 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Legacy ratio of non-CPU encoder capacity to CPU encoder capacity used by device-aware weighted routing.
+    pub const DYN_ENCODER_CUDA_TO_CPU_RATIO: &str = "DYN_ENCODER_CUDA_TO_CPU_RATIO";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -898,6 +901,7 @@ mod tests {
             model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
+            router::DYN_ENCODER_CUDA_TO_CPU_RATIO,
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,

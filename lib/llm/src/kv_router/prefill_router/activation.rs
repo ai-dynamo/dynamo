@@ -11,7 +11,7 @@ use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
-    pipeline::{PushRouter, RouterMode},
+    pipeline::{PushRouter, RouterMode, resolve_non_cpu_to_cpu_ratio},
     prelude::DistributedRuntimeProvider,
     protocols::annotated::Annotated,
 };
@@ -42,6 +42,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            non_cpu_to_cpu_ratio: resolve_non_cpu_to_cpu_ratio(None, None),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -63,6 +64,7 @@ impl PrefillRouter {
         namespace: String,
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        non_cpu_to_cpu_ratio: usize,
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -74,6 +76,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            non_cpu_to_cpu_ratio: resolve_non_cpu_to_cpu_ratio(Some(non_cpu_to_cpu_ratio), None),
             prefill_load_estimator,
             model_name,
             namespace,
@@ -179,10 +182,11 @@ impl PrefillRouter {
                 create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor_and_ratio(
                 client,
                 RouterMode::KV,
                 None, // worker_monitor
+                self.non_cpu_to_cpu_ratio,
             )
             .await?;
 
@@ -202,10 +206,11 @@ impl PrefillRouter {
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor_and_ratio(
                 client,
                 self.router_mode,
                 None, // worker_monitor
+                self.non_cpu_to_cpu_ratio,
             )
             .await?;
 

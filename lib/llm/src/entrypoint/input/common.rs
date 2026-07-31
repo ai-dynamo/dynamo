@@ -252,6 +252,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    non_cpu_to_cpu_ratio: usize,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -288,12 +289,13 @@ pub async fn build_preprocessed_routing(
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router = LlmPushRouter::from_client_with_state(
+    let router = LlmPushRouter::from_client_with_state_and_ratio(
         router_client,
         router_mode,
         monitor_arc,
         embedding_cache_indexer,
         cache_key_extractor,
+        non_cpu_to_cpu_ratio,
     )
     .await?;
 

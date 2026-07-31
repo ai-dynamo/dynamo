@@ -22,7 +22,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::pipeline::{RouterMode, non_cpu_to_cpu_ratio_from_env};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
@@ -183,6 +183,10 @@ impl Router {
             // ext-proc constructs no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
+            // ext-proc carries no RouterConfig, so the ratio resolves from the
+            // legacy environment variable exactly as it did before the ratio
+            // became an explicit parameter.
+            non_cpu_to_cpu_ratio_from_env(),
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);

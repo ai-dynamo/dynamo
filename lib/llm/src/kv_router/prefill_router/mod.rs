@@ -159,6 +159,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    non_cpu_to_cpu_ratio: usize,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
     model_name: String,
@@ -498,6 +499,27 @@ mod tests {
     };
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[tokio::test]
+    async fn new_stores_resolved_non_cpu_to_cpu_ratio() {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new(
+            rx,
+            Arc::new(ModelManager::new()),
+            RouterMode::DeviceAwareWeighted,
+            16,
+            None,
+            None,
+            None,
+            "model".to_string(),
+            "namespace".to_string(),
+            false,
+            None,
+            3,
+        );
+
+        assert_eq!(router.non_cpu_to_cpu_ratio, 3);
+    }
 
     #[test]
     fn decode_router_override_disables_overlap_and_prefill_tracking() {
