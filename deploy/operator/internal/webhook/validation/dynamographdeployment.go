@@ -32,6 +32,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -574,6 +575,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			canModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
+		allErrs = append(allErrs, v.validateDynamoGraphDeploymentSharedSpecUpdate(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i),
+		)...)
 	}
 
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -614,6 +620,53 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		))
 	}
 
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentSharedSpecUpdate validates DGD-specific component fields on update.
+// newComponent, oldComponent, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpecUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
+	oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
+
+	// Reject transitions into, out of, or within the power-annotation contract.
+	if newHasPowerLimit != oldHasPowerLimit ||
+		(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+		var invalidValue any
+		if newHasPowerLimit {
+			invalidValue = newPowerLimit
+		}
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	if oldHasPowerLimit {
+		// Keep the Planner's remaining cached per-replica power inputs stable.
+		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
+		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
+		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
+			allErrs = append(allErrs, field.Invalid(
+				newNumberOfGPUs.path,
+				newNumberOfGPUs.invalidValue(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode", "nodeCount"),
+				newComponent.GetNumberOfNodes(),
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+	}
 	return allErrs
 }
 
