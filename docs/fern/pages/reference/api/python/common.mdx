@@ -105,13 +105,13 @@ normalization downstream.
 Also supports the NIXL decoded variant for frontend-decoded audio
 transferred via RDMA.
 
-[`components/src/dynamo/common/multimodal/audio_loader.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L66)
+[`components/src/dynamo/common/multimodal/audio_loader.py#L70`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L70)
 
 **Public methods**
 
-- `__init__(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L80))
-- `load_audio(audio_url: str) -> tuple[np.ndarray, float]` — Load audio from a URL and return a (waveform, sample_rate) tuple. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L132))
-- `load_audio_batch(audio_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, float]]` — Load a batch of audio files from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L170))
+- `__init__(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L84))
+- `load_audio(audio_url: str) -> tuple[np.ndarray, float]` — Load audio from a URL and return a (waveform, sample_rate) tuple. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L136))
+- `load_audio_batch(audio_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, float]]` — Load a batch of audio files from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L180))
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-baseengine" title="BaseEngine (class)">
@@ -873,13 +873,13 @@ from dynamo.common.multimodal import VideoLoader
 VideoLoader(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
 ```
 
-[`components/src/dynamo/common/multimodal/video_loader.py#L72`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L72)
+[`components/src/dynamo/common/multimodal/video_loader.py#L76`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L76)
 
 **Public methods**
 
-- `__init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L75))
-- `load_video(video_url: str) -> tuple[np.ndarray, Dict[str, Any]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L131))
-- `load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L161))
+- `__init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L79))
+- `load_video(video_url: str) -> tuple[np.ndarray, Dict[str, Any]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L135))
+- `load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L171))
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
@@ -896,12 +896,14 @@ WelfordAccumulator() -> None
 Numerically stable single-pass computation -- avoids catastrophic
 cancellation that sum-of-squares can suffer with large values.
 
-Usage::
+Usage
 
+```
 acc = WelfordAccumulator()
 for v in values:
-acc.add(v)
+    acc.add(v)
 print(acc.n, acc.s, acc.variance())
+```
 
 [`components/src/dynamo/common/forward_pass_metrics.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L48)
 
@@ -928,12 +930,12 @@ or a `DiffusionEngine` (raw media pipeline). The request adapter is
 selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
 ``WorkerConfig.model_input`` is validated against that kind.
 
-[`components/src/dynamo/common/backend/worker.py#L224`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L224)
+[`components/src/dynamo/common/backend/worker.py#L228`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L228)
 
 **Public methods**
 
-- `__init__(engine: BaseEngine, config: WorkerConfig)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L232))
-- `run() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L236))
+- `__init__(engine: BaseEngine, config: WorkerConfig)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L236))
+- `run() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L240))
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-worker-workerconfig" title="WorkerConfig (class)">
@@ -944,15 +946,15 @@ from dynamo.common.backend import WorkerConfig
 ```
 
 ```python
-WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None) -> None
+WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None
 ```
 
 [`components/src/dynamo/common/backend/worker.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L104)
 
 **Public methods**
 
-- `from_runtime_config(cls, runtime_cfg, model_name: str, served_model_name: Optional[str] = None, model_input: Optional[ModelInput] = None, **overrides) -> 'WorkerConfig'` — Build from any object that carries DynamoRuntimeConfig fields. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L150))
-- `__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py))
+- `from_runtime_config(cls, runtime_cfg, model_name: str, served_model_name: Optional[str] = None, model_input: Optional[ModelInput] = None, **overrides) -> 'WorkerConfig'` — Build from any object that carries DynamoRuntimeConfig fields. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L151))
+- `__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py))
 </Accordion>
 
 <Accordion id="api-dynamo-common-config-dump-config-dumper-add-config-dump-args" title="add_config_dump_args (function)">

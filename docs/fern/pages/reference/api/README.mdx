@@ -8,7 +8,7 @@ subtitle: Language-by-language public surface for Dynamo, discovered from the so
 <CardGroup cols={3}>
 <Card title="Python" href="python/README.mdx">Worker decorators, HTTP frontend, planner / router / mocker configuration, and the Rust-backed runtime bindings.</Card>
 <Card title="Rust" href="rust/README.mdx">Distributed runtime crates published on crates.io, pinned to the current release.</Card>
-<Card title="Kubernetes" href="../../kubernetes/api-reference-fern.mdx">DynamoGraphDeployment, DynamoGraphDeploymentRequest, and DynamoComponentDeployment custom-resource fields.</Card>
+<Card title="Kubernetes" href="../kubernetes-api/full-api-reference.mdx">DynamoGraphDeployment, DynamoGraphDeploymentRequest, and DynamoComponentDeployment custom-resource fields.</Card>
 </CardGroup>
 
 The API Reference is a machine-generated view of Dynamo's public surface, kept
@@ -22,9 +22,9 @@ and deep-links to the exact file and line on `main`.
   curated module. Class methods and function signatures are pulled directly
   from the source; there are no hand-maintained tables.
 - **Rust** — see the published [`ai-dynamo` crates on crates.io][crates] and
-  the [release artifact inventory](../release-artifacts.mdx) for currently
-  shipped crate versions.
-- **Kubernetes** — the [Kubernetes API reference](../../kubernetes/api-reference-fern.mdx)
+  the [release artifact inventory](../general/release-artifacts.mdx) for
+  currently shipped crate versions.
+- **Kubernetes** — the [Kubernetes API reference](../kubernetes-api/full-api-reference.mdx)
   documents the full DynamoGraphDeployment / DynamoComponentDeployment
   custom-resource surface. Trimmed per-CRD references (DGD, DGDR, DCD) live
   as siblings under the same section so every deep link resolves.
@@ -36,11 +36,11 @@ source with [griffe][griffe] — no import, no build, no runtime dependency on
 backend containers. From one parse it writes:
 
 - the [Python API landing page](python/README.mdx) at
-  `docs/fern/reference/api/python/README.mdx`, a card index of every curated
-  module.
-- `docs/fern/reference/api/python/<module>.mdx` — one page per curated module,
-  with an anchored accordion per symbol carrying its import statement,
-  signature, and public methods.
+  `docs/fern/pages/reference/api/python/README.mdx`, a card index of every
+  curated module.
+- `docs/fern/pages/reference/api/python/<module>.mdx` — one page per curated
+  module, with an anchored accordion per symbol carrying its import
+  statement, signature, and public methods.
 
 Every page is plain MDX built from Fern's own components, so the whole
 surface is indexed for search and Fern derives the Markdown and `llms.txt`

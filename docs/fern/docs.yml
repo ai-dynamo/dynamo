@@ -902,22 +902,6 @@ redirects:
     destination: "/dynamo/zh-CN/dev/contributing/contribution-guide"
   - source: "/dynamo/dev/additional-resources/request-migration-simplified-chinese"
     destination: "/dynamo/zh-CN/dev/kubernetes/fault-tolerance/request-migration"
-  # Kubernetes API colocation: the standalone Kubernetes API variant collapsed
-  # into API Reference alongside Python and Rust. The section landing at
-  # /reference/api/kubernetes owns kubernetes/api-reference-fern.mdx, which
-  # previously lived at /reference/kubernetes-api/full-api-reference.
-  - source: "/dynamo/dev/reference/kubernetes-api/full-api-reference"
-    destination: "/dynamo/dev/reference/api/kubernetes"
-  - source: "/dynamo/dev/reference/kubernetes-api/dynamographdeployment"
-    destination: "/dynamo/dev/reference/api/kubernetes/dynamographdeployment"
-  - source: "/dynamo/dev/reference/kubernetes-api/dynamographdeploymentrequest"
-    destination: "/dynamo/dev/reference/api/kubernetes/dynamographdeploymentrequest"
-  - source: "/dynamo/dev/reference/kubernetes-api/dynamocomponentdeployment"
-    destination: "/dynamo/dev/reference/api/kubernetes/dynamocomponentdeployment"
-  - source: "/dynamo/dev/reference/kubernetes-api/additional-resources/api-reference-k-8-s"
-    destination: "/dynamo/dev/reference/api/kubernetes/additional-resources/api-reference-k-8-s"
-  - source: "/dynamo/dev/reference/kubernetes-api/:slug*"
-    destination: "/dynamo/dev/reference/api/kubernetes/:slug*"
 
 # GitHub repository link in navbar
 navbar-links:

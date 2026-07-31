@@ -22,7 +22,12 @@ DEFAULT_RELEASES_DATA = DEFAULT_FERN_ROOT / "components" / "releases.data.ts"
 def _outputs(fern_root: Path, reference: RustReference) -> dict[Path, str]:
     """Build every generated Rust output in one pass."""
     return {
-        fern_root / "reference" / "api" / "rust" / "README.mdx": render_page(reference),
+        fern_root
+        / "pages"
+        / "reference"
+        / "api"
+        / "rust"
+        / "README.mdx": render_page(reference),
     }
 
 

@@ -8,10 +8,10 @@ static discovery of the eleven curated Dynamo Python packages) with
 :mod:`api_rendering` (deterministic MDX serialization) to emit two kinds of
 output from one parse:
 
-  * ``docs/fern/reference/api/python/README.mdx`` -- the Python language
-    landing page, a ``<CardGroup>`` indexing every curated module.
-  * ``docs/fern/reference/api/python/<slug>.mdx`` -- one page per curated
-    module, generated end-to-end (no manual stubs), with an anchored
+  * ``docs/fern/pages/reference/api/python/README.mdx`` -- the Python
+    language landing page, a ``<CardGroup>`` indexing every curated module.
+  * ``docs/fern/pages/reference/api/python/<slug>.mdx`` -- one page per
+    curated module, generated end-to-end (no manual stubs), with an anchored
     ``<Accordion>`` per symbol carrying its import statement, signature,
     and public methods.
 
@@ -41,11 +41,11 @@ DEFAULT_FERN_ROOT = SCRIPT_DIR.parent
 
 
 def _module_page_path(fern_root: Path, module: Module) -> Path:
-    return fern_root / "reference" / "api" / "python" / f"{module.slug}.mdx"
+    return fern_root / "pages" / "reference" / "api" / "python" / f"{module.slug}.mdx"
 
 
 def _landing_page_path(fern_root: Path) -> Path:
-    return fern_root / "reference" / "api" / "python" / "README.mdx"
+    return fern_root / "pages" / "reference" / "api" / "python" / "README.mdx"
 
 
 def _rendered_outputs(fern_root: Path, modules: list[Module]) -> dict[Path, str]:

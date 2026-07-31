@@ -12,6 +12,12 @@ import pytest
 import rust_api_discovery
 import rust_api_rendering
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FERN_ROOT = REPO_ROOT / "docs" / "fern"
 RELEASES_DATA = FERN_ROOT / "components" / "releases.data.ts"
@@ -55,7 +61,7 @@ def reference() -> rust_api_discovery.RustReference:
 def workspace(tmp_path: Path) -> Path:
     fern = tmp_path / "docs" / "fern"
     (fern / "components").mkdir(parents=True)
-    (fern / "reference" / "api" / "rust").mkdir(parents=True)
+    (fern / "pages" / "reference" / "api" / "rust").mkdir(parents=True)
     return fern
 
 
@@ -83,13 +89,14 @@ def test_discovery_matches_the_published_crate_inventory(
 def test_workspace_version_matches_current_release(
     reference: rust_api_discovery.RustReference,
 ) -> None:
+    """The published-crate inventory pins to ``reference.release_tag``.
+
+    The workspace itself is allowed to sit ahead of that tag while the next
+    development version bakes -- ``test_release_tag_may_lag_a_development_workspace``
+    covers that direction -- so this test only exercises the published /
+    lagging matrix, not workspace-tag equality.
+    """
     assert reference.release_tag == "1.3.0"
-    assert (
-        rust_api_discovery.validate_release_tag(
-            {"CURRENT_TAG": reference.release_tag}, reference.workspace_version
-        )
-        == reference.release_tag
-    )
     current = [
         crate
         for crate in reference.crates
@@ -197,7 +204,9 @@ def test_generator_writes_and_checks_outputs(
     cached_reference: rust_api_discovery.RustReference,
 ) -> None:
     assert gen_rust_api.main(["--fern-root", str(workspace)]) == 0
-    assert (workspace / "reference" / "api" / "rust" / "README.mdx").is_file()
+    assert (
+        workspace / "pages" / "reference" / "api" / "rust" / "README.mdx"
+    ).is_file()
     assert gen_rust_api.main(["--fern-root", str(workspace), "--check"]) == 0
 
 
@@ -206,17 +215,17 @@ def test_check_mode_detects_rust_page_drift(
     cached_reference: rust_api_discovery.RustReference,
 ) -> None:
     assert gen_rust_api.main(["--fern-root", str(workspace)]) == 0
-    page = workspace / "reference" / "api" / "rust" / "README.mdx"
+    page = workspace / "pages" / "reference" / "api" / "rust" / "README.mdx"
     page.write_text(page.read_text(encoding="utf-8") + "\n<!-- drift -->\n")
     assert gen_rust_api.main(["--fern-root", str(workspace), "--check"]) == 1
 
 
 def test_rust_page_is_registered_and_linked_from_the_landing() -> None:
     index = (FERN_ROOT / "index.yml").read_text(encoding="utf-8")
-    landing = (FERN_ROOT / "reference" / "api" / "README.mdx").read_text(
+    landing = (FERN_ROOT / "pages" / "reference" / "api" / "README.mdx").read_text(
         encoding="utf-8"
     )
-    assert "reference/api/rust/README.mdx" in index
+    assert "pages/reference/api/rust/README.mdx" in index
     assert 'href="rust/README.mdx"' in landing
 
 
@@ -226,7 +235,10 @@ def test_shipped_rust_outputs_are_fresh(
 ) -> None:
     generated = tmp_path / "generated"
     generated.mkdir()
-    shutil.copytree(FERN_ROOT / "reference", generated / "reference")
+    shutil.copytree(
+        FERN_ROOT / "pages" / "reference" / "api",
+        generated / "pages" / "reference" / "api",
+    )
     assert rust_api_rendering.render_page(reference) == (
-        generated / "reference" / "api" / "rust" / "README.mdx"
+        generated / "pages" / "reference" / "api" / "rust" / "README.mdx"
     ).read_text(encoding="utf-8")
