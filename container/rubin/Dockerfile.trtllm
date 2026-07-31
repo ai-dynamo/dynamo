@@ -78,69 +78,23 @@ WORKDIR /opt/dynamo
 # Pin to the 13.1 API — forward-compatible with the 13.4 driver.
 ENV CUDARC_CUDA_VERSION=13010
 
-# NVTX v2 shim for cudarc (required by the `nvtx` feature below).
+# NVTX needs NO runtime library on this image, in either language.
 #
-# THE PROBLEM. Two different NVTX APIs are in play:
-#   TRT-LLM  -> Python `nvtx` package  -> NVTX v3, HEADER-ONLY. Needs no shared library:
-#               the headers compile to inert stubs that bind to the profiler's injection
-#               library via NVTX_INJECTION64_PATH at first use. This is why TRT-LLM's
-#               markers (_enqueue_responses, handle_response, ...) show up in every nsys
-#               report with nothing installed.
-#   dynamo   -> cudarc 0.19.3 -> NVTX v2 C API (nvtxRangePushA, nvtxDomainCreateA, ...),
-#               which lives in libnvToolsExt.so. cudarc resolves it by DLOPEN, not
-#               DT_NEEDED (its default features include fallback-dynamic-loading, which
-#               build.rs turns into cfg dynamic-loading), looking only for the name
-#               "nvToolsExt" (src/nvtx/sys/mod.rs:923,938). If nothing loads, culib()
-#               calls panic_no_lib_found() (src/lib.rs:181-183) - a hard panic, and a Rust
-#               panic across the pyo3 boundary takes the decode worker down.
+# Both halves of the stack are now on NVTX v3, which is HEADER-ONLY: the headers compile
+# to inert stubs that bind to the profiler's injection library via NVTX_INJECTION64_PATH
+# at first use. Nothing is linked, nothing is dlopened.
+#   TRT-LLM + dynamo Python -> `nvtx` PyPI package -> includes nvtx3/nvToolsExt.h.
+#   dynamo Rust             -> `nvtx` crate 1.3    -> vendors the nvtx3 headers, cc-built.
 #
-# CUDA 13 REMOVED libnvToolsExt.so entirely. The replacement is libnvtx3interop.so.1,
-# shipped by the `nvidia-nvtx` wheel (note: nvidia-nvtx-cu13 is only a deprecation stub
-# pointing here). Verified against nvidia_nvtx-13.3.29 manylinux2014_aarch64: it exports
-# the full v2 surface cudarc binds - nvtxRangePushA, nvtxRangePop, nvtxDomainCreateA,
-# nvtxRangeStartEx, nvtxNameOsThreadA, nvtxDomainRangePushEx, 105 nvtx* symbols in total.
-# So the ABI is there; only the FILENAME differs. Symlinking it under the name cudarc
-# dlopens is enough. Both .so and .so.1 forms are created because cudarc derives several
-# candidate names from DLL_PREFIX/DLL_SUFFIX plus version suffixes.
+# This replaced a libnvToolsExt.so.1 symlink shim that existed only because the Rust side
+# used to reach NVTX through cudarc's NVTX **v2** binding, which dlopens "nvToolsExt" —
+# a library CUDA 13 deleted. On a miss cudarc calls panic_no_lib_found(), and a Rust panic
+# across the pyo3 boundary took the decode worker down. Moving to the v3 crate removes the
+# failure mode and the wheel along with it; do not reintroduce the shim.
 #
-# THIS IS A WORKAROUND, NOT A SUPPORTED CONFIGURATION. NVIDIA renamed the library
-# deliberately; nothing guarantees the shim keeps this ABI. The clean fix is to move
-# dynamo off cudarc's v2 binding onto NVTX v3, exactly as TRT-LLM already does - then no
-# runtime library is needed at all. Revisit on the next dynamo/cudarc bump.
-#
-# Gated at runtime by DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs:9-14); with the env
-# var unset this layer costs one 150 KB wheel and nothing else.
-#
-# TWO BUILD-ONLY GOTCHAS, both hit and fixed here:
-#  1. `ldconfig` exits NON-ZERO on this base over a pre-existing, unrelated HPC-X file
-#     (/opt/hpcx/nccl_spectrum-x_plugin/lib/libdoca_gpunetio_host.so.0 "is not a symbolic
-#     link"). That is not our problem and must not fail the build -> `{ ldconfig || true; }`.
-#  2. Verification is a real dlopen via ctypes, NOT `ldconfig -p | grep`. dlopen-by-soname
-#     is exactly the call cudarc makes (Lib::new on the candidate names), so this tests the
-#     thing that actually has to work, and it does not depend on the ldconfig cache having
-#     been rebuilt. Symbols are probed too, so an ABI-stripped shim also fails here.
-# The symlinks are placed in BOTH /usr/local/lib and /usr/lib: if the ldconfig cache update
-# is incomplete, dlopen falls back to the trusted default path, which includes /usr/lib but
-# not necessarily /usr/local/lib.
-# NOTE: `nvidia` and `nvidia.cu13` are NAMESPACE packages (no __init__.py), so
-# nvidia.cu13.__file__ is None and dirname(__file__) raises TypeError. Locate the .so by
-# globbing site-packages instead of importing - immune to namespace-package semantics and
-# to any other `nvidia` distribution on the path shadowing it.
-RUN pip install --break-system-packages --no-cache-dir "nvidia-nvtx==13.3.29" \
- && NVTX_SO=$(python3 -c "import sysconfig,glob,os; \
-      roots=[sysconfig.get_paths()['purelib'], sysconfig.get_paths()['platlib']]; \
-      hits=[h for r in roots for h in sorted(glob.glob(os.path.join(r,'nvidia','**','libnvtx3interop.so*'),recursive=True))]; \
-      print(hits[0] if hits else '')") \
- && { [ -n "${NVTX_SO}" ] || NVTX_SO=$(find / -xdev -name 'libnvtx3interop.so*' 2>/dev/null | head -1); } \
- && test -f "${NVTX_SO}" \
- && ln -sf "${NVTX_SO}" /usr/local/lib/libnvToolsExt.so.1 \
- && ln -sf /usr/local/lib/libnvToolsExt.so.1 /usr/local/lib/libnvToolsExt.so \
- && ln -sf "${NVTX_SO}" /usr/lib/libnvToolsExt.so.1 \
- && ln -sf /usr/lib/libnvToolsExt.so.1 /usr/lib/libnvToolsExt.so \
- && { ldconfig || true; } \
- && python3 -c "import ctypes; h=ctypes.CDLL('libnvToolsExt.so.1'); \
-      [getattr(h,s) for s in ('nvtxRangePushA','nvtxRangePop','nvtxDomainCreateA','nvtxNameOsThreadA')]; \
-      print('libnvToolsExt shim OK - dlopen + v2 symbols resolved')"
+# Rust markers stay gated at runtime by DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs),
+# Python markers by DYN_NVTX (components/src/dynamo/common/utils/nvtx_utils.py).
+RUN pip install --break-system-packages --no-cache-dir nvtx
 
 RUN cd lib/bindings/python \
  && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,nvtx" --out /opt/dynamo/dist \

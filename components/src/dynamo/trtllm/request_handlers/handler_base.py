@@ -35,6 +35,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -885,6 +886,7 @@ class HandlerBase(BaseGenerativeHandler):
             logging.critical("Forcing process exit for restart")
             os._exit(1)
 
+    @_nvtx.range_decorator("trtllm:generate_locally", color="blue")
     async def generate_locally(
         self,
         request: dict,
@@ -966,19 +968,28 @@ class HandlerBase(BaseGenerativeHandler):
                 logging.warning("Additional metrics (request type): %s", e)
 
         # Normalize OpenAI format to TRT-LLM internal format
-        self._normalize_request_format(request)
+        with _nvtx.annotate("trtllm:normalize_request", color="cyan"):
+            self._normalize_request_format(request)
 
         # Setup disaggregated params based on PREFILL/DECODE mode
-        (
-            disaggregated_params,
-            ep_disaggregated_params,
-            epd_metadata,
-        ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
+        with _nvtx.annotate("trtllm:setup_disagg_params", color="cyan"):
+            (
+                disaggregated_params,
+                ep_disaggregated_params,
+                epd_metadata,
+            ) = self._setup_disaggregated_params_for_mode(
+                request, ep_disaggregated_params
+            )
 
-        # Prepare input for generation (handles multimodal/text flows)
-        processed_input = await self._prepare_input_for_generation(
-            request, embeddings, ep_disaggregated_params, epd_metadata
-        )
+        # Prepare input for generation (handles multimodal/text flows).
+        # Awaits, so use a start/end range rather than the push/pop context manager.
+        prepare_rng = _nvtx.start_range("trtllm:prepare_input", color="cyan")
+        try:
+            processed_input = await self._prepare_input_for_generation(
+                request, embeddings, ep_disaggregated_params, epd_metadata
+            )
+        finally:
+            _nvtx.end_range(prepare_rng)
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -1006,9 +1017,10 @@ class HandlerBase(BaseGenerativeHandler):
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
 
-        sampling_params = self._override_sampling_params(
-            self.default_sampling_params, request
-        )
+        with _nvtx.annotate("trtllm:sampling_params", color="cyan"):
+            sampling_params = self._override_sampling_params(
+                self.default_sampling_params, request
+            )
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
@@ -1114,17 +1126,21 @@ class HandlerBase(BaseGenerativeHandler):
         cache_salt = request_cache_salt(request)
 
         try:
-            # NEW: Updated engine call to include multimodal data
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
-                priority=priority,
-                cache_salt=cache_salt,
-            )
+            # Handoff into TRT-LLM. Everything before this range is Dynamo-side
+            # request preparation; everything the engine does afterwards shows up
+            # as the gaps between the trtllm:build_response ranges below.
+            with _nvtx.annotate("trtllm:engine_submit", color="red"):
+                # NEW: Updated engine call to include multimodal data
+                generation_result = self.engine.llm.generate_async(
+                    inputs=processed_input,  # Use the correctly extracted inputs
+                    sampling_params=sampling_params,
+                    disaggregated_params=disaggregated_params,
+                    streaming=streaming,
+                    trace_headers=trace_headers,
+                    scheduling_params=scheduling_params,
+                    priority=priority,
+                    cache_salt=cache_salt,
+                )
 
             # In disagg decode mode, wrap abort() to defer until first token
             # (KV transfer complete).
@@ -1138,7 +1154,13 @@ class HandlerBase(BaseGenerativeHandler):
             async with self._cancellation_monitor(
                 abort_guard or generation_result, context
             ):
+                first_response = True
                 async for res in generation_result:
+                    if first_response:
+                        # Engine-side TTFT boundary as the worker observes it.
+                        _nvtx.mark("trtllm:first_response", color="red")
+                        first_response = False
+
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
@@ -1155,85 +1177,93 @@ class HandlerBase(BaseGenerativeHandler):
                         break
 
                     for output in res.outputs:
-                        output_idx = getattr(output, "index", 0) or 0
-                        tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
-                        next_total_toks = len(output.token_ids)
+                        # Per-output response construction: Dynamo-side work
+                        # paid once per engine response. The gaps between
+                        # consecutive ranges are engine time.
+                        with _nvtx.annotate("trtllm:build_response", color="yellow"):
+                            output_idx = getattr(output, "index", 0) or 0
+                            tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
+                            next_total_toks = len(output.token_ids)
 
-                        # The engine returns all tokens generated so far for
-                        # this choice. Calculate only the new tokens generated
-                        # in this iteration to create the delta.
-                        out = {
-                            "token_ids": output.token_ids[tokens_so_far:],
-                            "index": output_idx,
-                        }
+                            # The engine returns all tokens generated so far for
+                            # this choice. Calculate only the new tokens generated
+                            # in this iteration to create the delta.
+                            out = {
+                                "token_ids": output.token_ids[tokens_so_far:],
+                                "index": output_idx,
+                            }
 
-                        # Extract logprobs from the output. Logprobs are
-                        # aligned with the cumulative token list, so use the
-                        # same per-choice cursor as token_ids.
-                        log_probs, top_logprobs = self._extract_logprobs(
-                            output, tokens_so_far
-                        )
-                        if log_probs:
-                            out["log_probs"] = log_probs
-                        if top_logprobs:
-                            out["top_logprobs"] = top_logprobs
-
-                        if output.finish_reason:
-                            out["finish_reason"] = output.finish_reason
-                        if output.stop_reason:
-                            out["stop_reason"] = output.stop_reason
-                        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                            # Return the disaggregated params only when
-                            # operating in prefill mode.
-                            params_dict = self._encode_and_pack_disaggregated_params(
-                                output,
-                                disaggregated_params,
-                                request,
-                                res,
-                                processed_input,
+                            # Extract logprobs from the output. Logprobs are
+                            # aligned with the cumulative token list, so use the
+                            # same per-choice cursor as token_ids.
+                            log_probs, top_logprobs = self._extract_logprobs(
+                                output, tokens_so_far
                             )
-                            if params_dict is not None:
-                                out["disaggregated_params"] = params_dict
+                            if log_probs:
+                                out["log_probs"] = log_probs
+                            if top_logprobs:
+                                out["top_logprobs"] = top_logprobs
 
-                        if out.get("finish_reason") or res.finished:
-                            if not out.get("finish_reason"):
-                                out["finish_reason"] = "unknown"
-                                logging.warning(
-                                    "Request finished with no finish reason set - "
-                                    "this indicates a possible bug"
+                            if output.finish_reason:
+                                out["finish_reason"] = output.finish_reason
+                            if output.stop_reason:
+                                out["stop_reason"] = output.stop_reason
+                            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                                # Return the disaggregated params only when
+                                # operating in prefill mode.
+                                params_dict = (
+                                    self._encode_and_pack_disaggregated_params(
+                                        output,
+                                        disaggregated_params,
+                                        request,
+                                        res,
+                                        processed_input,
+                                    )
+                                )
+                                if params_dict is not None:
+                                    out["disaggregated_params"] = params_dict
+
+                            if out.get("finish_reason") or res.finished:
+                                if not out.get("finish_reason"):
+                                    out["finish_reason"] = "unknown"
+                                    logging.warning(
+                                        "Request finished with no finish reason set - "
+                                        "this indicates a possible bug"
+                                    )
+
+                                num_input_tokens = len(request.get("token_ids", []))
+                                total_completion_tokens = sum(
+                                    len(o.token_ids) for o in res.outputs
                                 )
 
-                            num_input_tokens = len(request.get("token_ids", []))
-                            total_completion_tokens = sum(
-                                len(o.token_ids) for o in res.outputs
-                            )
-
-                            prompt_tokens_details = None
-                            if prefill_prompt_tokens_details:
-                                prompt_tokens_details = prefill_prompt_tokens_details
-                            else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
+                                prompt_tokens_details = None
+                                if prefill_prompt_tokens_details:
+                                    prompt_tokens_details = (
+                                        prefill_prompt_tokens_details
                                     )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                else:
+                                    if output.request_perf_metrics is not None:
+                                        kv_cache_metrics = (
+                                            output.request_perf_metrics.kv_cache_metrics
+                                        )
+                                        cached_tokens = min(
+                                            num_input_tokens,
+                                            kv_cache_metrics.num_reused_blocks
+                                            * self.kv_block_size,
+                                        )
+                                        if cached_tokens > 0:
+                                            prompt_tokens_details = {
+                                                "cached_tokens": int(cached_tokens),
+                                            }
 
-                            out["completion_usage"] = {
-                                "prompt_tokens": int(num_input_tokens),
-                                "completion_tokens": int(total_completion_tokens),
-                                "total_tokens": int(
-                                    num_input_tokens + total_completion_tokens
-                                ),
-                                "prompt_tokens_details": prompt_tokens_details,
-                            }
+                                out["completion_usage"] = {
+                                    "prompt_tokens": int(num_input_tokens),
+                                    "completion_tokens": int(total_completion_tokens),
+                                    "total_tokens": int(
+                                        num_input_tokens + total_completion_tokens
+                                    ),
+                                    "prompt_tokens_details": prompt_tokens_details,
+                                }
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.

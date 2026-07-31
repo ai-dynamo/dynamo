@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
@@ -82,6 +83,10 @@ where
     G: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
+        // Covers GIL acquisition plus the Rust->Python crossing that builds the
+        // request object and calls the handler's `generate`. Not token
+        // generation: the generator has not been advanced when this range ends.
+        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
@@ -112,9 +117,14 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
+        // the Python generator (and, for a worker, the engine) producing the item,
+        // so leaving it outside the range keeps engine time out of the bridge cost.
+        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
+        drop(nvtx_anext);
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -328,6 +338,9 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
+        // Per-response Python->Rust deserialization: pure Dynamo overhead paid
+        // once per token on the streaming path.
+        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
         Python::with_gil(|py| {
             let bound = item.into_bound(py);
             // Yields tagged with `_dynamo_annotated: True` are wire

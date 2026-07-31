@@ -13,6 +13,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
 from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
@@ -36,6 +37,7 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
+    @_nvtx.range_decorator("trtllm:agg:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -52,13 +54,20 @@ class AggregatedHandler(HandlerBase):
                 messages
             )
             if image_urls:
-                result = await fetch_embeddings_from_encoder(
-                    image_urls,
-                    request,
-                    self.encode_client,
-                    self._encoder_cache,
-                    trace_context=context,
+                # Remote encoder round-trip; awaits, so use a start/end range.
+                encode_rng = _nvtx.start_range(
+                    "trtllm:agg:fetch_embeddings", color="magenta"
                 )
+                try:
+                    result = await fetch_embeddings_from_encoder(
+                        image_urls,
+                        request,
+                        self.encode_client,
+                        self._encoder_cache,
+                        trace_context=context,
+                    )
+                finally:
+                    _nvtx.end_range(encode_rng)
                 if isinstance(result, list):
                     embeddings = result  # type: ignore[assignment]
                 else:

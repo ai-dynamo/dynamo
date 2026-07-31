@@ -9,6 +9,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -66,6 +67,7 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
+    @_nvtx.range_decorator("trtllm:encode:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -100,6 +102,7 @@ class PrefillHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
+    @_nvtx.range_decorator("trtllm:prefill:remote_encode_nixl", color="magenta")
     async def remote_encode_with_nixl(self, request: dict, context=None):
         """
         Call encode worker for NIXL flow to load embeddings and unpack the response.
@@ -129,6 +132,7 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
+    @_nvtx.range_decorator("trtllm:prefill:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -213,6 +217,7 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    @_nvtx.range_decorator("trtllm:decode:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
