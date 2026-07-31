@@ -441,8 +441,23 @@ class GMSWorker(Worker):
                 # as preserved-VA records and flip subsequent allocations on
                 # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
-            kv_cache_manager.reallocate_all_handles(tag="kv_cache")
-            kv_cache_manager.remap_all_vas()
+            # KV reuse (shadow failover): if a prior active engine's kv_cache
+            # allocations survived its crash — the kv_cache GMS server was started
+            # with --persist-on-abort, so the server (which owns the physical) kept
+            # them — reattach the SAME bytes by name instead of allocating a fresh,
+            # empty pool. remap maps RW-writable, so this engine keeps serving. When
+            # nothing persisted (the first active engine), allocate fresh as before.
+            existing_kv = kv_cache_manager.list_handles(tag="kv_cache")
+            if existing_kv:
+                logger.info(
+                    "[GMS] KV reuse: reattaching %d persisted kv_cache allocations "
+                    "from a prior engine (skipping fresh reallocation)",
+                    len(existing_kv),
+                )
+                kv_cache_manager.remap_all_vas()
+            else:
+                kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+                kv_cache_manager.remap_all_vas()
             self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()

@@ -155,7 +155,7 @@ echo "=== Phase 0: Start GPU Memory Service x2/device (devices 0..$((TP_SIZE-1))
 for dev in $(seq 0 $((TP_SIZE-1))); do
     python3 -m gpu_memory_service --device "$dev" --tag weights  > "$LOG_DIR/gms_w${dev}.log"  2>&1 &
     GMS_PIDS+=($!)
-    python3 -m gpu_memory_service --device "$dev" --tag kv_cache > "$LOG_DIR/gms_kv${dev}.log" 2>&1 &
+    python3 -m gpu_memory_service --device "$dev" --tag kv_cache --persist-on-abort > "$LOG_DIR/gms_kv${dev}.log" 2>&1 &
     GMS_PIDS+=($!)
 done
 echo "GMS PIDs: ${GMS_PIDS[*]}"
@@ -172,6 +172,7 @@ ENGINE_ID=1 FAILOVER_LOCK_PATH="$LOCK_PATH" DYN_SYSTEM_PORT=$ENGINE_B_SYSTEM_POR
 VLLM_NIXL_SIDE_CHANNEL_PORT=5601 DYN_VLLM_KV_EVENT_PORT=20081 \
 python3 -m dynamo.vllm --model "$MODEL_NAME" -tp "$TP_SIZE" \
     --gpu-memory-utilization "${GPU_UTIL:-0.4}" \
+    --num-gpu-blocks-override "${KV_BLOCKS:-8192}" \
     --load-format gms --gms-shadow-mode > "$ENGINE_B_LOG" 2>&1 &
 ENGINE_B_PID=$!
 echo "Engine B PID: $ENGINE_B_PID — waiting 20s"
@@ -190,6 +191,7 @@ ENGINE_ID=0 FAILOVER_LOCK_PATH="$LOCK_PATH" DYN_SYSTEM_PORT=$ENGINE_A_SYSTEM_POR
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 DYN_VLLM_KV_EVENT_PORT=20080 \
 python3 -m dynamo.vllm --model "$MODEL_NAME" -tp "$TP_SIZE" \
     --gpu-memory-utilization "${GPU_UTIL:-0.4}" \
+    --num-gpu-blocks-override "${KV_BLOCKS:-8192}" \
     --load-format gms --gms-shadow-mode > "$ENGINE_A_LOG" 2>&1 &
 ENGINE_A_PID=$!
 echo "Engine A PID: $ENGINE_A_PID"

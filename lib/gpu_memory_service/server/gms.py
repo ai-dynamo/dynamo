@@ -69,7 +69,9 @@ class GMS:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
+        persist_on_abort: bool = False,
     ):
+        self._persist_on_abort = persist_on_abort
         self._allocations = GMSAllocationManager(
             device,
             allocation_retry_interval=allocation_retry_interval,
@@ -198,15 +200,28 @@ class GMS:
 
     def on_connect(self, conn: Connection) -> None:
         if conn.mode == GrantedLockType.RW:
-            had_committed_layout = self._sessions.snapshot().committed
-            cleared = self._clear_layout_state()
-            if had_committed_layout:
-                self._events.append(
-                    GMSRuntimeEvent(
-                        kind="allocations_cleared",
-                        allocation_count=cleared,
+            if self._persist_on_abort:
+                # Shadow-failover KV server: a standby taking over connects RW to keep
+                # writing. Do NOT clear the layout on connect — adopt the prior engine's
+                # persisted allocations so the standby reattaches the SAME KV bytes by
+                # name (remap) instead of allocating a fresh, empty pool. On the first
+                # writer there is nothing to adopt, so this is a no-op.
+                n = len(self._allocations.list_allocations())
+                if n:
+                    logger.info(
+                        "RW connect (persist_on_abort): adopting %d persisted allocations",
+                        n,
                     )
-                )
+            else:
+                had_committed_layout = self._sessions.snapshot().committed
+                cleared = self._clear_layout_state()
+                if had_committed_layout:
+                    self._events.append(
+                        GMSRuntimeEvent(
+                            kind="allocations_cleared",
+                            allocation_count=cleared,
+                        )
+                    )
 
         self._sessions.on_connect(conn)
         if conn.mode == GrantedLockType.RW:
@@ -215,15 +230,28 @@ class GMS:
     async def cleanup_connection(self, conn: Connection | None) -> None:
         event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
-            logger.warning("RW aborted; clearing active layout")
-            cleared = self._clear_layout_state()
-            self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
-            self._events.append(
-                GMSRuntimeEvent(
-                    kind="allocations_cleared",
-                    allocation_count=cleared,
+            if self._persist_on_abort:
+                # Shadow-failover KV server: the physical allocations are owned by this
+                # (still-live) server, not the engine that just died writing them. Keep
+                # them so the standby can reattach the same bytes by name instead of
+                # reallocating a fresh, empty pool. The session state still resets to
+                # EMPTY, so the standby's RW connect is accepted normally.
+                n = len(self._allocations.list_allocations())
+                logger.warning(
+                    "RW aborted; persist_on_abort set, keeping %d allocations for reattach",
+                    n,
                 )
-            )
+                self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
+            else:
+                logger.warning("RW aborted; clearing active layout")
+                cleared = self._clear_layout_state()
+                self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
+                self._events.append(
+                    GMSRuntimeEvent(
+                        kind="allocations_cleared",
+                        allocation_count=cleared,
+                    )
+                )
         await self._sessions.finish_cleanup(conn)
 
     async def handle_request(
