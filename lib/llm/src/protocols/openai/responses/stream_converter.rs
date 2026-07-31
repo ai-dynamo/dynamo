@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
-use super::ResponseParams;
+use super::{Reasoning, ResponseParams};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -189,7 +189,9 @@ impl ResponseStreamConverter {
             prompt: None,
             prompt_cache_key: self.params.prompt_cache_key.clone(),
             prompt_cache_retention: self.params.prompt_cache_retention,
-            reasoning: self.params.reasoning.clone(),
+            // Serialized from `ResponseParams.reasoning` by
+            // `ResponseForSpec`; the upstream enum cannot represent `"max"`.
+            reasoning: None,
             safety_identifier: self.params.safety_identifier.clone(),
             service_tier: Some(self.params.service_tier.unwrap_or(ServiceTier::Auto)),
             top_logprobs: Some(0),
@@ -823,6 +825,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             ResponseStreamEvent::ResponseInProgress(event) => {
@@ -831,6 +834,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             ResponseStreamEvent::ResponseCompleted(event) => {
@@ -839,6 +843,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             ResponseStreamEvent::ResponseFailed(event) => {
@@ -847,6 +852,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             ResponseStreamEvent::ResponseIncomplete(event) => {
@@ -855,6 +861,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             ResponseStreamEvent::ResponseQueued(event) => {
@@ -863,6 +870,7 @@ impl ResponseStreamConverter {
                     event.sequence_number,
                     &event.response,
                     spec,
+                    self.params.reasoning.as_ref(),
                 ))
             }
             _ => serde_json::to_string(event),
@@ -882,6 +890,7 @@ struct ResponseEventForSpec<'a> {
     sequence_number: u64,
     response: &'a Response,
     spec: ResponseSpecFields,
+    reasoning: Option<&'a Reasoning>,
 }
 
 impl<'a> ResponseEventForSpec<'a> {
@@ -890,12 +899,14 @@ impl<'a> ResponseEventForSpec<'a> {
         sequence_number: u64,
         response: &'a Response,
         spec: ResponseSpecFields,
+        reasoning: Option<&'a Reasoning>,
     ) -> Self {
         Self {
             event_type,
             sequence_number,
             response,
             spec,
+            reasoning,
         }
     }
 }
@@ -910,6 +921,7 @@ impl Serialize for ResponseEventForSpec<'_> {
             &ResponseForSpec {
                 response: self.response,
                 spec: self.spec,
+                reasoning: self.reasoning,
             },
         )?;
         map.end()
@@ -919,6 +931,7 @@ impl Serialize for ResponseEventForSpec<'_> {
 struct ResponseForSpec<'a> {
     response: &'a Response,
     spec: ResponseSpecFields,
+    reasoning: Option<&'a Reasoning>,
 }
 
 // Mirrors async-openai's `Response` serialization while writing Dynamo's
@@ -952,7 +965,7 @@ impl Serialize for ResponseForSpec<'_> {
         map.serialize_entry("prompt", &response.prompt)?;
         map.serialize_entry("prompt_cache_key", &response.prompt_cache_key)?;
         map.serialize_entry("prompt_cache_retention", &response.prompt_cache_retention)?;
-        map.serialize_entry("reasoning", &response.reasoning)?;
+        map.serialize_entry("reasoning", &self.reasoning)?;
         map.serialize_entry("safety_identifier", &response.safety_identifier)?;
         serialize_optional_entry(&mut map, "service_tier", &response.service_tier)?;
         map.serialize_entry("status", &response.status)?;
@@ -1280,6 +1293,7 @@ mod tests {
                 params.presence_penalty.unwrap_or(0.0),
                 params.frequency_penalty.unwrap_or(0.0),
                 params.store.unwrap_or(false),
+                serde_json::to_value(&params.reasoning).unwrap(),
             );
         }
         value
@@ -1429,7 +1443,7 @@ mod tests {
 
     #[test]
     fn test_length_finish_reason_marks_reasoning_item_incomplete() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1452,7 +1466,7 @@ mod tests {
 
     #[test]
     fn test_completed_reasoning_stays_complete_when_text_is_truncated() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1481,7 +1495,7 @@ mod tests {
 
     #[test]
     fn test_same_chunk_text_and_length_complete_reasoning_only() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1526,7 +1540,7 @@ mod tests {
 
     #[test]
     fn test_same_chunk_tool_call_and_length_complete_reasoning_only() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1564,7 +1578,7 @@ mod tests {
 
     #[test]
     fn test_requested_reasoning_summary_streams_complete_event_sequence() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1624,7 +1638,7 @@ mod tests {
 
     #[test]
     fn test_reasoning_summary_ignores_updates_after_completion() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1654,7 +1668,7 @@ mod tests {
 
     #[test]
     fn test_reasoning_summary_finishes_before_tool_call() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -1684,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_reasoning_summary_does_not_start_after_visible_output() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
+        use dynamo_protocols::types::responses::ReasoningSummary;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
@@ -2107,6 +2121,10 @@ mod tests {
             presence_penalty: Some(0.25),
             frequency_penalty: Some(0.5),
             store: Some(true),
+            reasoning: Some(Reasoning {
+                effort: Some(dynamo_protocols::types::ReasoningEffort::Max),
+                summary: None,
+            }),
             ..Default::default()
         };
         let mut conv = ResponseStreamConverter::new("test-model".into(), params.clone());
@@ -2148,6 +2166,7 @@ mod tests {
         assert_eq!(response_json["response"]["presence_penalty"], 0.25);
         assert_eq!(response_json["response"]["frequency_penalty"], 0.5);
         assert_eq!(response_json["response"]["store"], true);
+        assert_eq!(response_json["response"]["reasoning"]["effort"], "max");
         assert!(response_json["response"]["max_tool_calls"].is_null());
     }
 }

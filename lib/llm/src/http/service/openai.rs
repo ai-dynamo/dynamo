@@ -2534,7 +2534,7 @@ async fn responses(
         tools: request.inner.tools.clone(),
         tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
-        reasoning: request.inner.reasoning.clone(),
+        reasoning: request.reasoning.clone(),
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
@@ -3984,6 +3984,7 @@ mod tests {
                 model: Some("test-model".into()),
                 ..Default::default()
             },
+            reasoning: None,
             nvext: None,
         }
     }

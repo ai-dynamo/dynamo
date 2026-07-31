@@ -47,10 +47,10 @@ use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
 
-use dynamo_protocols::types::responses::{IncludeEnum, Reasoning, Truncation};
+use dynamo_protocols::types::responses::{IncludeEnum, Truncation};
 
 use super::anthropic::types::{AnthropicCreateMessageRequest, ThinkingConfig};
-use super::openai::responses::NvCreateResponse;
+use super::openai::responses::{NvCreateResponse, Reasoning};
 
 /// Identifies which API surface originated the request and carries
 /// fields specific to that API that cannot be represented in the
@@ -198,7 +198,7 @@ impl TryFrom<NvCreateResponse> for UnifiedRequest {
         let responses_ctx = ResponsesContext {
             previous_response_id: req.inner.previous_response_id.clone(),
             truncation: req.inner.truncation,
-            reasoning: req.inner.reasoning.clone(),
+            reasoning: req.reasoning.clone(),
             include: req.inner.include.clone(),
             store: req.inner.store.unwrap_or(false),
         };
