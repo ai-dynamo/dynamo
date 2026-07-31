@@ -87,7 +87,7 @@ pub(crate) struct HubSnapshot {
 }
 
 impl HubSnapshot {
-    fn from_actor(
+    pub(super) fn from_actor(
         identity: ProducerIdentity,
         lease: LaneLease,
         sequence: u64,

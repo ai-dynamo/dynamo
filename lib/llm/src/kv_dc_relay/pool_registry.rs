@@ -53,8 +53,13 @@ pub(super) struct PoolAttachRequest {
     pub(super) registrations: Vec<CanonicalModelRegistration>,
     pub(super) query_semantics: KvQuerySemantics,
     #[cfg(feature = "kv-dc-relay-wan")]
-    pub(super) serving_facts: EndpointServingFacts,
-    #[cfg(feature = "kv-dc-relay-wan")]
+    pub(super) wan_facts: Option<PoolWanFacts>,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+#[derive(Debug, Clone)]
+pub(super) struct PoolWanFacts {
+    pub(super) serving: EndpointServingFacts,
     pub(super) runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
 }
 
@@ -83,8 +88,12 @@ struct PoolEntry {
     #[cfg(feature = "kv-dc-relay-wan")]
     hub: Arc<PoolHubSlot>,
     #[cfg(feature = "kv-dc-relay-wan")]
-    serving_facts: EndpointServingFacts,
-    #[cfg(feature = "kv-dc-relay-wan")]
+    wan: Option<PoolWanState>,
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+struct PoolWanState {
+    serving: EndpointServingFacts,
     load: PoolLoadState,
 }
 
@@ -435,7 +444,16 @@ impl PoolRegistry {
         );
         validate_registrations(&request.registrations)?;
         #[cfg(feature = "kv-dc-relay-wan")]
-        let load = PoolLoadState::from_runtime_configs(&request.runtime_configs)?;
+        let wan = request
+            .wan_facts
+            .as_ref()
+            .map(|facts| -> anyhow::Result<PoolWanState> {
+                Ok(PoolWanState {
+                    serving: facts.serving.clone(),
+                    load: PoolLoadState::from_runtime_configs(&facts.runtime_configs)?,
+                })
+            })
+            .transpose()?;
 
         let layout_generation = {
             let mut state = self.state.lock();
@@ -526,9 +544,7 @@ impl PoolRegistry {
                 #[cfg(feature = "kv-dc-relay-wan")]
                 hub: Arc::new(PoolHubSlot::new()),
                 #[cfg(feature = "kv-dc-relay-wan")]
-                serving_facts: request.serving_facts,
-                #[cfg(feature = "kv-dc-relay-wan")]
-                load,
+                wan,
             },
         );
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
@@ -620,10 +636,13 @@ impl PoolRegistry {
         if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
             return false;
         }
-        if entry.serving_facts == serving_facts {
+        let Some(wan) = entry.wan.as_mut() else {
+            return false;
+        };
+        if wan.serving == serving_facts {
             return true;
         }
-        entry.serving_facts = serving_facts;
+        wan.serving = serving_facts;
         publish_readiness_if_changed(&mut state, &self.readiness_tx);
         true
     }
@@ -642,7 +661,10 @@ impl PoolRegistry {
         if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
             return Ok(false);
         }
-        if entry.load.replace_capacity(runtime_configs)? {
+        let Some(wan) = entry.wan.as_mut() else {
+            return Ok(false);
+        };
+        if wan.load.replace_capacity(runtime_configs)? {
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
         Ok(true)
@@ -659,10 +681,13 @@ impl PoolRegistry {
         let Some(entry) = state.pools.get_mut(&pool_id) else {
             return false;
         };
-        if entry.layout_generation != layout_generation
-            || entry.state != PoolEntryState::Active
-            || !entry.load.observe(load)
-        {
+        if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
+            return false;
+        }
+        let Some(wan) = entry.wan.as_mut() else {
+            return false;
+        };
+        if !wan.load.observe(load) {
             return false;
         }
         publish_load_if_changed(&state, &self.load_tx, pool_id);
@@ -678,7 +703,10 @@ impl PoolRegistry {
         if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
             return false;
         }
-        if entry.load.clear_observations() {
+        let Some(wan) = entry.wan.as_mut() else {
+            return false;
+        };
+        if wan.load.clear_observations() {
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
         true
@@ -1045,7 +1073,9 @@ fn publish_readiness_if_changed(
         .values()
         .filter(|entry| entry.state == PoolEntryState::Active)
         .flat_map(|entry| {
-            derive_endpoint_readiness(entry.identity, &entry.registrations, &entry.serving_facts)
+            entry.wan.iter().flat_map(|wan| {
+                derive_endpoint_readiness(entry.identity, &entry.registrations, &wan.serving)
+            })
         })
         .collect::<Vec<_>>();
     entries.sort_unstable_by(|left, right| {
@@ -1075,7 +1105,12 @@ fn publish_load_if_changed(
         .pools
         .get(&pool_id)
         .filter(|entry| entry.state == PoolEntryState::Active)
-        .map(|entry| entry.load.snapshot(entry.identity));
+        .and_then(|entry| {
+            entry
+                .wan
+                .as_ref()
+                .map(|wan| wan.load.snapshot(entry.identity))
+        });
     sender.send_if_modified(|snapshots| {
         match (
             snapshots.binary_search_by_key(&pool_id, |item| item.producer.pool_id()),
@@ -1202,9 +1237,10 @@ mod tests {
             registrations: vec![registration(model)],
             query_semantics: query_semantics(),
             #[cfg(feature = "kv-dc-relay-wan")]
-            serving_facts: EndpointServingFacts::default(),
-            #[cfg(feature = "kv-dc-relay-wan")]
-            runtime_configs: HashMap::new(),
+            wan_facts: Some(PoolWanFacts {
+                serving: EndpointServingFacts::default(),
+                runtime_configs: HashMap::new(),
+            }),
         }
     }
 
@@ -1686,9 +1722,10 @@ mod tests {
                 registrations: registrations(),
                 query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
-                serving_facts: EndpointServingFacts::default(),
-                #[cfg(feature = "kv-dc-relay-wan")]
-                runtime_configs: HashMap::new(),
+                wan_facts: Some(PoolWanFacts {
+                    serving: EndpointServingFacts::default(),
+                    runtime_configs: HashMap::new(),
+                }),
             })
             .await
             .unwrap();
@@ -1699,9 +1736,10 @@ mod tests {
                 registrations: registrations(),
                 query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
-                serving_facts: EndpointServingFacts::default(),
-                #[cfg(feature = "kv-dc-relay-wan")]
-                runtime_configs: HashMap::new(),
+                wan_facts: Some(PoolWanFacts {
+                    serving: EndpointServingFacts::default(),
+                    runtime_configs: HashMap::new(),
+                }),
             })
             .await
             .unwrap();
@@ -1750,9 +1788,10 @@ mod tests {
                 )],
                 query_semantics: query_semantics(),
                 #[cfg(feature = "kv-dc-relay-wan")]
-                serving_facts: EndpointServingFacts::default(),
-                #[cfg(feature = "kv-dc-relay-wan")]
-                runtime_configs: HashMap::new(),
+                wan_facts: Some(PoolWanFacts {
+                    serving: EndpointServingFacts::default(),
+                    runtime_configs: HashMap::new(),
+                }),
             })
             .await
             .unwrap();
@@ -1914,6 +1953,41 @@ mod tests {
 
     #[cfg(feature = "kv-dc-relay-wan")]
     #[tokio::test]
+    async fn local_only_pool_publishes_no_wan_facts() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let mut attach_request = request(pool(1), "fast.router.generate", "llama");
+        attach_request.wan_facts = None;
+        let attachment = registry.attach(attach_request).await.unwrap();
+
+        assert_eq!(registry.catalog().pools().len(), 1);
+        assert!(registry.readiness().entries.is_empty());
+        assert!(registry.load_snapshots().is_empty());
+        assert!(!registry.replace_serving_facts(
+            attachment.pool_id,
+            attachment.layout_generation,
+            EndpointServingFacts::default(),
+        ));
+        assert!(
+            !registry
+                .replace_load_capacity(
+                    attachment.pool_id,
+                    attachment.layout_generation,
+                    &HashMap::new(),
+                )
+                .unwrap()
+        );
+        assert!(!registry.observe_load(
+            attachment.pool_id,
+            attachment.layout_generation,
+            ActiveLoad::default(),
+        ));
+
+        attachment.handle.state_stats().await.unwrap();
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
     async fn readiness_and_load_are_generation_scoped_and_withdrawn_together() {
         use std::collections::HashSet;
 
@@ -1947,8 +2021,10 @@ mod tests {
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: vec![registration("llama")],
                 query_semantics: query_semantics(),
-                serving_facts: serving_facts.clone(),
-                runtime_configs,
+                wan_facts: Some(PoolWanFacts {
+                    serving: serving_facts.clone(),
+                    runtime_configs,
+                }),
             })
             .await
             .unwrap();

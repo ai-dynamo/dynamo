@@ -524,4 +524,38 @@ mod tests {
                 .is_some_and(|error| error.contains("load publisher stopped unexpectedly"))
         );
     }
+
+    #[tokio::test]
+    async fn relay_root_cancellation_marks_wan_transport_not_serving() {
+        let relay_cancel = CancellationToken::new();
+        let transport_cancel = relay_cancel.child_token();
+        let health = Arc::new(RwLock::new(KvDcRelayTransportHealth {
+            enabled: true,
+            serving: true,
+            ..KvDcRelayTransportHealth::default()
+        }));
+        let server_cancel = transport_cancel.clone();
+        let load_cancel = transport_cancel.clone();
+        let server = tokio::spawn(async move {
+            server_cancel.cancelled().await;
+            Ok(())
+        });
+        let load = tokio::spawn(async move {
+            load_cancel.cancelled().await;
+            Ok(())
+        });
+        let supervisor = tokio::spawn(supervise_transport(
+            server,
+            load,
+            transport_cancel,
+            relay_cancel.clone(),
+            health.clone(),
+        ));
+
+        relay_cancel.cancel();
+        supervisor.await.unwrap();
+
+        assert!(!health.read().serving);
+        assert!(health.read().last_error.is_none());
+    }
 }
