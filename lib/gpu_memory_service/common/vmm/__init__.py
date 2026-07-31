@@ -126,7 +126,9 @@ def _create_vmm(device_type: VMMDeviceType) -> VMMDevice:
         return CudaVMM()
 
     if device_type is VMMDeviceType.XPU:
-        raise NotImplementedError("'xpu' VMM backend is not implemented yet")
+        from .xpu_utils import XpuVMM
+
+        return XpuVMM()
 
     raise ValueError(f"Unhandled VMM device type: {device_type!r}")
 
