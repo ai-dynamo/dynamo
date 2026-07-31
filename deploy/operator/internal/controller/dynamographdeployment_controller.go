@@ -1620,7 +1620,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		// Delete adapter if component no longer exists in DGD.
 		if dynamoDeployment.GetComponentByName(componentName) == nil {
 			logger.Info("Deleting orphaned DynamoGraphDeploymentScalingAdapter", "adapter", adapter.Name, "component", componentName)
-			if err := r.Delete(ctx, adapter); err != nil && !errors.IsNotFound(err) {
+			if err := r.Delete(ctx, adapter); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
 				logger.Error(err, "Failed to delete orphaned adapter", "adapter", adapter.Name)
 				return err
 			}

@@ -379,6 +379,82 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 	}
 }
 
+func TestReconcileScalingAdaptersEmitsDeleteEventOnlyAfterSuccessfulDelete(t *testing.T) {
+	notFound := apierrors.NewNotFound(
+		schema.GroupResource{
+			Group:    v1alpha1.GroupVersion.Group,
+			Resource: "dynamographdeploymentscalingadapters",
+		},
+		"test-dgd-removed",
+	)
+	tests := []struct {
+		name      string
+		deleteErr error
+		wantEvent bool
+	}{
+		{
+			name:      "successful delete emits event",
+			wantEvent: true,
+		},
+		{
+			name:      "already absent adapter emits no event",
+			deleteErr: notFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			}
+			adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd-removed",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					},
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
+						Name:        dgd.Name,
+						ServiceName: "removed",
+					},
+				},
+			}
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+				WithObjects(dgd, adapter).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(
+						ctx context.Context,
+						writer client.WithWatch,
+						obj client.Object,
+						opts ...client.DeleteOption,
+					) error {
+						if tt.deleteErr != nil {
+							return tt.deleteErr
+						}
+						return writer.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+			recorder := record.NewFakeRecorder(1)
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:   kubeClient,
+				Recorder: recorder,
+			}
+
+			require.NoError(t, reconciler.reconcileScalingAdapters(context.Background(), dgd))
+			if tt.wantEvent {
+				assert.Len(t, recorder.Events, 1)
+				return
+			}
+			assert.Empty(t, recorder.Events)
+		})
+	}
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcilePVCs(t *testing.T) {
 	newScheme := func(t testing.TB) *runtime.Scheme {
 		t.Helper()
