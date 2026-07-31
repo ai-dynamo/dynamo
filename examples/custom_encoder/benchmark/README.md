@@ -73,8 +73,9 @@ not meaningful because the encoder-only service emits one dummy content chunk.
 The paired sweep compares one AIPerf client against the combined service with two
 simultaneous clients: one against the same combined service and one against the
 encoder-only service. Both clients use the selected concurrency, and a parallel cell
-finishes only after both clients complete. The report calculates aggregate throughput
-as 2,000 requests divided by that joint makespan.
+finishes only after both clients complete. The report keeps the clients separate and
+reports their completion-rate range as 1,000 requests divided by each client's wall
+time. It does not add unlike request streams into an aggregate request rate.
 
 Generate the synthetic images on the benchmark host. Each measured client receives
 1,000 unique 500×500 JPEGs. Pools are disjoint between concurrency values and between

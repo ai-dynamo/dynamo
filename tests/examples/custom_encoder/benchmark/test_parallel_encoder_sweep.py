@@ -154,7 +154,8 @@ def test_joint_timing_waits_for_both_parallel_clients(tmp_path: Path) -> None:
     timing = _write_timing(PARALLEL_ARM, 8, 1, tmp_path, results)
 
     assert timing["joint_duration_s"] == 20.0
-    assert timing["joint_throughput_request_s"] == 100.0
+    assert timing["client_completion_rate_min_request_s"] == pytest.approx(1000 / 19.99)
+    assert timing["client_completion_rate_max_request_s"] == 100.0
     assert timing["start_skew_ms"] == 10.0
     assert timing["completion_skew_ms"] == 10_000.0
 
@@ -209,8 +210,8 @@ def test_arm_summary_uses_median_across_confirmations() -> None:
         {
             "arm": CONTROL_ARM,
             "concurrency_per_client": 16,
-            "joint_throughput_request_s": throughput,
             "joint_duration_s": 1000 / throughput,
+            "clients": {COMBINED_ROLE: {"wall_throughput_request_s": throughput}},
         }
         for throughput in (90.0, 100.0, 130.0)
     ]
@@ -218,4 +219,25 @@ def test_arm_summary_uses_median_across_confirmations() -> None:
     result = _arm_summary(timings, CONTROL_ARM)
 
     assert result[0]["runs"] == 3
-    assert result[0]["median_throughput"] == 100.0
+    assert result[0]["median_min_completion_rate"] == 100.0
+    assert result[0]["representative_min_completion_rate"] == 100.0
+    assert result[0]["representative_max_completion_rate"] == 100.0
+
+
+def test_arm_summary_reports_per_client_completion_range() -> None:
+    timings = [
+        {
+            "arm": PARALLEL_ARM,
+            "concurrency_per_client": 64,
+            "joint_duration_s": 52.0,
+            "clients": {
+                COMBINED_ROLE: {"wall_throughput_request_s": 1000 / 52},
+                ENCODER_ONLY_ROLE: {"wall_throughput_request_s": 1000 / 48},
+            },
+        }
+    ]
+
+    result = _arm_summary(timings, PARALLEL_ARM)
+
+    assert result[0]["representative_min_completion_rate"] == pytest.approx(1000 / 52)
+    assert result[0]["representative_max_completion_rate"] == pytest.approx(1000 / 48)

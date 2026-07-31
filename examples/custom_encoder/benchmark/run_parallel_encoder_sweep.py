@@ -612,6 +612,20 @@ def _write_timing(
     common_start = min(starts)
     joint_finish = max(finishes)
     requests = REQUESTS if arm == CONTROL_ARM else REQUESTS * 2
+    clients = {
+        role: {
+            "released_ns": result.released_ns,
+            "finished_ns": result.finished_ns,
+            "duration_s": (result.finished_ns - result.released_ns) / 1_000_000_000,
+            "wall_throughput_request_s": REQUESTS
+            / ((result.finished_ns - result.released_ns) / 1_000_000_000),
+            "artifact_dir": str(result.artifact_dir),
+        }
+        for role, result in results.items()
+    }
+    completion_rates = [
+        float(client["wall_throughput_request_s"]) for client in clients.values()
+    ]
     timing = {
         "arm": arm,
         "concurrency_per_client": concurrency,
@@ -622,21 +636,11 @@ def _write_timing(
         "common_start_ns": common_start,
         "joint_finish_ns": joint_finish,
         "joint_duration_s": (joint_finish - common_start) / 1_000_000_000,
-        "joint_throughput_request_s": requests
-        / ((joint_finish - common_start) / 1_000_000_000),
+        "client_completion_rate_min_request_s": min(completion_rates),
+        "client_completion_rate_max_request_s": max(completion_rates),
         "start_skew_ms": (max(starts) - min(starts)) / 1_000_000,
         "completion_skew_ms": (max(finishes) - min(finishes)) / 1_000_000,
-        "clients": {
-            role: {
-                "released_ns": result.released_ns,
-                "finished_ns": result.finished_ns,
-                "duration_s": (result.finished_ns - result.released_ns) / 1_000_000_000,
-                "wall_throughput_request_s": REQUESTS
-                / ((result.finished_ns - result.released_ns) / 1_000_000_000),
-                "artifact_dir": str(result.artifact_dir),
-            }
-            for role, result in results.items()
-        },
+        "clients": clients,
     }
     (cell_dir / "cell_timing.json").write_text(
         json.dumps(timing, indent=2) + "\n", encoding="utf-8"
@@ -1013,9 +1017,14 @@ def validate_matrix(output_root: Path) -> list[dict[str, Any]]:
                             "arm": arm,
                             "run": run_number,
                             "joint_duration_s": timing["joint_duration_s"],
-                            "joint_throughput_request_s": timing[
-                                "joint_throughput_request_s"
-                            ],
+                            "client_completion_rate_min_request_s": min(
+                                float(client["wall_throughput_request_s"])
+                                for client in timing["clients"].values()
+                            ),
+                            "client_completion_rate_max_request_s": max(
+                                float(client["wall_throughput_request_s"])
+                                for client in timing["clients"].values()
+                            ),
                             "start_skew_ms": timing["start_skew_ms"],
                             "completion_skew_ms": timing["completion_skew_ms"],
                         }
@@ -1044,6 +1053,14 @@ def _timing_rows(output_root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _client_completion_rate_range(timing: dict[str, Any]) -> tuple[float, float]:
+    rates = [
+        float(client["wall_throughput_request_s"])
+        for client in timing["clients"].values()
+    ]
+    return min(rates), max(rates)
+
+
 def _arm_summary(timings: Sequence[dict[str, Any]], arm: str) -> list[dict[str, Any]]:
     by_concurrency: dict[int, list[dict[str, Any]]] = {}
     for timing in timings:
@@ -1053,19 +1070,29 @@ def _arm_summary(timings: Sequence[dict[str, Any]], arm: str) -> list[dict[str, 
             )
     rows = []
     for concurrency, samples in sorted(by_concurrency.items()):
-        throughputs = [
-            float(sample["joint_throughput_request_s"]) for sample in samples
-        ]
         durations = [float(sample["joint_duration_s"]) for sample in samples]
+        median_duration = statistics.median(durations)
+        representative = min(
+            samples,
+            key=lambda sample: abs(float(sample["joint_duration_s"]) - median_duration),
+        )
+        representative_min, representative_max = _client_completion_rate_range(
+            representative
+        )
+        completion_ranges = [
+            _client_completion_rate_range(sample) for sample in samples
+        ]
         rows.append(
             {
                 "arm": arm,
                 "concurrency": concurrency,
                 "runs": len(samples),
-                "median_throughput": statistics.median(throughputs),
-                "min_throughput": min(throughputs),
-                "max_throughput": max(throughputs),
-                "median_duration": statistics.median(durations),
+                "median_min_completion_rate": statistics.median(
+                    lower for lower, _upper in completion_ranges
+                ),
+                "representative_min_completion_rate": representative_min,
+                "representative_max_completion_rate": representative_max,
+                "median_duration": median_duration,
             }
         )
     return rows
@@ -1087,7 +1114,7 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
         for arm in ARM_ORDER
     }
     winners = {
-        arm: max(rows, key=lambda row: row["median_throughput"])
+        arm: max(rows, key=lambda row: row["median_min_completion_rate"])
         for arm, rows in confirmed.items()
     }
 
@@ -1113,20 +1140,23 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
         f"ISL is exactly {TARGET_ISL}. The combined service reports exact ISL "
         f"{TARGET_ISL} and generates exactly {TARGET_OSL} tokens. The encoder-only "
         f"service returns one dummy token; without server token counting, AIPerf "
-        f"reports client text-tokenizer ISL {encoder_client_isl_text}.",
+        f"reports client text-tokenizer ISL {encoder_client_isl_text}. Every client "
+        f"pool contains {REQUESTS:,} unique {IMAGE_SIZE}×{IMAGE_SIZE} images. The "
+        f"control and parallel combined clients share a pool; the encoder-only pool "
+        f"is disjoint.",
         "",
-        "## Maximum observed throughput",
+        "## Best confirmed concurrency",
         "",
-        "| Arm | Concurrency/client | Requests/joint run | Median req/s | "
-        "Median makespan | Samples |",
+        "| Arm | Concurrency/client | Requests/client | Per-client completion "
+        "req/s (median-makespan run) | Median makespan | Samples |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for arm in ARM_ORDER:
         winner = winners[arm]
-        requests = REQUESTS if arm == CONTROL_ARM else REQUESTS * 2
         lines.append(
-            f"| {arm} | {winner['concurrency']} | {requests:,} | "
-            f"**{winner['median_throughput']:.2f}** | "
+            f"| {arm} | {winner['concurrency']} | {REQUESTS:,} | "
+            f"**{winner['representative_min_completion_rate']:.2f}–"
+            f"{winner['representative_max_completion_rate']:.2f}** | "
             f"{winner['median_duration']:.2f} s | {winner['runs']} |"
         )
 
@@ -1135,9 +1165,9 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
             "",
             "## Sweep",
             "",
-            "| Arm | Concurrency/client | Total outstanding | Runs | Median req/s | "
-            "Range req/s | Median makespan |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Arm | Concurrency/client | Total outstanding | Runs | Per-client "
+            "completion req/s (median-makespan run) | Median makespan |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for arm in ARM_ORDER:
@@ -1145,8 +1175,9 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
             outstanding = row["concurrency"] * (1 if arm == CONTROL_ARM else 2)
             lines.append(
                 f"| {arm} | {row['concurrency']} | {outstanding} | {row['runs']} | "
-                f"{row['median_throughput']:.2f} | {row['min_throughput']:.2f}–"
-                f"{row['max_throughput']:.2f} | {row['median_duration']:.2f} s |"
+                f"{row['representative_min_completion_rate']:.2f}–"
+                f"{row['representative_max_completion_rate']:.2f} | "
+                f"{row['median_duration']:.2f} s |"
             )
 
     lines.extend(
@@ -1199,11 +1230,14 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
     for arm, by_c in ((CONTROL_ARM, control_by_c), (PARALLEL_ARM, parallel_by_c)):
         if 32 in by_c and 64 in by_c:
             gain = (
-                by_c[64]["median_throughput"] / by_c[32]["median_throughput"] - 1.0
+                by_c[64]["median_min_completion_rate"]
+                / by_c[32]["median_min_completion_rate"]
+                - 1.0
             ) * 100.0
             status = "not proven" if gain >= 5.0 else "observed"
             saturation_notes.append(
-                f"- {arm}: 32→64 throughput change {gain:+.1f}%; saturation {status}."
+                f"- {arm}: 32→64 slow-client completion-rate change {gain:+.1f}%; "
+                f"saturation {status}."
             )
     lines.extend(
         [
@@ -1231,7 +1265,8 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
                 "run",
                 "total_requests",
                 "joint_duration_s",
-                "joint_throughput_request_s",
+                "client_completion_rate_min_request_s",
+                "client_completion_rate_max_request_s",
                 "start_skew_ms",
                 "completion_skew_ms",
                 "path",
@@ -1239,6 +1274,13 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
         )
         writer.writeheader()
         for timing in timings:
+            lower, upper = _client_completion_rate_range(timing)
+            timing.update(
+                {
+                    "client_completion_rate_min_request_s": lower,
+                    "client_completion_rate_max_request_s": upper,
+                }
+            )
             writer.writerow({name: timing[name] for name in writer.fieldnames})
     print(f"report={markdown_path} csv={csv_path}")
 
