@@ -23,7 +23,7 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -119,6 +119,12 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+        # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
+        # path, so the env var only enables the feature (the value is never
+        # bound). Allocate one per worker for cleanup symmetry with system_port.
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Set GPU assignment for disaggregated mode (like disagg.sh)
         if mode == "decode":
@@ -163,6 +169,7 @@ class DynamoWorkerProcess(ManagedProcess):
         try:
             # system_port is a required parameter, always set in __init__
             deallocate_port(self.system_port)
+            deallocate_port(self.fpm_port)
         except Exception as e:
             logging.warning(f"Failed to release SGLang worker port: {e}")
 
@@ -215,7 +222,8 @@ def test_request_cancellation_sglang_aggregated(
     logger.info("Sanity check if latest test is getting executed")
 
     # Allocate ports to avoid conflicts with parallel tests
-    system_port = allocate_port(9100)
+    system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=system_port: deallocate_port(port))
 
     # Step 1: Start the frontend (allocates its own port)
     with DynamoFrontendProcess(request) as frontend:
@@ -327,8 +335,10 @@ def test_request_cancellation_sglang_decode_cancel(
     """
 
     # Allocate ports to avoid conflicts with parallel tests
-    decode_system_port = allocate_port(9100)
-    prefill_system_port = allocate_port(9200)
+    decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
+    prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=prefill_system_port: deallocate_port(port))
 
     # Step 1: Start the frontend (allocates its own port)
     with DynamoFrontendProcess(request) as frontend:

@@ -24,6 +24,7 @@ import (
 )
 
 // DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// annotations to propagate to all child resources (PCS, DCD, Deployments,
 	// and pod templates). Component-level (`podTemplate`) values take precedence
@@ -34,6 +35,11 @@ type DynamoGraphDeploymentSpec struct {
 	// labels to propagate to all child resources. Same precedence rules as `annotations`.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 
 	// components are the components deployed as part of this graph. Each entry
 	// carries its own stable logical `name`, and names must be unique within
@@ -68,6 +74,22 @@ type DynamoGraphDeploymentSpec struct {
 	// Components without their own `topologyConstraint` inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between v1beta1 releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features whose API shape and behavior may change in breaking ways between
+// v1beta1 releases. Component-level experimental features live under
+// `spec.components[*].experimental`.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// kvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.
@@ -104,7 +126,44 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
+	// placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
 }
+
+// DGD Ready condition reasons used to classify Grove-backed not-ready
+// deployments on status.conditions[type=Ready].reason. These distinguish
+// capacity/scheduling blockers from pods that are scheduled but not yet
+// runtime-ready.
+const (
+	// DGDReadyReasonAllResourcesReady: every component is fully ready. This is
+	// the pre-existing success reason, unchanged.
+	DGDReadyReasonAllResourcesReady = "all_resources_are_ready"
+
+	// DGDReadyReasonInsufficientCapacity: at least one component is blocked
+	// before runtime readiness because Grove reports insufficient scheduled
+	// replicas, schedule-gated pods, or a scheduling/capacity condition.
+	DGDReadyReasonInsufficientCapacity = "insufficient_capacity"
+
+	// DGDReadyReasonPodsNotReady: required pods are scheduled, but at least
+	// one component does not have enough ready/available replicas.
+	DGDReadyReasonPodsNotReady = "pods_not_ready"
+
+	// DGDReadyReasonUpdating: scheduling is sufficient, but at least one
+	// component has not finished rolling out updated replicas.
+	DGDReadyReasonUpdating = "updating"
+
+	// DGDReadyReasonMixedNotReadyReasons: more than one not-ready component
+	// exists and they don't all share the same classification.
+	DGDReadyReasonMixedNotReadyReasons = "mixed_not_ready_reasons"
+
+	// DGDReadyReasonSomeResourcesNotReady: fallback used when the controller
+	// cannot classify the cause of a not-ready component. This is the
+	// pre-existing generic not-ready reason, unchanged.
+	DGDReadyReasonSomeResourcesNotReady = "some_resources_are_not_ready"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

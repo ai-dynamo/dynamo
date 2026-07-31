@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from typing import Any, Dict, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
@@ -20,9 +21,15 @@ from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
-DEFAULT_ENDPOINT_COMPONENT = "tensorrt_llm"
+
+def _warn_deprecated(message: str) -> None:
+    logging.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+
+
+DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_PREFILL_COMPONENT = "prefill"
-DEFAULT_ENCODE_COMPONENT = "tensorrt_llm_encode"
+DEFAULT_ENCODE_COMPONENT = "encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
 VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
@@ -80,6 +87,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     Cannot be combined with the explicit ``--override-engine-args`` flag.
     """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
+
+    # Deprecated alias: --publish-events-and-metrics maps to --publish-kv-events.
+    # Same for the legacy env var. Both are removed in the next release.
+    if any(
+        a.split("=", 1)[0]
+        in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
+        for a in cli_args
+    ):
+        _warn_deprecated(
+            "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
+            "The old flag stays as an alias for one release."
+        )
+    if (
+        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
+        and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
+    ):
+        _warn_deprecated(
+            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
+            "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
+            "alias for one release."
+        )
+        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
+            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
+        ]
 
     parser = argparse.ArgumentParser(
         description="Dynamo TensorRT-LLM worker configuration\n\n"

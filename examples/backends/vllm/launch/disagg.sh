@@ -9,15 +9,12 @@ MODEL="Qwen/Qwen3-0.6B"
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Consume --unified and handle --help BEFORE installing the
-# kill-process-group EXIT trap; an early exit would otherwise tear down
-# the caller's process group.
-pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+# Handle --help BEFORE installing the kill-process-group EXIT trap; an early
+# exit would otherwise tear down the caller's process group.
+WORKER_MODULE="dynamo.vllm"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    echo "Usage: $0 [--unified]"
-    echo "  --unified  Use the unified backend entry point (python -m dynamo.vllm.unified_main)"
+    echo "Usage: $0"
     exit 0
 fi
 if [[ $# -gt 0 ]]; then
@@ -45,6 +42,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m "$WORKER_MODULE" \
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
 CUDA_VISIBLE_DEVICES=1 python3 -m "$WORKER_MODULE" \
     --model "$MODEL" \
     --enforce-eager \

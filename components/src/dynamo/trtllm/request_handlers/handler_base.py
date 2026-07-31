@@ -28,13 +28,16 @@ from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
-from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.engine import is_generation_stage
+from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -42,6 +45,12 @@ from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.conversation_affinity import (
+    CONVERSATION_PARAMS_AVAILABLE,
+    conversation_params_for,
+    engine_conversation_affinity_enabled,
+    session_id_from_request,
+)
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -51,6 +60,12 @@ from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativ
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
+    get_compatible_global_disagg_request_id,
+)
+from dynamo.trtllm.utils.request_utils import (
+    apply_stop_conditions_to_sampling_params,
+    normalize_top_k_for_trtllm,
+    request_cache_salt,
 )
 
 if TYPE_CHECKING:
@@ -62,44 +77,59 @@ configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
-class TRTLLMEngineQuiesceController:
-    """Adapts TRT-LLM sleep/wake to the standard quiesce controller interface.
+
+class TRTLLMEnginePauseController:
+    """Adapts TRT-LLM sleep/wake to the standard pause controller interface.
 
     Two memory domains: KV cache via TRT-LLM collective_rpc, weights via GMS.
     """
 
     def __init__(self, engine: TensorRTLLMEngine):
         self._engine = engine
-        self._is_quiesced = False
+        self._is_paused = False
+        self._pending_resume_tags: set[str] = set()
 
     @property
-    def is_quiesced(self) -> bool:
-        return self._is_quiesced
+    def is_paused(self) -> bool:
+        return self._is_paused
 
-    async def quiesce(self, tags: list[str] | None = None) -> bool:
-        if self._is_quiesced:
+    @property
+    def needs_resume_recovery(self) -> bool:
+        return bool(self._pending_resume_tags)
+
+    async def pause(self, tags: list[str] | None = None) -> bool:
+        if self._is_paused or self._pending_resume_tags:
             return False
         tags = tags or ["kv_cache", "weights"]
         if "kv_cache" in tags:
+            self._pending_resume_tags.add("kv_cache")
             self._collective_rpc("sleep", ["kv_cache"])
         if "weights" in tags:
+            self._pending_resume_tags.add("weights")
             self._release_gms_weights()
-        self._is_quiesced = True
+        self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_quiesced:
+        if not self._is_paused and not self._pending_resume_tags:
             return False
-        tags = tags or ["kv_cache", "weights"]
-        if "weights" in tags:
+        requested_tags = set(tags or ["kv_cache", "weights"])
+        # During recovery, restore the domains that may actually be asleep
+        # instead of trusting a narrower resume request.
+        resume_tags = self._pending_resume_tags or requested_tags
+        if "weights" in resume_tags:
             self._restore_gms_weights()
-        if "kv_cache" in tags:
+            self._pending_resume_tags.discard("weights")
+        if "kv_cache" in resume_tags:
             self._collective_rpc("wakeup", ["kv_cache"])
+            self._pending_resume_tags.discard("kv_cache")
         return True
 
     def mark_resumed(self) -> None:
-        self._is_quiesced = False
+        self._is_paused = False
+        self._pending_resume_tags.clear()
 
     def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
         """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
@@ -221,6 +251,10 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    # Force conversation-affinity ADP routing regardless of engine config detection.
+    conversation_affinity: bool = False
+    # Select whether the engine or Dynamo owns initial DP-rank placement in affinity mode.
+    conversation_affinity_dp_rank_source: str = "engine"
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -241,6 +275,16 @@ class HandlerBase(BaseGenerativeHandler):
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
+        # Engine-owned conversation-affinity ADP routing gate; resolved lazily on first
+        # request (engine may not be initialized at handler construction). See
+        # conversation_affinity.py. None = not yet resolved.
+        self._conversation_affinity: Optional[bool] = None
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side assignment of conversation-affinity regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = config.conversation_affinity
+        self._conversation_affinity_dp_rank_source: str = (
+            config.conversation_affinity_dp_rank_source
+        )
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -254,12 +298,12 @@ class HandlerBase(BaseGenerativeHandler):
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
         # Sleep/wake state
-        self._quiesce_lock = asyncio.Lock()
+        self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
         self._inflight_requests = 0
         self._no_inflight_requests = asyncio.Event()
         self._no_inflight_requests.set()
-        self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
+        self._pause_controller = TRTLLMEnginePauseController(config.engine)
         self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
@@ -307,18 +351,32 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Timed out waiting for {inflight} in-flight request(s) to finish"
             ) from exc
 
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEnginePauseController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
     # ------------------------------------------------------------------
-    # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
+    # Sleep / wake public API (delegates to TRTLLMEnginePauseController)
     # ------------------------------------------------------------------
 
     async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory: unregister endpoint, drain requests, quiesce engine."""
+        """Release GPU memory: unregister endpoint, drain requests, pause engine."""
         body = body or {}
         tags = body.get("tags")
 
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            if self._pause_controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
+            if self._controller_needs_resume_recovery(self._pause_controller):
+                # A prior release rolled back into a half-paused state; pause()
+                # would no-op and falsely report success. Force a resume first.
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
 
             try:
                 await self._set_reject_new_requests(True)
@@ -328,14 +386,28 @@ class HandlerBase(BaseGenerativeHandler):
 
                 timeout_s = float(body.get("timeout_s", 30.0))
                 await self._wait_for_inflight_requests(timeout_s)
-                await self._quiesce_controller.quiesce(tags)
+                await self._pause_controller.pause(tags)
 
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
                 logger.error("release_memory_occupation failed: %s", exc)
                 # Rollback: TRT-LLM has no pause_generation(), so we
                 # manually unregistered the endpoint and set reject flag
-                # above. Restore both on failure.
+                # above. Restore both on failure. If pause partially
+                # succeeded, resume the completed domains first.
+                if self._controller_needs_resume_recovery(self._pause_controller):
+                    try:
+                        await self._pause_controller.resume(tags)
+                        self._pause_controller.mark_resumed()
+                    except Exception as resume_exc:
+                        logger.error(
+                            "release_memory_occupation rollback resume failed: %s",
+                            resume_exc,
+                        )
+                        return {
+                            "status": "error",
+                            "message": (f"{exc}; rollback resume failed: {resume_exc}"),
+                        }
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                 await self._set_reject_new_requests(False)
@@ -346,18 +418,21 @@ class HandlerBase(BaseGenerativeHandler):
         body = body or {}
         tags = body.get("tags")
 
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+        async with self._pause_lock:
+            needs_recovery = self._controller_needs_resume_recovery(
+                self._pause_controller
+            )
+            if not self._pause_controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Memory already resumed"}
 
             try:
-                await self._quiesce_controller.resume(tags)
+                await self._pause_controller.resume(tags)
 
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
 
                 await self._set_reject_new_requests(False)
-                self._quiesce_controller.mark_resumed()
+                self._pause_controller.mark_resumed()
                 return {"status": "ok", "message": "Memory resumed"}
             except Exception as exc:
                 logger.error("resume_memory_occupation failed: %s", exc)
@@ -367,71 +442,12 @@ class HandlerBase(BaseGenerativeHandler):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from the TRTLLM output for new tokens.
-
-        Args:
-            output: TRTLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        if not new_logprobs:
-            return None, None
-
-        # From TRTLLM CompletionOutput API, logprobs: (TokenLogprobs | List[float], optional)
-        # Expect TokenLogprobs output when logprobs is set, check edge case where list[float] is returned instead
-        if isinstance(new_logprobs[0], float):
-            return [float(lp) for lp in new_logprobs], None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-
-            # Extract log probability for the selected token
-            if actual_token_id in token_logprobs_dict:
-                selected_logprob = token_logprobs_dict[actual_token_id]
-                log_probs.append(float(selected_logprob.logprob))
-            else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_top_logprobs.append(
-                    {
-                        "rank": (
-                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
-                        ),
-                        "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
-                        "logprob": float(logprob_info.logprob),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+        return _shared_logprobs.extract_from_completion_output(
+            output,
+            num_output_tokens_so_far,
+            fallback_to_first_on_missing=True,
+            include_bytes=False,
+        )
 
     async def _handle_cancellation(
         self,
@@ -636,12 +652,19 @@ class HandlerBase(BaseGenerativeHandler):
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
+        # Text-only decode requests already carry the original token_ids.
+        # Prompt metadata is only needed to avoid reprocessing multimodal input.
+        if not self._request_has_multimodal(request) and not any(
+            key in request for key in ("_epd_processed_prompt", "_epd_prompt_token_ids")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # ALWAYS pack prompt info for DECODE to skip re-processing
+        # Pack prompt info for DECODE to skip re-processing
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
@@ -699,10 +722,31 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
-        # Canary probe: use its pre-built disagg params (skip prefill_result decode
-        # and skip the mode-specific request_type overrides).
-        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
-            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+        use_request_disagg_params = request.get(HEALTH_CHECK_KEY) or (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+
+        if (
+            use_request_disagg_params
+            and ep_disaggregated_params is not None
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        ):
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                ep_disaggregated_params
+            )
+            disaggregated_params.request_type = "context_and_generation"
+            return disaggregated_params, ep_disaggregated_params, {}
+
+        # Canary probes and text-only conditional-disagg bypasses run a full
+        # context+generation request on a disagg-mode worker, so they use
+        # the pre-built params and skip the normal prefill-result handoff.
+        if use_request_disagg_params and request.get("disaggregated_params"):
+            return (
+                LlmDisaggregatedParams(**request["disaggregated_params"]),
+                ep_disaggregated_params,
+                {},
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -712,7 +756,7 @@ class HandlerBase(BaseGenerativeHandler):
             else:
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only",
-                    disagg_request_id=get_global_disagg_request_id(
+                    disagg_request_id=get_compatible_global_disagg_request_id(
                         self.disagg_machine_id
                     ),
                 )
@@ -721,8 +765,8 @@ class HandlerBase(BaseGenerativeHandler):
             # ep_disaggregated_params, so the PYTHON transceiver can track
             # requests across prefill/decode workers.
             if disaggregated_params.disagg_request_id is None:
-                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
-                    self.disagg_machine_id
+                disaggregated_params.disagg_request_id = (
+                    get_compatible_global_disagg_request_id(self.disagg_machine_id)
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
@@ -939,7 +983,16 @@ class HandlerBase(BaseGenerativeHandler):
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
             ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
-        logging.debug(f"Request: {request}")
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+
+        request_token_ids = request.get("token_ids")
+        logging.debug(
+            "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
+            len(request_token_ids) if isinstance(request_token_ids, list) else None,
+            len(request),
+            embeddings is not None,
+            ep_disaggregated_params is not None,
+        )
 
         # Additional metrics: request type detection
         metrics_collector = self.additional_metrics
@@ -973,6 +1026,18 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
+        bypass_remote_prefill = (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+        if bypass_remote_prefill:
+            request_id = request.get("id") or request.get("request_id", "unknown-id")
+            logging.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request %s as AGG (prefill+decode on this worker).",
+                request_id,
+            )
+            request["disaggregated_params"] = {"request_type": "context_and_generation"}
 
         # Setup disaggregated params based on PREFILL/DECODE mode
         (
@@ -1002,6 +1067,7 @@ class HandlerBase(BaseGenerativeHandler):
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
+            and not bypass_remote_prefill
         ):
             logging.error("DECODE: disaggregated_params is None but required!")
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
@@ -1036,32 +1102,37 @@ class HandlerBase(BaseGenerativeHandler):
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
                     )
 
+        expanded_prompt_len = (
+            processed_input.pop("expanded_prompt_len", None)
+            if isinstance(processed_input, dict)
+            else None
+        )
+
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
-        elif self.max_seq_len is not None:
-            if self.multimodal_processor and processed_input is not None:
-                logging.debug(
-                    "Skipping dynamic max_tokens default for multimodal request..."
-                )
-            else:
-                token_ids = request.get("token_ids", [])
-                input_length = len(token_ids)
-                dynamic_default = max(1, self.max_seq_len - input_length)
-                sampling_params.max_tokens = dynamic_default
+        else:
+            has_images = self._request_has_images(processed_input)
+            prompt_token_ids = (
+                processed_input.get("prompt_token_ids")
+                if isinstance(processed_input, dict)
+                else None
+            )
+            default_max_tokens = self._default_max_tokens(
+                self.max_seq_len,
+                prompt_token_ids
+                if prompt_token_ids is not None
+                else request.get("token_ids", []),
+                has_images,
+                expanded_prompt_len,
+            )
+            if default_max_tokens is not None:
+                sampling_params.max_tokens = default_max_tokens
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
-
-        min_tokens = request["stop_conditions"].get("min_tokens")
-        if min_tokens:
-            sampling_params.min_tokens = min_tokens
-
-        stop_token_ids = request["stop_conditions"].get("stop_token_ids_hidden")
-        if stop_token_ids:
-            existing = sampling_params.stop_token_ids or []
-            sampling_params.stop_token_ids = list(set(existing).union(stop_token_ids))
+        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+            apply_stop_conditions_to_sampling_params(
+                sampling_params, request["stop_conditions"]
+            )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
@@ -1071,8 +1142,8 @@ class HandlerBase(BaseGenerativeHandler):
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
 
-        # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
-        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # Optional test-only logits processing (enable with DYN_ENABLE_TEST_LOGITS_PROCESSOR=1)
+        if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
@@ -1083,13 +1154,59 @@ class HandlerBase(BaseGenerativeHandler):
         )
 
         # Build trace headers for distributed tracing
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
+
+        # Resolve the engine conversation-affinity gate once (lazily; the engine is
+        # initialized by first request).
+        if self._conversation_affinity is None:
+            if (
+                self._engine_conversation_affinity_override
+                and not CONVERSATION_PARAMS_AVAILABLE
+            ):
+                raise RuntimeError(
+                    "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+            self._conversation_affinity = (
+                self._engine_conversation_affinity_override
+                or engine_conversation_affinity_enabled(self.engine.llm)
+            )
+            if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
+                raise RuntimeError(
+                    "attention_dp_config.kv_cache_routing_conversation_affinity is enabled but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+        conv_affinity = self._conversation_affinity
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
+        conversation_params = None
         scheduling_params = None
-        if dp_rank is not None:
+        if conv_affinity:
+            conversation_params = conversation_params_for(
+                session_id_from_request(request)
+            )
+            if (
+                self._conversation_affinity_dp_rank_source == "dynamo"
+                and conversation_params is not None
+                and dp_rank is not None
+            ):
+                # TensorRT-LLM#16815 records this explicit first-turn placement as the
+                # conversation binding. On later turns, the recorded binding takes
+                # precedence if Dynamo supplies a different rank.
+                scheduling_params = SchedulingParams(
+                    attention_dp_rank=dp_rank,
+                    attention_dp_relax=False,
+                )
+                logging.debug(
+                    "Using dynamo router dp_rank=%s for initial conversation-affinity "
+                    "placement",
+                    dp_rank,
+                )
+        elif dp_rank is not None:
             scheduling_params = SchedulingParams(
                 attention_dp_rank=dp_rank,
                 attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
@@ -1100,9 +1217,15 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        cache_salt = request_cache_salt(request)
 
         try:
             # NEW: Updated engine call to include multimodal data
+            # Only pass conversation_params in affinity mode — older TRT-LLM builds'
+            # generate_async does not accept the keyword.
+            conv_kwargs = (
+                {"conversation_params": conversation_params} if conv_affinity else {}
+            )
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
                 sampling_params=sampling_params,
@@ -1110,14 +1233,18 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                **conv_kwargs,
                 priority=priority,
+                cache_salt=cache_salt,
             )
 
-            # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete).
+            # In disagg decode mode with remote prefill, wrap abort() to defer
+            # until the first token is received (KV transfer complete).
             abort_guard = (
                 _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE
+                and disaggregated_params is not None
+                and not bypass_remote_prefill
                 else None
             )
 
@@ -1323,12 +1450,55 @@ class HandlerBase(BaseGenerativeHandler):
             await self._initiate_shutdown(e)
 
     @staticmethod
+    def _request_has_images(processed_input) -> bool:
+        """Whether the processed input carries image content, as opposed to a
+        text-only request served by a multimodal worker.
+
+        This distinction drives max_tokens sizing: only image requests have
+        unexpanded placeholders in token_ids, so only they need the expanded
+        length; text requests use len(token_ids) directly.
+        """
+        return bool(
+            isinstance(processed_input, dict)
+            and (
+                processed_input.get("multi_modal_data")
+                or processed_input.get("multi_modal_embeddings")
+            )
+        )
+
+    @staticmethod
+    def _default_max_tokens(
+        max_seq_len: Optional[int],
+        token_ids: list,
+        has_images: bool,
+        expanded_prompt_len: Optional[int],
+    ) -> Optional[int]:
+        """Default for an omitted max_tokens: fill the model's remaining context.
+
+        For image requests, token_ids hold unexpanded placeholders, so sizing uses
+        expanded_prompt_len (placeholders replaced by their per-image token counts);
+        when that is unavailable, returns None to defer to the engine default rather
+        than overestimate. Text requests (including text-only requests to a
+        multimodal worker) use len(token_ids) directly. Returns None when no default
+        applies.
+        """
+        if max_seq_len is None:
+            return None
+        if has_images:
+            if expanded_prompt_len is None:
+                return None
+            return max(1, max_seq_len - expanded_prompt_len)
+        return max(1, max_seq_len - len(token_ids))
+
+    @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
         overrides = {
             key: value
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        if "top_k" in overrides:
+            overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 
         # Convert guided_decoding dict (from Rust serialization) to GuidedDecodingParams.
         # Explicit field mapping avoids breakage if either side adds fields the other
@@ -1350,7 +1520,9 @@ class HandlerBase(BaseGenerativeHandler):
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                structural_tag=serialize_structural_tag(
+                    guided_decoding.get("structural_tag")
+                ),
             )
 
         n = overrides.get("n")

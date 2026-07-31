@@ -63,6 +63,17 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    if !state.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "stage": state.service_stage().to_string(),
+                "message": "Service is not ready"
+            })),
+        );
+    }
+
     let instances = match list_all_instances(state.discovery()).await {
         Ok(instances) => instances,
         Err(err) => {

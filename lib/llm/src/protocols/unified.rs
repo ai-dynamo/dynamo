@@ -38,11 +38,11 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::preprocessor::media::MediaDecoder;
-use crate::preprocessor::prompt::{OAIChatLikeRequest, TextInput};
+use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
+use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
-use crate::protocols::openai::nvext::{NvExt, NvExtProvider};
 use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -344,8 +344,8 @@ impl CommonExtProvider for UnifiedRequest {
     }
 
     fn get_guided_json(&self) -> Option<serde_json::Value> {
-        // Delegate to the inner impl which handles tool_choice → guided_json
-        // and response_format → guided_json derivation.
+        // Delegate to the inner impl which handles guided_json and
+        // response_format → guided_json derivation.
         CommonExtProvider::get_guided_json(&self.inner)
     }
 
@@ -387,6 +387,10 @@ impl CommonExtProvider for UnifiedRequest {
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.inner.common.skip_special_tokens
+    }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.inner.common.prompt_logprobs
     }
 }
 
@@ -491,12 +495,14 @@ impl OAIChatLikeRequest for UnifiedRequest {
         self.inner.chat_template_args.as_ref()
     }
 
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
-        self.inner.media_io_kwargs.as_ref()
-    }
-
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
         self.inner.inner.mm_processor_kwargs.as_ref()
+    }
+}
+
+impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        self.inner.media_io_kwargs.as_ref()
     }
 }
 
@@ -542,6 +548,7 @@ mod tests {
             common: CommonExt::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -565,6 +572,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: Some(0.7),
             top_p: None,

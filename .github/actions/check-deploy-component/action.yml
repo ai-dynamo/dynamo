@@ -24,6 +24,7 @@ runs:
           --target linter \
           --progress=plain \
           --build-context snapshot=../snapshot \
+          --build-context operator=../operator \
           .
 
     - name: Tester
@@ -35,13 +36,15 @@ runs:
           --target tester \
           --progress=plain \
           --build-context snapshot=../snapshot \
+          --build-context operator=../operator \
+          --build-context operator-chart=../helm/charts/platform/components/operator \
           .
 
     - name: Set up Go
       if: ${{ inputs.component == 'operator' }}
       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
       with:
-        go-version: '1.25'
+        go-version: '1.26.3'
 
     - name: Set up Python
       if: ${{ inputs.component == 'operator' }}
@@ -49,13 +52,18 @@ runs:
       with:
         python-version: "3.11"
 
-    - name: Install Python dependencies for operator codegen
+    - name: Install Python dependencies for operator checks
       if: ${{ inputs.component == 'operator' }}
       shell: bash
       working-directory: ./deploy/operator
       run: |
         python -m pip install --upgrade pip
-        python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
+        python -m pip install \
+          "pydantic>=2,<3" \
+          "black==23.1.0" \
+          "pyyaml>=6.0" \
+          "pytest==9.0.3" \
+          "pytest-timeout==2.4.0"
 
     - name: Check operator generated files
       if: ${{ inputs.component == 'operator' }}
@@ -63,3 +71,19 @@ runs:
       working-directory: ./deploy/operator
       run: |
         make check
+
+    - name: Test Go/Python DGD override boundary
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      env:
+        DYNAMO_RUN_DGD_OVERRIDE_GO_INTEGRATION: "1"
+        PYTHONPATH: ${{ github.workspace }}/components/src
+      run: |
+        go version
+        python -m pytest \
+          -c /dev/null \
+          --confcutdir=components/src/dynamo/profiler/tests/integration \
+          -W ignore::pytest.PytestUnknownMarkWarning \
+          -o "cache_dir=${RUNNER_TEMP}/dgd-override-pytest-cache" \
+          -q \
+          components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py

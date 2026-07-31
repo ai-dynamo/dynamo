@@ -30,6 +30,8 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 
@@ -591,6 +593,36 @@ def test_single_stage_runtime_devices_preserve_visible_subset(monkeypatch):
     assert stage_arg["runtime"]["devices"] == "1"
 
 
+def test_single_stage_runtime_devices_normalized_for_xpu_visibility(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "2")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "2"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "0"
+
+
+def test_single_stage_runtime_devices_preserve_xpu_visible_subset(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "0,1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "1"
+
+
 def test_fetch_stage_inputs_raises_on_missing_connector():
     worker = _make_worker_at_stage(1, connectors={}, engine_input_source=[0])
     with pytest.raises(RuntimeError, match="no connector for edge"):
@@ -703,3 +735,58 @@ async def test_sampling_params_propagate_in_stage_output():
         "height": 480,
         "width": 832,
     }
+
+
+@pytest.mark.asyncio
+async def test_final_stage_router_connector_sends_object_payload_wrapper():
+    """Final->router connector path should send object payload (not tensor-encoded blobs)."""
+    last_result = SimpleNamespace(
+        outputs=[SimpleNamespace(token_ids=[7], cumulative_token_ids=[7])],
+        final_output_type="text",
+    )
+    engine = _MockEngine(output=last_result)
+    router_connector = MagicMock()
+    router_connector.put.return_value = (True, 16, {"rdma": "meta"})
+
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "router"): router_connector},
+        stage_id=0,
+        stage_config=_make_stage_config(final_output=True),
+    )
+
+    chunks = [
+        chunk async for chunk in worker.generate({"prompt": "hello"}, _MockContext())
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0] == {
+        "stage_connector_refs": {"0": {"rdma": "meta"}},
+        "finished": True,
+    }
+
+    router_connector.put.assert_called_once()
+    sent_payload = router_connector.put.call_args.args[3]
+    assert isinstance(sent_payload, dict)
+    assert sent_payload["engine_inputs"] is last_result
+    assert "_dynamo_completion_output_attrs" in sent_payload
+
+
+@pytest.mark.asyncio
+async def test_fetch_stage_inputs_accepts_deserialized_object_payload():
+    """Upstream connector payload can be the deserialized object directly."""
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])])
+    connector = MagicMock()
+    connector.get.return_value = fetched_output
+
+    worker = _make_worker_at_stage(
+        1,
+        connectors={("0", "1"): connector},
+        engine_input_source=[0],
+    )
+    stage_list = await worker._fetch_stage_inputs({0: {"name": "ref0"}}, "req-obj")
+
+    assert len(stage_list) == 1
+    restored = stage_list[0].engine_outputs[0]
+    assert restored is fetched_output
+    assert restored.outputs[0].cumulative_token_ids == [4, 5]

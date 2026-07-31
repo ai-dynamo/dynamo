@@ -21,7 +21,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 _DIFFUSION_FIELDS = {f.name for f in dataclasses.fields(OmniDiffusionKwargs)}
@@ -51,7 +54,6 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "event_plane": "nats",
         "connector": [],
         "enable_local_indexer": True,
-        "durable_kv_events": False,
         "dyn_tool_call_parser": None,
         "dyn_reasoning_parser": None,
         "custom_jinja_template": None,

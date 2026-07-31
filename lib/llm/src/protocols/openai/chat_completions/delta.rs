@@ -6,11 +6,10 @@ use std::sync::Arc;
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     protocols::{
-        common::{self, timing::RequestTracker},
+        common::{self, extensions::NvExtProvider, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions},
-            nvext::NvExtProvider,
             token_to_utf8_bytes,
         },
     },
@@ -191,6 +190,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None, // Will be populated by router layer if needed
+            llm_metrics: None,
         }
     }
 
@@ -214,6 +214,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -268,6 +269,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
             }
+
+            // Propagate completion token details if provided, including reasoning tokens.
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
@@ -311,12 +317,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
+        let prompt_logprobs_payload =
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
-            delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
+            Some(completion_token_ids_slice),
+            prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -330,6 +340,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             if let Some(ref tokens) = nvext_response.token_ids {
                 tracing::debug!(
                     "Injected token_ids into chat completion nvext: {} tokens",
+                    tokens.len()
+                );
+            }
+            if let Some(ref tokens) = nvext_response.completion_token_ids {
+                tracing::debug!(
+                    "Injected completion_token_ids into chat completion nvext: {} tokens",
                     tokens.len()
                 );
             }
@@ -370,7 +386,8 @@ mod tests {
     use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
+        CreateChatCompletionRequest,
     };
 
     fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -392,6 +409,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -435,7 +453,7 @@ mod tests {
     }
 
     fn make_request_with_nvext(
-        nvext: crate::protocols::openai::nvext::NvExt,
+        nvext: crate::protocols::common::extensions::NvExt,
     ) -> NvCreateChatCompletionRequest {
         let mut request = create_test_request();
         request.nvext = Some(nvext);
@@ -454,12 +472,44 @@ mod tests {
             stop_reason: None,
             index: Some(0),
             completion_usage: None,
-            disaggregated_params: Some(serde_json::json!({
-                "token_ids": [11, 22, 33],
+            disaggregated_params: None,
+            worker_trace_link: None,
+            // routed_experts rides the engine's opaque passthrough.
+            engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
-            engine_data: None,
+            encoder_result: None,
+            routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_token_details_are_propagated_from_backend_usage() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-token-details".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            }),
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        let completion_details = usage
+            .completion_tokens_details
+            .expect("completion token details should be propagated");
+
+        assert_eq!(completion_details.reasoning_tokens, Some(3));
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
@@ -480,12 +530,13 @@ mod tests {
             },
             common: Default::default(),
             nvext: Some(
-                crate::protocols::openai::nvext::NvExt::builder()
+                crate::protocols::common::extensions::NvExt::builder()
                     .extra_fields(fields)
                     .build()
                     .unwrap(),
             ),
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -506,11 +557,14 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            routing_data: None,
         }
     }
 
@@ -563,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_timing_extra_field_emits_timing_on_final_chunk() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["timing".to_string()])
             .build()
@@ -587,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_query_instance_id_emits_worker_id_and_token_ids() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .annotations(vec!["query_instance_id:abc".to_string()])
             .build()
@@ -597,6 +651,11 @@ mod tests {
         generator
             .tracker()
             .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        // The query-only tokenized prompt reaches the delta generator via the tracker,
+        // mirroring the standalone-router round-trip the preprocessor drains.
+        generator
+            .tracker()
+            .set_external_query_token_ids(vec![11, 22, 33]);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
@@ -617,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_routed_experts_extra_field_emits_routed_experts() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["routed_experts".to_string()])
             .build()
@@ -714,7 +773,10 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            routing_data: None,
         };
 
         let response = generator

@@ -26,15 +26,20 @@ pub trait DecodeInterpolator: Send + Sync {
 }
 
 /// Callback trait for direct AIC SDK calls.
-/// Implementors call the Python AIC SDK via PyO3 GIL.
+/// Implementors call the Rust AIC core API.
 pub trait AicCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
-    fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64;
+    fn predict_prefill(
+        &self,
+        batch_size: usize,
+        effective_isl: usize,
+        prefix: usize,
+    ) -> Result<f64>;
 
     /// Predict decode (generation) latency in ms.
     /// Parameters: (batch_size, isl, osl)
-    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> f64;
+    fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> Result<f64>;
 }
 
 /// Wrapper to implement PrefillInterpolator for the concrete Interp1D type
@@ -82,7 +87,7 @@ pub enum PerfModel {
         prefill_interp: Arc<dyn PrefillInterpolator>,
         decode_interp: Arc<dyn DecodeInterpolator>,
     },
-    /// AI Configurator SDK calls via Python callback.
+    /// AI Configurator SDK calls through the configured callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
     Aiconfigurator { callback: Arc<dyn AicCallback> },
 }
@@ -218,23 +223,27 @@ impl PerfModel {
     /// - Polynomial/Interpolated: uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
     /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
-    pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
+    pub fn predict_prefill_time(
+        &self,
+        batch_size: usize,
+        isl: usize,
+        prefix: usize,
+    ) -> Result<f64> {
         let new_tokens_per_req = isl.saturating_sub(prefix);
+        if batch_size == 0 || new_tokens_per_req == 0 {
+            return Ok(0.0);
+        }
         let time = match self {
-            PerfModel::Polynomial => {
-                // Total tokens across the batch — GPU processes them in parallel
-                let tokens = (batch_size * new_tokens_per_req) as f64;
-                4.209989e-07 * tokens.powi(2) + 1.518344e-02 * tokens + 1.650142e+01
-            }
+            PerfModel::Polynomial => polynomial_prefill_time(batch_size, new_tokens_per_req),
             PerfModel::Interpolated { prefill_interp, .. } => {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator { callback } => {
-                callback.predict_prefill(batch_size, new_tokens_per_req, prefix)
-            }
+            PerfModel::Aiconfigurator { callback } => callback
+                .predict_prefill(batch_size, new_tokens_per_req, prefix)
+                .context("AIC prefill prediction failed")?,
         };
-        time.max(0.0)
+        Ok(time.max(0.0))
     }
 
     /// Predict decode time in milliseconds.
@@ -249,32 +258,128 @@ impl PerfModel {
         active_kv_tokens: usize,
         context_length: usize,
         total_kv_tokens: usize,
-    ) -> f64 {
+    ) -> Result<f64> {
         if batch_size == 0 {
-            return 0.0;
+            return Ok(0.0);
         }
         let time = match self {
-            PerfModel::Polynomial => {
-                let active_perc = if total_kv_tokens > 0 {
-                    active_kv_tokens as f64 / total_kv_tokens as f64
-                } else {
-                    tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
-                    1.0
-                };
-                -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
-            }
+            PerfModel::Polynomial => polynomial_decode_time(active_kv_tokens, total_kv_tokens),
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator { callback } => {
-                callback.predict_decode(batch_size, context_length, 2)
-            }
+            PerfModel::Aiconfigurator { callback } => callback
+                .predict_decode(batch_size, context_length, 2)
+                .context("AIC decode prediction failed")?,
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
         tracing::trace!(
             "Decode time prediction: batch_size={batch_size}, active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
-        result
+        Ok(result)
+    }
+}
+
+fn polynomial_prefill_time(batch_size: usize, new_tokens_per_request: usize) -> f64 {
+    // Total tokens across the batch — GPU processes them in parallel.
+    let tokens = (batch_size * new_tokens_per_request) as f64;
+    4.209989e-07 * tokens.powi(2) + 1.518344e-02 * tokens + 1.650142e+01
+}
+
+fn polynomial_decode_time(active_kv_tokens: usize, total_kv_tokens: usize) -> f64 {
+    let active_perc = if total_kv_tokens > 0 {
+        active_kv_tokens as f64 / total_kv_tokens as f64
+    } else {
+        tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
+        1.0
+    };
+    -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AicCallback, PerfModel};
+    use std::sync::Arc;
+
+    struct EchoBatchCallback;
+
+    impl AicCallback for EchoBatchCallback {
+        fn predict_prefill(
+            &self,
+            batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(batch_size as f64)
+        }
+
+        fn predict_decode(
+            &self,
+            batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            Ok(batch_size as f64)
+        }
+    }
+
+    struct FailingCallback;
+
+    impl AicCallback for FailingCallback {
+        fn predict_prefill(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<f64> {
+            anyhow::bail!("missing AIC prefill point")
+        }
+
+        fn predict_decode(
+            &self,
+            _batch_size: usize,
+            _isl: usize,
+            _osl: usize,
+        ) -> anyhow::Result<f64> {
+            anyhow::bail!("missing AIC decode point")
+        }
+    }
+
+    #[test]
+    fn fully_cached_prompt_skips_prefill() {
+        assert_eq!(
+            PerfModel::default()
+                .predict_prefill_time(1, 128, 128)
+                .unwrap(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn aic_forwards_scheduler_local_batch() {
+        let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+
+        assert_eq!(model.predict_prefill_time(7, 128, 0).unwrap(), 7.0);
+        assert_eq!(model.predict_decode_time(9, 0, 128, 0).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn aic_prefill_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_prefill_time(2, 128, 32)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "AIC prefill prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC prefill point");
+    }
+
+    #[test]
+    fn aic_decode_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_decode_time(2, 64, 128, 1024)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "AIC decode prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC decode point");
     }
 }

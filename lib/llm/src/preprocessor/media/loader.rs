@@ -17,6 +17,7 @@ use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -126,6 +127,15 @@ impl Default for MediaFetcher {
 }
 
 impl MediaFetcher {
+    fn with_internal_access(allow_internal: bool) -> Self {
+        Self {
+            allow_direct_ip: allow_internal,
+            allow_direct_port: allow_internal,
+            allow_private_ips: allow_internal,
+            ..Self::default()
+        }
+    }
+
     /// Build a `MediaFetcher` whose defaults respect the shared
     /// `DYN_MM_ALLOW_INTERNAL` environment variable. Mirrors the Python
     /// `UrlValidationPolicy.from_env()` behavior so both fetch paths
@@ -137,12 +147,7 @@ impl MediaFetcher {
     /// once.
     pub fn from_env() -> Self {
         let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
-        Self {
-            allow_direct_ip: allow_internal,
-            allow_direct_port: allow_internal,
-            allow_private_ips: allow_internal,
-            ..Self::default()
-        }
+        Self::with_internal_access(allow_internal)
     }
 }
 
@@ -372,16 +377,20 @@ pub struct MediaLoader {
 }
 
 impl MediaLoader {
-    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
-    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
-    /// Default `0` (disabled) — opt-in only.
-    fn cache_budget_bytes_from_env() -> u64 {
-        let gb = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB")
-            .ok()
+    fn cache_budget_bytes(value: Option<&str>) -> u64 {
+        let gb = value
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v >= 0.0)
             .unwrap_or(0.0);
         (gb * (1024.0 * 1024.0 * 1024.0)) as u64
+    }
+
+    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
+    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
+    /// Default `0` (disabled) — opt-in only.
+    fn cache_budget_bytes_from_env() -> u64 {
+        let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
+        Self::cache_budget_bytes(value.as_deref())
     }
 
     /// Hash a URL/datauri string into a stable u64 cache key.
@@ -464,8 +473,10 @@ impl MediaLoader {
             // output (resize, normalisation). When it's set we skip the
             // cache to stay correct; in practice it's None on the common
             // path so the hit rate is unaffected.
-            if media_io_kwargs.is_none() {
-                let key = Self::cache_key(image_part.image_url.url.as_str());
+            if media_io_kwargs.is_none()
+                && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
+            {
+                let key = Self::cache_key(url.as_str());
                 if let Some(hit) = cache.lock().get(&key) {
                     tracing::debug!(url_hash = key, "[mm-cache] hit");
                     return Ok(hit);
@@ -482,7 +493,7 @@ impl MediaLoader {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = &image_part.image_url.url;
+                let url = require_image_url(image_part)?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;
@@ -505,7 +516,13 @@ impl MediaLoader {
                             anyhow::anyhow!("Model does not support video inputs")
                         })?;
 
-                    let url = &video_part.video_url.url;
+                    let url = video_part
+                        .video_url
+                        .as_ref()
+                        .map(|media| &media.url)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Cannot decode a video content part without a URL")
+                        })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
                         .await?;
@@ -534,8 +551,9 @@ impl MediaLoader {
         if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
             (self.cache.as_ref(), oai_content_part)
             && media_io_kwargs.is_none()
+            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
         {
-            let key = Self::cache_key(image_part.image_url.url.as_str());
+            let key = Self::cache_key(url.as_str());
             let bytes = descriptor_bytes(&rdma_descriptor);
             cache.lock().put(key, rdma_descriptor.clone());
             tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
@@ -592,7 +610,10 @@ mod tests {
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage { image_url },
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: Some(image_url),
+                uuid: None,
+            },
         );
 
         let result = loader
@@ -687,7 +708,10 @@ mod tests {
         let url_string = format!("{}/cache-image.png", server.url());
         let image_url = ImageUrl::from(url_string);
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
-            ChatCompletionRequestMessageContentPartImage { image_url },
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: Some(image_url),
+                uuid: None,
+            },
         );
 
         // First call — populates cache.
@@ -792,7 +816,10 @@ mod tests {
         let make_part = |path: &str| {
             let image_url = ImageUrl::from(format!("{}{}", server.url(), path));
             ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                ChatCompletionRequestMessageContentPartImage { image_url },
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: Some(image_url),
+                    uuid: None,
+                },
             )
         };
 
@@ -869,47 +896,20 @@ mod tests_non_nixl {
 
     #[test]
     fn test_cache_budget_from_env_default_zero() {
-        const VAR: &str = "DYN_MULTIMODAL_LOADER_CACHE_GB";
         const GIB: u64 = 1024 * 1024 * 1024;
-        // Save and restore so other tests in the same process aren't affected.
-        let prev = std::env::var(VAR).ok();
-        // SAFETY: env mutation is fine within this single-threaded test;
-        // we restore on exit below.
-        unsafe {
-            std::env::remove_var(VAR);
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
-
-        unsafe {
-            std::env::set_var(VAR, "1");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB);
+        assert_eq!(MediaLoader::cache_budget_bytes(None), 0);
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("1")), GIB);
 
         // Fractional GB are honoured (lets users set, e.g., 0.5 for 512 MiB).
-        unsafe {
-            std::env::set_var(VAR, "0.5");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB / 2);
-
-        unsafe {
-            std::env::set_var(VAR, "not-a-number");
-        }
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("0.5")), GIB / 2);
         assert_eq!(
-            MediaLoader::cache_budget_bytes_from_env(),
+            MediaLoader::cache_budget_bytes(Some("not-a-number")),
             0,
             "non-numeric value should fall back to 0"
         );
 
         // Negative values are rejected (treated as 0).
-        unsafe {
-            std::env::set_var(VAR, "-1");
-        }
-        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var(VAR, v) },
-            None => unsafe { std::env::remove_var(VAR) },
-        }
+        assert_eq!(MediaLoader::cache_budget_bytes(Some("-1")), 0);
     }
 
     #[test]
@@ -1071,17 +1071,16 @@ mod tests_non_nixl {
     }
 
     #[test]
-    fn test_from_env_default() {
-        // Saving/restoring env vars in tests is racy with parallel tests,
-        // so we only assert the "unset" case here (parallel-safe).
-        // SAFETY: single-threaded mutation acceptable for this restore.
-        unsafe {
-            std::env::remove_var("DYN_MM_ALLOW_INTERNAL");
-        }
-        let f = MediaFetcher::from_env();
+    fn test_internal_access_defaults() {
+        let f = MediaFetcher::with_internal_access(false);
         assert!(!f.allow_private_ips);
         assert!(!f.allow_direct_ip);
         assert!(!f.allow_direct_port);
+
+        let f = MediaFetcher::with_internal_access(true);
+        assert!(f.allow_private_ips);
+        assert!(f.allow_direct_ip);
+        assert!(f.allow_direct_port);
     }
 
     #[test]

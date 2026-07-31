@@ -490,6 +490,29 @@ def set_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
     return args
 
 
+def set_unique_argument_value(args: list[str], arg_name: str, value: str) -> list[str]:
+    """Set one canonical value after removing every duplicate occurrence.
+
+    Handles both ``--arg value`` and ``--arg=value`` forms. This is intended
+    for identity-bearing arguments where appended DGD overrides must not leave
+    a later conflicting value for the backend parser to consume.
+    """
+    filtered: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == arg_name:
+            index += 2 if index + 1 < len(args) else 1
+            continue
+        if isinstance(arg, str) and arg.startswith(f"{arg_name}="):
+            index += 1
+            continue
+        filtered.append(arg)
+        index += 1
+
+    return append_argument(filtered, [arg_name, value])
+
+
 def update_image(config: dict, image: str) -> dict:
     """Update container image for non-planner DGD services.
 

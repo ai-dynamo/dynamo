@@ -159,16 +159,14 @@ nodes live in a different AZ.
 
 ## aiperf install
 
-We install aiperf from source pinned to a recent `main` SHA that
-includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
-(`feat(dataset): add session_id to single-turn for causal ordering`).
-Our sliding-window dataset writes one row per `(user, turn)` with
-`session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
-mode honor that ordering so prefix-cache hits across turns are real.
+We install `aiperf==0.10.0` from PyPI. This release includes
+[PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
+(`feat(dataset): add session_id to single-turn for causal ordering`),
+which makes `single_turn` mode honor `session_id` ordering so
+prefix-cache hits across the 8 turns of a given user are real.
 
-The pin lives in the shared `perf.yaml` (`AIPERF_GIT_REF` env var) at
-the recipe root, applied identically across all three configs. Bump
-when you want newer aiperf fixes.
+The version is pinned in `perf.yaml` and applies identically across
+all three configs. Bump the `aiperf==` pin there to roll forward.
 
 ## Naming & ownership
 

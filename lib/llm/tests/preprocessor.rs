@@ -4,10 +4,12 @@
 use anyhow::{Ok, Result};
 use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
-use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::preprocessor::prompt::PromptFormatter;
+use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_renderer::PromptContextMixin;
+use dynamo_renderer::PromptFormatter;
 use serde::{Deserialize, Serialize};
 
 use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
@@ -259,6 +261,7 @@ impl Request {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -275,7 +278,7 @@ async fn test_single_turn() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -307,7 +310,7 @@ async fn test_single_turn_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -344,7 +347,7 @@ async fn test_mulit_turn_without_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -376,7 +379,7 @@ async fn test_mulit_turn_with_system() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -414,7 +417,7 @@ async fn test_multi_turn_with_system_with_tools() {
     let mdcs = make_mdcs().await;
 
     for mdc in mdcs.iter() {
-        let formatter = PromptFormatter::from_mdc(mdc).unwrap();
+        let formatter = prompt_formatter_from_mdc(mdc).unwrap();
 
         // assert its an OAI formatter
         let formatter = match formatter {
@@ -457,7 +460,7 @@ async fn test_multi_turn_with_continuation() {
     )
     .await;
 
-    let formatter = PromptFormatter::from_mdc(&mdc).unwrap();
+    let formatter = prompt_formatter_from_mdc(&mdc).unwrap();
 
     // assert its an OAI formatter
     let formatter = match formatter {
@@ -487,7 +490,6 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
-    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -528,55 +530,6 @@ pub mod openai_preprocessor_tests {
         assert_eq!(
             eos_token_id_set,
             vec![200002, 199999, 200012].into_iter().collect()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_agent_context_propagates_to_preprocessed_request() {
-        if let Err(e) = get_hf_token() {
-            println!("HF_TOKEN is not set, skipping test: {}", e);
-            return;
-        }
-        let mdc = make_mdc_from_repo(
-            "tests/data/sample-models",
-            "openai/gpt-oss-120b",
-            "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
-            Some(vec![PromptContextMixin::OaiChat]),
-        )
-        .await;
-
-        let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
-        let mut request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
-        request.nvext = Some(
-            NvExt::builder()
-                .agent_context(
-                    AgentContext::builder()
-                        .session_type_id("deep_research:v1".to_string())
-                        .session_id("run-123".to_string())
-                        .trajectory_id("run-123:researcher-0".to_string())
-                        .parent_trajectory_id("run-123:orchestrator".to_string())
-                        .build()
-                        .unwrap(),
-                )
-                .build()
-                .unwrap(),
-        );
-
-        let preprocessed_request = oai_preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap()
-            .0;
-
-        let agent_context = preprocessed_request
-            .agent_context
-            .expect("agent_context should propagate");
-        assert_eq!(agent_context.session_type_id, "deep_research:v1");
-        assert_eq!(agent_context.session_id, "run-123");
-        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
-        assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
-            Some("run-123:orchestrator")
         );
     }
 }
@@ -678,6 +631,180 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
     }
 }
 
+mod cached_multimodal_uuid {
+    use std::sync::Arc;
+
+    use super::Request;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+    use dynamo_runtime::error::{DynamoError, ErrorType};
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    fn make_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    fn assert_invalid_argument(error: &anyhow::Error) {
+        let dynamo_error = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<DynamoError>())
+            .expect("error chain should contain DynamoError");
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn preserves_url_and_uuid_only_slot_alignment() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "compare"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/first.png"},
+                        "uuid": "image-a"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": null,
+                        "uuid": "image-b"
+                    }
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let preprocessor = make_preprocessor();
+
+        #[cfg(feature = "mm-routing")]
+        {
+            let mut builder = dynamo_llm::preprocessor::PreprocessedRequest::builder();
+            let mm_image_entries = preprocessor
+                .gather_multi_modal_data(&request, &mut builder, None, &[])
+                .await
+                .unwrap();
+            assert!(mm_image_entries.is_empty());
+        }
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let images = &preprocessed.multi_modal_data.as_ref().unwrap()["image_url"];
+        assert_eq!(images.len(), 2);
+        assert!(matches!(images[0], MultimodalData::Url(_)));
+        assert!(matches!(
+            &images[1],
+            MultimodalData::UuidOnly(value) if value == "image-b"
+        ));
+        assert_eq!(
+            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
+            vec![Some("image-a".to_string()), Some("image-b".to_string())]
+        );
+        assert!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("mm_hashes"))
+                .is_none()
+        );
+        assert!(preprocessed.mm_routing_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_audio_and_video_cache_uuids() {
+        for messages in [
+            r#"[{
+                "role": "user",
+                "content": [{
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
+                    "uuid": "cached-video"
+                }]
+            }]"#,
+            r#"[{
+                "role": "user",
+                "content": [{
+                    "type": "audio_url",
+                    "audio_url": {"url": "https://example.com/audio.wav"},
+                    "uuid": "cached-audio"
+                }]
+            }]"#,
+        ] {
+            let request = Request::from(messages, None, None, "test-model".to_string());
+            let error = make_preprocessor()
+                .preprocess_request(&request, None)
+                .await
+                .expect_err("audio and video cache UUIDs must be rejected");
+
+            assert!(
+                format!("{error:#}").contains("supported only for image_url parts with vLLM"),
+                "unexpected error: {error:#}"
+            );
+            assert_invalid_argument(&error);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_media_part_without_url_or_uuid() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": ""}}
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let error = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .expect_err("media without a URL or UUID must be rejected");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("neither `url` nor `uuid`"),
+            "unexpected error: {error_chain}"
+        );
+        assert_invalid_argument(&error);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_media_uuid() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.png"},
+                        "uuid": ""
+                    }
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let error = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .expect_err("an empty media UUID must be rejected");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("uuid must be a non-empty string"),
+            "unexpected error: {error_chain}"
+        );
+        assert_invalid_argument(&error);
+    }
+}
+
 mod context_length_validation {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -700,6 +827,7 @@ mod context_length_validation {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -710,7 +838,7 @@ mod context_length_validation {
     async fn test_prompt_exceeding_context_length_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // Set a very small context length so even a short prompt exceeds it
-        mdc.context_length = 5;
+        mdc.runtime_config.context_length = Some(5);
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
@@ -744,7 +872,7 @@ mod context_length_validation {
     async fn test_prompt_exactly_at_context_length_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // First, preprocess with a large context_length to discover the token count
-        mdc.context_length = 131072;
+        mdc.runtime_config.context_length = Some(131072);
         let preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
         let request = make_chat_request(
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
@@ -757,7 +885,7 @@ mod context_length_validation {
         let token_count = preprocessed.token_ids.len() as u32;
 
         // Now set context_length to exactly the token count — no room for output
-        mdc.context_length = token_count;
+        mdc.runtime_config.context_length = Some(token_count);
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
@@ -778,7 +906,8 @@ mod context_length_validation {
     async fn test_context_length_zero_skips_validation() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // context_length = 0 means unconfigured, should skip validation
-        mdc.context_length = 0;
+        mdc.runtime_config.context_length = None;
+        mdc.architectural_max_context_length = None;
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(

@@ -77,6 +77,7 @@ func TestDCD_RoundTrip_Empty(t *testing.T) {
 
 func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(3)
+	minAvailable := int32(2)
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -85,6 +86,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 				ComponentName: "min",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Replicas:      &replicas,
+				MinAvailable:  &minAvailable,
 			},
 		},
 	}
@@ -565,6 +567,16 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 }
 
 func TestDCD_RoundTrip_Experimental(t *testing.T) {
+	clientPodTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": "loader"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "gms-loader",
+				Image:   "loader:latest",
+				Command: []string{"/bin/loader"},
+			}},
+		},
+	}
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "exp", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -573,8 +585,33 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Experimental: &v1beta1.ExperimentalSpec{
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
-						Mode:            v1beta1.GMSModeIntraPod,
-						DeviceClassName: "gpu.nvidia.com",
+						Mode:                  v1beta1.GMSModeIntraPod,
+						DeviceClassName:       "gpu.nvidia.com",
+						ExtraClientContainers: []string{"gms-loader"},
+						ExtraClientPods: []v1beta1.GMSClientPodSpec{{
+							Name:        "loader",
+							PodTemplate: *clientPodTemplate.DeepCopy(),
+						}},
+					},
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled:             true,
+						Mode:                v1beta1.CheckpointModeAuto,
+						TargetContainerName: "worker",
+						Identity: &v1beta1.DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "vllm",
+						},
+						Job: &v1beta1.ComponentCheckpointJobConfig{
+							GMSClientContainers: []string{"gms-saver"},
+							PodTemplate: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{
+										Name:  "gms-saver",
+										Image: "saver:latest",
+									}},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -632,7 +669,8 @@ func TestDCD_ExperimentalModeValuesAreValidForIntermediateVersion(t *testing.T) 
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
 					Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
 					Checkpoint: &v1beta1.ComponentCheckpointConfig{
-						Mode: v1beta1.CheckpointModeAuto,
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
 						Identity: &v1beta1.DynamoCheckpointIdentity{
 							Model:            "model",
 							BackendFramework: "vllm",

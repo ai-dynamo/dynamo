@@ -164,7 +164,7 @@ pub use assignments::{
 
 use std::ops::Range;
 
-use dynamo_tokens::{Token, TokenBlock, TokenBlockError, TokenBlockSequence, Tokens};
+use dynamo_tokens::{SaltHash, Token, TokenBlock, TokenBlockError, TokenBlockSequence, Tokens};
 
 use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 
@@ -212,7 +212,7 @@ pub struct BlockSequence {
 
 impl BlockSequence {
     /// Creates a new `BlockSequence` from tokens, block size, and optional salt hash.
-    pub fn new(tokens: Vec<Token>, block_size: u32, salt_hash: Option<u64>) -> Self {
+    pub fn new(tokens: Vec<Token>, block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         let tokens = Tokens::from(tokens);
         Self {
             sequence: TokenBlockSequence::new(tokens, block_size, salt_hash),

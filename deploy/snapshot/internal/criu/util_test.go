@@ -1,6 +1,8 @@
 package criu
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -47,6 +49,35 @@ func TestParseManageCgroupsMode(t *testing.T) {
 	}
 }
 
+func TestReadLogTail(t *testing.T) {
+	t.Run("returns whole small log", func(t *testing.T) {
+		path := t.TempDir() + "/dump.log"
+		if err := os.WriteFile(path, []byte("short log"), 0644); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+
+		if got := readLogTail(path); got != "short log" {
+			t.Fatalf("readLogTail() = %q, want %q", got, "short log")
+		}
+	})
+
+	t.Run("truncates large log", func(t *testing.T) {
+		path := t.TempDir() + "/dump.log"
+		content := "prefix-" + strings.Repeat("x", dumpLogTailMaxSize+1)
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+
+		got := readLogTail(path)
+		if !strings.HasPrefix(got, "...<truncated>...\n") {
+			t.Fatalf("readLogTail() missing truncation marker: %q", got[:min(len(got), 32)])
+		}
+		if !strings.HasSuffix(got, strings.Repeat("x", dumpLogTailMaxSize)) {
+			t.Fatal("readLogTail() did not keep the log tail")
+		}
+	})
+}
+
 func TestApplyCommonSettings(t *testing.T) {
 	t.Run("valid mode sets all fields", func(t *testing.T) {
 		opts := &criurpc.CriuOpts{}
@@ -90,6 +121,47 @@ func TestApplyCommonSettings(t *testing.T) {
 		}
 		if opts.GetManageCgroupsMode() != criurpc.CriuCgMode_SOFT {
 			t.Errorf("ManageCgroupsMode = %v, want SOFT", opts.GetManageCgroupsMode())
+		}
+	})
+
+	t.Run("imageIoMode direct sets IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "direct"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode empty defaults to IMAGE_IO_DIRECT", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_DIRECT {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_DIRECT", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("imageIoMode writeback sets IMAGE_IO_WRITEBACK", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "writeback"}
+		if err := applyCommonSettings(opts, settings); err != nil {
+			t.Fatalf("applyCommonSettings: %v", err)
+		}
+		if opts.GetImageIoMode() != criurpc.CriuImageIoMode_IMAGE_IO_WRITEBACK {
+			t.Errorf("ImageIoMode = %v, want IMAGE_IO_WRITEBACK", opts.GetImageIoMode())
+		}
+	})
+
+	t.Run("invalid imageIoMode returns error", func(t *testing.T) {
+		opts := &criurpc.CriuOpts{}
+		settings := &types.CRIUSettings{ImageIoMode: "bogus"}
+		if err := applyCommonSettings(opts, settings); err == nil {
+			t.Error("expected error for invalid ImageIoMode")
 		}
 	})
 

@@ -10,7 +10,7 @@
 # Requires:
 #   - gpuMemoryService.enabled: true (GMS sidecar + DRA)
 #   - nvidia.com/dynamo-kube-discovery-mode: container (per-container K8s discovery)
-#   - Kubernetes 1.32+ with DRA enabled and the NVIDIA GPU DRA driver installed
+#   - Kubernetes 1.34+ with DRA v1 enabled and the NVIDIA GPU DRA driver installed
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment

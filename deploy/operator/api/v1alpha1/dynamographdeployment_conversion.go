@@ -35,6 +35,7 @@ package v1alpha1
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,9 +47,16 @@ import (
 )
 
 const (
-	annDGDSpec   = "nvidia.com/dgd-spec"
-	annDGDStatus = "nvidia.com/dgd-status"
+	dgdConversionAnnotationPrefix = "nvidia.com/dgd-"
+	annDGDSpec                    = dgdConversionAnnotationPrefix + "spec"
+	annDGDStatus                  = dgdConversionAnnotationPrefix + "status"
 )
+
+// IsDynamoGraphDeploymentConversionAnnotation reports whether key is reserved
+// for DGD conversion bookkeeping.
+func IsDynamoGraphDeploymentConversionAnnotation(key string) bool {
+	return strings.HasPrefix(key, dgdConversionAnnotationPrefix)
+}
 
 // DynamoGraphDeploymentConversionContext carries DGD-level conversion context
 // that component converters cannot derive from their local inputs.
@@ -101,6 +109,7 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -110,6 +119,10 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	if src.TopologyConstraint != nil {
 		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
 		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
+	}
+	if src.Experimental != nil {
+		dst.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{}
+		ConvertFromDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Env = src.Envs
 	if save != nil && len(src.PVCs) > 0 {
@@ -403,6 +416,7 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	// Convert fields represented by both versions from the live source.
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
+	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
 	if src.Restart != nil {
@@ -412,6 +426,10 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	if src.TopologyConstraint != nil {
 		dst.TopologyConstraint = &SpecTopologyConstraint{}
 		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
+	}
+	if src.Experimental != nil {
+		dst.Experimental = &DynamoGraphDeploymentExperimentalSpec{}
+		ConvertToDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Envs = src.Env
 
@@ -553,6 +571,52 @@ func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy
 	}
 }
 
+// ConvertFromDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1alpha1 to v1beta1.
+func ConvertFromDynamoGraphDeploymentExperimentalSpec(src *DynamoGraphDeploymentExperimentalSpec, dst *v1beta1.DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
+		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
+// ConvertToDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1beta1 to v1alpha1.
+func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDeploymentExperimentalSpec, dst *DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &KvTransferPolicy{}
+		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
+// ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to
+// v1beta1.
+func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
+	*dst = v1beta1.KvTransferPolicy{
+		ClusterTopologyName: src.ClusterTopologyName,
+		LabelKey:            src.LabelKey,
+		Domain:              v1beta1.TopologyDomain(src.Domain),
+		Enforcement:         v1beta1.KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+	}
+}
+
+// ConvertToKvTransferPolicy converts KV transfer policy from v1beta1 to
+// v1alpha1.
+func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
+	*dst = KvTransferPolicy{
+		ClusterTopologyName: src.ClusterTopologyName,
+		LabelKey:            src.LabelKey,
+		Domain:              TopologyDomain(src.Domain),
+		Enforcement:         KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+	}
+}
+
 // ConvertFromSpecTopologyConstraint converts deployment topology constraints
 // from v1alpha1 to v1beta1.
 func ConvertFromSpecTopologyConstraint(src *SpecTopologyConstraint, dst *v1beta1.SpecTopologyConstraint) {
@@ -576,6 +640,16 @@ func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *S
 func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &v1beta1.PlacementStatus{
+			State: v1beta1.PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -613,6 +687,16 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &PlacementStatus{
+			State: PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -668,6 +752,7 @@ func ConvertToRestartStatus(src *v1beta1.RestartStatus, dst *RestartStatus) {
 func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1beta1.ComponentCheckpointStatus) {
 	*dst = v1beta1.ComponentCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}
@@ -678,6 +763,7 @@ func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1bet
 func ConvertToServiceCheckpointStatus(src *v1beta1.ComponentCheckpointStatus, dst *ServiceCheckpointStatus) {
 	*dst = ServiceCheckpointStatus{
 		CheckpointName: src.CheckpointName,
+		CheckpointID:   src.CheckpointID,
 		IdentityHash:   src.IdentityHash,
 		Ready:          src.Ready,
 	}
@@ -709,16 +795,20 @@ func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *Rolling
 // v1beta1.
 func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
-		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNamesToHub(src),
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNamesToHub(src),
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if src.ReadyReplicas != nil {
 		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
 	}
 }
 
@@ -728,10 +818,11 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{
-		ComponentKind:   ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNames,
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNames,
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]
@@ -741,5 +832,8 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	}
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
 	}
 }

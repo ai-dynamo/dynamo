@@ -2,15 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! LoRA Allocation Algorithms - HRW and Random
+//!
+//! Min-Cost Flow placement is implemented separately in [`McfPlacementSolver`]
+//! and is not yet wired into the per-LoRA allocator path. It is not exposed
+//! as a config value until that integration lands.
 
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use std::collections::HashMap;
 use std::str::FromStr;
 
 pub mod hrw;
+pub mod mcf_allocator;
+pub mod min_cost_flow;
 pub mod table;
 
 pub use hrw::RendezvousHasher;
+pub use mcf_allocator::{McfPlacementResult, McfPlacementSolver, McfSolveParams};
 pub use table::{LoraReplicaConfig, LoraRoutingTable};
 
 /// Trait for LoRA allocation algorithms
@@ -35,17 +42,45 @@ pub trait LoraAllocator: Send + Sync {
         self.compute_replica_set(lora_name, workers, replica_factor)
     }
 
+    /// Stability-preserving slot-aware variant: like [`compute_replica_set_with_slots`],
+    /// but retains workers from `prior` (the LoRA's current placement) when they are still
+    /// present and not at capacity, before filling remaining slots from the ranked list.
+    ///
+    /// This keeps per-worker capacity safety (the caller charges residual usage across
+    /// LoRAs within a tick) without letting transient sibling activity move a LoRA whose
+    /// own inputs are unchanged — preserving the HRW churn-minimization guarantee.
+    ///
+    /// Default implementation ignores `prior` and delegates to the non-sticky variant.
+    fn compute_replica_set_with_slots_sticky(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+        _prior: &[WorkerWithDpRank],
+    ) -> Vec<WorkerWithDpRank> {
+        self.compute_replica_set_with_slots(lora_name, workers, replica_factor, worker_slot_usage)
+    }
+
     /// Name of this algorithm (for logging/metrics)
     fn name(&self) -> &str;
 }
 
-/// Factory for creating allocation algorithms
+/// Per-LoRA allocation algorithm selectable via `DYN_LORA_ALLOCATION_ALGORITHM`.
+///
+/// `MinCostFlow` selects the global `McfPlacementSolver` churn-aware placement
+/// path, which is driven by `LoraController` (see `controller.rs`). The per-LoRA
+/// `LoraAllocator` returned by [`create_lora_allocator`] for this variant is only
+/// used as a cold-start / fallback allocator; the actual global solve happens in
+/// the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationAlgorithmType {
     /// Rendezvous (Highest Random Weight) hashing
     Hrw,
     /// Random selection (for testing)
     Random,
+    /// Min-Cost Flow global placement (churn-aware bipartite assignment)
+    MinCostFlow,
 }
 
 impl FromStr for AllocationAlgorithmType {
@@ -55,16 +90,20 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
-            _ => Err(format!("Unknown allocation algorithm type: {}", s)),
+            "mcf" | "min_cost_flow" | "mincostflow" => Ok(Self::MinCostFlow),
+            _ => Err(format!("Unknown allocation algorithm type: {s}")),
         }
     }
 }
 
-/// Create a LoRA allocation algorithm instance
+/// Create a LoRA allocation algorithm instance.
 pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn LoraAllocator> {
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
+        // MCF uses its own global solver (McfPlacementSolver) in the controller;
+        // the per-LoRA allocator here is only a cold-start / fallback path.
+        AllocationAlgorithmType::MinCostFlow => Box::new(RendezvousHasher),
     }
 }
 
@@ -98,6 +137,20 @@ mod tests {
 
         let random = create_lora_allocator(AllocationAlgorithmType::Random);
         assert_eq!(random.name(), "random");
+    }
+
+    #[test]
+    fn test_mcf_config_string_parses_to_min_cost_flow() {
+        // PR4 wires MCF into the controller (McfPlacementSolver), so the config
+        // string is now accepted and maps to the MinCostFlow variant.
+        for s in &["mcf", "MCF", "min_cost_flow", "mincostflow"] {
+            let result = AllocationAlgorithmType::from_str(s);
+            assert_eq!(
+                result,
+                Ok(AllocationAlgorithmType::MinCostFlow),
+                "'{s}' should parse to MinCostFlow"
+            );
+        }
     }
 
     #[test]

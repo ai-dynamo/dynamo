@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -31,6 +32,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
@@ -42,6 +44,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -142,6 +145,33 @@ func TestIsDeploymentReady(t *testing.T) {
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
 						Replicas:           2,
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "not ready (old replicas remain after update)",
+			args: args{
+				deployment: &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Generation: 2,
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &[]int32{2}[0],
+					},
+					Status: appsv1.DeploymentStatus{
+						ObservedGeneration: 2,
+						UpdatedReplicas:    2,
+						ReadyReplicas:      2,
+						AvailableReplicas:  2,
+						Replicas:           3,
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentAvailable,
+								Status: corev1.ConditionTrue,
+							},
+						},
 					},
 				},
 			},
@@ -602,6 +632,81 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 	require.Equal(t, testNormalizedDCDName, service.Name)
 }
 
+func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	replicas := int32(1)
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-decode-4e5bb2af",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "decode",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   commonconsts.ComponentTypeDecode,
+				Replicas:        &replicas,
+				Multinode: &v1alpha1.MultinodeSpec{
+					NodeCount: 2,
+				},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: "1",
+					},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image:   "test-image:latest",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm"},
+					},
+				},
+			},
+		},
+	})
+
+	r := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd, &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "default-test-sa",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
+					},
+				},
+			}).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
+	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
+	require.NotEqual(t, service.Name, lws.Name)
+}
+
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, v1alpha1.AddToScheme(s))
@@ -661,6 +766,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -762,7 +868,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 	}
 	existingLeaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dcd.Name,
+			Name:      leaderWorkerSetName(dcd),
 			Namespace: dcd.Namespace,
 		},
 		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -783,7 +889,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 			WithScheme(s).
 			WithObjects(dcd, existingLeaderWorkerSet).
 			Build(),
-		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
 	}
 
 	componentType, err := r.getDCDWorkloadComponentType(context.Background(), dcd)
@@ -835,6 +941,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1058,7 +1165,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			},
 			want: &leaderworkersetv1.LeaderWorkerSet{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lws-deploy",
+					Name:      "test-lws-deploy-0",
 					Namespace: "default",
 					Labels: map[string]string{
 						"nvidia.com/label1":                          "label1",
@@ -1634,10 +1741,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
 
-	t.Run("ready checkpoint adds explicit restore labels", func(t *testing.T) {
+	t.Run("ready checkpoint in immediate mode adds restore candidate metadata", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1665,25 +1773,40 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
-			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != "" {
+			t.Fatalf("expected %s to be omitted before pod-create mutation, got %q", snapshotprotocol.CheckpointIDLabel, got)
 		}
 		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
 			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation]; got != commonconsts.KubeLabelValueTrue {
+			t.Fatalf("expected restore-candidate annotation, got %q", got)
+		}
+		if got := podTemplateSpec.Annotations[commonconsts.CheckpointNameAnnotation]; got != checkpointName {
+			t.Fatalf("expected checkpoint name annotation %q, got %q", checkpointName, got)
 		}
 		if got := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; got != commonconsts.MainContainerName {
 			t.Fatalf("expected %s=main annotation, got %q", snapshotprotocol.TargetContainersAnnotation, got)
 		}
 	})
 
-	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
+	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
+			Name:    "gms-loader",
+			Image:   "custom-loader:latest",
+			Command: []string{"/bin/custom-loader"},
+		})
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
 		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1700,6 +1823,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
 		podTemplateSpec, err := r.generatePodTemplateSpec(
 			context.Background(),
 			generateResourceOption{dynamoComponentDeployment: dcd},
@@ -1725,28 +1849,118 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		gmsServer := find(gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
-		loader := find(checkpoint.GMSLoaderContainer)
+		loader := find("gms-loader")
 		require.NotNil(t, loader)
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
 			mounts[mount.Name] = mount.MountPath
 		}
-		if got := mounts[snapshotprotocol.CheckpointVolumeName]; got != "/checkpoints" {
-			t.Fatalf("expected gms loader checkpoint mount at /checkpoints, got %q", got)
+		if got := mounts[gms.SharedVolumeName]; got != gms.SharedMountPath {
+			t.Fatalf("expected gms loader socket mount at %s, got %q", gms.SharedMountPath, got)
 		}
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
-		// Restore: gms-server and loader are init sidecars (restartPolicy=Always)
+		// gms-server is a native sidecar (init + restartPolicy=Always); no probe.
 		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			t.Fatalf("expected restore gms-server to have RestartPolicy=Always, got %#v", gmsServer.RestartPolicy)
 		}
 		if gmsServer.StartupProbe != nil {
 			t.Fatalf("expected restore gms-server to have no StartupProbe")
 		}
-		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.snapshot.loader" {
-			t.Fatalf("expected loader to run python module, got %#v", got)
+		// gms-loader is a regular container (no container-level RestartPolicy override).
+		if loader.RestartPolicy != nil {
+			t.Fatalf("expected restore gms-loader to have no container-level RestartPolicy, got %#v", loader.RestartPolicy)
+		}
+		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
+			t.Fatalf("expected loader command to be user-declared, got %#v", got)
+		}
+	})
+
+	t.Run("service gms with non-gms checkpoint is rejected", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{
+				Identity: identity,
+			},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		_, err = r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
+	})
+
+	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
+			Name:    "gms-loader",
+			Image:   "custom-loader:latest",
+			Command: []string{"/bin/custom-loader"},
+		})
+		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
+			Mode:                  v1beta1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader"},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{
+				Identity:         identity,
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+			},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		loader := findContainer(podTemplateSpec.Spec.Containers, "gms-loader")
+		require.NotNil(t, loader)
+		if got := loader.Image; got != "custom-loader:latest" {
+			t.Fatalf("loader image = %q, want custom-loader:latest", got)
+		}
+		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
+			t.Fatalf("loader command = %#v, want [/bin/custom-loader]", got)
 		}
 	})
 
@@ -1757,6 +1971,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
 		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
 			Name:    "gms-loader",
 			Image:   "sidecar:latest",
@@ -1797,11 +2012,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if sidecarContainer == nil || len(sidecarContainer.Command) != 1 || sidecarContainer.Command[0] != "python3" {
 			t.Fatalf("expected user sidecar container to remain unchanged, got %#v", sidecarContainer)
 		}
-		if mainContainer == nil || len(mainContainer.Command) != 2 || mainContainer.Command[0] != "sleep" || mainContainer.Command[1] != "infinity" {
-			t.Fatalf("expected main container to be rewritten for restore, got %#v", mainContainer)
+		if mainContainer == nil || len(mainContainer.Command) != 1 || mainContainer.Command[0] != "python3" {
+			t.Fatalf("expected main container command to be preserved for restore, got %#v", mainContainer)
 		}
-		if mainContainer.Args != nil {
-			t.Fatalf("expected main container args to be cleared, got %#v", mainContainer.Args)
+		if len(mainContainer.Args) == 0 {
+			t.Fatalf("expected main container args to be preserved, got %#v", mainContainer.Args)
 		}
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
@@ -1845,7 +2060,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != testNamespace {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
 		}
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
@@ -1866,6 +2081,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
 		ckpt := &v1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      checkpointName,
@@ -1983,6 +2199,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
 		}
 	}
 
@@ -2071,7 +2288,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := defaultNamespace
+	namespace := testNamespace
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
@@ -2166,7 +2383,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component",
+						Name:      "test-component-0",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -2192,7 +2409,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:   v1beta1.ComponentKindLeaderWorkerSet,
-					ComponentNames:  []string{"test-component"},
+					ComponentNames:  []string{"test-component-0"},
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
 					Replicas:        1,
@@ -2205,7 +2422,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component",
+						Name:      "test-component-0",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -2231,7 +2448,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				message:  "LeaderWorkerSet is not ready",
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:   v1beta1.ComponentKindLeaderWorkerSet,
-					ComponentNames:  []string{"test-component"},
+					ComponentNames:  []string{"test-component-0"},
 					ReadyReplicas:   ptr.To(int32(2)),
 					UpdatedReplicas: 2,
 					Replicas:        3,
@@ -2244,7 +2461,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			existingLeaderWorkerSets: []*leaderworkersetv1.LeaderWorkerSet{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-component",
+						Name:      "test-component-0",
 						Namespace: "default",
 					},
 					Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -2270,7 +2487,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				message:  "LeaderWorkerSet is ready",
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:   v1beta1.ComponentKindLeaderWorkerSet,
-					ComponentNames:  []string{"test-component"},
+					ComponentNames:  []string{"test-component-0"},
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
 					Replicas:        3,
@@ -2367,9 +2584,150 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
+	}
+}
+
+func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *testing.T) {
+	ctx := context.Background()
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+	require.NoError(t, volcanov1beta1.AddToScheme(s))
+
+	replicas := int32(3)
+	makeDCD := func() *v1beta1.DynamoComponentDeployment {
+		dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-component",
+				Namespace: "default",
+				UID:       "test-dcd-uid",
+			},
+			Spec: v1alpha1.DynamoComponentDeploymentSpec{
+				BackendFramework: string(dynamo.BackendFrameworkVLLM),
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ServiceName:     "test-service",
+					DynamoNamespace: ptr.To("default"),
+					ComponentType:   string(commonconsts.ComponentTypeDecode),
+					Replicas:        &replicas,
+					Multinode: &v1alpha1.MultinodeSpec{
+						NodeCount: 2,
+					},
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{
+							GPU: "1",
+						},
+					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image:   "test-image:latest",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm"},
+						},
+					},
+				},
+			},
+		})
+		dcd.UID = "test-dcd-uid"
+		return dcd
+	}
+
+	makeOwnerRef := func(dcd *v1beta1.DynamoComponentDeployment) metav1.OwnerReference {
+		return metav1.OwnerReference{
+			APIVersion: v1beta1.GroupVersion.String(),
+			Kind:       "DynamoComponentDeployment",
+			Name:       dcd.Name,
+			UID:        dcd.UID,
+			Controller: ptr.To(true),
+		}
+	}
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default-test-sa",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
+			},
+		},
+	}
+	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
+		return &DynamoComponentDeploymentReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objs...).
+				WithStatusSubresource(objs...).
+				Build(),
+			Recorder:      record.NewFakeRecorder(100),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
+			DockerSecretRetriever: &mockDockerSecretRetriever{
+				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+					return []string{}, nil
+				},
+			},
+		}
+	}
+
+	dcd := makeDCD()
+	objects := make([]client.Object, 0, 2+2*int(replicas))
+	objects = append(objects, dcd, serviceAccount.DeepCopy())
+	// v1.1.0 represented DCD replicas as separate one-replica LWS objects.
+	// Native LWS scaling should adopt the old "-0" object, set its
+	// Spec.Replicas to the DCD replica count, and delete the excess indexed
+	// objects and their legacy PodGroups.
+	for i := range int(replicas) {
+		instanceID := fmt.Sprintf("%d", i)
+		name := fmt.Sprintf("%s-%d", dcd.Name, i)
+		objects = append(objects,
+			&leaderworkersetv1.LeaderWorkerSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: "default",
+					Labels: map[string]string{
+						legacyLWSInstanceIDLabel: instanceID,
+					},
+					OwnerReferences: []metav1.OwnerReference{makeOwnerRef(dcd)},
+				},
+				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+					Replicas: ptr.To(int32(1)),
+				},
+			},
+			&volcanov1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: "default",
+					Labels: map[string]string{
+						legacyLWSInstanceIDLabel: instanceID,
+					},
+					OwnerReferences: []metav1.OwnerReference{makeOwnerRef(dcd)},
+				},
+			},
+		)
+	}
+	r := makeReconciler(objects...)
+
+	_, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
+	require.NoError(t, err)
+
+	got := &leaderworkersetv1.LeaderWorkerSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, got))
+	require.NotContains(t, got.Labels, legacyLWSInstanceIDLabel)
+	require.NotNil(t, got.Spec.Replicas)
+	require.Equal(t, replicas, *got.Spec.Replicas)
+
+	for _, name := range []string{"test-component-1", "test-component-2"} {
+		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
+		require.True(t, k8serrors.IsNotFound(err), "expected legacy LeaderWorkerSet %q to be deleted, got %v", name, err)
+	}
+	for _, name := range []string{"test-component-0", "test-component-1", "test-component-2"} {
+		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &volcanov1beta1.PodGroup{})
+		require.True(t, k8serrors.IsNotFound(err), "expected legacy PodGroup %q to be deleted, got %v", name, err)
 	}
 }
 
@@ -2537,6 +2895,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Assert the ComponentReconcileResult
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2626,6 +2986,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 			ComponentKind:     v1beta1.ComponentKindDeployment,
 			ComponentNames:    []string{"test-component"},
+			RuntimeNamespace:  "default",
 			Replicas:          1,
 			UpdatedReplicas:   1,
 			ReadyReplicas:     ptr.To(int32(0)),
@@ -3049,4 +3410,71 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 			g.Expect(deployment.Spec.Strategy).To(gomega.Equal(tt.wantStrategy))
 		})
 	}
+}
+
+func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-no-gpu-check",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  commonconsts.MainContainerName,
+								Image: "nvcr.io/nvidia/dynamo:latest",
+								Command: []string{
+									"python3",
+								},
+								Args: []string{
+									"-m",
+									"dynamo.vllm",
+								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{"cpu": resource.MustParse("1")},
+									Limits:   corev1.ResourceList{"cpu": resource.MustParse("1")},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	got, err := reconciler.generateWorkerPodTemplateSpec(
+		context.Background(),
+		generateResourceOption{dynamoComponentDeployment: dcd},
+		map[string]string{"app": "demo"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "worker", got.Labels["role"])
+	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
 }

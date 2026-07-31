@@ -1,0 +1,136 @@
+{{- include "power-agent.validateDevImageTag" . -}}
+{{- include "power-agent.validateMutex" . -}}
+{{- include "power-agent.validateActuator" . -}}
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# In-cluster dev-iteration harness. Renders a single Pod that mounts
+# power_agent.py, actuator.py, and managed_state.py from an
+# externally-created ConfigMap, pinned to one GPU node (dev.nodeName)
+# and one namespace (Release.Namespace).
+#
+# PREREQUISITE (NOT validated by Helm — validateMutex only checks
+# daemonset/dev exclusivity, not this ConfigMap's existence. If it is
+# missing, Kubernetes surfaces it later as a Pending Pod with
+# `MountVolume.SetUp failed` for volume "script"):
+#
+#   kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
+#     --from-file=power_agent.py=deploy/power-agent/power_agent.py \
+#     --from-file=actuator.py=deploy/power-agent/actuator.py \
+#     --from-file=managed_state.py=deploy/power-agent/managed_state.py \
+#     -n {{ .Release.Namespace }}
+#
+# The actuator.py mount was added in chart v1.1.0 — power_agent.py
+# imports `from actuator import Actuator, ...` at top of file, so a
+# ConfigMap that only carries power_agent.py will ImportError on
+# startup. A v1.0.0-style single-file ConfigMap will fail clearly with
+# `ModuleNotFoundError: No module named 'actuator'`.
+# managed_state.py was added in chart v1.3.0 — power_agent.py and
+# actuator.py share their managed-GPU state through it, so a ConfigMap
+# missing it fails with `ModuleNotFoundError: No module named
+# 'managed_state'`.
+
+{{- if .Values.dev.enabled }}
+{{- include "power-agent.validateTerminationGracePeriod" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "power-agent.fullname" . }}-dev
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "power-agent.labels" . | nindent 4 }}
+    role: dev
+spec:
+  serviceAccountName: {{ include "power-agent.serviceAccountName" . }}
+  hostPID: true                          # /proc/{pid}/cgroup readback
+  restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
+  terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}  # graceful shutdown restores TGP
+  runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  nodeName: {{ .Values.dev.nodeName | quote }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: power-agent
+      image: "{{ include "power-agent.imageRef" (dict "repository" .Values.dev.image.repository "tag" .Values.dev.image.tag) }}"
+      imagePullPolicy: {{ .Values.dev.image.pullPolicy }}
+      command: ["bash", "-c"]
+      args:
+        - |
+          set -euo pipefail
+          echo "[dev-pod] Installing python deps (kubernetes, prometheus-client)…"
+          pip install --quiet --no-input kubernetes prometheus-client
+          echo "[dev-pod] Starting Power Agent on node=$NODE_NAME, namespace=$POD_NAMESPACE…"
+          # --namespace=$POD_NAMESPACE constrains agent pod-list to this
+          # namespace; matches the namespace-scoped RBAC dev mode installs.
+          exec python3 /scripts/power_agent.py \
+            --safe-default-watts=$SAFE_DEFAULT_WATTS \
+            --node-name=$NODE_NAME \
+            --namespace=$POD_NAMESPACE \
+            --prometheus-port={{ .Values.agent.prometheusPort }} \
+            --actuator={{ .Values.agent.actuator }}{{- if eq .Values.agent.actuator "dcgm" }} \
+            --dcgm-host={{ .Values.agent.dcgm.host }} \
+            --dcgm-port={{ .Values.agent.dcgm.port }}{{- end }}
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: SAFE_DEFAULT_WATTS
+          value: {{ .Values.agent.safeDefaultWatts | quote }}
+        {{- range $k, $v := .Values.env }}
+        - name: {{ $k }}
+          value: {{ $v | quote }}
+        {{- end }}
+      securityContext:
+        privileged: true
+        readOnlyRootFilesystem: false
+        runAsUser: 0
+      ports:
+        - name: metrics
+          containerPort: {{ .Values.agent.prometheusPort }}
+          protocol: TCP
+      resources:
+        {{- toYaml .Values.dev.resources | nindent 8 }}
+      volumeMounts:
+        - name: script
+          mountPath: /scripts
+          readOnly: true
+        - name: state
+          mountPath: /var/lib/dynamo-power-agent
+  volumes:
+    - name: script
+      configMap:
+        name: {{ .Values.dev.scriptConfigMap }}
+        items:
+          - key: power_agent.py
+            path: power_agent.py
+            mode: 0o755
+          # actuator.py was added in chart v1.1.0. power_agent.py
+          # imports from it at module load; the dev pod will
+          # `ModuleNotFoundError: No module named 'actuator'` if the
+          # ConfigMap was created without --from-file=actuator.py=...
+          - key: actuator.py
+            path: actuator.py
+            mode: 0o644
+          # managed_state.py was added in chart v1.3.0. power_agent.py and
+          # actuator.py share their managed-GPU state through it; the dev pod
+          # will `ModuleNotFoundError: No module named 'managed_state'` if the
+          # ConfigMap was created without --from-file=managed_state.py=...
+          - key: managed_state.py
+            path: managed_state.py
+            mode: 0o644
+    - name: state
+      hostPath:
+        path: {{ .Values.state.hostPath | quote }}
+        type: DirectoryOrCreate
+{{- end }}

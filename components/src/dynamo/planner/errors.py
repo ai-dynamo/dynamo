@@ -25,6 +25,7 @@ from typing import List
 __all__ = [
     "PlannerError",
     "DynamoGraphDeploymentNotFoundError",
+    "DynamoGraphDeploymentNotReadyError",
     "ComponentError",
     "ModelNameNotFoundError",
     "DeploymentModelNameMismatchError",
@@ -68,11 +69,35 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
         return f"{self.__class__.__name__}(deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
 
 
+class DynamoGraphDeploymentNotReadyError(PlannerError):
+    """Raised when a DynamoGraphDeployment is not ready for scaling."""
+
+    def __init__(self, deployment_name: str, namespace: str | None = None):
+        self.deployment_name = deployment_name
+        self.namespace = namespace
+
+        if namespace:
+            message = (
+                "DynamoGraphDeployment is not ready "
+                f"(name: '{deployment_name}' in namespace '{namespace}')"
+            )
+        else:
+            message = f"DynamoGraphDeployment is not ready (name: '{deployment_name}')"
+
+        super().__init__(message)
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"deployment_name={self.deployment_name!r}, namespace={self.namespace!r})"
+        )
+
+
 class ComponentError(PlannerError):
-    """Base class for subComponent configuration issues.
+    """Base class for component type configuration issues.
 
     This serves as a parent class for all exceptions related to
-    subComponentType configuration problems in DynamoGraphDeployments.
+    component type configuration problems in DynamoGraphDeployments.
     """
 
     pass
@@ -138,16 +163,19 @@ class BackendFrameworkInvalidError(PlannerError):
 
 
 class SubComponentNotFoundError(ComponentError):
-    """Raised when a required subComponentType is not found in the deployment.
+    """Raised when a required component role is not found in the deployment.
 
-    This occurs when the DynamoGraphDeployment doesn't contain any service
-    with the requested subComponentType (e.g., 'prefill', 'decode').
+    This occurs when the DynamoGraphDeployment doesn't contain any component
+    with the requested role (e.g., 'prefill', 'decode').
     """
 
     def __init__(self, sub_component_type: str):
         self.sub_component_type = sub_component_type
 
-        message = f"DynamoGraphDeployment must contain a service with subComponentType '{sub_component_type}'"
+        message = (
+            f"DynamoGraphDeployment must contain a component with "
+            f"type '{sub_component_type}'"
+        )
 
         super().__init__(message)
 
@@ -158,10 +186,10 @@ class SubComponentNotFoundError(ComponentError):
 
 
 class DuplicateSubComponentError(ComponentError):
-    """Raised when multiple services have the same subComponentType.
+    """Raised when multiple components have the same planner role.
 
-    This occurs when the DynamoGraphDeployment contains more than one service
-    with the same subComponentType, which violates the expected uniqueness constraint.
+    This occurs when the DynamoGraphDeployment contains more than one component
+    with the same role, which violates the expected uniqueness constraint.
     """
 
     def __init__(self, sub_component_type: str, service_names: List[str]):
@@ -169,8 +197,8 @@ class DuplicateSubComponentError(ComponentError):
         self.service_names = service_names
 
         message = (
-            f"DynamoGraphDeployment must contain only one service with "
-            f"subComponentType '{sub_component_type}', but found multiple: "
+            f"DynamoGraphDeployment must contain only one component with "
+            f"type '{sub_component_type}', but found multiple: "
             f"{', '.join(sorted(service_names))}"
         )
 

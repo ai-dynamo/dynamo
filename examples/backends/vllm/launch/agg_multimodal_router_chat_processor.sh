@@ -13,8 +13,8 @@
 # `KvRouter` directly. This is the original MM-aware routing path.
 #
 # The default script (`agg_multimodal_router.sh`) uses the Rust frontend with
-# the `lightseek-mm` feature instead — pure-Rust per-image token-count via
-# the `llm-multimodal` crate, no PyO3/GIL on the routing hot path. Use this
+# the `mm-routing` feature instead — pure-Rust per-image token-count, no
+# PyO3/GIL on the routing hot path. Use this
 # `_chat_processor` variant when you specifically want the vLLM Python path
 # (e.g., to take advantage of `DYNAMO_MM_TRANSFER` shm/NIXL pre-rendered
 # `mm_kwargs`).
@@ -69,7 +69,7 @@ export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
 #   nixl  — NIXL RDMA transfer. Required for cross-node deployments.
 # Set DYNAMO_DISABLE_NIXL_MM=1 to disable the transfer channel entirely; the
 # backend then re-downloads + reprocesses the image from the original URL.
-# See docs/features/multimodal/multimodal-kv-routing.md for details.
+# See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for details.
 export DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
 
 # Extra args (word-splitting is intentional for shell-style overrides)
@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: $0 [--model NAME] [--num-workers N] [--single-gpu] [EXTRA_VLLM_ARGS...]
 
-See docs/features/multimodal/multimodal-kv-routing.md for env vars.
+See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for env vars.
 EOF
             exit 0
             ;;
@@ -160,7 +160,7 @@ wait_frontend_models() {
 
 echo "Prerequisite: start etcd and NATS yourself before running this script."
 echo "Example:"
-echo "  docker compose -f deploy/docker-compose.yml up -d"
+echo "  docker compose -f dev/docker-compose.yml up -d"
 echo
 
 COMMON_ENV=(
@@ -170,6 +170,9 @@ COMMON_ENV=(
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 )
 
+# Phase 1: launch all workers in parallel.
+# Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
+# requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
@@ -194,8 +197,11 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
             $GPU_MEM_ARGS \
             --max-model-len "${MAX_MODEL_LEN}" \
             ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
-    # trap 'kill 0' handles cleanup
-    # Wait for this worker before starting the next one to avoid ZMQ port races.
+done
+
+# Phase 2: wait for all workers to be ready.
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 
@@ -217,12 +223,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
     FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
-    # Only reset states on the first replica to avoid wiping shared state.
-    RESET_ARGS=""
-    if [[ "$f" -eq 1 ]]; then
-        RESET_ARGS="--router-reset-states"
-    fi
-
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
     if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
@@ -239,7 +239,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
             --dyn-chat-processor vllm \
             --router-mode kv \
             --kv-cache-block-size "${BLOCK_SIZE}" \
-            ${RESET_ARGS} \
             ${SYNC_ARGS} \
             --model-name "${MODEL}" \
             ${FRONTEND_EXTRA_ARGS} &

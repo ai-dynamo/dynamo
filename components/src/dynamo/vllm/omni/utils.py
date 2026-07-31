@@ -3,12 +3,11 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
-import json
+import asyncio
 import logging
-from pathlib import Path
 from typing import Any, cast
 
-from huggingface_hub import scan_cache_dir
+import torch
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -24,6 +23,43 @@ DEFAULT_VIDEO_SIZE = "832x480"
 def shm_deserialize(shm_meta: dict) -> Any:
     """Read and deserialize an OmniRequestOutput from shared memory."""
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
+
+
+async def ensure_awaited(value: Any) -> Any:
+    """Await a value if it is a coroutine, otherwise return it directly."""
+    if asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
+def unwrap_connector_payload(payload: Any) -> Any:
+    """Unpack connector return value (some return (payload,) tuples)."""
+    return payload[0] if isinstance(payload, tuple) else payload
+
+
+def is_empty_payload(value: Any) -> bool:
+    """Check if a payload value is empty/None (tensor-aware)."""
+    if value is None:
+        return True
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, (list, tuple, dict, str, bytes, bytearray, set)):
+        return len(value) == 0
+    return False
+
+
+def coerce_token_ids_to_list(token_ids: Any) -> list[Any]:
+    """Normalize token_ids (tensor, list, tuple, or other) to a Python list."""
+    if token_ids is None:
+        return []
+    if isinstance(token_ids, torch.Tensor):
+        return token_ids.detach().cpu().tolist()
+    if isinstance(token_ids, (list, tuple)):
+        return list(token_ids)
+    try:
+        return list(token_ids)
+    except TypeError:
+        return [token_ids]
 
 
 def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, int]:
@@ -252,55 +288,3 @@ def _build_sampling_params(stage_config: Any, overrides: dict | None) -> list | 
             if hasattr(llm_params, arg):
                 setattr(llm_params, arg, value)
     return [llm_params]
-
-
-def ensure_dummy_tokenizer_for_tts(model: str) -> list[Path]:
-    """Create a minimal tokenizer.json for TTS models that lack one.
-
-    Audio/TTS models (e.g., Qwen3-TTS) use a custom speech tokenizer and don't
-    ship the standard tokenizer.json expected by the Rust ModelDeploymentCard
-    loader. This writes a placeholder so register_model doesn't fail.
-
-    Returns the list of created dummy paths so the caller can delete them
-    after registration (otherwise the fake tokenizer poisons vLLM-Omni's
-    inference-time AutoTokenizer.from_pretrained call).
-
-    This is a short-term workaround. The long-term fix is making TokenizerKind
-    optional in ModelDeploymentCard::from_repo_checkout().
-    """
-    created: list[Path] = []
-    cache_info = scan_cache_dir()
-    for repo in cache_info.repos:
-        if repo.repo_id == model:
-            for revision in repo.revisions:
-                tokenizer_path = Path(revision.snapshot_path) / "tokenizer.json"
-                if not tokenizer_path.exists():
-                    logging.warning(
-                        "TTS model %s has no tokenizer.json; "
-                        "creating a minimal placeholder at %s",
-                        model,
-                        tokenizer_path,
-                    )
-                    minimal_tokenizer = {
-                        "version": "1.0",
-                        "model": {"type": "BPE", "vocab": {}, "merges": []},
-                    }
-                    tokenizer_path.write_text(json.dumps(minimal_tokenizer))
-                    created.append(tokenizer_path)
-            return created
-    return created
-
-
-def cleanup_dummy_tokenizer_for_tts(paths: list[Path]):
-    """Remove dummy tokenizer.json files created by ensure_dummy_tokenizer_for_tts.
-
-    Must be called after register_model() completes so the fake tokenizer
-    doesn't interfere with vLLM-Omni's inference-time tokenizer loading
-    (AutoTokenizer.from_pretrained picks up our stub and crashes).
-    """
-    for path in paths:
-        try:
-            path.unlink(missing_ok=True)
-            logging.info("Removed dummy tokenizer placeholder: %s", path)
-        except OSError as e:
-            logging.warning("Failed to remove dummy tokenizer %s: %s", path, e)

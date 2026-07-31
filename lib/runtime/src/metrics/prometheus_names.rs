@@ -46,7 +46,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
 //! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
@@ -90,6 +90,10 @@ pub mod name_prefix {
 
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
+
+    /// Prefix for request admission/rejection control metrics (e.g.
+    /// `dynamo_rejection_request_total`).
+    pub const REJECTION: &str = "dynamo_rejection";
 
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
@@ -136,7 +140,7 @@ pub mod labels {
     /// When a metric already has a label, injection does not overwrite it (original is preserved).
     pub const MODEL_NAME: &str = "model_name";
 
-    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
     /// Label for router instance (discovery.instance_id() of the frontend)
@@ -169,6 +173,9 @@ pub mod frontend_service {
 
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// Total number of LLM requests accepted by the frontend handler
+    pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
 
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
@@ -219,6 +226,23 @@ pub mod frontend_service {
 
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
+
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    /// Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    /// pooling-model latencies (sub-second) without sacrificing resolution.
+    pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
+
+    /// Number of `image_url` content parts per request (histogram)
+    pub const IMAGES_PER_REQUEST: &str = "images_per_request";
+
+    /// Number of `video_url` content parts per request (histogram)
+    pub const VIDEOS_PER_REQUEST: &str = "videos_per_request";
+
+    /// Number of `audio_url` content parts per request (histogram)
+    pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
 
     /// Model configuration metrics
     ///
@@ -297,6 +321,15 @@ pub mod frontend_service {
     /// Number of in-flight (active) requests for a LoRA adapter
     pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
 
+    /// Total LoRA loads (new placements) this controller tick
+    pub const LORA_CHURN_LOADS_TOTAL: &str = "lora_churn_loads_total";
+
+    /// Total LoRA unloads (removed placements) this controller tick
+    pub const LORA_CHURN_UNLOADS_TOTAL: &str = "lora_churn_unloads_total";
+
+    /// MCF solver overflow count (unplaceable replicas)
+    pub const LORA_OVERFLOW_COUNT: &str = "lora_overflow_count";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -350,8 +383,11 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
+        /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
+
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
@@ -433,6 +469,9 @@ pub mod work_handler {
 
         /// Generation error
         pub const GENERATE: &str = "generate";
+
+        /// Response serialization error
+        pub const SERIALIZATION: &str = "serialization";
 
         /// Response publishing error
         pub const PUBLISH_RESPONSE: &str = "publish_response";
@@ -557,7 +596,7 @@ pub mod routing_overhead {
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -565,6 +604,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
@@ -575,6 +617,9 @@ pub mod router {
     /// Total number of remote indexer routing-decision writes that failed
     pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
         "router_remote_indexer_write_failures_total";
+
+    /// Number of workers expected to publish KV events but missing query endpoints
+    pub const KV_EVENT_SOURCE_MISMATCH_WORKERS: &str = "router_kv_event_source_mismatch_workers";
 
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
@@ -596,6 +641,9 @@ pub mod router {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Whether the router currently has a worker/dp_rank registered (1 = registered)
+    pub const WORKER_REGISTERED: &str = "router_worker_registered";
 }
 
 /// Frontend pipeline stage and event-loop metrics
@@ -615,6 +663,14 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
+    /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
+    /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
+    /// Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_CACHED_TOKENS_TOTAL: &str = "tokenizer_cache_cached_tokens_total";
+    /// Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: &str = "tokenizer_cache_uncached_tokens_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -738,6 +794,15 @@ pub mod trtllm_additional {
 
     /// KV cache transfer speed per request in GB/s
     pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
+
+    /// Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    pub const KV_EVENT_BUFFER_CAPACITY: &str = "trtllm_kv_event_buffer_capacity";
+
+    /// Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    pub const KV_EVENT_DRAIN_BATCH_SIZE: &str = "trtllm_kv_event_drain_batch_size";
+
+    /// Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    pub const KV_EVENT_ID_GAP_EVENTS_TOTAL: &str = "trtllm_kv_event_id_gap_events_total";
 }
 
 // KV cache statistics metrics

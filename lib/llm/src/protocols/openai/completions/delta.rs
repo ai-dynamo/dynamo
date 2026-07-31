@@ -6,11 +6,10 @@ use std::sync::Arc;
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
     protocols::{
-        common::{self, timing::RequestTracker},
+        common::{self, extensions::NvExtProvider, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions},
-            nvext::NvExtProvider,
         },
     },
     types::TokenIdType,
@@ -232,6 +231,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             }
         }
 
+        // Keep token IDs available for optional nvext emission only when requested.
+        let completion_token_ids_for_nvext = if self.options.response_fields.completion_token_ids {
+            Some(delta.token_ids.clone())
+        } else {
+            None
+        };
         let logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
@@ -256,12 +261,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
+        let prompt_logprobs_payload =
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
-            delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
+            completion_token_ids_for_nvext.as_deref(),
+            prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
@@ -275,6 +283,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             if let Some(ref tokens) = nvext_response.token_ids {
                 tracing::debug!(
                     "Injected token_ids into completions nvext: {} tokens",
+                    tokens.len()
+                );
+            }
+            if let Some(ref tokens) = nvext_response.completion_token_ids {
+                tracing::debug!(
+                    "Injected completion_token_ids into completions nvext: {} tokens",
                     tokens.len()
                 );
             }
@@ -333,7 +347,7 @@ mod tests {
     }
 
     fn make_request_with_nvext(
-        nvext: crate::protocols::openai::nvext::NvExt,
+        nvext: crate::protocols::common::extensions::NvExt,
     ) -> NvCreateCompletionRequest {
         let mut request = create_test_request();
         request.nvext = Some(nvext);
@@ -352,11 +366,14 @@ mod tests {
             stop_reason: None,
             index: Some(0),
             completion_usage: None,
-            disaggregated_params: Some(serde_json::json!({
-                "token_ids": [11, 22, 33],
+            disaggregated_params: None,
+            worker_trace_link: None,
+            // routed_experts rides the engine's opaque passthrough.
+            engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
-            engine_data: None,
+            encoder_result: None,
+            routing_data: None,
         }
     }
 
@@ -371,7 +388,7 @@ mod tests {
             inner,
             common: Default::default(),
             nvext: Some(
-                crate::protocols::openai::nvext::NvExt::builder()
+                crate::protocols::common::extensions::NvExt::builder()
                     .extra_fields(fields)
                     .build()
                     .unwrap(),
@@ -395,11 +412,14 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            routing_data: None,
         }
     }
 
@@ -516,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_timing_extra_field_emits_timing_on_final_chunk() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["timing".to_string()])
             .build()
@@ -540,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_query_instance_id_emits_worker_id_and_token_ids() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .annotations(vec!["query_instance_id:abc".to_string()])
             .build()
@@ -550,6 +570,11 @@ mod tests {
         generator
             .tracker()
             .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        // The query-only tokenized prompt reaches the delta generator via the tracker,
+        // mirroring the standalone-router round-trip the preprocessor drains.
+        generator
+            .tracker()
+            .set_external_query_token_ids(vec![11, 22, 33]);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
@@ -570,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_routed_experts_extra_field_emits_routed_experts() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["routed_experts".to_string()])
             .build()
@@ -667,7 +692,10 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
+            routing_data: None,
         };
 
         let response = generator

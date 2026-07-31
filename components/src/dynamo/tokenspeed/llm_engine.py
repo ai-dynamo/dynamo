@@ -18,9 +18,11 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
@@ -84,14 +86,16 @@ class TokenspeedLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model,
             served_model_name=self.server_args.served_model_name,
-            context_length=self._model_max_len,
-            kv_cache_block_size=block_size,
-            total_kv_blocks=total_kv_blocks,
-            max_num_seqs=_optional_int(
-                scheduler_info.get("max_num_seqs")
-                or getattr(self.server_args, "max_num_seqs", None)
+            llm=LlmRegistration(
+                context_length=self._model_max_len,
+                kv_cache_block_size=block_size,
+                total_kv_blocks=total_kv_blocks,
+                max_num_seqs=_optional_int(
+                    scheduler_info.get("max_num_seqs")
+                    or getattr(self.server_args, "max_num_seqs", None)
+                ),
+                max_num_batched_tokens=max_num_batched_tokens,
             ),
-            max_num_batched_tokens=max_num_batched_tokens,
         )
 
     async def generate(
@@ -292,13 +296,7 @@ def _guided_decoding_params(guided_decoding: dict[str, Any]) -> dict[str, Any]:
         params["ebnf"] = grammar
 
     if structural_tag is not None:
-        if hasattr(structural_tag, "model_dump"):
-            structural_tag = structural_tag.model_dump()
-        params["structural_tag"] = (
-            structural_tag
-            if isinstance(structural_tag, str)
-            else json.dumps(structural_tag)
-        )
+        params["structural_tag"] = serialize_structural_tag(structural_tag)
 
     return params
 

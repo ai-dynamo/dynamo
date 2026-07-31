@@ -51,6 +51,32 @@ func (r *ContainerdRuntime) ResolveContainer(ctx context.Context, containerID st
 }
 
 func (r *ContainerdRuntime) ResolveContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (int, *specs.Spec, error) {
+	container, err := r.findRunningContainerByPod(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx = namespaces.WithNamespace(ctx, k8sNamespace)
+
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to get task for container %s (pod %s/%s): %w", container.ID(), podNamespace, podName, err)
+	}
+	spec, err := container.Spec(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to get spec for container %s (pod %s/%s): %w", container.ID(), podNamespace, podName, err)
+	}
+	return int(task.Pid()), spec, nil
+}
+
+func (r *ContainerdRuntime) ResolveContainerIDByPod(ctx context.Context, podName, podNamespace, containerName string) (string, error) {
+	container, err := r.findRunningContainerByPod(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return "", err
+	}
+	return container.ID(), nil
+}
+
+func (r *ContainerdRuntime) findRunningContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (containerd.Container, error) {
 	ctx = namespaces.WithNamespace(ctx, k8sNamespace)
 
 	filter := fmt.Sprintf("labels.\"io.kubernetes.pod.name\"==%s,labels.\"io.kubernetes.pod.namespace\"==%s,labels.\"io.kubernetes.container.name\"==%s",
@@ -58,24 +84,18 @@ func (r *ContainerdRuntime) ResolveContainerByPod(ctx context.Context, podName, 
 
 	containers, err := r.client.Containers(ctx, filter)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to list containers for pod %s/%s: %w", podNamespace, podName, err)
+		return nil, fmt.Errorf("failed to list containers for pod %s/%s: %w", podNamespace, podName, err)
 	}
 	if len(containers) == 0 {
-		return 0, nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
+		return nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
 	}
 
 	// During container restarts, both the old and new container may be listed;
 	// pick the first with a live task.
 	for _, c := range containers {
-		task, err := c.Task(ctx, nil)
-		if err != nil {
-			continue
+		if _, err := c.Task(ctx, nil); err == nil {
+			return c, nil
 		}
-		spec, err := c.Spec(ctx)
-		if err != nil {
-			continue
-		}
-		return int(task.Pid()), spec, nil
 	}
-	return 0, nil, fmt.Errorf("no running container found for pod %s/%s container %s (%d candidates)", podNamespace, podName, containerName, len(containers))
+	return nil, fmt.Errorf("no running container found for pod %s/%s container %s (%d candidates)", podNamespace, podName, containerName, len(containers))
 }

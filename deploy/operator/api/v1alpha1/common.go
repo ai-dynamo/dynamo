@@ -167,18 +167,19 @@ const (
 	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
 	// GMSModeInterPod runs GMS as a separate weight server pod and one or more
 	// engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared
-	// hostPath volume for UDS sockets. Only valid on FailoverSpec; the
-	// GPUMemoryServiceSpec sidecar always runs in intraPod mode.
+	// hostPath volume for UDS sockets. Extra client pod rendering is reserved
+	// for a follow-up change.
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
-// (weights + kv_cache) and communicates with the main container over UDS sockets.
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker component.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == 'intraPod'",message="extraClientContainers is only supported with mode=intraPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == 'interPod'",message="extraClientPods is only supported with mode=interPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0",message="extraClientPods is reserved for inter-pod GMS and is not implemented yet"
 type GPUMemoryServiceSpec struct {
-	// Enabled activates the GMS sidecar. GPU resources on the main container
-	// are replaced with a DRA ResourceClaim for shared GPU access.
+	// Enabled activates GMS wiring. GPU resources on client containers are
+	// replaced with a DRA ResourceClaim for shared GPU access.
 	Enabled bool `json:"enabled"`
 	// Mode selects the GMS deployment topology.
 	// +kubebuilder:default=intraPod
@@ -189,6 +190,42 @@ type GPUMemoryServiceSpec struct {
 	// +kubebuilder:default="gpu.nvidia.com"
 	// +optional
 	DeviceClassName string `json:"deviceClassName,omitempty"`
+
+	// ExtraClientContainers lists additional user-declared containers that should
+	// be wired as GMS clients in pods rendered from the enclosing spec.
+	// DGD/DCD services apply this to service pods. Auto-created checkpoints
+	// apply checkpoint job clients before creating the DynamoCheckpoint; manual
+	// DynamoCheckpoint users must provide an already-prepared pod template.
+	// In each rendered pod, only matching container names are wired; absent
+	// names are ignored.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ExtraClientContainers []string `json:"extraClientContainers,omitempty"`
+
+	// ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+	// reserved for future use and is rejected until inter-pod client orchestration is wired.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ExtraClientPods []GMSClientPodSpec `json:"extraClientPods,omitempty"`
+}
+
+// GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+type GMSClientPodSpec struct {
+	// Name identifies this client pod.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// PodTemplate configures the pod to run as a GMS client.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
@@ -230,40 +267,119 @@ type ScalingAdapter struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// CheckpointMode defines how checkpoint creation is handled
+// Deprecated: use checkpoint.enabled instead.
+// enabled=true without checkpointRef creates a DGD-managed automatic
+// checkpoint; checkpointRef restores the named checkpoint.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
-	// CheckpointModeAuto means the DGD controller will automatically create a Checkpoint CR
+	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// CheckpointModeManual means the user must create the Checkpoint CR themselves
+	// Deprecated: use checkpointRef to restore an existing checkpoint.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
+// CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
+// +kubebuilder:validation:Enum=Immediate;WaitForCheckpoint
+type CheckpointStartupPolicy string
+
+const (
+	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
+	// job runs in the background, and only pods created after the checkpoint is
+	// Ready are restore-shaped by the pod-create mutating webhook.
+	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
+	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
+	// component's checkpoint is Ready, then starts them from the checkpoint.
+	CheckpointStartupPolicyWaitForCheckpoint CheckpointStartupPolicy = "WaitForCheckpoint"
+)
+
+// CheckpointDeletionPolicy defines what happens to DGD-managed automatic
+// checkpoint resources when the owning DGD is deleted.
+// +kubebuilder:validation:Enum=Delete;Retain
+type CheckpointDeletionPolicy string
+
+const (
+	// CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint
+	// CRs and artifacts when the owning DGD is deleted.
+	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
+	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
+	// and artifacts after the owning DGD is deleted. Users can reference the
+	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
+)
+
 // ServiceCheckpointConfig configures checkpointing for a DGD service
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
 type ServiceCheckpointConfig struct {
 	// Enabled indicates whether checkpointing is enabled for this service
 	// +optional
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// Mode defines how checkpoint creation is handled
-	// - Auto: DGD controller creates Checkpoint CR automatically
-	// - Manual: User must create Checkpoint CR
+	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
+	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
+	// named checkpoint.
 	// +optional
-	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
+
+	// StartupPolicy defines when normal worker replicas are started relative to
+	// automatic checkpoint readiness.
+	// - Immediate: start workers cold immediately; later Pods restore from the
+	//   checkpoint once it is Ready.
+	// - WaitForCheckpoint: keep worker replicas at zero until the checkpoint is
+	//   Ready, then start them from the checkpoint.
+	// +optional
+	// +kubebuilder:default=Immediate
+	StartupPolicy CheckpointStartupPolicy `json:"startupPolicy,omitempty"`
+
+	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+	// artifact are deleted or retained when the owning DGD is deleted.
+	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
 	// If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Identity defines the checkpoint identity for hash computation
-	// Used when Mode is Auto or when looking up existing checkpoints
-	// Required when checkpointRef is not specified
+	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
+	// Use CheckpointRef to restore an existing checkpoint.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+
+	// TargetContainerName is the workload container to snapshot and restore.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// Job customizes the DGD-managed checkpoint Job.
+	// +optional
+	Job *ServiceCheckpointJobConfig `json:"job,omitempty"`
+}
+
+// ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+type ServiceCheckpointJobConfig struct {
+	// GMSClientContainers lists checkpoint Job containers that should receive
+	// GMS client wiring. Requires gpuMemoryService on the service.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
+
+	// PodTemplate customizes the checkpoint Job pod. The operator starts from the
+	// selected workload container and merges this template so users can add helper
+	// containers such as gms-saver.
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }

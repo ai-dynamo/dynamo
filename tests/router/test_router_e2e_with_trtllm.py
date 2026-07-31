@@ -19,7 +19,8 @@ from tests.router.e2e_harness import (
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
+from tests.utils.gpu_args import build_trtllm_override_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -74,7 +75,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -95,9 +95,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                   multiple routing targets within a single TRT-LLM worker process.
             num_workers: Number of TRT-LLM worker processes
             single_gpu: If True, all workers share GPU 0
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
         Note: TRT-LLM supports two forms of parallelism for routing:
               1. Multiple workers (num_workers > 1): Each worker is a separate routing target
@@ -108,7 +107,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         namespace_suffix = generate_random_suffix()
         self.namespace = namespace or f"test-namespace-{namespace_suffix}"
         self.component_name = (
-            "prefill" if disaggregation_mode == "prefill" else "tensorrt_llm"
+            "prefill" if disaggregation_mode == "prefill" else "backend"
         )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
@@ -117,7 +116,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
         # Dynamically allocate unique system ports (one per worker) to avoid
         # conflicts when tests run in parallel via pytest-xdist.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
         request.addfinalizer(lambda: deallocate_ports(self._system_ports))
 
         if trtllm_args is None:
@@ -179,10 +178,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
 
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
-
             # Set tensor parallel size if specified (needed for attention DP)
             if tensor_parallel_size is not None:
                 command.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
@@ -190,6 +185,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Enable attention data parallelism if requested
             if enable_attention_dp:
                 command.append("--enable-attention-dp")
+
+            command.extend(build_trtllm_override_args())
 
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
@@ -234,6 +231,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
@@ -286,7 +285,7 @@ def test_router_decisions_trtllm_attention_dp(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=1,
         single_gpu=False,
         test_dp_rank=True,
@@ -295,6 +294,8 @@ def test_router_decisions_trtllm_attention_dp(
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
@@ -312,7 +313,7 @@ def test_router_decisions_trtllm_multiple_workers(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
@@ -355,24 +356,18 @@ def test_router_decisions_trtllm_disagg(
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_trtllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=TRTLLMProcess,
@@ -380,9 +375,9 @@ def test_trtllm_indexers_sync(
         engine_args=TRTLLM_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=TRTLLM_BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

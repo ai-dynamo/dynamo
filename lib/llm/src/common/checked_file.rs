@@ -94,6 +94,16 @@ impl CheckedFile {
         self.size
     }
 
+    /// Filename (last path segment) regardless of whether the path is local
+    /// or a URL. Returns `None` only for paths that don't have a final
+    /// segment (e.g. a URL ending in `/`).
+    pub fn basename(&self) -> Option<&str> {
+        match &self.path {
+            Either::Left(p) => p.file_name().and_then(|n| n.to_str()),
+            Either::Right(u) => u.path().rsplit('/').find(|s| !s.is_empty()),
+        }
+    }
+
     /// Does the given file checksum to the same value as this CheckedFile?
     pub fn checksum_matches<P: AsRef<Path> + std::fmt::Debug>(&self, disk_file: P) -> bool {
         match b3sum(&disk_file) {

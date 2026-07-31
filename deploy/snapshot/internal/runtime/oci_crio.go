@@ -48,6 +48,31 @@ func (r *CRIORuntime) ResolveContainer(ctx context.Context, id string) (int, *sp
 // ResolveContainerByPod picks the first RUNNING container matching the pod +
 // container-name label filter; errors if none qualify.
 func (r *CRIORuntime) ResolveContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (int, *specs.Spec, error) {
+	running, err := r.findRunningContainerByPod(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
+	defer cancel()
+
+	statusResp, err := r.svc.ContainerStatus(ctx, running.GetId(), true)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to get status for container %s (pod %s/%s): %w", running.GetId(), podNamespace, podName, err)
+	}
+	return parseCRIOStatus(running.GetId(), statusResp.GetInfo())
+}
+
+func (r *CRIORuntime) ResolveContainerIDByPod(ctx context.Context, podName, podNamespace, containerName string) (string, error) {
+	running, err := r.findRunningContainerByPod(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return "", err
+	}
+	return running.GetId(), nil
+}
+
+// findRunningContainerByPod picks the first RUNNING container matching the pod
+// + container-name label filter; errors if none qualify.
+func (r *CRIORuntime) findRunningContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (*runtimeapi.Container, error) {
 	ctx, cancel := context.WithTimeout(ctx, crioCallTimeout)
 	defer cancel()
 
@@ -60,10 +85,10 @@ func (r *CRIORuntime) ResolveContainerByPod(ctx context.Context, podName, podNam
 	}
 	containers, err := r.svc.ListContainers(ctx, filter)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to list containers for pod %s/%s: %w", podNamespace, podName, err)
+		return nil, fmt.Errorf("failed to list containers for pod %s/%s: %w", podNamespace, podName, err)
 	}
 	if len(containers) == 0 {
-		return 0, nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
+		return nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
 	}
 
 	var running *runtimeapi.Container
@@ -74,14 +99,9 @@ func (r *CRIORuntime) ResolveContainerByPod(ctx context.Context, podName, podNam
 		}
 	}
 	if running == nil {
-		return 0, nil, fmt.Errorf("no running container found for pod %s/%s container %s (%d candidates)", podNamespace, podName, containerName, len(containers))
+		return nil, fmt.Errorf("no running container found for pod %s/%s container %s (%d candidates)", podNamespace, podName, containerName, len(containers))
 	}
-
-	statusResp, err := r.svc.ContainerStatus(ctx, running.GetId(), true)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to get status for container %s (pod %s/%s): %w", running.GetId(), podNamespace, podName, err)
-	}
-	return parseCRIOStatus(running.GetId(), statusResp.GetInfo())
+	return running, nil
 }
 
 // crioInfo is the JSON shape CRI-O writes into ContainerStatus.Info["info"]

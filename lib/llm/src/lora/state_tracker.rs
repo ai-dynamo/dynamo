@@ -23,14 +23,15 @@
 //! ## Worker Capacity Invariant
 //!
 //! `LoraInfo::max_gpu_lora_count` is a *worker-level* property (the engine's
-//! `--max-loras` setting, see DEP §9), but is duplicated into every `LoraInfo` a
+//! `--max-loras` setting; see `docs/dev/dep/000N-lora-placement/lora-allocation-v2.md`),
+//! but is duplicated into every `LoraInfo` a
 //! worker publishes for convenience. All `LoraInfo` values coming from the same
 //! worker MUST carry the same `max_gpu_lora_count`. If a mismatch is observed
 //! across updates, we log a warning and adopt the latest value — but this should
 //! never happen with a correctly-configured worker.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
@@ -43,6 +44,17 @@ const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 ///
 /// Concurrent data structure updated from MDC discovery events and read from
 /// the allocation controller and filter.
+///
+/// ## Cross-map consistency
+///
+/// State is spread across four `DashMap`s that must stay mutually consistent
+/// (e.g. `loaded_locations` and `worker_to_loras` are inverse indexes of the
+/// same fact). Per-map atomicity is not enough: a concurrent addition and
+/// removal touching the same `(worker, lora)` could interleave their
+/// individual map writes and leave the indexes disagreeing. All three mutating
+/// handlers therefore serialize on `write_lock` for the duration of their
+/// multi-map update, so writers observe a consistent snapshot relative to one
+/// another. Readers stay lock-free on the individual `DashMap`s.
 #[derive(Clone)]
 pub struct LoraStateTracker {
     /// LoRA name -> set of workers where it is loaded
@@ -53,6 +65,10 @@ pub struct LoraStateTracker {
     worker_to_loras: Arc<DashMap<WorkerWithDpRank, HashSet<String>>>,
     /// Worker -> max_gpu_lora_count capacity
     worker_capacity: Arc<DashMap<WorkerWithDpRank, u32>>,
+    /// Serializes the multi-map mutations in the `handle_*` methods so the four
+    /// indexes above can never be left mutually inconsistent by interleaved
+    /// writers. Reads do not take this lock.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl LoraStateTracker {
@@ -62,7 +78,14 @@ impl LoraStateTracker {
             lora_info: Arc::new(DashMap::new()),
             worker_to_loras: Arc::new(DashMap::new()),
             worker_capacity: Arc::new(DashMap::new()),
+            write_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Acquire the writer-serialization lock, tolerating poisoning (a prior
+    /// writer panic must not wedge all future updates).
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Handle an MDC addition event: a worker registered (or re-published) a LoRA adapter.
@@ -78,6 +101,7 @@ impl LoraStateTracker {
     /// previously-recorded capacity for the same worker is logged at warn level
     /// and the latest value is adopted.
     pub fn handle_mdc_addition(&self, worker: WorkerWithDpRank, lora: &LoraInfo) {
+        let _guard = self.lock_writes();
         let lora_name = lora.name.clone();
 
         self.loaded_locations
@@ -93,22 +117,21 @@ impl LoraStateTracker {
             .or_default()
             .insert(lora_name);
 
-        let capacity = lora
-            .max_gpu_lora_count
-            .unwrap_or(DEFAULT_MAX_GPU_LORA_COUNT);
-        if let Some(prev) = self.worker_capacity.get(&worker)
-            && *prev != capacity
-        {
+        let capacity = lora.max_gpu_lora_count.unwrap_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id,
                 dp_rank = worker.dp_rank,
                 lora_name = lora.name,
-                previous_capacity = *prev,
-                new_capacity = capacity,
-                "Worker capacity changed across MDC updates"
+                default = DEFAULT_MAX_GPU_LORA_COUNT,
+                "LoRA MDC carries no max_gpu_lora_count; using default for placement capacity. \
+                 The worker backend should publish its configured per-worker LoRA slot count \
+                 (e.g. vLLM --max-loras) so allocation reflects real capacity."
             );
-        }
-        self.worker_capacity.insert(worker, capacity);
+            DEFAULT_MAX_GPU_LORA_COUNT
+        });
+        // record_worker_capacity warns on a same-worker capacity change (shared with the
+        // base-card path in set_worker_capacity so both registration paths honor the invariant).
+        self.record_worker_capacity(worker, capacity);
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -119,20 +142,67 @@ impl LoraStateTracker {
         );
     }
 
+    /// Set a worker's LoRA slot capacity directly, without registering any adapter on it.
+    ///
+    /// Capacity-only counterpart to [`handle_mdc_addition`] (which records a loaded adapter AND
+    /// sets capacity). Makes the worker appear in [`list_workers`] with the given capacity and no
+    /// loaded LoRAs, so callers can establish cluster topology / per-worker `max_gpu_lora_count`
+    /// without consuming a slot with a phantom adapter.
+    pub fn set_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
+        let _guard = self.lock_writes();
+        self.record_worker_capacity(worker, capacity);
+    }
+
+    /// Record a worker's LoRA slot capacity, warning if it changes a previously-recorded value.
+    /// The caller must hold the write lock. Shared by
+    /// [`handle_mdc_addition`](Self::handle_mdc_addition) (adapter cards) and
+    /// [`set_worker_capacity`](Self::set_worker_capacity) (base-card capacity seeding) so a
+    /// same-worker capacity change is logged regardless of which path set it.
+    fn record_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
+        if let Some(prev) = self.worker_capacity.get(&worker)
+            && *prev != capacity
+        {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                previous_capacity = *prev,
+                new_capacity = capacity,
+                "Worker LoRA capacity changed across registrations"
+            );
+        }
+        self.worker_capacity.insert(worker, capacity);
+    }
+
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.
     pub fn handle_mdc_removal(&self, worker: WorkerWithDpRank, lora_name: &str) {
-        if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
+        let _guard = self.lock_writes();
+        let became_empty = if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
             workers.remove(&worker);
-            if workers.is_empty() {
-                drop(workers);
-                self.loaded_locations.remove(lora_name);
-            }
+            workers.is_empty()
+        } else {
+            false
+        };
+        if became_empty {
+            // remove_if re-checks the predicate under the shard lock, so a
+            // concurrent handle_mdc_addition that races between the is_empty
+            // check above and this call cannot have its entry silently deleted.
+            self.loaded_locations
+                .remove_if(lora_name, |_, v| v.is_empty());
         }
 
         self.lora_info.remove(&(lora_name.to_string(), worker));
 
-        if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
+        let became_empty = if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
             loras.remove(lora_name);
+            loras.is_empty()
+        } else {
+            false
+        };
+        if became_empty {
+            // remove_if re-checks the predicate under the shard lock, so a
+            // concurrent handle_mdc_addition that races between the drop above
+            // and this call cannot have its newly inserted entry deleted.
+            self.worker_to_loras.remove_if(&worker, |_, v| v.is_empty());
         }
 
         tracing::debug!(
@@ -145,19 +215,33 @@ impl LoraStateTracker {
 
     /// Handle a worker being completely removed.
     pub fn handle_worker_removal(&self, worker: WorkerWithDpRank) {
+        let _guard = self.lock_writes();
+
+        // Remove the capacity entry FIRST. `worker_capacity` is the enumeration
+        // spine for every slot/capacity reader (`workers_with_free_slots`,
+        // `list_workers`, `get_worker_slot_usage`, `slot_info`), so dropping it
+        // first makes the worker vanish from those snapshots atomically. If we
+        // cleared `worker_to_loras` first instead, a concurrent reader could
+        // momentarily see the worker as capacity-present with zero loaded LoRAs
+        // and wrongly report it as having free slots.
+        self.worker_capacity.remove(&worker);
+
         if let Some((_, loras)) = self.worker_to_loras.remove(&worker) {
             for lora_name in &loras {
-                if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
-                    workers.remove(&worker);
-                    if workers.is_empty() {
-                        drop(workers);
-                        self.loaded_locations.remove(lora_name);
-                    }
+                let became_empty =
+                    if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
+                        workers.remove(&worker);
+                        workers.is_empty()
+                    } else {
+                        false
+                    };
+                if became_empty {
+                    self.loaded_locations
+                        .remove_if(lora_name, |_, v| v.is_empty());
                 }
                 self.lora_info.remove(&(lora_name.clone(), worker));
             }
         }
-        self.worker_capacity.remove(&worker);
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -224,24 +308,47 @@ impl LoraStateTracker {
     }
 
     pub fn get_worker_slot_usage(&self) -> HashMap<WorkerWithDpRank, (usize, usize)> {
-        self.worker_capacity
+        // Snapshot capacities first, releasing all worker_capacity shard guards
+        // before touching worker_to_loras. Reading a second DashMap while
+        // holding an iterator guard risks a lock-order deadlock against a
+        // writer that locks the two maps in the opposite order.
+        let caps: Vec<(WorkerWithDpRank, u32)> = self
+            .worker_capacity
             .iter()
-            .map(|entry| {
-                let worker = *entry.key();
-                let (loaded, cap) = self.slot_info(&worker);
-                (worker, (loaded as usize, cap as usize))
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        caps.into_iter()
+            .filter_map(|(worker, cap)| {
+                let loaded = self.loaded_count(&worker);
+                // Drop workers removed since the snapshot. handle_worker_removal
+                // clears worker_capacity before worker_to_loras, so if loaded
+                // dropped to 0 due to a concurrent removal, the capacity entry
+                // is already gone and this recheck filters out the stale row.
+                self.worker_capacity
+                    .contains_key(&worker)
+                    .then_some((worker, (loaded, cap as usize)))
             })
             .collect()
     }
 
     pub fn workers_with_free_slots(&self) -> Vec<WorkerWithDpRank> {
-        self.worker_capacity
+        // Snapshot first (see get_worker_slot_usage) to avoid holding a
+        // worker_capacity iterator guard while reading worker_to_loras.
+        let caps: Vec<(WorkerWithDpRank, u32)> = self
+            .worker_capacity
             .iter()
-            .filter(|entry| {
-                let (loaded, capacity) = self.slot_info(entry.key());
-                loaded < capacity
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        caps.into_iter()
+            .filter(|(worker, capacity)| {
+                // loaded_count first, then re-confirm the worker still exists:
+                // a worker removed since the snapshot has its capacity cleared
+                // before worker_to_loras, so a transient loaded==0 cannot make
+                // a removed worker look free.
+                (self.loaded_count(worker) as u32) < *capacity
+                    && self.worker_capacity.contains_key(worker)
             })
-            .map(|entry| *entry.key())
+            .map(|(worker, _)| worker)
             .collect()
     }
 
@@ -375,5 +482,67 @@ mod tests {
         let free = tracker.workers_with_free_slots();
         assert_eq!(free.len(), 1);
         assert!(free.contains(&w2));
+    }
+
+    #[test]
+    fn test_concurrent_add_remove_keeps_indexes_consistent() {
+        // Hammer the tracker with concurrent additions and removals across many
+        // (worker, lora) pairs, then assert the two inverse indexes
+        // (loaded_locations and worker_to_loras) agree. Without writer
+        // serialization, interleaved multi-map updates could leave them
+        // disagreeing; the write_lock prevents that.
+        use std::thread;
+
+        let tracker = LoraStateTracker::new();
+        let workers = 8u64;
+        let loras = 8u64;
+        let iters = 200;
+
+        let mut handles = Vec::new();
+        for t in 0..workers {
+            let tk = tracker.clone();
+            handles.push(thread::spawn(move || {
+                let w = make_worker(t);
+                for i in 0..iters {
+                    let lname = format!("lora-{}", i % loras);
+                    let info = make_lora_info(&lname, Some(loras as u32));
+                    tk.handle_mdc_addition(w, &info);
+                    if i % 3 == 0 {
+                        tk.handle_mdc_removal(w, &lname);
+                    }
+                    if i % 50 == 49 {
+                        tk.handle_worker_removal(w);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        // Invariant: every (lora -> worker) entry in loaded_locations has a
+        // matching (worker -> lora) entry in worker_to_loras, and vice versa.
+        for lora in tracker.list_loras() {
+            for w in tracker.get_loaded_workers(&lora) {
+                let loras_on_w = tracker
+                    .worker_to_loras
+                    .get(&w)
+                    .map(|s| s.contains(&lora))
+                    .unwrap_or(false);
+                assert!(
+                    loras_on_w,
+                    "loaded_locations says {lora} on {w:?} but worker_to_loras disagrees"
+                );
+            }
+        }
+        for entry in tracker.worker_to_loras.iter() {
+            let w = *entry.key();
+            for lora in entry.value() {
+                assert!(
+                    tracker.is_loaded(lora, &w),
+                    "worker_to_loras says {lora} on {w:?} but loaded_locations disagrees"
+                );
+            }
+        }
     }
 }

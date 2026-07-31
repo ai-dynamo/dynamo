@@ -9,16 +9,18 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use rand::Rng;
-use reqwest;
-use std::env;
 use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, backend};
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_backend_with_metrics() -> Result<()> {
-    // Set environment variable for dynamic port allocation (0 = auto-assign)
-    env::set_var(env_system::DYN_SYSTEM_PORT, "0");
+    temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
+        test_backend_with_metrics_inner().await
+    })
+    .await
+}
 
+async fn test_backend_with_metrics_inner() -> Result<()> {
     // Generate a random endpoint name to avoid collisions
     let random_suffix = rand::rng().random_range(1000..9999);
     let test_endpoint = format!("{}{}", DEFAULT_ENDPOINT, random_suffix);

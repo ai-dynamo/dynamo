@@ -3,15 +3,15 @@
 
 //! Shared test utilities for radix tree tests.
 
-use std::future;
+use std::collections::HashSet;
 
 use crate::indexer::KvIndexerInterface;
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores,
-    RouterEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_seq_hash_for_block,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank, compute_seq_hash_for_block,
 };
-use crate::sequences::SequencePublisher;
+pub use crate::sequences::NoopSequencePublisher;
 
 pub fn router_event(
     worker_id: WorkerId,
@@ -347,20 +347,22 @@ pub async fn assert_exact_scores(
     }
 }
 
-/// No-op [`SequencePublisher`] for tests and benchmarks that don't need event transport.
-pub struct NoopSequencePublisher;
-
-impl SequencePublisher for NoopSequencePublisher {
-    fn publish_event(
-        &self,
-        _event: &ActiveSequenceEvent,
-    ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
-        future::ready(Ok(()))
-    }
-
-    fn publish_load(&self, _load: ActiveLoad) {}
-
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+/// Assert two [`OverlapScores`] are identical.
+///
+/// [`OverlapScores`] does not derive `PartialEq`, so this compares both fields explicitly: the
+/// `scores` map (`FxHashMap` equality is order-independent) and the `frequencies` vec. `ctx` is
+/// included in the failure message to identify which query diverged.
+pub fn assert_overlap_scores_eq(left: &OverlapScores, right: &OverlapScores, ctx: &str) {
+    assert_eq!(
+        left.scores, right.scores,
+        "scores map mismatch ({ctx}): left={:?} right={:?}",
+        left.scores, right.scores
+    );
+    assert_eq!(
+        left.frequencies, right.frequencies,
+        "frequencies mismatch ({ctx}): left={:?} right={:?}",
+        left.frequencies, right.frequencies
+    );
 }
 
 /// Minimal [`WorkerConfigLike`] for scheduler/queue tests and benchmarks.
@@ -370,6 +372,7 @@ pub struct SimpleWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
+    pub taints: HashSet<String>,
 }
 
 impl Default for SimpleWorkerConfig {
@@ -379,6 +382,7 @@ impl Default for SimpleWorkerConfig {
             data_parallel_size: 1,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
+            taints: HashSet::new(),
         }
     }
 }
@@ -398,5 +402,9 @@ impl WorkerConfigLike for SimpleWorkerConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn taints(&self) -> &HashSet<String> {
+        &self.taints
     }
 }

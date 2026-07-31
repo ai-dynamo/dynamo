@@ -8,9 +8,9 @@ use std::{
 
 use dynamo_protocols::types::{ChatCompletionStreamOptions, CompletionUsage};
 
-use crate::protocols::{
-    common::timing::RequestTracker, openai::nvext::NvExt,
-    openai::nvext::NvExtResponseFieldSelection,
+use crate::protocols::common::{
+    extensions::{NvExt, NvExtResponseFieldSelection},
+    timing::RequestTracker,
 };
 
 /// Configuration options for the [`DeltaGenerator`], controlling response behavior.
@@ -91,4 +91,44 @@ pub(crate) fn enable_usage_for_nonstreaming(
             continuous_usage_stats: false,
         })
         .include_usage = true;
+}
+
+/// Enables usage statistics regardless of the request's `include_usage` value.
+pub(crate) fn force_include_usage(stream_options: &mut Option<ChatCompletionStreamOptions>) {
+    stream_options
+        .get_or_insert_with(|| ChatCompletionStreamOptions {
+            include_usage: true,
+            continuous_usage_stats: false,
+        })
+        .include_usage = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn force_include_usage_inserts_missing_options() {
+        let mut options = None;
+
+        force_include_usage(&mut options);
+
+        let options = options.expect("stream options should be inserted");
+        assert!(options.include_usage);
+        assert!(!options.continuous_usage_stats);
+    }
+
+    #[test]
+    fn force_include_usage_overrides_false_and_preserves_siblings() {
+        let mut options = Some(ChatCompletionStreamOptions {
+            include_usage: false,
+            continuous_usage_stats: true,
+        });
+
+        force_include_usage(&mut options);
+
+        let options = options.expect("stream options should remain present");
+        assert!(options.include_usage);
+        assert!(options.continuous_usage_stats);
+    }
 }

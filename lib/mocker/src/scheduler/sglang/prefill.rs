@@ -15,6 +15,7 @@ pub(super) struct PrefillFpmItem {
     pub(super) prefix_tokens: usize,
 }
 
+#[derive(Default)]
 pub(super) struct AdmitResult {
     pub(super) can_run: Vec<SglangRequest>,
     pub(super) admissions: Vec<AdmissionEvent>,
@@ -42,18 +43,11 @@ pub(super) fn get_new_batch_prefill(
             remaining_output as f64 * new_token_ratio
         })
         .sum();
-    let reserved_page_overhead = waiting
-        .iter()
-        .map(SglangRequest::extra_reserved_tokens)
-        .sum::<usize>()
-        + running
-            .iter()
-            .map(SglangRequest::extra_reserved_tokens)
-            .sum::<usize>();
-
-    let mut rem_total_tokens = (cache.available_tokens() + cache.evictable_size)
-        .saturating_sub(reserved_page_overhead) as f64
-        - reserved_decode_output;
+    // PagePool already removes the full physical footprint of every active
+    // partial page from available capacity, so page slack must not be charged
+    // a second time here.
+    let mut rem_total_tokens =
+        (cache.available_tokens() + cache.evictable_size) as f64 - reserved_decode_output;
     let mut rem_input_tokens = config.max_prefill_tokens as f64;
     let mut rem_chunk_tokens = config.chunked_prefill_size as f64;
 
@@ -65,15 +59,12 @@ pub(super) fn get_new_batch_prefill(
     let mut total_isl = 0usize;
     let mut total_prefix = 0usize;
 
-    while let Some(mut req) = waiting.pop_front() {
+    let available_running_slots = config.max_running_requests.saturating_sub(running.len());
+    while can_run.len() < available_running_slots
+        && let Some(mut req) = waiting.pop_front()
+    {
         let extend_input = req.extend_input_len();
         if extend_input == 0 {
-            rejected.push_back(req);
-            break;
-        }
-
-        let total_needed = req.total_tokens_needed(config.clip_max_new_tokens) as f64;
-        if total_needed >= rem_total_tokens {
             rejected.push_back(req);
             break;
         }
@@ -90,6 +81,16 @@ pub(super) fn get_new_batch_prefill(
         };
 
         let charged_input_tokens = ceil_to_block(chunk_tokens, config.block_size) as f64;
+        let output_reserve = if chunk_tokens < extend_input {
+            0
+        } else {
+            req.remaining_output_tokens()
+                .min(config.clip_max_new_tokens)
+        };
+        if charged_input_tokens + output_reserve as f64 >= rem_total_tokens {
+            rejected.push_back(req);
+            break;
+        }
         if charged_input_tokens > rem_input_tokens || charged_input_tokens > rem_chunk_tokens {
             rejected.push_back(req);
             break;
@@ -97,68 +98,56 @@ pub(super) fn get_new_batch_prefill(
 
         let chunk_end = req.materialized_tokens + chunk_tokens;
         let old_allocated_tokens = req.allocated_tokens;
-        let prev_node = req.last_node.take();
+        let mut lease = std::mem::take(&mut req.kv_lease);
         let alloc_tokens = req.sequence_prefix(chunk_end);
-        let actual_new_tokens = alloc_tokens.len().saturating_sub(req.materialized_tokens);
-        let available = kv_manager.cache().token_pool.available();
-        if available < actual_new_tokens {
-            kv_manager.evict(actual_new_tokens - available);
+        if req.materialized_tokens > 0 {
+            let target_allocated_tokens = ceil_to_block(chunk_end, config.block_size);
+            let required_capacity = target_allocated_tokens.saturating_sub(old_allocated_tokens);
+            let available = kv_manager.cache().available_tokens();
+            if available < required_capacity {
+                kv_manager.evict(required_capacity - available);
+            }
         }
 
-        let alloc = if req.materialized_tokens > 0 {
-            let last_node = prev_node.unwrap_or_else(|| {
+        let prefix_len = if req.materialized_tokens > 0 {
+            if !lease.is_active() {
                 panic!(
-                    "prefill: request {} has materialized_tokens={} but last_node is None",
+                    "prefill: request {} has materialized_tokens={} but no active KV lease",
                     req.uuid, req.materialized_tokens
-                )
-            });
-            kv_manager.allocate_after_prefix(
-                &alloc_tokens,
-                req.materialized_tokens,
-                &req.kv_indices[..req.materialized_tokens],
-                last_node,
-            )
+                );
+            }
+            kv_manager
+                .extend_allocation(alloc_tokens, &mut lease)
+                .then_some(req.materialized_tokens)
         } else {
-            kv_manager.allocate_for_request(&alloc_tokens)
+            kv_manager.allocate_for_request_lease(alloc_tokens, &mut lease)
         };
 
-        let Some(alloc) = alloc else {
-            req.last_node = prev_node;
+        let Some(prefix_len) = prefix_len else {
+            req.kv_lease = lease;
             rejected.push_back(req);
             oom = true;
             break;
         };
+        let tokens_computed = chunk_end.saturating_sub(prefix_len);
 
-        if let Some(node) = prev_node {
-            kv_manager.free_request(node);
-        }
-
-        req.last_node = Some(alloc.last_node);
-        req.kv_indices = alloc.kv_indices;
+        req.kv_lease = lease;
         req.materialized_tokens = chunk_end;
         req.allocated_tokens = ceil_to_block(chunk_end, config.block_size);
         req.debug_assert_invariants(config.block_size);
 
-        let is_truncated = chunk_end < req.current_sequence_len();
-        let output_reserve = if is_truncated {
-            0
-        } else {
-            req.remaining_output_tokens()
-                .min(config.clip_max_new_tokens)
-        };
-
         admissions.push(AdmissionEvent {
             uuid: req.uuid,
-            reused_input_tokens: alloc.prefix_len,
+            reused_input_tokens: prefix_len,
         });
         prefill_fpm.push(PrefillFpmItem {
             prompt_len: req.prompt_len(),
-            tokens_computed: chunk_tokens,
-            prefix_tokens: alloc.prefix_len,
+            tokens_computed,
+            prefix_tokens: prefix_len,
         });
 
         total_isl += chunk_end;
-        total_prefix += alloc.prefix_len;
+        total_prefix += prefix_len;
         rem_total_tokens -= (req.allocated_tokens - old_allocated_tokens + output_reserve) as f64;
         rem_input_tokens -= charged_input_tokens;
         rem_chunk_tokens -= charged_input_tokens;

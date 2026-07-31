@@ -14,7 +14,7 @@ mod tests;
 
 pub use builder::{
     BlockManagerBuilderError, BlockManagerConfigBuilder, BlockManagerResetError,
-    FrequencyTrackingCapacity, InactiveBackendConfig,
+    FrequencyTrackingCapacity, InactiveBackendConfig, LineageEviction,
 };
 
 use std::collections::HashMap;
@@ -91,107 +91,136 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
     /// Register a batch of completed blocks.
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
-        blocks
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let handles = self
+            .block_registry
+            .register_sequence_hashes(blocks.iter().map(CompleteBlock::sequence_hash));
+        let batch_size = blocks.len();
+        let registered =
+            self.store
+                .register_completed_blocks(blocks, handles, self.duplication_policy);
+        // The offline settlement bridge observes this counter as a
+        // publication watermark, so publish only after every store transition
+        // and presence marker in the batch is complete.
+        self.metrics
+            .inc_registrations_by(u64::try_from(batch_size).unwrap_or(u64::MAX));
+        registered
             .into_iter()
-            .map(|block| self.register_block(block))
+            .map(ImmutableBlock::from_inner)
             .collect()
     }
 
     /// Register a single completed block and return an immutable handle.
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
-        self.metrics.inc_registrations();
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
         let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        self.metrics.inc_registrations();
         ImmutableBlock::from_inner(inner)
     }
 
     /// Linear prefix match: walks `seq_hash` left-to-right, stopping on
-    /// first miss. Checks the active pool first (via the registry's weak
-    /// refs), then the inactive pool for the remaining hashes.
+    /// the first hash that hits neither the active nor the inactive pool.
     ///
-    /// Single-hash fast path: probes the first hash against active and
-    /// then inactive, only allocating the result `Vec` once at least
-    /// one hit is confirmed. The all-miss path is allocation-free.
+    /// The whole active-or-inactive prefix is resolved under a **single**
+    /// store-mutex acquisition via [`BlockStore::match_prefix_locked_batch`]
+    /// — no per-hash registry radix-tree lookup, no per-hash store lock.
+    /// Frequency-tracker touches are batched and applied *after* the store
+    /// lock is released: every returned block is touched exactly once
+    /// (including inactive resurrections).
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         self.metrics
             .inc_match_hashes_requested(seq_hash.len() as u64);
 
-        tracing::debug!(
-            num_hashes = seq_hash.len(),
-            inactive_pool_len = self.store.inactive_len(),
-            "match_blocks called"
-        );
-
-        let Some((&first_hash, rest)) = seq_hash.split_first() else {
+        if seq_hash.is_empty() {
             self.metrics.inc_match_blocks_returned(0);
-            tracing::debug!(total_matched = 0, "match_blocks result");
-            return Vec::new();
-        };
-
-        // Active path: single-hash probe before allocating the Vec.
-        if let Some(first_active) = self.find_active_match(first_hash, true) {
-            let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
-            matched.push(ImmutableBlock::from_inner(first_active));
-            if !rest.is_empty() {
-                matched.extend(
-                    self.find_active_matches(rest, true)
-                        .into_iter()
-                        .map(ImmutableBlock::from_inner),
-                );
-            }
-            let active_matched = matched.len();
-            tracing::debug!(active_matched, "Matched from active pool");
-
-            let remaining_hashes = &seq_hash[matched.len()..];
-            if !remaining_hashes.is_empty() {
-                let inactive_found = self.store.find_inactive_primaries(remaining_hashes, true);
-                let inactive_matched = inactive_found.len();
-                tracing::debug!(
-                    remaining_to_check = remaining_hashes.len(),
-                    inactive_matched,
-                    "Matched from inactive pool"
-                );
-                matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
-            }
-
-            self.metrics.inc_match_blocks_returned(matched.len() as u64);
-            tracing::debug!(total_matched = matched.len(), "match_blocks result");
-            tracing::trace!(matched = ?matched, "matched blocks");
-            return matched;
-        }
-
-        // Active missed on the first hash. Try inactive for the full
-        // slice; `find_inactive_primaries` has its own first-hash
-        // fast-path that returns empty without allocating when the
-        // head misses.
-        let inactive_found = self.store.find_inactive_primaries(seq_hash, true);
-        if inactive_found.is_empty() {
-            self.metrics.inc_match_blocks_returned(0);
-            tracing::debug!(active_matched = 0, "Matched from active pool");
-            tracing::debug!(total_matched = 0, "match_blocks result");
             return Vec::new();
         }
 
-        let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
-        let inactive_matched = inactive_found.len();
-        matched.extend(inactive_found.into_iter().map(ImmutableBlock::from_inner));
-        tracing::debug!(active_matched = 0, "Matched from active pool");
-        tracing::debug!(
-            remaining_to_check = seq_hash.len(),
-            inactive_matched,
-            "Matched from inactive pool"
-        );
+        // ONE store-lock acquisition for the whole active+inactive prefix.
+        let inners = self.store.match_prefix_locked_batch(seq_hash);
+
+        // Frequency-tracker touches, batched, AFTER the store lock is
+        // released. Touches every returned hit exactly once — including
+        // inactive resurrections, which the old `find_inactive_primaries`
+        // path never touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in &inners {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let matched: Vec<ImmutableBlock<T>> =
+            inners.into_iter().map(ImmutableBlock::from_inner).collect();
 
         self.metrics.inc_match_blocks_returned(matched.len() as u64);
-        tracing::debug!(total_matched = matched.len(), "match_blocks result");
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = matched.len(),
+            "match_blocks result"
+        );
         tracing::trace!(matched = ?matched, "matched blocks");
         matched
     }
 
+    /// Scattered batch match: resolves every input hash against the active or
+    /// inactive pool without stopping at a miss.
+    ///
+    /// The returned vector is aligned with `seq_hash`: each hit is `Some`,
+    /// each miss is `None`, and input order and duplicates are preserved. The
+    /// complete batch is resolved under one store-mutex acquisition. Frequency
+    /// tracking is applied after releasing that lock, exactly once per hit
+    /// (including repeated hashes and inactive resurrections).
+    ///
+    /// This operation contributes to the existing match metrics. Requested
+    /// and returned values are counted as occurrences, so repeated input
+    /// hashes and their repeated hits are counted repeatedly.
+    pub fn match_blocks_scattered(
+        &self,
+        seq_hash: &[SequenceHash],
+    ) -> Vec<Option<ImmutableBlock<T>>> {
+        self.metrics
+            .inc_match_hashes_requested(seq_hash.len() as u64);
+
+        if seq_hash.is_empty() {
+            self.metrics.inc_match_blocks_returned(0);
+            return Vec::new();
+        }
+
+        // ONE store-lock acquisition for all active+inactive probes, including
+        // misses and repeated hashes.
+        let inners = self.store.match_scattered_locked_batch(seq_hash);
+
+        // Keep TinyLFU work outside the store critical section. A duplicate
+        // input is a duplicate access, so each returned occurrence is touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in inners.iter().flatten() {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let hit_count = inners.iter().filter(|inner| inner.is_some()).count();
+        let matched = inners
+            .into_iter()
+            .map(|inner| inner.map(ImmutableBlock::from_inner))
+            .collect();
+
+        self.metrics.inc_match_blocks_returned(hit_count as u64);
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = hit_count,
+            "match_blocks_scattered result"
+        );
+        matched
+    }
+
     /// Scatter-gather scan: finds all blocks matching any hash, without
-    /// stopping on misses.
+    /// stopping on misses. Requested hashes are counted as input occurrences,
+    /// while returned blocks are counted as distinct hashes in the result map.
     pub fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],
@@ -225,37 +254,8 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         result
     }
 
-    /// Look up currently-active registered blocks by sequence hash via the
-    /// registry's stored Weak references. Stops on first miss.
-    fn find_active_matches(
-        &self,
-        hashes: &[SequenceHash],
-        touch: bool,
-    ) -> Vec<Arc<crate::blocks::ImmutableBlockInner<T>>> {
-        let mut matches = Vec::with_capacity(hashes.len());
-        for hash in hashes {
-            if let Some(inner) = self.find_active_match(*hash, touch) {
-                matches.push(inner);
-            } else {
-                break;
-            }
-        }
-        matches
-    }
-
-    /// Single-hash variant of [`find_active_matches`] used by the
-    /// `match_blocks` first-hash fast path to avoid allocating a
-    /// one-element slice and result Vec.
-    fn find_active_match(
-        &self,
-        hash: SequenceHash,
-        touch: bool,
-    ) -> Option<Arc<crate::blocks::ImmutableBlockInner<T>>> {
-        let handle = self.block_registry.match_sequence_hash(hash, touch)?;
-        handle.try_get_inner::<T>(&self.store, touch)
-    }
-
-    /// Scan-style version of `find_active_matches` — does not stop on miss.
+    /// Scan-style active lookup by sequence hash via the registry's
+    /// stored Weak references — does not stop on miss.
     fn scan_active_matches(
         &self,
         hashes: &[SequenceHash],

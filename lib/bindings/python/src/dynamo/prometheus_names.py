@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -106,6 +108,20 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
+    # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    # pooling-model latencies (sub-second) without sacrificing resolution.
+    EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
+    # Number of `image_url` content parts per request (histogram). Named
+    # `images_per_request` so the auto-emitted `_sum` (cumulative image volume),
+    # `_count` (requests observed), and `_bucket` all read naturally.
+    IMAGES_PER_REQUEST = "images_per_request"
+    # Number of `video_url` content parts per request (histogram)
+    VIDEOS_PER_REQUEST = "videos_per_request"
+    # Number of `audio_url` content parts per request (histogram)
+    AUDIO_PER_REQUEST = "audio_per_request"
+    # Calculated image-placeholder token count per image-bearing request (histogram)
+    IMAGE_TOKENS_PER_REQUEST = "image_tokens_per_request"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -150,6 +166,22 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
+    # Number of replicas allocated for a LoRA adapter
+    LORA_REPLICA_FACTOR = "lora_replica_factor"
+    # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    LORA_IS_ACTIVE = "lora_is_active"
+    # Estimated load (windowed request count) for a LoRA adapter
+    LORA_ESTIMATED_LOAD = "lora_estimated_load"
+    # Raw arrival count (windowed rate counter) for a LoRA adapter
+    LORA_RAW_ARRIVAL_COUNT = "lora_raw_arrival_count"
+    # Number of in-flight (active) requests for a LoRA adapter
+    LORA_ACTIVE_REQUESTS = "lora_active_requests"
+    # Total LoRA loads (new placements) this controller tick
+    LORA_CHURN_LOADS_TOTAL = "lora_churn_loads_total"
+    # Total LoRA unloads (removed placements) this controller tick
+    LORA_CHURN_UNLOADS_TOTAL = "lora_churn_unloads_total"
+    # MCF solver overflow count (unplaceable replicas)
+    LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
@@ -231,6 +263,16 @@ class kvstats:
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
+
+
+class lifecycle:
+    """Worker-lifecycle timing gauges. Set once per worker run by the
+    framework, not by the engine."""
+
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class labels:
@@ -257,7 +299,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
@@ -309,14 +351,18 @@ class request_plane:
 
 
 class router:
-    """Router request metrics (component-scoped aggregate histograms + counter)"""
+    """Router request metrics (component-scoped aggregate histograms + counters)"""
 
+    # Total number of requests admitted by the router scheduler
+    REQUESTS_STARTED_TOTAL = "router_requests_started_total"
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
     # Total number of remote indexer overlap queries that failed
     REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
     # Total number of remote indexer routing-decision writes that failed
     REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
+    # Number of workers expected to publish KV events but missing query endpoints
+    KV_EVENT_SOURCE_MISMATCH_WORKERS = "router_kv_event_source_mismatch_workers"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
@@ -327,6 +373,8 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Whether the router currently has a worker/dp_rank registered (1 = registered)
+    WORKER_REGISTERED = "router_worker_registered"
 
 
 class router_request:
@@ -407,6 +455,12 @@ class trtllm_additional:
     KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
     # KV cache transfer speed per request in GB/s
     KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
+    # Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    KV_EVENT_BUFFER_CAPACITY = "trtllm_kv_event_buffer_capacity"
+    # Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    KV_EVENT_DRAIN_BATCH_SIZE = "trtllm_kv_event_drain_batch_size"
+    # Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    KV_EVENT_ID_GAP_EVENTS_TOTAL = "trtllm_kv_event_id_gap_events_total"
 
 
 class work_handler:

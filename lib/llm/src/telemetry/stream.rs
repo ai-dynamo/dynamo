@@ -11,16 +11,20 @@ type CompletionStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 type DoneFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 struct PassThroughWithCompletion<S> {
-    inner: S,
+    inner: Option<S>,
     done_tx: Option<oneshot::Sender<()>>,
 }
 
 impl<S> PassThroughWithCompletion<S> {
     fn new(inner: S, done_tx: oneshot::Sender<()>) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
             done_tx: Some(done_tx),
         }
+    }
+
+    fn drop_inner(&mut self) {
+        drop(self.inner.take());
     }
 
     fn notify_done(&mut self) {
@@ -32,6 +36,7 @@ impl<S> PassThroughWithCompletion<S> {
 
 impl<S> Drop for PassThroughWithCompletion<S> {
     fn drop(&mut self) {
+        self.drop_inner();
         self.notify_done();
     }
 }
@@ -43,8 +48,12 @@ where
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match Pin::new(inner).poll_next(cx) {
             Poll::Ready(None) => {
+                self.drop_inner();
                 self.notify_done();
                 Poll::Ready(None)
             }
@@ -71,9 +80,34 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll};
+
     use futures::{StreamExt, stream};
 
     use super::notify_on_completion;
+
+    struct DropMarker {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    impl futures::Stream for DropMarker {
+        type Item = ();
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
 
     #[tokio::test]
     async fn notifies_when_stream_is_dropped_before_exhaustion() {
@@ -88,5 +122,18 @@ mod tests {
         assert_eq!(wrapped.next().await, Some(1));
         assert_eq!(wrapped.next().await, None);
         done.await;
+    }
+
+    #[tokio::test]
+    async fn drops_inner_stream_before_notifying() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (wrapped, done) = notify_on_completion(DropMarker {
+            dropped: dropped.clone(),
+        });
+
+        drop(wrapped);
+        done.await;
+
+        assert!(dropped.load(Ordering::Acquire));
     }
 }
