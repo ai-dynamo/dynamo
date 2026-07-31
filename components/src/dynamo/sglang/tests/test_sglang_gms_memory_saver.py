@@ -17,14 +17,16 @@ from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )
+from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
-from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
 
 # Expected device type for parametrized assertions — matches what
 # GMSMemorySaverImpl will produce via get_vmm_device_type().
-_EXPECTED_DEVICE = torch.device("xpu", 0) if torch.xpu.is_available() else torch.device("cuda", 0)
+_EXPECTED_DEVICE = (
+    torch.device("xpu", 0) if torch.xpu.is_available() else torch.device("cuda", 0)
+)
 
 pytestmark = [
     pytest.mark.pre_merge,

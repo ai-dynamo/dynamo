@@ -112,8 +112,7 @@ class XpuVMM(VMMDevice):
         # Accept USM device (1) or VMM-mapped (4).
         if ptype not in (1, _PTR_TYPE_VMM_MAPPED):
             raise ValueError(
-                f"Pointer 0x{va:x} is not a valid device/VMM pointer "
-                f"(type={ptype})"
+                f"Pointer 0x{va:x} is not a valid device/VMM pointer " f"(type={ptype})"
             )
 
     # ----- runtime helpers --------------------------------------------------
@@ -142,12 +141,8 @@ class XpuVMM(VMMDevice):
     def stream_synchronize(self, stream) -> None:
         _sycl_vmm.stream_synchronize(stream)
 
-    def memcpy_h2d_async(
-        self, dst_ptr: int, src_ptr: int, size: int, stream
-    ) -> None:
+    def memcpy_h2d_async(self, dst_ptr: int, src_ptr: int, size: int, stream) -> None:
         _sycl_vmm.memcpy_async(dst_ptr, src_ptr, size, stream)
 
-    def memcpy_d2h_async(
-        self, dst_ptr: int, src_ptr: int, size: int, stream
-    ) -> None:
+    def memcpy_d2h_async(self, dst_ptr: int, src_ptr: int, size: int, stream) -> None:
         _sycl_vmm.memcpy_async(dst_ptr, src_ptr, size, stream)

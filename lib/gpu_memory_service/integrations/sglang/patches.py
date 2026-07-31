@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 import gpu_memory_service.integrations.sglang as gms_sglang
-import torch
 from gpu_memory_service.integrations.sglang.memory_saver import (
     GMSMemorySaverImpl,
     get_gms_memory_saver_impl,
@@ -66,6 +65,7 @@ def patch_torch_memory_saver() -> None:
             # no-ops/warnings, and cuda_graph remains unsupported.
             # Get device from the active VMM device module (already set by SGLang)
             from gpu_memory_service.integrations.common.utils import torch_device
+
             device_index = torch_device().current_device()
 
             # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
