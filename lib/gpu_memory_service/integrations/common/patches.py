@@ -9,6 +9,7 @@ import logging
 
 import torch
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_managers
+from gpu_memory_service.integrations.common.utils import torch_device
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,10 @@ _empty_cache_patched = False
 
 
 def patch_empty_cache() -> None:
-    """Patch torch.cuda.empty_cache to prevent segfaults with VMM allocations.
+    """Patch torch.{cuda,xpu}.empty_cache to prevent segfaults with VMM allocations.
 
     When weights are allocated through our VMM-based pluggable allocator, calling
-    torch.cuda.empty_cache() causes segfaults because the native caching allocator
+    empty_cache() causes segfaults because the native caching allocator
     tries to release blocks that were allocated through VMM APIs.
 
     This patch is idempotent - calling it multiple times has no effect.
@@ -29,7 +30,8 @@ def patch_empty_cache() -> None:
     if _empty_cache_patched:
         return
 
-    _original_empty_cache = torch.cuda.empty_cache
+    dev_mod = torch_device()
+    _original_empty_cache = dev_mod.empty_cache
 
     def safe_empty_cache() -> None:
         managers = get_gms_client_memory_managers()
@@ -41,11 +43,11 @@ def patch_empty_cache() -> None:
         )
         if has_live_mappings:
             logger.debug(
-                "[GMS] Skipping torch.cuda.empty_cache() - live VMM mappings active",
+                "[GMS] Skipping empty_cache() - live VMM mappings active",
             )
             return
         _original_empty_cache()
 
-    torch.cuda.empty_cache = safe_empty_cache
+    dev_mod.empty_cache = safe_empty_cache
     _empty_cache_patched = True
-    logger.info("[GMS] Patched torch.cuda.empty_cache")
+    logger.info("[GMS] Patched %s.empty_cache", dev_mod.__name__)
