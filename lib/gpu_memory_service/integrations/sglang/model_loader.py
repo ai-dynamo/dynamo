@@ -22,11 +22,11 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
+    torch_device,
 )
 from gpu_memory_service.integrations.sglang.memory_saver import (
     get_gms_memory_saver_impl,
 )
-from gpu_memory_service.integrations.common.utils import torch_device
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
     patch_static_state_for_gms,

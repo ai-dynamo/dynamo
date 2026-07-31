@@ -33,23 +33,25 @@ def _tensor_from_pointer(
     dtype: torch.dtype,
     device_index: int,
 ) -> torch.Tensor:
-    """Create a torch.Tensor from a raw CUDA pointer without copying data.
+    """Create a torch.Tensor from a raw GPU pointer without copying data.
 
     Uses PyTorch's internal APIs to create a tensor that aliases existing
     GPU memory. The tensor does NOT own the memory - the caller must ensure
     the memory remains valid for the tensor's lifetime.
 
     Args:
-        data_ptr: CUDA device pointer (virtual address) to the tensor data.
+        data_ptr: GPU device pointer (virtual address) to the tensor data.
         shape: Tensor dimensions.
         stride: Tensor strides (in elements, not bytes).
         dtype: Tensor data type.
-        device_index: CUDA device index where the memory resides.
+        device_index: Device index where the memory resides.
 
     Returns:
         A tensor aliasing the specified GPU memory.
     """
-    device = torch.device("cuda", device_index)
+    from gpu_memory_service.common.vmm import get_vmm_device_type
+
+    device = torch.device(get_vmm_device_type().value, device_index)
 
     # Calculate storage size in bytes based on stride (handles non-contiguous tensors)
     # For non-contiguous tensors, the memory footprint is larger than numel * element_size
