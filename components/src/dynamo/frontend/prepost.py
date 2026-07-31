@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -915,10 +916,34 @@ class StreamingPostProcessor:
             )
         )
 
-    @staticmethod
+    # A text-grammar reasoning parser can only split the stream if the model's
+    # content-kind control markers survive detokenisation, which is why
+    # ParserEngine.adjust_request forces `skip_special_tokens = False`. But nothing
+    # then removes the markers the parser did NOT consume, so terminal ones leak
+    # into user-visible content, e.g.:
+    #     content = "<|end_message|>408<|end_message|>"
+    # As shipped the two settings are mutually exclusive: the default strips the
+    # markers before the parser can split (reasoning is silently dropped), and
+    # False leaks them into the answer. Keep the markers for the parser, then strip
+    # the residue afterwards.
+    #
+    # Scope is deliberately narrow: only when a parser is actually active (the only
+    # case where skip_special_tokens was forced off), and only over the `<|...|>`
+    # control-token shape. `reasoning` is left untouched -- it is already clean, and
+    # rewriting it would risk mangling legitimate text the model quoted.
+    _CONTROL_MARKER_RE = re.compile(r"<\|[A-Za-z0-9_]+\|>")
+
+    def _strip_control_markers(self, text: str | None) -> str | None:
+        if not text:
+            return text
+        if self.reasoning_parser is None and self.tool_parser is None:
+            return text
+        return self._CONTROL_MARKER_RE.sub("", text)
+
     def _compose_delta_message(
-        reasoning: str | None, content: str | None
+        self, reasoning: str | None, content: str | None
     ) -> DeltaMessage | None:
+        content = self._strip_control_markers(content)
         delta_message = DeltaMessage(reasoning=reasoning, content=content)
         if not delta_message.reasoning and not delta_message.content:
             return None
@@ -1045,6 +1070,17 @@ class StreamingPostProcessor:
     def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
         if delta.get("tool_calls"):
             self._tool_call_choices_emitted.add(output.index)
+        # _compose_delta_message covers the parser paths, but _build_choice has
+        # several call sites and some seed `delta["content"]` directly, so a leading
+        # marker survives a strip applied only at the composer. This is the last
+        # point every choice passes through, so the invariant "no control markers
+        # reach the client" is enforced here once rather than at each producer.
+        if isinstance(delta.get("content"), str):
+            stripped = self._strip_control_markers(delta["content"])
+            if stripped:
+                delta["content"] = stripped
+            else:
+                delta.pop("content", None)
         return {
             "index": output.index,
             "delta": delta,
@@ -1124,7 +1160,11 @@ class StreamingPostProcessor:
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
-        delta_message: DeltaMessage | None = DeltaMessage(content=delta_text)
+        # Seeds the delta directly rather than through _compose_delta_message, so it
+        # needs the same control-marker strip.
+        delta_message: DeltaMessage | None = DeltaMessage(
+            content=self._strip_control_markers(delta_text)
+        )
 
         # ------------------------------------------------------------------
         # Drain the tool-text buffer (populated when </think> and <tool_call>
