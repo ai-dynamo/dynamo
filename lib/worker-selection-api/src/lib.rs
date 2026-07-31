@@ -510,6 +510,7 @@ mod tests {
     struct ShimPlugin {
         called: bool,
         out_of_range: bool,
+        utf8_error: bool,
     }
 
     impl WorkerSelectorPlugin for ShimPlugin {
@@ -518,6 +519,7 @@ mod tests {
             Ok(Self {
                 called: false,
                 out_of_range: config == b"out-of-range",
+                utf8_error: config == b"utf8-error",
             })
         }
 
@@ -531,6 +533,9 @@ mod tests {
         }
 
         fn select(&mut self, input: SelectionInput<'_>) -> Result<Selection, String> {
+            if self.utf8_error {
+                return Err("abcé".to_string());
+            }
             if self.out_of_range {
                 return Ok(Selection::Worker(input.worker_count()));
             }
@@ -627,7 +632,7 @@ mod tests {
         let columns = WorkerSelectorColumnsV1 {
             struct_size: size_of::<WorkerSelectorColumnsV1>() as u32,
             _reserved: 0,
-            provided_inputs: required_inputs,
+            provided_inputs: WorkerInputs::ALL.bits(),
             worker_ids: worker_ids.as_ptr(),
             dp_ranks: dp_ranks.as_ptr(),
             cached_tokens: cached_tokens.as_ptr(),
@@ -688,6 +693,13 @@ mod tests {
             str::from_utf8(&error_bytes[..error.written]).unwrap(),
             "plugin panicked"
         );
+        let status =
+            unsafe { __private::select::<ShimPlugin>(state, &input, &mut selected, &mut error) };
+        assert_eq!(status, STATUS_PANICKED);
+        assert_eq!(
+            str::from_utf8(&error_bytes[..error.written]).unwrap(),
+            "plugin state is poisoned"
+        );
         unsafe { __private::destroy::<ShimPlugin>(state) };
 
         let mut state = std::ptr::null_mut();
@@ -704,6 +716,27 @@ mod tests {
             unsafe { __private::select::<ShimPlugin>(state, &input, &mut selected, &mut error) };
         assert_eq!(status, STATUS_ERROR);
         unsafe { __private::destroy::<ShimPlugin>(state) };
+
+        let mut state = std::ptr::null_mut();
+        let status = unsafe {
+            __private::create::<ShimPlugin>(
+                ByteSliceV1::from_slice(b"utf8-error"),
+                ROUTER_ROLE_DECODE,
+                &mut state,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        error.capacity = 4;
+        let status =
+            unsafe { __private::select::<ShimPlugin>(state, &input, &mut selected, &mut error) };
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            str::from_utf8(&error_bytes[..error.written]).unwrap(),
+            "abc"
+        );
+        unsafe { __private::destroy::<ShimPlugin>(state) };
+        error.capacity = error_bytes.len();
 
         let mut state = std::ptr::null_mut();
         let status = unsafe {

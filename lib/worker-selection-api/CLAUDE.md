@@ -89,6 +89,7 @@ export_worker_selector_plugin!(LeastDecodeLoad);
 - `select()` runs synchronously on the scheduler actor's request hot path. Keep it bounded and non-blocking; do not perform network or filesystem I/O.
 - Input slices and strings are borrowed only for the callback and must not be retained.
 - Mutable strategy state is allowed because calls for one instance are serialized. Separate decode and prefill instances may execute on different threads.
+- A panic poisons that plugin instance; later selections fail until the host destroys it.
 - Returning an error fails that selection call; return `UseDefault` when delegation is intended.
 - Pinning, eligibility, final validation, accounting, reservation, and dispatch remain host-owned and cannot be overridden by the plugin.
 

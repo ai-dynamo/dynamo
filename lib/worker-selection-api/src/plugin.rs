@@ -55,14 +55,15 @@ impl<'a> SelectionInput<'a> {
             return Err("worker columns are smaller than ABI v1");
         }
         let columns = unsafe { &*columns_ptr };
-        let inputs = WorkerInputs::from_bits(columns.provided_inputs)
+        let provided_inputs = WorkerInputs::from_bits(columns.provided_inputs)
             .ok_or("selection input contains unknown worker inputs")?;
-        if inputs != inputs.with_identity() {
+        if provided_inputs != provided_inputs.with_identity() {
             return Err("worker inputs require identity");
         }
-        if !inputs.contains(required_inputs) {
+        if !provided_inputs.contains(required_inputs) {
             return Err("selection input is missing a required worker input");
         }
+        let inputs = required_inputs;
         let (worker_ids, dp_ranks) = if inputs.contains(WorkerInputs::IDENTITY) {
             (
                 unsafe {
@@ -337,6 +338,7 @@ pub mod __private {
     struct PluginState<T> {
         plugin: T,
         required_inputs: WorkerInputs,
+        poisoned: bool,
     }
 
     pub unsafe extern "C" fn create<T: WorkerSelectorPlugin>(
@@ -366,6 +368,7 @@ pub mod __private {
                 let state = PluginState {
                     plugin,
                     required_inputs,
+                    poisoned: false,
                 };
                 unsafe { state_out.write(Box::into_raw(Box::new(state)).cast()) };
                 STATUS_OK
@@ -406,6 +409,10 @@ pub mod __private {
             return STATUS_INVALID_INPUT;
         }
         let state = unsafe { &mut *state.cast::<PluginState<T>>() };
+        if state.poisoned {
+            unsafe { write_error(error_out, "plugin state is poisoned") };
+            return STATUS_PANICKED;
+        }
         let input = match unsafe { SelectionInput::from_abi(input, state.required_inputs) } {
             Ok(input) => input,
             Err(error) => {
@@ -436,6 +443,7 @@ pub mod __private {
                 STATUS_ERROR
             }
             Err(_) => {
+                state.poisoned = true;
                 unsafe { write_error(error_out, "plugin panicked") };
                 STATUS_PANICKED
             }
@@ -460,7 +468,10 @@ pub mod __private {
             return;
         }
         let bytes = message.as_bytes();
-        let written = bytes.len().min(error_out.capacity);
+        let mut written = bytes.len().min(error_out.capacity);
+        while !message.is_char_boundary(written) {
+            written -= 1;
+        }
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), error_out.ptr, written) };
         error_out.written = written;
     }
