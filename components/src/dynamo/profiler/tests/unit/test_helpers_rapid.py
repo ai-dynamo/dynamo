@@ -224,6 +224,82 @@ class TestRunNaiveFallback:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_with_pvc_absolute_path_under_mount_passes_relative_generator_path(self):
+        """Already-mounted pvcModelPath values are passed to AIC as PVC-relative."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/models",
+                pvcModelPath=(
+                    "/opt/models/hub/models--Qwen--Qwen3-0.6B/"
+                    "snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+                ),
+            )
+        )
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+
+        k8s = captured_params.get("K8sConfig", {})
+        assert k8s.get("k8s_pvc_mount_path") == "/opt/models"
+        assert k8s.get("k8s_model_path_in_pvc") == (
+            "hub/models--Qwen--Qwen3-0.6B/"
+            "snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_with_cache_only_pvc_omits_model_path_override(self):
+        """When pvcModelPath is unset, AIC receives only the cache PVC mount."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+        captured_params = {}
+
+        def fake_generate(params, backend, use_dynamo_generator=False):
+            captured_params.update(params)
+            return {
+                "k8s_deploy.yaml": "kind: DGD\nmetadata:\n  name: test\nspec:\n  services: {}"
+            }
+
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                side_effect=fake_generate,
+            ),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-0.6B", 4, "a100_pcie", "vllm")
+
+        k8s = captured_params.get("K8sConfig", {})
+        assert k8s.get("k8s_pvc_name") == "model-cache"
+        assert k8s.get("k8s_pvc_mount_path") == "/opt/model-cache"
+        assert "k8s_model_path_in_pvc" not in k8s
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_without_pvc_has_no_pvc_overrides(self):
         """When no modelCache, PVC keys are absent from generator params."""
         dgdr = _make_dgdr()

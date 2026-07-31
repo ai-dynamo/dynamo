@@ -145,6 +145,13 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(f"{tmp_path}/", "/model"))
         assert resolve_model_path(dgdr) == str(local_dir)
 
+    def test_absolute_pvc_model_path_inside_mount_is_not_doubled(self, tmp_path):
+        """An already container-visible pvcModelPath should not be joined again."""
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), str(local_dir)))
+        assert resolve_model_path(dgdr) == str(local_dir)
+
     def test_returns_hf_id_when_local_path_is_a_file(self, tmp_path):
         """The resolved path exists but is a file, not a directory -> the HF id."""
         (tmp_path / "model").write_text("not a directory")
@@ -398,6 +405,20 @@ class TestThoroughResolvesModelPath:
 
         assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
 
+    async def test_enumerate_uses_relative_pvc_path_for_absolute_model_path(
+        self, tmp_path
+    ):
+        """run_thorough passes AIC a PVC-relative path for mounted model paths."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), str(local_dir)))
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] == "model"
+
     async def test_enumerate_uses_hf_id_when_no_pvc(self, tmp_path):
         """run_thorough -> enumerate_profiling_configs gets the HF id when no PVC."""
         dgdr = _make_dgdr()
@@ -405,6 +426,20 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_enumerate_preserves_unset_pvc_model_path(self, tmp_path):
+        """run_thorough keeps missing pvcModelPath as None for AIC."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] is None
 
     async def test_materializes_each_candidate_once_with_resolved_model_path(
         self, tmp_path

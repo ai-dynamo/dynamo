@@ -30,6 +30,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
 )
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +159,10 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
         and dgdr.modelCache.pvcMountPath
         and dgdr.modelCache.pvcModelPath
     ):
-        mount = dgdr.modelCache.pvcMountPath.rstrip("/")
-        sub = dgdr.modelCache.pvcModelPath.strip("/")
-        local_path = f"{mount}/{sub}"
+        local_path = normalize_model_cache_path(
+            dgdr.modelCache.pvcMountPath,
+            dgdr.modelCache.pvcModelPath,
+        )
         if os.path.isfile(os.path.join(local_path, "config.json")):
             return local_path
     return dgdr.model
