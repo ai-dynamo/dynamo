@@ -52,10 +52,49 @@ log_ts_to_epoch_ms() {
     echo $(( secs*1000 + 10#$frac ))
 }
 
+# ---- KV-reuse probe helpers (North Star: a re-sent warm prefix should HIT after failover) ----
+# A long, deterministic prefix that spans many full KV blocks (block_size=16). The SAME
+# string is sent before the kill (to warm the winner) and after failover (to test reuse).
+REUSE_PROMPT=""
+build_reuse_prompt() {
+    local i s=""
+    for i in $(seq 1 240); do
+        s+="Section $i: the quick brown fox jumps over the lazy dog near the riverbank. "
+    done
+    REUSE_PROMPT="$s"
+}
+# One completion via the frontend; echoes "<time_total_ms>|<text>|<http_code>". max_tokens=1,
+# temperature=0 → total time is dominated by prompt prefill, so it is a good TTFT proxy: a
+# prefix-cache HIT skips prefill (fast); a MISS re-prefills the whole prompt (slow).
+timed_completion() {
+    local prompt="$1" out last t code text ms
+    local body; body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"prompt":sys.argv[2],"max_tokens":1,"temperature":0}))' "$MODEL_NAME" "$prompt")
+    out=$(curl -s -w '\n%{time_total} %{http_code}' -X POST http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" -d "$body")
+    last=$(echo "$out" | tail -1); t=${last% *}; code=${last##* }
+    text=$(echo "$out" | sed '$d' | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)["choices"][0]["text"].strip().replace("\n"," "))
+except Exception: print("")' 2>/dev/null)
+    ms=$(python3 -c "print(int(float('$t')*1000))" 2>/dev/null || echo -1)
+    echo "${ms}|${text}|${code}"
+}
+# Best-effort vLLM prefix-cache hit counter from the engine system port /metrics (NA if not
+# exposed there — the TTFT contrast is the primary signal, this is corroborating).
+prefix_hits() {
+    # Sum the real hit COUNTER; exclude the prometheus_client sidecar series (_created is a
+    # unix-timestamp ~1.7e9, _sum/_bucket are histogram parts) that otherwise dwarf the count.
+    curl -s "http://localhost:$1/metrics" 2>/dev/null | strip_ansi \
+      | grep -iE 'prefix_cache_hits' | grep -vE '^#|_created|_sum|_bucket' \
+      | awk '{s+=$NF} END{if(NR>0) printf "%d", s; else print "NA"}'
+}
+
 cleanup() {
     echo ""; echo "=== Cleaning up ==="
+    # SIGKILL each tree (not SIGTERM + wait): a graceful SIGTERM on the active engine hangs
+    # (same bug as Phase 5), which would freeze teardown at `wait` and strand the engine +
+    # its ~70 GiB KV + the GMS servers — colliding with the next run in this shared dev pod.
     for pid in "$FRONTEND_PID" "$ENGINE_B_PID" "$ENGINE_A_PID" "${GMS_PIDS[@]}"; do
-        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && { pkill -9 -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; }
     done
     # vLLM EngineCore/worker subprocesses do NOT die with the dynamo.vllm parent —
     # sweep them by pattern (bracket trick avoids matching this script), then reap any
@@ -74,6 +113,19 @@ cleanup() {
     [ "$fail_count" -gt 0 ] && exit 1 || exit 0
 }
 trap cleanup EXIT
+
+# Preflight: this dev pod is reused across runs and a prior run's graceful teardown may have
+# hung, stranding engines/GMS/GPU. Sweep any leftovers so we start on a clean slate. (Bracket
+# patterns avoid matching this script; only this pod's PID namespace/GPU is affected.)
+preflight_sweep() {
+    pkill -9 -f "dynamo[.]vllm" 2>/dev/null; pkill -9 -f "dynamo[.]frontend" 2>/dev/null
+    pkill -9 -f "[g]pu_memory_service" 2>/dev/null; pkill -9 -f "[E]ngineCore" 2>/dev/null
+    for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+    rm -f /tmp/gms_*.sock 2>/dev/null; sleep 2
+    local used; used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null)
+    echo "Preflight sweep done — GPU used: ${used} MiB"
+}
+preflight_sweep
 
 wait_for() {  # wait_for <log> <pattern> <timeout_s> <pid> <desc>
     local log="$1" pat="$2" to="$3" pid="$4" desc="$5"
@@ -212,6 +264,19 @@ else
     fail "Inference on winner failed: $R"
 fi
 
+# ---- Phase 4b: Warm a long prefix on the winner (KV-reuse probe setup) ----
+echo ""; echo "=== Phase 4b: Warm long prefix on winner ==="
+build_reuse_prompt
+echo "  long prefix ~${#REUSE_PROMPT} chars (~$(echo "$REUSE_PROMPT" | wc -w) words)"
+WARM_COLD=$(timed_completion "$REUSE_PROMPT")   # 1st send: cold, full prefill on winner
+WARM_HOT=$(timed_completion "$REUSE_PROMPT")    # 2nd send: should HIT within winner (calibration)
+WIN_HITS=$(prefix_hits "$WINNER_PORT")
+REF_REST=${WARM_COLD#*|}; REF_OUT=${REF_REST%|*}    # reference greedy output (pre-kill)
+echo "  winner cold TTFT=${WARM_COLD%%|*} ms | hot TTFT=${WARM_HOT%%|*} ms | winner prefix_hits=$WIN_HITS"
+[ "${WARM_HOT%%|*}" -lt "${WARM_COLD%%|*}" ] 2>/dev/null \
+    && pass "KV-reuse calibration: prefix caching works within the winner (hot < cold TTFT)" \
+    || echo "  NOTE: hot TTFT not clearly < cold — small-model prefill may be too cheap to time crisply"
+
 # ---- Phase 5: Failover ----
 echo ""; echo "=== Phase 5: Failover ==="
 KILL_MS=$(date +%s%3N)
@@ -267,5 +332,38 @@ else
     fail "Inference after failover failed after $attempt attempts: $R"
 fi
 kill -0 "$LOSER_PID" 2>/dev/null && pass "D7: Exactly one engine alive after failover" || fail "D7: Loser not alive"
+
+# ---- Phase 6: KV-reuse probe (North Star: the re-sent warm prefix should HIT) ----
+echo ""; echo "=== Phase 6: KV-Reuse Probe (re-send warmed prefix post-failover) ==="
+FO=""; for attempt in $(seq 1 8); do
+    FO=$(timed_completion "$REUSE_PROMPT")
+    [ "${FO##*|}" = "200" ] && break
+    echo "  reuse-probe attempt $attempt not ready; retry in 2s..."; sleep 2
+done
+FO_MS=${FO%%|*}; FO_REST=${FO#*|}; FO_OUT=${FO_REST%|*}
+LOSER_HITS=$(prefix_hits "$LOSER_PORT")
+COLD_MS=${WARM_COLD%%|*}; HOT_MS=${WARM_HOT%%|*}
+echo "=========================================="
+echo "  KV-REUSE PROBE  (long prefix, TTFT proxy = max_tokens=1 total time)"
+echo "  winner cold TTFT (full prefill):  ${COLD_MS} ms"
+echo "  winner hot  TTFT (prefix HIT):    ${HOT_MS} ms"
+echo "  loser  post-failover TTFT:        ${FO_MS} ms"
+echo "  prefix_hits  winner=${WIN_HITS}  loser=${LOSER_HITS}"
+# Classify: nearer the hot reference => reuse HIT; nearer cold => MISS (full re-prefill).
+verdict="INCONCLUSIVE"
+if [ "$FO_MS" -ge 0 ] 2>/dev/null && [ "$COLD_MS" -gt 0 ] 2>/dev/null && [ "$HOT_MS" -ge 0 ] 2>/dev/null; then
+    mid=$(( (COLD_MS + HOT_MS) / 2 ))
+    if [ "$FO_MS" -le "$mid" ]; then verdict="HIT (reuse)"; else verdict="MISS (full re-prefill)"; fi
+fi
+echo "  VERDICT: post-failover prefix reuse => $verdict"
+echo "  (baseline/main expectation: MISS — loser resets its prefix index on wake and the"
+echo "   winner's KV bytes are not reattached; the POC must flip this to HIT)"
+# Correctness gate: greedy output for the same prompt must match the pre-kill reference.
+if [ -n "$REF_OUT" ] && [ "$FO_OUT" = "$REF_OUT" ]; then
+    pass "KV-reuse correctness: post-failover greedy output matches pre-kill reference"
+else
+    fail "KV-reuse correctness: output differs (ref='$REF_OUT' vs failover='$FO_OUT')"
+fi
+echo "=========================================="
 
 echo ""; echo "  TEST COMPLETE"
