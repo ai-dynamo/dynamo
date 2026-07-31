@@ -310,21 +310,10 @@ func (r *DynamoGraphDeploymentReconciler) resolveProgramRestartState(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-	result *workloadProgramResult,
 ) programRestart {
 	statusView := dgd.DeepCopy()
 	statusView.Status = *status
 	restartStatus := r.computeRestartStatus(ctx, statusView)
-	if restartStatus != nil && restartStatus.Phase == nvidiacomv1beta1.RestartPhaseSuperseded &&
-		(status.Restart == nil || status.Restart.ObservedID != restartStatus.ObservedID ||
-			status.Restart.Phase != restartStatus.Phase) {
-		result.Eventf(
-			corev1.EventTypeWarning,
-			"RestartSuperseded",
-			"Restart %s superseded by rolling update",
-			restartStatus.ObservedID,
-		)
-	}
 	return programRestart{
 		State:  dynamo.DetermineRestartState(statusView, restartStatus),
 		Status: restartStatus,

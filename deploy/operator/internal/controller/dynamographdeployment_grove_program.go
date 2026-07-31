@@ -95,7 +95,9 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, err
 	}
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status, &programResult)
+	previousRestart := programResult.Status.Restart
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status)
+	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
 	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{

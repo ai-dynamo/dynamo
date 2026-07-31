@@ -72,9 +72,16 @@ func (r *groveWorkloadRenderer) Render(
 	if r.reader == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a Kubernetes reader")
 	}
-	existingPodCliqueSet, err := r.getExistingPodCliqueSet(ctx, dgd)
-	if err != nil {
-		return nil, err
+	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
+	key := types.NamespacedName{
+		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Namespace: dgd.Namespace,
+	}
+	if err := r.reader.Get(ctx, key, existingPodCliqueSet); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("get PodCliqueSet %s: %w", key, err)
+		}
+		existingPodCliqueSet = nil
 	}
 
 	renderDeployment := groveRenderDeployment(dgd, existingPodCliqueSet)
@@ -123,28 +130,6 @@ func applyGroveCompatibility(
 			applyLegacyGroveWorkerComponentType(component, componentType)
 		}
 	}
-}
-
-func (r *groveWorkloadRenderer) getExistingPodCliqueSet(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	err := r.reader.Get(
-		ctx,
-		types.NamespacedName{
-			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-			Namespace: dgd.Namespace,
-		},
-		pcs,
-	)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
-	}
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
-	return pcs, nil
 }
 
 func restartAnnotationsFromPodCliqueSet(pcs *grovev1alpha1.PodCliqueSet) map[string]string {

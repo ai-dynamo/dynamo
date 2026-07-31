@@ -52,7 +52,12 @@ type workloadProgramEvent struct {
 
 type workloadProgramResult struct {
 	ctrl.Result
+	// Status is the complete desired DGD status after this attempt. It remains
+	// meaningful when Reconcile returns an error so the outer reconciler can
+	// persist any partial progress before returning that error.
 	Status nvidiacomv1beta1.DynamoGraphDeploymentStatus
+	// Events contains status-transition events that become real only after
+	// Status has been persisted successfully.
 	Events []workloadProgramEvent
 }
 
@@ -99,6 +104,25 @@ func (r *workloadProgramResult) Eventf(
 		Reason:  reason,
 		Message: fmt.Sprintf(format, args...),
 	})
+}
+
+func recordRestartTransition(
+	previous *nvidiacomv1beta1.RestartStatus,
+	next *nvidiacomv1beta1.RestartStatus,
+	result *workloadProgramResult,
+) {
+	if next == nil || next.Phase != nvidiacomv1beta1.RestartPhaseSuperseded {
+		return
+	}
+	if previous != nil && previous.ObservedID == next.ObservedID && previous.Phase == next.Phase {
+		return
+	}
+	result.Eventf(
+		corev1.EventTypeWarning,
+		"RestartSuperseded",
+		"Restart %s superseded by rolling update",
+		next.ObservedID,
+	)
 }
 
 func (r *workloadProgramResult) Fail(generation int64, reason Reason, err error) {
@@ -248,7 +272,9 @@ func (p *componentProgram) Reconcile(
 		)
 		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status, &programResult)
+	previousRestart := programResult.Status.Restart
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status)
+	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
 	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{

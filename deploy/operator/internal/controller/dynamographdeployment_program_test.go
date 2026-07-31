@@ -419,7 +419,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 	}
 }
 
-func TestResolveProgramRestartStateQueuesSupersededTransition(t *testing.T) {
+func TestRecordRestartTransitionQueuesSupersededTransition(t *testing.T) {
 	t.Log("Build an active rolling update that supersedes a new restart request")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -437,8 +437,8 @@ func TestResolveProgramRestartStateQueuesSupersededTransition(t *testing.T) {
 		context.Background(),
 		dgd,
 		&result.Status,
-		&result,
 	)
+	recordRestartTransition(result.Status.Restart, restart.Status, &result)
 	result.Status.Restart = restart.Status
 
 	t.Log("Verify status and its transition event remain coupled in the result")
