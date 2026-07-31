@@ -336,16 +336,18 @@ func newDSHappyPathDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{
-					ComponentName: "prefill",
-					ComponentType: nvidiacomv1beta1.ComponentTypePrefill,
-					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
-					PodTemplate:   dsTestPodTemplate(),
+					ComponentName:          "prefill",
+					ComponentType:          nvidiacomv1beta1.ComponentTypePrefill,
+					RuntimeVersionOverride: "1.0.0",
+					Multinode:              &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate:            dsTestPodTemplate(),
 				},
 				{
-					ComponentName: "decode",
-					ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
-					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
-					PodTemplate:   dsTestPodTemplate(),
+					ComponentName:          "decode",
+					ComponentType:          nvidiacomv1beta1.ComponentTypeDecode,
+					RuntimeVersionOverride: "1.0.0",
+					Multinode:              &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate:            dsTestPodTemplate(),
 				},
 			},
 		},

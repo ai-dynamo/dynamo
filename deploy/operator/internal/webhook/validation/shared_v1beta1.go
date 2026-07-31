@@ -36,9 +36,11 @@ import (
 // sharedValidation carries request-wide dependencies and accumulation used by
 // validation for API types shared by multiple resources.
 type sharedValidation struct {
-	ctx      context.Context
-	mgr      ctrl.Manager
-	warnings admission.Warnings
+	ctx                                context.Context
+	mgr                                ctrl.Manager
+	warnings                           admission.Warnings
+	runtimeVersionSource               runtimeVersionValidationSource
+	allowMissingRuntimeVersionOverride bool
 }
 
 func (v *sharedValidation) warn(message string) {
@@ -122,6 +124,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
 		)...)
+	}
+
+	// Validate runtime compatibility against the source-version fields.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		image, imagePath := runtimeVersionImageAndPath(spec, fldPath)
+		if image == "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			))
+		}
 	}
 
 	return allErrs
@@ -386,6 +402,22 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				fldPath.Child("experimental", "failover"),
 				nil,
 				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
+			))
+		}
+	}
+
+	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
+	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
+		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		if newImage == "" && oldImage != "" {
+			allErrs = append(allErrs, field.Required(imagePath, "is required"))
+		} else if !v.allowMissingRuntimeVersionOverride &&
+			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			allErrs = append(allErrs, field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
 			))
 		}
 	}

@@ -21,6 +21,7 @@ use dynamo_llm::{
     },
     model_card::ModelDeploymentCard,
 };
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -83,8 +84,15 @@ impl
         let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
+            // Emit the first token immediately so the frontend's initial
+            // stream-peek (check_for_backend_error) unblocks quickly — this
+            // matches real engines (TTFT < 1s) rather than pathologically
+            // delaying every event by max_tokens ms.
+            let first = generator.create_choice(0, Some("choice 0".to_string()), None, None);
+            yield Annotated::from_data(first);
+
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
-            for i in 0..10 {
+            for i in 1..10 {
                 let output = generator.create_choice(i, Some(format!("choice {i}")), None, None);
 
                 yield Annotated::from_data(output);
@@ -144,6 +152,43 @@ impl
 }
 
 struct AlwaysFailEngine {}
+
+/// Engine that yields a single `Backend(InvalidArgument)` error frame as the
+/// first stream event — modeling a text-only model refusing multimodal input.
+struct InvalidArgumentEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                        .message("Received multimodal data but multimodal processing is not enabled")
+                        .build(),
+                ),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
 
 #[async_trait]
 impl
@@ -1208,6 +1253,94 @@ async fn test_nvext_disabled_strips_request_and_response() {
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Same regression for `/v1/responses`: the streaming Responses path shares
+/// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
+/// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
+///
+/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
+/// (default: unset → peek disabled). Enable it here so the assertion
+/// exercises the fix path. `#[serial]` prevents the env var from bleeding
+/// into other tests that may run in parallel.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
+    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
+    // this env var concurrently.
+    unsafe {
+        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
+    }
+    // Guard to unset on any exit path from this test.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
+            }
+        }
+    }
+    let _guard = EnvGuard;
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("invalid-arg-model");
+    manager
+        .add_chat_completions_model(
+            "invalid-arg-model",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentEngine {}),
+        )
+        .unwrap();
+
+    let body = serde_json::json!({
+        "model": "invalid-arg-model",
+        "stream": true,
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "describe this image"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+            ]
+        }]
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/responses"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /v1/responses");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "streaming Backend(InvalidArgument) on /v1/responses must land as HTTP 400 before HTTP 200 is committed; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("Received multimodal data but multimodal processing is not enabled"),
+        "expected typed backend error message forwarded to client; got: {text}"
     );
 
     cancel_token.cancel();
