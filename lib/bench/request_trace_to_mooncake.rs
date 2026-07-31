@@ -3,7 +3,7 @@
 
 //! Convert Dynamo request traces to Mooncake replay JSONL.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,6 +14,7 @@ use dynamo_data_gen::{
         mooncake::lower_mooncake_rows,
     },
 };
+use tempfile::TempPath;
 
 #[derive(Parser, Debug)]
 #[command(name = "request_trace_to_mooncake")]
@@ -29,10 +30,20 @@ struct Args {
     agentic: bool,
 }
 
+fn temporary_output_path(output_path: &Path) -> Result<TempPath> {
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    Ok(tempfile::NamedTempFile::new_in(parent)?.into_temp_path())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let loaded = load_request_trace_records(&args.input_path)?;
-    let mut writer = MooncakeJsonlWriter::create(&args.output_file, None)?;
+    let temporary_output = temporary_output_path(&args.output_file)?;
+    let mut writer = MooncakeJsonlWriter::create(temporary_output.as_ref(), None)?;
     let (kind, trace_block_size) = if args.agentic {
         (
             "Agentic Mooncake",
@@ -45,6 +56,7 @@ fn main() -> Result<()> {
         )
     };
     let stats = writer.finish()?;
+    temporary_output.persist(&args.output_file)?;
 
     println!(
         "Wrote {} {kind} rows to {}",
