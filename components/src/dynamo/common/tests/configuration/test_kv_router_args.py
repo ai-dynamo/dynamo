@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from dynamo.common.configuration.groups import kv_router_args
 from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfArgGroup,
     AicPerfConfigBase,
@@ -512,15 +513,8 @@ def test_conditional_disagg_prefill_load_errors_without_busy_threshold() -> None
 def test_conditional_disagg_config_rejects_invalid_json(
     config_json: str, message: str
 ) -> None:
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    config = FrontendConfig.from_cli_args(
-        parser.parse_args(["--router-conditional-disagg-config", config_json])
-    )
-
-    with pytest.raises(ValueError, match=message):
-        config.validate()
+    with pytest.raises(argparse.ArgumentTypeError, match=message):
+        kv_router_args._conditional_disagg_config_arg(config_json)
 
 
 def test_frontend_rejection_thresholds_default_to_none(

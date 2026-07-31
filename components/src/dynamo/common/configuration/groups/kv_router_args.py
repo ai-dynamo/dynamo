@@ -177,6 +177,13 @@ def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
     return parsed
 
 
+def _conditional_disagg_config_arg(value: str) -> dict[str, Any]:
+    try:
+        return _parse_conditional_disagg_config(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
@@ -208,7 +215,7 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
-    conditional_disagg_config: Optional[str] = None
+    conditional_disagg_config: Optional[dict[str, Any]] = None
     conditional_disagg_policy: str = "isl_bounding"
     conditional_disagg_eff_isl_threshold: int = 2048
     conditional_disagg_eff_isl_ratio_threshold: float = 0.7
@@ -225,9 +232,16 @@ class KvRouterConfigBase(ConfigBase):
             setattr(self, field, value)
 
     def apply_conditional_disagg_config(self) -> None:
+        if (
+            self.conditional_disagg_config is not None
+            and not self.conditional_disagg_enabled
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config requires --router-conditional-disagg"
+            )
+
         if self.conditional_disagg_config is not None:
-            parsed = _parse_conditional_disagg_config(self.conditional_disagg_config)
-            for key, value in parsed.items():
+            for key, value in self.conditional_disagg_config.items():
                 setattr(self, _CONDITIONAL_DISAGG_CONFIG_FIELDS[key], value)
 
         if not self.conditional_disagg_enabled:
@@ -558,8 +572,9 @@ class KvRouterArgGroup(ArgGroup):
                 "eff_isl_threshold, eff_isl_ratio_threshold, "
                 "prefill_busy_threshold, decode_busy_threshold."
             ),
-            arg_type=str,
+            arg_type=_conditional_disagg_config_arg,
             dest="conditional_disagg_config",
+            metavar="JSON",
         )
         add_argument(
             g,
