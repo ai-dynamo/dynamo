@@ -59,3 +59,26 @@ fn agentic_trace_requires_agentic_flag() {
     assert!(convert(&input, &output, true).status.success());
     assert_eq!(std::fs::read_to_string(output).unwrap().lines().count(), 17);
 }
+
+#[cfg(unix)]
+#[test]
+fn published_output_preserves_normal_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let input = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/pi_request_trace.jsonl.gz");
+    let output = temp.path().join("mooncake.jsonl");
+    let normal = temp.path().join("normal.jsonl");
+    std::fs::File::create(&normal).unwrap();
+
+    assert!(convert(&input, &output, true).status.success());
+    let normal_mode = std::fs::metadata(normal).unwrap().permissions().mode() & 0o777;
+    let output_mode = std::fs::metadata(&output).unwrap().permissions().mode() & 0o777;
+    assert_eq!(output_mode, normal_mode);
+
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(convert(&input, &output, true).status.success());
+    let output_mode = std::fs::metadata(output).unwrap().permissions().mode() & 0o777;
+    assert_eq!(output_mode, 0o640);
+}
