@@ -1381,7 +1381,7 @@ pub(crate) async fn run_destination_session(
                         if outcomes.len() >= 16 {
                             bail!("bootstrap action outcome cache exceeded its bound");
                         }
-                        let control_action = match prepare_destination_action(action) {
+                        let control_action = match prepare_destination_action(handoff_id, action) {
                             Ok(prepared) => prepared,
                             Err(outcome) => {
                                 outcomes.insert(action.id, (action.action, outcome.clone()));
@@ -1462,18 +1462,30 @@ pub(crate) async fn run_destination_session(
 }
 
 fn prepare_destination_action(
+    expected_handoff_id: HandoffId,
     action: IssuedHandoffAction,
 ) -> std::result::Result<HandoffControlAction, HandoffActionOutcome> {
-    let action = match action.action {
-        HandoffAction::ReserveDestination { .. } => HandoffControlAction::ReserveDestination,
-        HandoffAction::ActivateDestination { .. } => HandoffControlAction::ActivateDestination,
-        HandoffAction::CancelDestination { .. } => HandoffControlAction::CancelDestination,
+    let (observed_handoff_id, action) = match action.action {
+        HandoffAction::ReserveDestination { handoff_id } => {
+            (handoff_id, HandoffControlAction::ReserveDestination)
+        }
+        HandoffAction::ActivateDestination { handoff_id } => {
+            (handoff_id, HandoffControlAction::ActivateDestination)
+        }
+        HandoffAction::CancelDestination { handoff_id } => {
+            (handoff_id, HandoffControlAction::CancelDestination)
+        }
         _ => {
             return Err(HandoffActionOutcome::Failed(
                 "source sent a non-destination scheduler action".to_string(),
             ));
         }
     };
+    if observed_handoff_id != expected_handoff_id {
+        return Err(HandoffActionOutcome::Failed(format!(
+            "destination action handoff {observed_handoff_id:?} does not match bootstrap handoff {expected_handoff_id:?}"
+        )));
+    }
     Ok(action)
 }
 

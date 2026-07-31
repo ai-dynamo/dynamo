@@ -270,6 +270,62 @@ async fn destination_ack_precedes_an_early_reservation_fact() {
 }
 
 #[tokio::test]
+async fn destination_rejects_an_action_for_another_handoff() {
+    let request_id = Uuid::from_u128(70_100);
+    let handoff_id = HandoffId::from(Uuid::from_u128(70_101));
+    let other_handoff_id = HandoffId::from(Uuid::from_u128(70_102));
+    let (server, mut source, destination, shutdown) = bootstrap_pair(
+        handoff_id,
+        request_id,
+        HandoffOrder::DestinationFirst,
+        EngineType::Sglang,
+    )
+    .await;
+    let (control, mut calls, events, _event_tx) = semantic_boundary();
+    let cancel = CancellationToken::new();
+    let session = tokio::spawn(run_destination_session(
+        destination,
+        control,
+        events,
+        cancel.clone(),
+        Duration::from_secs(2),
+        shutdown.clone(),
+    ));
+
+    source.send(BootstrapMessage::Registered).await.unwrap();
+    let mut other_coordinator =
+        HandoffCoordinatorCore::new(other_handoff_id, HandoffOrder::DestinationFirst);
+    let reserve = other_coordinator.start().unwrap().pop().unwrap();
+    source
+        .send(BootstrapMessage::Action(reserve))
+        .await
+        .unwrap();
+    let response = tokio::select! {
+        response = source.recv() => response.unwrap(),
+        invocation = calls.recv() => {
+            panic!(
+                "mismatched action reached typed control: {:?}",
+                invocation.unwrap().action
+            );
+        }
+    };
+    assert!(matches!(
+        response,
+        Some(BootstrapMessage::ActionAck {
+            action_id,
+            outcome: HandoffActionOutcome::Failed(message),
+        }) if action_id == reserve.id && message.contains("does not match bootstrap handoff")
+    ));
+
+    cancel.cancel();
+    let cleanup = calls.recv().await.unwrap();
+    assert_eq!(cleanup.action, HandoffControlAction::CancelDestination);
+    acknowledge(cleanup, HandoffActionOutcome::Applied);
+    assert!(session.await.unwrap().is_err());
+    finish_test_transport(server, shutdown).await;
+}
+
+#[tokio::test]
 async fn premature_complete_waits_for_destination_cleanup() {
     let request_id = Uuid::from_u128(71_000);
     let handoff_id = HandoffId::from(Uuid::from_u128(71_001));

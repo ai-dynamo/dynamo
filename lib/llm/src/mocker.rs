@@ -1124,7 +1124,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                         if signal.completed {
                             if !send_response(&stream_tx, output, &async_context).await {
-                                tracing::error!("Output stream receiver closed.");
                                 break;
                             }
                             native_timing.record_tokens(1);
@@ -1194,7 +1193,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             )
                             .await
                             {
-                                tracing::error!("Output stream receiver closed.");
                                 break;
                             }
                             native_timing.record_normal_completion();
@@ -1203,7 +1201,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if !send_response(&stream_tx, output, &async_context).await {
-                            tracing::error!("Output stream receiver closed.");
                             break;
                         }
                         native_timing.record_tokens(1);
