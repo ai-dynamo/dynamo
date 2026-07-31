@@ -78,8 +78,6 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/local_dev.Dockerfile'
-  - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
@@ -107,6 +105,14 @@ core:
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
   - 'container/templates/compliance.Dockerfile'
+  # dev/local-dev are built for EVERY framework -- dev.Dockerfile is `FROM runtime`
+  # and local_dev.Dockerfile is `FROM dev` -- so a change here has an all-framework
+  # blast radius, exactly like wheel_builder above. These two used to sit in
+  # `ignore`, which meant the templates defining every developer's image were never
+  # built by CI: both the missing libprotobuf-dev (#12443) and the vLLM dev image
+  # whose ENTRYPOINT pointed at a script it does not ship (#12515) shipped that way.
+  - 'container/templates/dev.Dockerfile'
+  - 'container/templates/local_dev.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
