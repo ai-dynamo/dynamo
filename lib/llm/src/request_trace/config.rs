@@ -8,10 +8,12 @@ use std::sync::atomic::Ordering;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
+use dynamo_runtime::logging::trace_sample_ratio_from_env;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::telemetry::parse_sink_names;
 
-use super::DEFAULT_TOOL_EVENTS_TOPIC;
+use super::{DEFAULT_TOOL_EVENTS_TOPIC, RequestTraceRecord};
 
 const DEFAULT_CAPACITY: usize = 1024;
 const DEFAULT_FILE_BUFFER_BYTES: usize = 1024 * 1024;
@@ -86,6 +88,7 @@ pub struct RequestTracePolicy {
     pub enabled: bool,
     pub records: Vec<RequestTraceRecordKind>,
     pub sinks: Vec<RequestTraceSinkKind>,
+    pub sample_ratio: Option<f64>,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
     pub capacity: usize,
@@ -126,6 +129,47 @@ impl RequestTracePolicy {
     pub fn emit_tool_records(&self) -> bool {
         self.records.contains(&RequestTraceRecordKind::Tool)
     }
+
+    /// Applies the configured ratio before request-trace records fan out to sinks.
+    ///
+    /// The request ID keeps request-end and request-payload records together. Harness
+    /// tool records have no request ID, so their session ID provides the stable key.
+    pub fn should_sample(&self, record: &RequestTraceRecord) -> bool {
+        self.sample_ratio
+            .is_none_or(|ratio| should_sample_record(record, ratio))
+    }
+}
+
+fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
+    if ratio <= 0.0 {
+        return false;
+    }
+    if ratio >= 1.0 {
+        return true;
+    }
+
+    let key = record
+        .request
+        .as_ref()
+        .map(|request| request.request_id.as_str())
+        .or_else(|| {
+            record
+                .payload
+                .as_ref()
+                .map(|payload| payload.request_id.as_str())
+        })
+        .or_else(|| {
+            record
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str())
+        });
+    let Some(key) = key else {
+        return false;
+    };
+
+    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
+    xxh3_64(key.as_bytes()) < threshold
 }
 
 static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
@@ -139,6 +183,7 @@ fn load_from_env() -> RequestTracePolicy {
     let enabled = !records.is_empty();
     let (sinks, legacy_file_format, legacy_audit_sinks_selected) =
         load_sinks(enabled, legacy_audit_sinks.as_deref());
+    let sample_ratio = enabled.then(trace_sample_ratio_from_env).flatten();
     let has_file_sink = sinks.contains(&RequestTraceSinkKind::File);
     let file_path = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_PATH)
         .or_else(|| env_trimmed(env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH))
@@ -239,6 +284,7 @@ fn load_from_env() -> RequestTracePolicy {
         enabled,
         records,
         sinks,
+        sample_ratio,
         file_path,
         file_format,
         capacity,
@@ -431,8 +477,12 @@ pub(crate) fn capture_enabled() -> bool {
 mod tests {
     use dynamo_runtime::config::environment_names::llm::audit as env_audit;
     use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
+    use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 
     use super::*;
+    use crate::request_trace::{
+        RequestTraceEventType, RequestTraceMetrics, RequestTracePayload, RequestTraceSchema,
+    };
 
     const ALL_ENV_NAMES: &[&str] = &[
         env_request_trace::DYN_REQUEST_TRACE,
@@ -455,6 +505,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        env_otlp::OTEL_TRACES_SAMPLE_RATIO,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -484,6 +535,93 @@ mod tests {
             }
         }
         temp_env::with_vars(vars, test);
+    }
+
+    fn request_record(request_id: &str) -> RequestTraceRecord {
+        RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestEnd,
+            event_time_unix_ms: 1_000,
+            event_source: None,
+            agent_context: None,
+            request: Some(RequestTraceMetrics {
+                request_id: request_id.to_string(),
+                x_request_id: None,
+                model: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                request_received_ms: None,
+                prefill_wait_time_ms: None,
+                prefill_time_ms: None,
+                ttft_ms: None,
+                total_time_ms: None,
+                avg_itl_ms: None,
+                kv_hit_rate: None,
+                kv_transfer_estimated_latency_ms: None,
+                queue_depth: None,
+                worker: None,
+                replay: None,
+                finish_reason_metadata: None,
+            }),
+            tool: None,
+            payload: None,
+        }
+    }
+
+    fn payload_record(request_id: &str) -> RequestTraceRecord {
+        RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestPayload,
+            event_time_unix_ms: 1_000,
+            event_source: None,
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: Some(RequestTracePayload {
+                request_id: request_id.to_string(),
+                endpoint: "openai.chat_completion".to_string(),
+                model: "test-model".to_string(),
+                request: None,
+                response: None,
+                http_request_headers: None,
+                payload_complete: true,
+                payload_drop_reason: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn sample_ratio_uses_a_stable_request_key() {
+        let request = request_record("request-123");
+        let payload = payload_record("request-123");
+
+        assert!(!should_sample_record(&request, 0.0));
+        assert!(should_sample_record(&request, 1.0));
+        assert_eq!(
+            should_sample_record(&request, 0.5),
+            should_sample_record(&payload, 0.5)
+        );
+
+        let decisions = (0..256)
+            .map(|index| should_sample_record(&request_record(&format!("request-{index}")), 0.5))
+            .collect::<Vec<_>>();
+        assert!(decisions.iter().any(|decision| *decision));
+        assert!(decisions.iter().any(|decision| !*decision));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_trace_loads_the_otel_sample_ratio() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0.25"),
+            ],
+            || {
+                assert_eq!(load_from_env().sample_ratio, Some(0.25));
+            },
+        );
     }
 
     #[test]
