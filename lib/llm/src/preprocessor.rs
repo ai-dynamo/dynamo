@@ -38,7 +38,12 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -369,16 +374,60 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+struct EmbeddingTokenizerState {
+    model_card: ModelDeploymentCard,
+    with_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    without_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    initialization_lock: Mutex<()>,
+    add_special_tokens_default: Option<bool>,
+}
+
+impl EmbeddingTokenizerState {
+    fn new(model_card: &ModelDeploymentCard) -> Result<Self> {
+        Ok(Self {
+            model_card: model_card.clone(),
+            with_special_tokens: OnceLock::new(),
+            without_special_tokens: OnceLock::new(),
+            initialization_lock: Mutex::new(()),
+            add_special_tokens_default: embedding_add_special_tokens_env()?,
+        })
+    }
+
+    fn tokenizer(&self, add_special_tokens: bool) -> Result<Arc<dyn Tokenizer>> {
+        let tokenizer = if add_special_tokens {
+            &self.with_special_tokens
+        } else {
+            &self.without_special_tokens
+        };
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        // OnceLock has no stable fallible initializer. Serialize only first use,
+        // then keep the steady-state path lock-free.
+        let _guard = self
+            .initialization_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("embedding tokenizer initialization lock was poisoned"))?;
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        let initialized = self.model_card.embedding_tokenizer_with_options(
+            crate::tokenizers::TokenizerOptions { add_special_tokens },
+        )?;
+        let initialized: Arc<dyn Tokenizer> = (*initialized).clone();
+        Ok(tokenizer.get_or_init(|| initialized).clone())
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
-    /// Embedding-only tokenizer configured to apply the HuggingFace
-    /// post-processor (for example BOS/EOS). Kept separate so chat and
-    /// completion tokenization retains its existing behavior.
-    embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>>,
-    embedding_tokenizer_without_special_tokens: Option<Arc<dyn Tokenizer>>,
-    embedding_add_special_tokens_default: Option<bool>,
+    /// Present only when constructed for an embedding pipeline. The two
+    /// HuggingFace tokenizer variants are initialized independently on demand.
+    embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -645,7 +694,8 @@ impl OpenAIPreprocessor {
 
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
-        Self::new_with_parts(mdc, formatter, tokenizer)
+        let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers))
     }
 
     pub fn new_with_parts(
@@ -653,32 +703,17 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        let supports_embedding = mdc.model_type.supports_embedding();
-        let (embedding_tokenizer_with_special_tokens, embedding_tokenizer_without_special_tokens) =
-            if supports_embedding {
-                let with_special_tokens =
-                    mdc.embedding_tokenizer_with_options(crate::tokenizers::TokenizerOptions {
-                        add_special_tokens: true,
-                    })?;
-                let without_special_tokens =
-                    mdc.embedding_tokenizer_with_options(crate::tokenizers::TokenizerOptions {
-                        add_special_tokens: false,
-                    })?;
-                (Some(with_special_tokens), Some(without_special_tokens))
-            } else {
-                (None, None)
-            };
-        let embedding_add_special_tokens_default = if supports_embedding {
-            embedding_add_special_tokens_env()?
-        } else {
-            None
-        };
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None)
+    }
+
+    fn new_with_parts_inner(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        embedding_tokenizers: Option<EmbeddingTokenizerState>,
+    ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
-        let embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>> =
-            embedding_tokenizer_with_special_tokens.map(|tokenizer| (*tokenizer).clone());
-        let embedding_tokenizer_without_special_tokens: Option<Arc<dyn Tokenizer>> =
-            embedding_tokenizer_without_special_tokens.map(|tokenizer| (*tokenizer).clone());
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -865,9 +900,7 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
-            embedding_tokenizer_with_special_tokens,
-            embedding_tokenizer_without_special_tokens,
-            embedding_add_special_tokens_default,
+            embedding_tokenizers,
             model_info,
             mdcsum,
             lora_name,
@@ -2099,26 +2132,16 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
+        let embedding_tokenizers = self.embedding_tokenizers.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "embedding tokenization is unavailable; construct the preprocessor with \
+                 OpenAIPreprocessor::new_for_embeddings"
+            )
+        })?;
         let effective_add_special_tokens = request
             .add_special_tokens
-            .or(self.embedding_add_special_tokens_default)
+            .or(embedding_tokenizers.add_special_tokens_default)
             .unwrap_or(true);
-        let tokenizer = match effective_add_special_tokens {
-            true => self
-                .embedding_tokenizer_with_special_tokens
-                .clone()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "embedding special-token tokenizer is unavailable for a non-embedding model"
-                    )
-                })?,
-            false => self
-                .embedding_tokenizer_without_special_tokens
-                .clone()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("embedding tokenizer is unavailable for a non-embedding model")
-                })?,
-        };
         let is_text_input = matches!(
             &request.inner.input,
             dynamo_protocols::types::EmbeddingInput::String(_)
@@ -2128,10 +2151,12 @@ impl OpenAIPreprocessor {
             self.embedding_truncation_limit(request.truncate_prompt_tokens, is_text_input)?;
         let mut all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
                 let encoding = tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = tokenizer.clone();

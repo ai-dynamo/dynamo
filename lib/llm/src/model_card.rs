@@ -1270,10 +1270,14 @@ impl ModelDeploymentCard {
                         self.name(),
                     )
                 } else {
-                    // When special-token processing is enabled, incremental
-                    // prefix-cache segments must not each run the HuggingFace
-                    // post-processor (which could add BOS/EOS per segment).
-                    // A globally disabled cache also reaches this raw path.
+                    // The L1 cache encodes text in segments ending at special-token
+                    // boundaries. That happens on misses and on hits even when
+                    // cache extension is disabled; extension controls only whether
+                    // a hit's suffix is inserted. Running the HuggingFace
+                    // post-processor on every segment could therefore add BOS/EOS
+                    // more than once. Bypass the cache for embedding tokenizers that
+                    // apply special tokens. Boundary-free inputs would create no
+                    // reusable entries anyway.
                     raw
                 }
             }

@@ -750,9 +750,11 @@ mod embedding_without_chat_template {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::model_type::ModelType;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
     use dynamo_llm::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use dynamo_renderer::PromptFormatter;
     use serde_json::json;
     use serial_test::serial;
     use std::sync::Arc;
@@ -802,6 +804,26 @@ mod embedding_without_chat_template {
         OpenAIPreprocessor::new_for_embeddings(mdc).unwrap()
     }
 
+    fn chat_request() -> NvCreateChatCompletionRequest {
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_str(r#"[{"role":"user","content":"hello"}]"#).unwrap();
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+            .model("test-model")
+            .messages(messages)
+            .build()
+            .unwrap();
+        NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            thinking: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
     #[test]
     fn embedding_preprocessor_does_not_require_chat_template() {
         let model_dir = model_copy_with_chat_template(None);
@@ -819,26 +841,33 @@ mod embedding_without_chat_template {
     fn embedding_preprocessor_uses_chat_template_when_present() {
         let preprocessor =
             OpenAIPreprocessor::new_for_embeddings(embedding_mdc(MODEL_PATH)).unwrap();
-        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
-            serde_json::from_str(r#"[{"role":"user","content":"hello"}]"#).unwrap();
-        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
-            .model("test-model")
-            .messages(messages)
-            .build()
+        let rendered = preprocessor
+            .apply_template(&chat_request())
+            .unwrap()
             .unwrap();
-        let request = NvCreateChatCompletionRequest {
-            inner,
-            common: Default::default(),
-            nvext: None,
-            chat_template_args: None,
-            thinking: None,
-            media_io_kwargs: None,
-            return_tokens_as_token_ids: None,
-            unsupported_fields: Default::default(),
-        };
-
-        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
         assert!(rendered.contains("<|start_header_id|>user<|end_header_id|>"));
+    }
+
+    #[test]
+    fn hybrid_general_constructor_does_not_initialize_embedding_tokenizers() {
+        let model_dir = model_copy_with_chat_template(Some(
+            "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+        ));
+        let mut mdc = embedding_mdc(model_dir.path());
+        mdc.model_type = ModelType::Chat | ModelType::Embedding;
+        let tokenizer = mdc.tokenizer().unwrap();
+        let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+
+        std::fs::remove_file(model_dir.path().join("tokenizer.json")).unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer)
+            .expect("general construction must not load embedding-only tokenizers");
+        assert_eq!(
+            preprocessor
+                .apply_template(&chat_request())
+                .unwrap()
+                .as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -924,6 +953,30 @@ mod embedding_without_chat_template {
             assert_ne!(omitted, explicit_false);
             assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
             assert_ne!(explicit_false[0].first(), Some(&128000));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedding_tokenizer_variants_initialize_on_demand() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let model_dir = model_copy_with_chat_template(None);
+            let preprocessor =
+                OpenAIPreprocessor::new_for_embeddings(embedding_mdc(model_dir.path())).unwrap();
+
+            let expected = token_ids(&preprocessor, None).await;
+            std::fs::remove_file(model_dir.path().join("tokenizer.json")).unwrap();
+
+            assert_eq!(token_ids(&preprocessor, None).await, expected);
+            let error = preprocessor
+                .preprocess_embedding_request(&embedding_request(Some(false)))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("tokenizer.json"),
+                "the unselected tokenizer variant should initialize only when requested: {error}"
+            );
         })
         .await;
     }
