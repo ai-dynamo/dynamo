@@ -124,7 +124,11 @@ class TestClassifyWorkerHandler:
             "probs": pytest.approx([0.1, 0.7, 0.2]),
             "num_classes": 3,
         }
-        assert response["usage"] == {"prompt_tokens": 4, "total_tokens": 4}
+        assert response["usage"] == {
+            "prompt_tokens": 4,
+            "total_tokens": 4,
+            "completion_tokens": 0,
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
