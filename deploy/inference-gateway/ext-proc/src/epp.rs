@@ -27,7 +27,8 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
 use crate::picker::{
-    Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage, format_address_port,
+    Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage,
+    format_address_port,
 };
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
