@@ -858,6 +858,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_response_format_rejects_null_json_schema() {
+        let response_format = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "schema": null
+            }
+        }))
+        .unwrap();
+
+        let err = validate_response_format(&Some(response_format)).unwrap_err();
+        assert!(err.to_string().contains("schema` is required"));
+    }
+
+    #[test]
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
         let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
         assert!(err.to_string().contains("Unsupported parameter(s)"));

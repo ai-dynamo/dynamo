@@ -1148,13 +1148,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[0].topologyConstraint.packDomain: Invalid value: "": spec.components[0].topologyConstraint.packDomain in body should match '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'`,
 		},
 		{
-			name: "deployment topology without pack domain requires every component topology",
+			name: "deployment topology without pack domain allows unconstrained components",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Generation = 2
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology"}
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
-			wantWebhookErrs: []string{"spec.components[0].topologyConstraint: Required value: is required because spec.topologyConstraint.packDomain is not set"},
+		},
+		{
+			name: "deployment topology without pack domain requires a component topology",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Generation = 2
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology"}
+			}),
+			wantWebhookErrs: []string{"spec.topologyConstraint.packDomain: Required value: is required when no component topologyConstraint is set"},
 		},
 		{
 			name: "deployment pack domain can be inherited",
@@ -1199,10 +1206,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			withoutTopology: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "missing-topology"}
-				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[0].topologyConstraint: Required value: is required because spec.topologyConstraint.packDomain is not set",
+				`spec.topologyConstraint.packDomain: Required value: is required when no component topologyConstraint is set`,
 				`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopologyBinding resource that was not found`,
 			},
 		},
