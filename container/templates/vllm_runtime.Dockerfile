@@ -44,11 +44,16 @@ ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% elif device == "rocm" %}
+ENV NIXL_PREFIX=/opt/amd/amd_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% endif %}
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
+{% if device != "rocm" %}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% endif %}
 {% else %}
 # Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
@@ -94,6 +99,9 @@ COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
 # XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
 COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% elif device == "rocm" %}
+# ROCm NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
+COPY --chown=dynamo:0 --from=wheel_builder /opt/amd/amd_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
 # Copy NIXL Python wheels
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
@@ -129,7 +137,9 @@ RUN apt-get update && \
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{# ROCm's vllm-openai-rocm base uses the system interpreter (no /opt/venv), so it
+   targets --system like cuda; xpu/cpu bases carry a venv at /opt/venv. #}
+{% set pip_target = "--system" if device in ("cuda", "rocm") else "--python /opt/venv/bin/python" %}
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py

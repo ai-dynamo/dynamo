@@ -84,6 +84,15 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.26.0
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
+  rocm:
+    # Same image for base and runtime (the xpu precedent). Building NIXL inside the
+    # runtime image guarantees the Python ABI, glibc and ROCm minor match by
+    # construction, and gives wheel_builder /opt/rocm for UCX's --with-rocm.
+    base_image: vllm/vllm-openai-rocm
+    runtime_image: vllm/vllm-openai-rocm
+    base_image_tag: v0.26.0
+    runtime_image_tag: v0.26.0
+    # baseline_sbom: not yet captured for rocm — runtime build runs without subtraction
   flashinf_ref: v0.6.14
   vllm_omni_ref: "v0.26.0rc1"
   nixl_ref: v1.3.1
@@ -123,6 +132,15 @@ sglang:
     sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
     # XPU SGLang requires a newer NIXL than the framework default; scoped here
     # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
+    nixl_ref: v1.1.0
+  rocm:
+    # Same image for base and runtime (the xpu precedent) — see vllm.rocm.
+    base_image: lmsysorg/sglang
+    runtime_image: lmsysorg/sglang
+    base_image_tag: v0.5.16-rocm720-mi35x
+    runtime_image_tag: v0.5.16-rocm720-mi35x
+    # ROCm builds NIXL from source in wheel_builder and installs that wheel into
+    # the runtime, so it needs the same newer NIXL the xpu path pins.
     nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang

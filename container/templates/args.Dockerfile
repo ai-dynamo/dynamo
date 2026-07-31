@@ -34,7 +34,9 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" or device == "cpu" %}
+{# ROCm builds in its own base so UCX/NIXL compile against the image's /opt/rocm
+   and link the same glibc/Python as the runtime. #}
+{% if device == "xpu" or device == "cpu" or device == "rocm" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
