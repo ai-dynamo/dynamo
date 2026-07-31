@@ -42,7 +42,13 @@ metadata:
   name: accuracy-check
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 14400
+  # Bounds the whole Job, including the readiness wait and any retry. Runtime
+  # scales with the request count and per-request latency, and falls as
+  # CONCURRENCY rises: a 198-question run against a large reasoning model at
+  # concurrency 10 took ~3.7h, while a full MMLU run is ~70x the requests.
+  # Raise this (or CONCURRENCY) for larger benchmarks and slower models, or the
+  # pod is killed mid-run with no results.
+  activeDeadlineSeconds: 28800
   completions: 1
   parallelism: 1
   template:
@@ -195,6 +201,9 @@ spec:
         # ---------------------------------------------------------------
         # The remainder rarely needs changing.
         # ---------------------------------------------------------------
+        # In-flight requests. Unlike a perf benchmark, where concurrency is the
+        # variable under test, here it mainly sets how long the run takes:
+        # raise it to finish sooner, bounded by what the deployment can serve.
         - name: CONCURRENCY
           value: "10"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
