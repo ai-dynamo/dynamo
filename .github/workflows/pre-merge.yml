@@ -87,6 +87,7 @@ jobs:
           'pytest>=8.0' \
           'pyyaml>=6.0' \
           'pydantic>=2' \
+          'pytest-asyncio>=1.0' \
           'pytest-benchmark>=4'
     - name: Test generated API references
       # docs/fern/scripts/tests is an explicit path so it opts back into
