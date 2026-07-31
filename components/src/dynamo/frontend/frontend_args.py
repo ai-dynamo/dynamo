@@ -179,6 +179,20 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--router-conditional-disagg-config eff_isl_ratio_threshold must be in [0.0, 1.0]"
             )
+        if (
+            self.conditional_disagg_prefill_busy_threshold is not None
+            and self.conditional_disagg_prefill_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config prefill_busy_threshold must be >= 0"
+            )
+        if (
+            self.conditional_disagg_decode_busy_threshold is not None
+            and self.conditional_disagg_decode_busy_threshold < 0
+        ):
+            raise ValueError(
+                "--router-conditional-disagg-config decode_busy_threshold must be >= 0"
+            )
         if self.conditional_disagg_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-disagg requires --router-mode=kv")
         if self.conditional_disagg_enabled and not self.use_kv_events:

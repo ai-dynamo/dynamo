@@ -502,6 +502,10 @@ def test_conditional_disagg_prefill_load_errors_without_busy_threshold() -> None
             '{"eff_isl_ratio_threshold":"0.8"}',
             "eff_isl_ratio_threshold must be a number",
         ),
+        (
+            '{"eff_isl_ratio_threshold":null}',
+            "eff_isl_ratio_threshold must be a number",
+        ),
         ('{"prefill_busy_threshold":true}', "prefill_busy_threshold must be a number"),
     ],
 )

@@ -157,11 +157,15 @@ def _parse_conditional_disagg_config(value: str) -> dict[str, Any]:
         raise ValueError(
             "--router-conditional-disagg-config eff_isl_threshold must be an integer"
         )
-    for field in (
-        "eff_isl_ratio_threshold",
-        "prefill_busy_threshold",
-        "decode_busy_threshold",
+    if "eff_isl_ratio_threshold" in parsed and (
+        parsed["eff_isl_ratio_threshold"] is None
+        or not isinstance(parsed["eff_isl_ratio_threshold"], (int, float))
+        or isinstance(parsed["eff_isl_ratio_threshold"], bool)
     ):
+        raise ValueError(
+            "--router-conditional-disagg-config eff_isl_ratio_threshold must be a number"
+        )
+    for field in ("prefill_busy_threshold", "decode_busy_threshold"):
         if parsed.get(field) is None:
             continue
         if not isinstance(parsed[field], (int, float)) or isinstance(
