@@ -72,7 +72,7 @@ impl<'de> Deserialize<'de> for NvCreateResponse {
         D: serde::Deserializer<'de>,
     {
         let mut value = serde_json::Value::deserialize(deserializer)?;
-        normalize_codex_agent_messages(&mut value);
+        normalize_codex_agent_messages(&mut value).map_err(serde::de::Error::custom)?;
         let wire = NvCreateResponseWire::deserialize(value).map_err(serde::de::Error::custom)?;
         Ok(Self {
             inner: wire.inner,
@@ -83,12 +83,12 @@ impl<'de> Deserialize<'de> for NvCreateResponse {
 
 /// Convert Codex's thread-to-thread task envelope into a standard input message.
 /// `agent_message` is a Codex Responses extension, not an OpenResponses item.
-fn normalize_codex_agent_messages(body: &mut serde_json::Value) {
+fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), String> {
     let Some(items) = body
         .get_mut("input")
         .and_then(serde_json::Value::as_array_mut)
     else {
-        return;
+        return Ok(());
     };
 
     for item in items {
@@ -115,16 +115,39 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) {
             .get("content")
             .and_then(serde_json::Value::as_array)
             .map(|parts| {
-                parts
-                    .iter()
-                    .filter_map(|part| {
-                        (part.get("type").and_then(serde_json::Value::as_str) == Some("input_text"))
-                            .then(|| part.get("text").and_then(serde_json::Value::as_str))
-                            .flatten()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
+                let mut text = Vec::with_capacity(parts.len());
+                for part in parts {
+                    match part.get("type").and_then(serde_json::Value::as_str) {
+                        Some("input_text") => {
+                            let Some(text_part) =
+                                part.get("text").and_then(serde_json::Value::as_str)
+                            else {
+                                return Err(
+                                    "Codex agent_message input_text missing text".to_string()
+                                );
+                            };
+                            text.push(text_part);
+                        }
+                        Some("encrypted_content") => {
+                            return Err(
+                                "Codex agent_message with encrypted content is unsupported"
+                                    .to_string(),
+                            );
+                        }
+                        Some(kind) => {
+                            return Err(format!(
+                                "Codex agent_message contains unsupported content type {kind}"
+                            ));
+                        }
+                        None => {
+                            return Err("Codex agent_message content missing type discriminator"
+                                .to_string());
+                        }
+                    }
+                }
+                Ok(text.join("\n"))
             })
+            .transpose()?
             .unwrap_or_default();
 
         *item = serde_json::json!({
@@ -136,6 +159,8 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) {
             }],
         });
     }
+
+    Ok(())
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -3054,6 +3079,59 @@ thinking
             }
             messages => panic!("expected one user message, got {messages:?}"),
         }
+    }
+
+    #[test]
+    fn test_nvcreate_response_joins_codex_agent_message_parts_with_newlines() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": [
+                    {"type": "input_text", "text": "First."},
+                    {"type": "input_text", "text": "Second."},
+                ],
+            }],
+        });
+
+        let req: NvCreateResponse =
+            serde_json::from_value(body).expect("Codex agent message should deserialize");
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[..] {
+            [ChatCompletionRequestMessage::User(message)] => {
+                assert_eq!(
+                    message.content,
+                    ChatCompletionRequestUserMessageContent::Text(
+                        "Message from /root to /root/dynamo_subagent_smoke:\nFirst.\nSecond."
+                            .to_string()
+                    )
+                );
+            }
+            messages => panic!("expected one user message, got {messages:?}"),
+        }
+    }
+
+    #[test]
+    fn test_nvcreate_response_rejects_encrypted_codex_agent_message() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": [{"type": "encrypted_content", "encrypted_content": "AB=="}],
+            }],
+        });
+
+        let error = serde_json::from_value::<NvCreateResponse>(body)
+            .expect_err("encrypted Codex agent messages must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("encrypted content is unsupported")
+        );
     }
 
     #[test]
