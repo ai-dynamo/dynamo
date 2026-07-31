@@ -43,6 +43,43 @@ class CoverageGate:
     warnings: list[str]
 
 
+# Program-function areas coordinated by Maintainers directly; exempt from the
+# SIG roster (see GOVERNANCE.md, "Special Interest Groups").
+PROGRAM_AREAS = {"docs", "ops", "process"}
+
+
+def sigs_mapped_teams(sigs_text: str) -> set[str]:
+    """Team names mapped to a SIG in SIGS.md's roster table.
+
+    Reads the third column (CODEOWNERS Groups) of ``| sig-... |`` table rows
+    only, so a team merely *mentioned* in prose, a retired-SIG note, or a
+    commented-out row does not count as mapped.
+    """
+    mapped: set[str] = set()
+    for line in sigs_text.splitlines():
+        if not line.lstrip().startswith("| sig-"):
+            continue
+        cells = line.split("|")
+        if len(cells) > 3:
+            for token in cells[3].split(","):
+                mapped.add(token.strip().strip("`").strip())
+    return mapped
+
+
+def sigs_gaps(labels: list[str], sigs_text: str) -> list[str]:
+    """Area labels whose codeowners team is absent from the SIGS.md table.
+
+    Every non-program area must appear in the SIG roster so the SIG-to-area
+    mapping cannot drift silently when areas are added or renamed.
+    """
+    mapped = sigs_mapped_teams(sigs_text)
+    return [
+        label
+        for label in labels
+        if label not in PROGRAM_AREAS and f"dynamo-{label}-codeowners" not in mapped
+    ]
+
+
 def split_coverage(unmatched: list[str], changed: list[str] | None) -> CoverageGate:
     """Partition catch-all-only paths into blocking vs. non-blocking.
 
@@ -81,6 +118,10 @@ def is_policy_change(changed: list[str], areas: str, repo: str) -> bool:
     for p in changed:
         if Path(p).name == "CODEOWNERS":
             return True
+        # SIGS.md maps areas to SIGs; editing it can orphan any area, so a PR
+        # that touches it is judged full-tree like any other policy change.
+        if Path(p).name == "SIGS.md":
+            return True
         if areas_rel is not None and p == areas_rel:
             return True
         if policy_dir not in (None, ".") and (
@@ -113,6 +154,12 @@ def main() -> int:
         "--base",
         default="main",
         help="base ref for --changed-only (default: main)",
+    )
+    ap.add_argument(
+        "--sigs",
+        default="SIGS.md",
+        help="SIG roster path relative to --repo (default: SIGS.md); "
+        "pass '' to disable the SIG drift check",
     )
     args = ap.parse_args()
 
@@ -171,12 +218,45 @@ def main() -> int:
         )
         print("   ", gate.warnings[:15])
 
-    if args.strict and gate.blocking:
-        scope = "changed" if changed is not None else "tree"
-        print(
-            f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the catch-all "
-            "-- cover them in areas.yaml"
-        )
+    # SIG roster drift: every non-program area must appear in SIGS.md. A
+    # missing roster is itself a failure -- deleting or moving SIGS.md must
+    # not disable the check that exists to guard it. Repos without a SIG
+    # roster opt out explicitly with --sigs ''.
+    sig_missing: list[str] = []
+    sig_roster_absent = False
+    if args.sigs != "":
+        sigs_path = Path(args.repo) / args.sigs
+        if sigs_path.exists():
+            sig_missing = sigs_gaps(
+                [a.label for a in model.areas], sigs_path.read_text()
+            )
+            if sig_missing:
+                print(
+                    f"!! {args.sigs} is missing {len(sig_missing)} area team(s): "
+                    f"{sig_missing} -- add the area to a SIG (or to PROGRAM_AREAS)"
+                )
+        else:
+            sig_roster_absent = True
+            print(
+                f"!! SIG roster {args.sigs} not found under {args.repo} "
+                "(deleted or moved?). Pass --sigs '' to disable the check."
+            )
+
+    # Diff-aware runs judge only the PR's own surface, so inherited SIG drift
+    # warns rather than blocks -- same discipline as inherited coverage gaps.
+    # Full-tree runs (push/main, or a PR that touches ownership policy, which
+    # includes SIGS.md via is_policy_change) block on it.
+    sig_blocking = (sig_missing or sig_roster_absent) if changed is None else False
+    if sig_missing and changed is not None:
+        print("   (inherited from base; not blocking this diff-aware run)")
+
+    if args.strict and (gate.blocking or sig_blocking):
+        if gate.blocking:
+            scope = "changed" if changed is not None else "tree"
+            print(
+                f"!! strict: {len(gate.blocking)} {scope} file(s) fall to the catch-all "
+                "-- cover them in areas.yaml"
+            )
         return 1
     return 0
 

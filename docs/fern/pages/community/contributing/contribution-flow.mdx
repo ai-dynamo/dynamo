@@ -11,13 +11,15 @@ have not prepared a fork or configured commit sign-off, begin with
 
 ## Decide Whether to Open an Issue
 
-Small, focused changes can usually go directly to a pull request. Examples include typo fixes,
-documentation corrections, small bug fixes, and narrow configuration changes.
+Small, focused changes under 100 core lines can usually go directly to a pull request. Core lines
+are changed lines of code, excluding tests, documentation, and generated files. Examples include
+typo fixes, documentation corrections, small bug fixes, and narrow configuration changes.
 
 Open a [Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml)
-before implementation when a change is large, introduces a feature, spans multiple components, or
-would benefit from agreement on the approach. Wait for maintainer approval before investing in a
-substantial implementation.
+before implementation when a change has 100 or more core lines, spans multiple areas, changes a
+public API, or adds a dependency. Trusted Contributors are exempt from the size trigger; structural
+triggers still require a Contribution Request. Wait for the `approved-for-pr` label before
+investing in a substantial implementation.
 
 Changes that modify public APIs, communication-plane architecture, backend integration contracts,
 or multiple major components require a
@@ -66,20 +68,29 @@ or multiple major components require a
   <Step title="Complete automated review and CI">
     Respond to actionable automated review comments and fix failing checks.
 
-    For external contributions, a maintainer might need to authorize CI for the latest commit. If
-    requested, wait for a maintainer to trigger the tests rather than repeatedly pushing unchanged
-    commits.
+    For external contributors, a maintainer must approve the pull request's current head to run the
+    full CI suite, either by commenting `/ok to test COMMIT-ID` with the latest short commit ID or
+    by updating the branch. Each new push needs approval again. Trusted Contributors receive
+    automatic CI approval for each new head.
+
+    Every commit must carry a signature that GitHub reports as verified. Unsigned commits block CI
+    approval.
 
     <Info>
     You are responsible for understanding and validating all submitted code, including code
-    produced with AI assistance.
+    produced with AI assistance. Disclose substantial AI assistance in the pull request
+    description. Fully automated submissions opened without human review are not accepted. See
+    [Project Governance](https://github.com/ai-dynamo/dynamo/blob/main/GOVERNANCE.md).
     </Info>
   </Step>
 
   <Step title="Request and address review">
-    Request review from the maintainer who approved the issue when applicable. The repository
-    [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) file identifies required
-    reviewers for many paths.
+    GitHub automatically requests the repository
+    [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) teams for the files in
+    the pull request. Every pull request needs approval from at least two Maintainers other than the
+    author. Only human reviews count toward this requirement; automated review is a supplemental
+    signal. Request review from the maintainer who approved the Contribution Request when
+    applicable and they were not automatically requested.
 
     Respond to review comments, push follow-up commits with DCO sign-off, and re-request review when
     the change is ready.

@@ -9,25 +9,31 @@ body:
       label: Area
       description: Primary area this DEP affects (determines PIC assignment)
       options:
-        - external-api
         - frontend
+        - agents
         - router
         - backend-vllm
         - backend-trtllm
         - backend-sglang
         - kv-memory
         - multimodal
+        - diffusion
         - planner
-        - core-platform
+        - runtime
         - observability
         - fault-tolerance
-        - gateway
-        - devops
+        - ops
         - docs
         - process
-        - k8s
-        - dgdr
+        - operator
+        - gms
+        - epp
+        - tokenspeed
+        - rl
+        - performance
         - xpu
+        - efa
+        - cross-area (multiple)
     validations:
       required: true
   - type: textarea

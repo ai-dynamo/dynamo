@@ -24,10 +24,13 @@ Nobody reads this file to find a reviewer -- GitHub auto-requests the owning
 team, and ``who_owns.py`` answers "who reviews this path" on demand. The
 grouping + legend just make the generated artifact navigable.
 
-External contributors (``external_contributors.yaml``) attach to an area LABEL
-and are appended as co-owners on every line that area's team owns, so they
-inherit the team's globs without duplicating them. The same file drives
-``CONTRIBUTORS.md``.
+External contributors (``external_contributors.yaml``) attach to an area LABEL.
+Maintainer-level contributors are appended as co-owners on every line that
+area's team owns, inheriting the team's globs without duplicating them; lower
+rungs (trusted_contributor, contributor) are recorded in ``CONTRIBUTORS.md``
+only and never reach CODEOWNERS, because a code owner's review satisfies the
+required-review gate and merge authority begins at Maintainer (GOVERNANCE.md).
+The same file drives ``CONTRIBUTORS.md``.
 
 Usage:
   uv run python .github/codeowners/emit_codeowners.py \\
@@ -70,8 +73,8 @@ def _github(c: dict) -> str:
 
 
 # Contributor standing, ordered low -> high. The rank drives CONTRIBUTORS.md
-# sort order (most senior first). This is metadata about a person's standing;
-# it does not change CODEOWNERS routing (co-ownership is by attached area).
+# sort order (most senior first) AND gates CODEOWNERS emission: only the
+# CODEOWNER_LEVELS below are routed as co-owners of their attached areas.
 CONTRIBUTOR_LEVELS: tuple[str, ...] = (
     "contributor",
     "trusted_contributor",
@@ -85,6 +88,9 @@ LEVEL_DISPLAY: dict[str, str] = {
     "core_maintainer": "Core Maintainer",
 }
 LEVEL_RANK: dict[str, int] = {lvl: i for i, lvl in enumerate(CONTRIBUTOR_LEVELS)}
+# Levels that carry merge authority, and so are emitted as CODEOWNERS
+# co-owners. Lower rungs are recorded in CONTRIBUTORS.md only.
+CODEOWNER_LEVELS: frozenset[str] = frozenset({"maintainer", "core_maintainer"})
 
 
 def contributor_level(c: dict) -> str:
@@ -127,9 +133,18 @@ def team_externals_map(
     its GitHub team here, so the team's every CODEOWNERS line can pick up the
     handle at render time. An unknown label is a hard error -- a typo must not
     silently drop an owner.
+
+    ``level`` gates this: only ``maintainer`` and ``core_maintainer`` are
+    emitted into CODEOWNERS, because being a code owner is what satisfies the
+    required-review gate, and that is merge authority. Per GOVERNANCE.md a
+    Trusted Contributor "may review and approve ... but cannot merge", so a TC
+    is recorded in CONTRIBUTORS.md and never routed here. GitHub would also
+    ignore a code owner without write access, so listing one is doubly wrong.
     """
     mapping: dict[str, list[str]] = {}
     for c in contributors:
+        if contributor_level(c) not in CODEOWNER_LEVELS:
+            continue
         handle = _handle(_github(c))
         for label in c.get("areas", []) or []:
             team = label_to_team.get(label)
@@ -168,13 +183,27 @@ def render_contributors_md(contributors: list[dict]) -> str:
     Rows are ordered by standing (most senior first), then by name. ``areas``
     are shown as inline-code chips; the resolved team lives in CODEOWNERS.
     """
+    if contributors:
+        intro = [
+            "External contributors holding a recognized standing in this repository,",
+            "with the subsystem areas they work in. Maintainer-level contributors are",
+            "additionally listed in CODEOWNERS as individual co-owners of their areas'",
+            "paths alongside the owning team; Trusted Contributors review and approve",
+            "within their areas but do not hold codeownership.",
+        ]
+    else:
+        # Preserve the established empty-roster artifact byte-for-byte. The
+        # standing-specific wording becomes relevant when the first row exists.
+        intro = [
+            "External contributors who hold area-scoped **codeownership** in this",
+            "repository. Each person below has earned review and approval rights over",
+            "one or more subsystem areas, and is added as a co-owner on those areas'",
+            "paths alongside the owning NVIDIA team.",
+        ]
     lines = [
         "# Contributors",
         "",
-        "External contributors who hold area-scoped **codeownership** in this",
-        "repository. Each person below has earned review and approval rights over",
-        "one or more subsystem areas, and is added as a co-owner on those areas'",
-        "paths alongside the owning NVIDIA team.",
+        *intro,
         "",
         "Generated from `.github/codeowners/external_contributors.yaml`. Do not",
         "hand-edit \u2014 update that file and regenerate (see",
@@ -234,16 +263,23 @@ def _render_codeowners(
 ) -> tuple[list[str], dict[str, int]]:
     """Build the CODEOWNERS file body. Returns (lines, stats).
 
-    Pure function of the resolved model plus the external-contributors list:
+    Pure function of the resolved model plus the external-contributor roster:
     no tree, no filesystem. Same inputs -> byte-identical output.
+
+    ``level`` gates emission. A ``maintainer`` (or ``core_maintainer``) is
+    appended as an individual co-owner on every line their areas' teams own --
+    the same pattern the sibling nixl repo uses for its libfabric and bindings
+    owners. A ``trusted_contributor`` may review and approve but cannot merge
+    (GOVERNANCE.md), and a code owner's review is what satisfies the merge
+    gate, so lower rungs are recorded in CONTRIBUTORS.md and never routed here.
     """
     catch_all = model.catch_all
     label_to_team = model.label_to_team()
     team_to_label = {a.github_team: a.label for a in model.areas}
     area_order = [a.label for a in model.areas]
 
-    # External contributors co-own an area's paths by attaching to its label;
-    # their handle is appended to every line that area's team owns (deco()).
+    # Maintainer-level externals co-own an area's paths by attaching to its
+    # label; their handle rides every line that area's team owns (deco()).
     team_externals = team_externals_map(external or [], label_to_team)
 
     def deco(owners: str) -> str:
