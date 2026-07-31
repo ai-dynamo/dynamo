@@ -243,7 +243,7 @@ def send_cancellable_request(
         frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
-        max_tokens: Maximum tokens to request for the cancellable request
+        max_tokens: Maximum tokens to generate for the cancellable request
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled

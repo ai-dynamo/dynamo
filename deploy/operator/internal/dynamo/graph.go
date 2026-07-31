@@ -2770,8 +2770,8 @@ func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	return annotations, nil
 }
 
-// detectBackendFrameworkFromArgs detects the backend framework from command/args
-func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
 	// Combine command and args to search through all parts
 	allParts := append(command, args...)
 	fullCommand := strings.Join(allParts, " ")
@@ -2820,7 +2820,7 @@ func determineBackendFramework(
 
 	// Try to detect from command/args
 	if len(command) > 0 || len(args) > 0 {
-		detected, err := detectBackendFrameworkFromArgs(command, args)
+		detected, err := DetectBackendFrameworkFromArgs(command, args)
 		if err == nil {
 			detectedFramework = detected
 		} else {

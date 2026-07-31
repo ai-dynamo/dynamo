@@ -102,6 +102,71 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
 
+    @pytest.mark.multimodal
+    def test_rejects_multimodal_cache_uuid(self):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                            "uuid": "cached-image",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match="supported only by the vLLM backend"):
+            _build_dynamo_preproc(request, [1], "test", None)
+
+    @pytest.mark.multimodal
+    @pytest.mark.parametrize(
+        ("content_part", "message"),
+        [
+            (
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
+                    "uuid": "cached-video",
+                },
+                "supported only for image_url",
+            ),
+            (
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"},
+                    "uuid": "",
+                },
+                "must be a non-empty string",
+            ),
+            (
+                {"type": "image_url", "image_url": None},
+                "must contain a non-empty URL or uuid",
+            ),
+        ],
+    )
+    def test_maps_invalid_multimodal_input_to_preprocess_error(
+        self,
+        content_part,
+        message,
+    ):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [content_part],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match=message):
+            _build_dynamo_preproc(request, [1], "test", None)
+
     def test_top_k_zero_maps_to_negative_one(self):
         """SGLang uses -1 for disabled top_k, OpenAI uses 0."""
         result = _build_dynamo_preproc(
@@ -1929,8 +1994,10 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             None,
             exclude_tools_when_tool_choice_none=True,
             chat_template="custom template",
+            default_thinking_mode="disabled",
         )
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
+        assert sglang_processor_module._w_default_thinking_mode == "disabled"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
@@ -2265,6 +2332,141 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["thinking"] is True
         assert result.request["chat_template_kwargs"]["enable_thinking"] is True
         assert result.force_reasoning is True
+
+    def test_default_thinking_mode_disabled_reaches_generic_chat_template(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is False
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert captured["kwargs"]["thinking_mode"] == "disabled"
+        assert result.request["chat_template_kwargs"]["thinking_mode"] == "disabled"
+        assert "chat_template_kwargs" not in request
+
+    def test_default_thinking_mode_does_not_override_request_kwargs(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_default_thinking_mode_does_not_override_pythonized_args(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_null_root_thinking_does_not_suppress_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": None,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["enable_thinking"] is False
+
+    def test_reasoning_effort_takes_precedence_over_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["reasoning_effort"] == "high"
+        assert "thinking" not in captured["kwargs"]
+        assert "enable_thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}

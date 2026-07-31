@@ -21,6 +21,7 @@ from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
     managed_runtime,
+    parse_sse_json_chunks,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
@@ -30,6 +31,11 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.router_logs import (
+    parse_kv_event_diagnostics,
+    select_kv_event_diagnostics,
+    wait_for_kv_event_diagnostics,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -223,6 +229,127 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
+
+
+def _test_kv_event_publisher_disabled_diagnostic(
+    *,
+    frontend,
+    engine_workers,
+    diagnostic_workers,
+    frontend_port: int,
+    test_payload: dict,
+    model_name: str,
+    expected_worker_role: str,
+    expected_requirement: str,
+    expected_rank_count: int,
+    unexpected_worker_roles: tuple[str, ...] = (),
+    expected_total_diagnostics: int = 1,
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+):
+    """Assert an explicit disabled publisher is diagnosed without blocking serving."""
+
+    worker_groups = (
+        list(engine_workers)
+        if isinstance(engine_workers, (list, tuple))
+        else [engine_workers]
+    )
+    expected_num_workers = sum(group.num_workers for group in worker_groups)
+
+    async def discover_diagnostic_worker_ids() -> set[int]:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+        try:
+            endpoint = runtime.endpoint(
+                f"{diagnostic_workers.namespace}."
+                f"{diagnostic_workers.component_name}.generate"
+            )
+            return set(
+                await poll_for_worker_instances(
+                    endpoint,
+                    diagnostic_workers.num_workers,
+                )
+            )
+        finally:
+            runtime.shutdown()
+
+    expected_worker_ids = asyncio.run(discover_diagnostic_worker_ids())
+    expected_serving_endpoint = (
+        f"{diagnostic_workers.namespace}/"
+        f"{diagnostic_workers.component_name}/generate"
+    )
+    expected_dp_ranks = ",".join(str(rank) for rank in range(expected_rank_count))
+
+    frontend_url = f"http://localhost:{frontend_port}"
+    asyncio.run(
+        wait_for_frontend_ready(
+            frontend_url=frontend_url,
+            expected_num_workers=expected_num_workers,
+            timeout=120,
+            test_payload=test_payload,
+            engine_workers=worker_groups,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+    )
+
+    diagnostics = wait_for_kv_event_diagnostics(
+        frontend,
+        diagnostic_code="kv_event_publisher_disabled",
+        expected_count=expected_total_diagnostics,
+        worker_role=expected_worker_role,
+        timeout_s=10,
+    )
+    diagnostic = diagnostics[-1]
+    assert diagnostic.model == model_name
+    assert diagnostic.worker_role == expected_worker_role
+    assert diagnostic.requirement == expected_requirement
+    assert diagnostic.worker_id in expected_worker_ids
+    assert diagnostic.serving_endpoint == expected_serving_endpoint
+    assert diagnostic.kv_event_publishing_enabled is False
+    assert diagnostic.waited_ms == 0
+    assert diagnostic.rank_count == expected_rank_count
+    assert diagnostic.dp_ranks == expected_dp_ranks
+
+    async def assert_inference_succeeds() -> None:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{frontend_url}/v1/chat/completions",
+                json=test_payload,
+            ) as response:
+                body = await response.text()
+                assert response.status == 200, (
+                    "inference must continue when KV event publishing is disabled; "
+                    f"status={response.status}, body={body}"
+                )
+
+    asyncio.run(assert_inference_succeeds())
+
+    final_diagnostics = parse_kv_event_diagnostics(frontend.read_logs())
+    disabled_diagnostics = select_kv_event_diagnostics(
+        final_diagnostics,
+        diagnostic_code="kv_event_publisher_disabled",
+    )
+    assert len(disabled_diagnostics) == expected_total_diagnostics, (
+        "expected exactly one disabled-publisher diagnostic per worker lifecycle "
+        f"after successful inference, got {disabled_diagnostics}"
+    )
+    for worker_role in unexpected_worker_roles:
+        for diagnostic_code in (
+            "kv_event_publisher_disabled",
+            "kv_event_source_not_observed",
+        ):
+            unexpected = select_kv_event_diagnostics(
+                final_diagnostics,
+                diagnostic_code=diagnostic_code,
+                worker_role=worker_role,
+            )
+            assert not unexpected, (
+                f"worker role {worker_role!r} does not require KV events, but "
+                f"emitted {diagnostic_code!r} diagnostics: {unexpected}"
+            )
 
 
 def _test_router_override_router_config(
@@ -514,13 +641,8 @@ def _test_session_affinity(
                     assert response.status == 200, body
 
                 worker_info = None
-                for line in body.splitlines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        continue
-                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                for chunk in parse_sse_json_chunks(body):
+                    candidate = chunk.get("nvext", {}).get("worker_id")
                     if candidate:
                         worker_info = candidate
 
@@ -1069,40 +1191,19 @@ def _test_router_query_instance_id(
                         f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
                     )
 
-                    # Parse the SSE response to extract the first chunk with nvext data
-                    # New format: nvext contains worker_id and token_ids
-                    sse_parts = full_response.split("\n\n")
                     worker_id_info = None
                     token_list = None
 
-                    for part in sse_parts:
-                        part = part.strip()
-                        if not part or not part.startswith("data:"):
-                            continue
+                    for chunk in parse_sse_json_chunks(full_response):
+                        logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
 
-                        data_str = part.split("data:", 1)[1].strip()
-                        if data_str == "[DONE]":
-                            continue
-
-                        try:
-                            chunk = json.loads(data_str)
-                            logger.info(f"Parsed chunk: {json.dumps(chunk, indent=2)}")
-
-                            # Extract nvext data containing worker_id and token_ids
-                            nvext = chunk.get("nvext", {})
-                            if nvext:
-                                if "worker_id" in nvext:
-                                    worker_id_info = nvext["worker_id"]
-                                    logger.info(
-                                        f"Found worker_id info: {worker_id_info}"
-                                    )
-                                if "token_ids" in nvext:
-                                    token_list = nvext["token_ids"]
-                                    logger.info(
-                                        f"Found token_ids: {len(token_list)} tokens"
-                                    )
-                        except json.JSONDecodeError:
-                            continue
+                        nvext = chunk.get("nvext", {})
+                        if "worker_id" in nvext:
+                            worker_id_info = nvext["worker_id"]
+                            logger.info(f"Found worker_id info: {worker_id_info}")
+                        if "token_ids" in nvext:
+                            token_list = nvext["token_ids"]
+                            logger.info(f"Found token_ids: {len(token_list)} tokens")
 
                     # Validate worker_id info
                     assert (
@@ -1182,19 +1283,20 @@ def _parse_frontend_rejection_metric(
     return 0
 
 
-def _verify_frontend_rejection_metrics(
+def _get_frontend_rejection_metric(
     frontend_port: int,
     model_name: str,
     endpoint: str,
-    expected_count: int,
-) -> None:
-    """Verify frontend rejection metrics by scraping the /metrics endpoint.
+) -> int:
+    """Read the frontend rejection counter from the /metrics endpoint.
 
     Args:
         frontend_port: Port where the frontend /metrics is served
         model_name: The model name label value
         endpoint: The endpoint label value (e.g. "chat_completions")
-        expected_count: Expected rejection count to match exactly
+
+    Returns:
+        The current rejection count
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
     try:
@@ -1205,9 +1307,17 @@ def _verify_frontend_rejection_metrics(
             f"Failed to fetch frontend metrics from {metrics_url}: {e}"
         ) from e
 
-    metric_count = _parse_frontend_rejection_metric(
-        metrics_response.text, model_name, endpoint
-    )
+    return _parse_frontend_rejection_metric(metrics_response.text, model_name, endpoint)
+
+
+def _verify_frontend_rejection_metrics(
+    frontend_port: int,
+    model_name: str,
+    endpoint: str,
+    expected_count: int,
+) -> None:
+    """Verify frontend rejection metrics by scraping the /metrics endpoint."""
+    metric_count = _get_frontend_rejection_metric(frontend_port, model_name, endpoint)
     logger.info(f"Frontend rejection metric: model_rejection_total={metric_count}")
     assert metric_count == expected_count, (
         f"Frontend model_rejection_total ({metric_count}) does not match "
@@ -1230,12 +1340,17 @@ def _probe_overload_529_and_assert(
     asserts:
     1. At least one request is rejected with 529 (the threshold gates the pool)
     2. No other status codes appear
-    3. The frontend ``model_rejection_total`` metric matches the 529 count
+    3. The frontend ``model_rejection_total`` metric increases by the 529 count
 
     Successes are not required: a single overload-shaped request can exceed the
     threshold before dispatch, so an all-529 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    model_name = test_payload.get("model", "")
+    # Read after readiness because its retries can contribute unrelated 529s.
+    initial_rejection_count = _get_frontend_rejection_metric(
+        frontend_port, model_name, "chat_completions"
+    )
     test_payload_529 = {
         **test_payload,
         "max_tokens": max_tokens,
@@ -1245,6 +1360,7 @@ def _probe_overload_529_and_assert(
 
     async def exhaust_resources_and_verify_529():
         stop_event = asyncio.Event()
+        observed_statuses = []
 
         async with aiohttp.ClientSession() as session:
             tasks = []
@@ -1252,25 +1368,28 @@ def _probe_overload_529_and_assert(
             async def send_request(req_id, payload):
                 try:
                     async with session.post(url, json=payload) as response:
-                        if response.status == 200:
+                        status = response.status
+                        observed_statuses.append(status)
+
+                        if status == 200:
                             logger.info("Request %s accepted", req_id)
                             await stop_event.wait()
-                            return response.status
+                            return status
 
-                        if response.status == 529:
+                        if status == 529:
+                            stop_event.set()
                             body = await response.text()
                             logger.info("Request %s got expected 529: %s", req_id, body)
-                            stop_event.set()
-                            return response.status
+                            return status
 
                         body = await response.text()
                         logger.info(
                             "Request %s got unexpected status %s: %s",
                             req_id,
-                            response.status,
+                            status,
                             body,
                         )
-                        return response.status
+                        return status
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -1304,22 +1423,16 @@ def _probe_overload_529_and_assert(
                         logger.error("Timed out waiting for overload 529")
             finally:
                 stop_event.set()
-                # Drain quickly and count only requests that received a status.
-                # This does not race the rejection-metric assertion: a 529 is
-                # returned synchronously by send_request (so every rejected
-                # request is in `done`, never `pending`), and the accepted (200)
-                # requests unblock from stop_event and return immediately. Any
-                # task still pending here received no HTTP status yet — cancelling
-                # it can neither drop a counted 529 nor desync model_rejection_total
-                # (which only counts emitted 529s). Some configs (e.g. slow decode
-                # with large max_tokens) leave such in-flight requests, so we must
-                # not block on or fail them.
+                # Statuses are recorded when headers arrive, so cancelling a task
+                # that is still draining its body cannot drop an observed 529.
                 done, pending = await asyncio.wait(tasks, timeout=5)
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
 
-            return [t.result() for t in done]
+            return observed_statuses
 
     results = asyncio.run(exhaust_resources_and_verify_529())
 
@@ -1342,9 +1455,11 @@ def _probe_overload_529_and_assert(
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
 
     # Verify rejection metrics from frontend /metrics endpoint
-    model_name = test_payload.get("model", "")
     _verify_frontend_rejection_metrics(
-        frontend_port, model_name, "chat_completions", num_rejected
+        frontend_port,
+        model_name,
+        "chat_completions",
+        initial_rejection_count + num_rejected,
     )
 
     logger.info(
@@ -1372,9 +1487,9 @@ def _test_router_overload_529(
     Uses limited resources to intentionally trigger the overload condition.
 
     Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
-    1. At least one request succeeds (routed before busy state propagates)
+    1. Every observed response is either 200 or 529
     2. At least one request is rejected with 529 (worker busy)
-    3. The frontend model_rejection_total metric matches the observed 529 count
+    3. The frontend model_rejection_total increase matches the observed 529 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -2249,39 +2364,16 @@ def _test_router_decisions_disagg(
                         decode_wid = None
                         timing_info = None
 
-                        async for line in response.content:
-                            if not line:
-                                continue
-
-                            line_str = line.decode("utf-8", errors="replace").strip()
-                            if not line_str.startswith("data:"):
-                                continue
-
-                            data_str = line_str[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-
-                            try:
-                                data = json.loads(data_str)
-                                # Check for nvext in the response
-                                nvext = data.get("nvext", {})
-                                if nvext:
-                                    worker_id_info = nvext.get("worker_id", {})
-                                    if worker_id_info:
-                                        if "prefill_worker_id" in worker_id_info:
-                                            prefill_wid = worker_id_info[
-                                                "prefill_worker_id"
-                                            ]
-                                        if "decode_worker_id" in worker_id_info:
-                                            decode_wid = worker_id_info[
-                                                "decode_worker_id"
-                                            ]
-                                    # Timing info appears in final chunk
-                                    if "timing" in nvext:
-                                        timing_info = nvext["timing"]
-
-                            except json.JSONDecodeError:
-                                continue
+                        body = await response.text()
+                        for data in parse_sse_json_chunks(body):
+                            nvext = data.get("nvext", {})
+                            worker_id_info = nvext.get("worker_id", {})
+                            if "prefill_worker_id" in worker_id_info:
+                                prefill_wid = worker_id_info["prefill_worker_id"]
+                            if "decode_worker_id" in worker_id_info:
+                                decode_wid = worker_id_info["decode_worker_id"]
+                            if "timing" in nvext:
+                                timing_info = nvext["timing"]
 
                         logger.info(
                             f"Request {i + 1}: prefill_worker_id={prefill_wid}, "

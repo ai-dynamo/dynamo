@@ -14,9 +14,9 @@
   `dist_init_addr` into a runtime-data key that non-leader workers can use
   to discover the leader endpoint.
 
-* :func:`warmup_prefill_engine` — drive one request through the disagg
-  path with SGLang's `FAKE_BOOTSTRAP_HOST` so the first real request
-  doesn't pay the JIT/CUDA-graph compile cost.
+* :func:`warmup_prefill_engine` — drive one request per DP rank through
+  the disagg path with SGLang's `FAKE_BOOTSTRAP_HOST` so the first real
+  request doesn't pay the JIT/CUDA-graph compile cost.
 """
 
 from __future__ import annotations
@@ -123,29 +123,37 @@ def get_sglang_worker_group_id(server_args) -> Optional[str]:
 
 
 async def warmup_prefill_engine(engine: sgl.Engine, bootstrap_port: int) -> None:
-    """Drive one request through the prefill disagg path with SGLang's
-    `FAKE_BOOTSTRAP_HOST` so JIT/CUDA-graph compile happens before the
-    first real request. Raises on timeout/failure — an unwarmed prefill
-    silently drops production requests."""
+    """Warm every prefill DP rank through the disagg path.
+
+    Uses SGLang's `FAKE_BOOTSTRAP_HOST` so JIT/CUDA-graph compile happens
+    before the first real request. Raises on timeout/failure — an unwarmed
+    prefill silently drops production requests.
+    """
     from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+    server_args = engine.tokenizer_manager.server_args
+    dp_size = server_args.dp_size
     sampling_params = {
         "temperature": 0.0,
         "max_new_tokens": 8,
         "ignore_eos": True,
     }
 
-    async def _do_warmup() -> None:
+    async def _warmup_dp_rank(dp_rank: int) -> None:
         results = await engine.async_generate(
-            input_ids=[0, 1, 2, 3],
+            input_ids=[10, 11, 12, 13],
             sampling_params=sampling_params,
             stream=True,
             bootstrap_host=FAKE_BOOTSTRAP_HOST,
             bootstrap_port=bootstrap_port,
-            bootstrap_room=999999,
+            bootstrap_room=dp_rank,
+            routed_dp_rank=dp_rank,
         )
         async for _ in results:
             pass
+
+    async def _do_warmup() -> None:
+        await asyncio.gather(*(_warmup_dp_rank(i) for i in range(dp_size)))
 
     logging.info("SGLang prefill warmup starting...")
     await asyncio.wait_for(_do_warmup(), timeout=_PREFILL_WARMUP_TIMEOUT_S)
