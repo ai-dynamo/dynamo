@@ -17,45 +17,17 @@
 
 package compatibility
 
-import (
-	semver "github.com/Masterminds/semver/v3"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
-)
+import semver "github.com/Masterminds/semver/v3"
 
-// Compatibility feature gates.
+// Feature gates gated on the operator origin version (the operator version that
+// first reconciled / created the DGD resource).
 
 var (
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
-	// instead of Ray for multi-node deployments. It is enabled for resources
-	// originally created by operator >= 1.0.0.
-	VLLMMultiprocessing = Gate[VersionedResource]{
+	// instead of Ray for multi-node deployments. Enabled for DGDs originally
+	// created by operator >= 1.0.0.
+	VLLMMultiprocessing = Gate{
 		Name:             "VLLMMultiprocessing",
-		MinOriginVersion: semver.MustParse("1.0.0"),
+		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
-
-	// Canary health check compatibility policy:
-	//
-	//	default: enabled for resources created by operator >= 1.4.0 when runtime >= 1.4.0
-	//	upgrade: operator-only upgrades preserve the legacy default for existing resources
-	//	scale: new replicas keep the existing workload template and do not opt in
-	//	opt-in: set DYN_HEALTH_CHECK_ENABLED=true explicitly
-	//	rollout: explicit opt-in intentionally rolls the affected workload
-	//	ordering: none; mixed workers with and without canary checks are supported
-	//	conditions:
-	//	  - type: FeatureGatePending
-	//	    when: the runtime gate passes but the origin gate preserves the legacy default
-
-	canaryHealthChecksMinOriginVersion  = semver.MustParse("1.4.0")
-	canaryHealthChecksMinRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 4, Patch: 0}
 )
-
-// CanaryHealthChecks returns the canary health-check compatibility gate for a
-// caller's concrete Gated resource type.
-func CanaryHealthChecks[T Gated](optIn Predicate[T]) Gate[T] {
-	return Gate[T]{
-		Name:              "CanaryHealthChecks",
-		MinOriginVersion:  canaryHealthChecksMinOriginVersion,
-		MinRuntimeVersion: &canaryHealthChecksMinRuntimeVersion,
-		OptIn:             optIn,
-	}
-}

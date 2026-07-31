@@ -328,13 +328,8 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 		}
 	}
 
-	// Step 2: Check the operator origin compatibility constraint.
-	resource := compatibility.NewVersionedResource(
-		&metav1.ObjectMeta{Annotations: annotations},
-		nil,
-	)
-
-	return compatibility.VLLMMultiprocessing.Evaluate(resource).Enabled()
+	// Step 2: Check operator origin version gate
+	return compatibility.VLLMMultiprocessing.Enabled(annotations)
 }
 
 // injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.
