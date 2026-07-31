@@ -949,8 +949,10 @@ where
         };
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
+        let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
 
-        if let Some(m) = metrics::RoutingOverheadMetrics::get() {
+        // Keep existing routing metrics scoped to requests admitted into the scheduler by this call.
+        if is_admitted_routing && let Some(m) = metrics::RoutingOverheadMetrics::get() {
             m.observe(
                 hash_elapsed,
                 seq_hash_elapsed,
@@ -962,7 +964,8 @@ where
         }
 
         // Observe per-request shared cache metrics.
-        if let Some(hits) = sc_hits_for_metrics
+        if is_admitted_routing
+            && let Some(hits) = sc_hits_for_metrics
             && let Some(m) = metrics::RouterRequestMetrics::get()
         {
             if num_blocks > 0 {
