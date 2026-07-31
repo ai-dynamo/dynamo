@@ -14,6 +14,9 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
+#[allow(dead_code)] // Constructed by SelectionService in DYN-3711.
+mod composition;
+
 /// A trait that users can implement to define custom selection logic.
 ///
 /// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
@@ -132,6 +135,27 @@ impl DefaultWorkerSelector {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
             deterministic_rng: Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
+        }
+    }
+
+    fn selection_weights(&self, request: &SchedulingRequest) -> LogitWeights {
+        LogitWeights {
+            overlap_score_credit: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.overlap_score_credit)
+                .unwrap_or(self.kv_router_config.overlap_score_credit),
+            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
+            prefill_load_scale: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.prefill_load_scale)
+                .unwrap_or(self.kv_router_config.prefill_load_scale),
+            shared_cache_multiplier: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.shared_cache_multiplier)
+                .unwrap_or(self.kv_router_config.shared_cache_multiplier),
         }
     }
 
@@ -482,24 +506,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         // Borrowed, never allocated; bridges the winner row to `[ROUTING] Best`.
         let request_id = request.mode.request_id().unwrap_or("-");
 
-        let weights = LogitWeights {
-            overlap_score_credit: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.overlap_score_credit)
-                .unwrap_or(self.kv_router_config.overlap_score_credit),
-            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
-            prefill_load_scale: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.prefill_load_scale)
-                .unwrap_or(self.kv_router_config.prefill_load_scale),
-            shared_cache_multiplier: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.shared_cache_multiplier)
-                .unwrap_or(self.kv_router_config.shared_cache_multiplier),
-        };
+        let weights = self.selection_weights(request);
 
         if let Some(worker) = pinned_worker {
             match eligibility.validate_worker_rank(workers, worker) {
