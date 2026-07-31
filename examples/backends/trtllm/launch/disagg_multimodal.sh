@@ -32,13 +32,16 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal Serving (2 
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# Prevent port collisions: prefill and decode each run their own
-# system-status-server, so DYN_SYSTEM_PORT (which would be shared) is dropped
-# in favor of DYN_SYSTEM_PORT1/DYN_SYSTEM_PORT2 below.
+# Prevent port collisions: prefill and decode each run their own status server.
+# Preserve DYN_SYSTEM_PORT as the base when only the single-worker convention
+# is provided, while allowing either worker port to be overridden explicitly.
+SYSTEM_PORT_BASE="${DYN_SYSTEM_PORT:-8081}"
+DYN_SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-$SYSTEM_PORT_BASE}"
+DYN_SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-$((SYSTEM_PORT_BASE + 1))}"
 unset DYN_SYSTEM_PORT
 
 # run prefill worker
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_PORT=$DYN_SYSTEM_PORT1 \
 CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -48,7 +51,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --disaggregation-mode prefill &
 
 # run decode worker
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=$DYN_SYSTEM_PORT2 \
 CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
