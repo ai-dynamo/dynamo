@@ -32,7 +32,7 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::{
-        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
+        KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
@@ -49,6 +49,7 @@ use crate::{
             images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
+    worker_type::WorkerType,
 };
 
 /// State for prefill router activation rendezvous.
@@ -1037,7 +1038,7 @@ impl ModelManager {
 
     // -- KV Router creation --
 
-    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    /// Whether to start the LoRA load-estimator feed for a KV router's metric worker type.
     ///
     /// The feed must run for the worker mode that carries the routable request load. In dynamo's
     /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
@@ -1056,7 +1057,32 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter>> {
+        self.kv_chooser_for_with_worker_role(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_worker_role(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
@@ -1086,7 +1112,7 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -1108,18 +1134,19 @@ impl ModelManager {
         };
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
-        let kv_source_membership = if !effective_kv_router_config.use_remote_indexer
-            && effective_kv_router_config.should_subscribe_to_kv_events()
-        {
-            Some(
-                self.get_or_create_kv_source_membership_watch(endpoint)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
+        let kv_source_membership =
+            if kv_event_source_requirement.should_subscribe(&effective_kv_router_config) {
+                Some(
+                    self.get_or_create_kv_source_membership_watch(endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
-        let chooser = KvRouter::new(
+        let chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -1128,7 +1155,8 @@ impl ModelManager {
             selector,
             kv_router_config,
             prefill_load_estimator,
-            worker_type,
+            worker_role,
+            metric_worker_type,
             model_name,
             is_eagle,
             shared_cache,
@@ -1149,7 +1177,7 @@ impl ModelManager {
         // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
         // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
         // directly, e.g. the watcher / C bindings, are unaffected.)
-        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
+        if Self::should_start_lora_load_feed(self.lora_enabled, metric_worker_type) {
             let feed_key = endpoint.id().to_string();
             // Start a feed if none runs for this endpoint yet, or restart it if the previous
             // one exited (so a dead subscription does not permanently disable load tracking).

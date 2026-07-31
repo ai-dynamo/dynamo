@@ -71,6 +71,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
@@ -294,6 +295,10 @@ func main() {
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
+	if err := podcache.Configure(&mgrOpts.Cache); err != nil {
+		setupLog.Error(err, "unable to configure Pod cache")
+		os.Exit(1)
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -505,7 +510,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

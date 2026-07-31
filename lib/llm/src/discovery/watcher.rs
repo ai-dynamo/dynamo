@@ -1591,11 +1591,12 @@ impl ModelWatcher {
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     Some(
                         self.manager
-                            .kv_chooser_for(
+                            .kv_chooser_for_with_worker_role(
                                 &endpoint,
                                 card.kv_cache_block_size,
                                 Some(router_config.kv_router_config.clone()),
                                 self.prefill_load_estimator.clone(),
+                                card.worker_type,
                                 WORKER_TYPE_DECODE, // This is the decode router
                                 Some(card.display_name.clone()),
                                 card.runtime_config.enable_eagle,
@@ -1671,6 +1672,7 @@ impl ModelWatcher {
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
+                    kv_chooser.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
