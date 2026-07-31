@@ -61,10 +61,6 @@ from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
-from dynamo.trtllm.request_handlers.batched_egress import (
-    batched_egress_enabled,
-    serve_batched_endpoint,
-)
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
@@ -806,21 +802,11 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-                if batched_egress_enabled():
-                    # DYN-3703: batch egress across requests (one bridge
-                    # crossing per engine step). Default OFF.
-                    await serve_batched_endpoint(
-                        endpoint,
-                        handler,
-                        metrics_labels=metrics_labels,
-                        health_check_payload=health_check_payload,
-                    )
-                else:
-                    await endpoint.serve_endpoint(
-                        handler.generate,
-                        metrics_labels=metrics_labels,
-                        health_check_payload=health_check_payload,
-                    )
+                await endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=metrics_labels,
+                    health_check_payload=health_check_payload,
+                )
 
             # Shutdown consolidator publisher if it was created
             if consolidator_publisher:
@@ -829,11 +815,6 @@ async def init_llm_worker(
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
-            if batched_egress_enabled():
-                await serve_batched_endpoint(
-                    endpoint, handler, health_check_payload=health_check_payload
-                )
-            else:
-                await endpoint.serve_endpoint(
-                    handler.generate, health_check_payload=health_check_payload
-                )
+            await endpoint.serve_endpoint(
+                handler.generate, health_check_payload=health_check_payload
+            )

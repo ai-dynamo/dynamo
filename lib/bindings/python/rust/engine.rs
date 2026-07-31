@@ -106,7 +106,7 @@ where
     Ok(stream)
 }
 
-pub(crate) fn demand_driven_python_stream(
+fn demand_driven_python_stream(
     locals: TaskLocals,
     generator: Bound<'_, PyAny>,
 ) -> PyResult<PyItemStream> {
