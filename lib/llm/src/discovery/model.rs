@@ -372,6 +372,7 @@ impl Model {
             .any(|entry| entry.value().has_generate_engine())
     }
 
+    /// Check whether a Generate worker also advertises `capability`.
     pub fn has_generate_engine_for_capability(&self, capability: &str) -> bool {
         self.worker_sets.iter().any(|entry| {
             let worker_set = entry.value();
@@ -724,7 +725,7 @@ impl Model {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
-
+    /// Get a Generate engine from a worker advertising `capability`.
     pub fn get_generate_engine_for_capability(
         &self,
         capability: &str,

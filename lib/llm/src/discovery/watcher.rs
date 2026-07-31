@@ -37,7 +37,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::TokenizerBackend,
+    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -406,6 +406,13 @@ impl ModelWatcher {
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+    /// Compatibility wrapper for callers that enable the vLLM Generate route.
+    pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
+        self.generate_engine_capabilities = enabled
+            .then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .into_iter()
+            .collect();
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
