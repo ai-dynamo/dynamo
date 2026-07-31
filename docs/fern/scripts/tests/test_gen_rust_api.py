@@ -204,9 +204,7 @@ def test_generator_writes_and_checks_outputs(
     cached_reference: rust_api_discovery.RustReference,
 ) -> None:
     assert gen_rust_api.main(["--fern-root", str(workspace)]) == 0
-    assert (
-        workspace / "pages" / "reference" / "api" / "rust" / "README.mdx"
-    ).is_file()
+    assert (workspace / "pages" / "reference" / "api" / "rust" / "README.mdx").is_file()
     assert gen_rust_api.main(["--fern-root", str(workspace), "--check"]) == 0
 
 
