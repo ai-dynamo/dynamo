@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
+use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
@@ -22,11 +23,12 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
-    SchedulingResponse,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, OverloadedWorkerProvider,
+    SchedulingContext, SchedulingRequest, SchedulingResponse,
 };
 use crate::protocols::{
-    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
+    WorkerWithDpRank,
 };
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -55,6 +57,12 @@ struct QueuedRequest {
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
+struct SelectedWorkerForRequest {
+    selection: WorkerSelectionResult,
+    selected_worker_tiers: SelectedWorkerTierSnapshot,
+    selected_worker_load: AdvisoryWorkerLoad,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
     Enqueue {
@@ -62,6 +70,10 @@ enum AdmissionCommand {
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
+    },
+    SelectWithoutAdmission {
+        request: SchedulingRequest,
+        resp_tx: oneshot::Sender<Result<AdvisorySchedulingResponse, KvSchedulerError>>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -502,6 +514,27 @@ impl<
         }))
     }
 
+    /// Select a worker from current scheduler state without entering admission.
+    ///
+    /// This is for advisory policy probes that must not wait in the router
+    /// queue and must not book active scheduler state.
+    pub async fn select_without_admission(
+        &self,
+        request: SchedulingRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        request.eligibility().validate_pinned_worker_allowed()?;
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let command = AdmissionCommand::SelectWithoutAdmission { request, resp_tx };
+        if self.admission_tx.send(command).await.is_err() {
+            return Err(KvSchedulerError::SubscriberShutdown);
+        }
+
+        resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
@@ -603,6 +636,13 @@ impl<
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(lease);
+                }
+                AdmissionCommand::SelectWithoutAdmission {
+                    mut request,
+                    resp_tx,
+                } => {
+                    let result = self.select_without_admission_inner(&mut request, Instant::now());
+                    let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
@@ -876,14 +916,16 @@ impl<
         }
     }
 
-    /// Run the full scheduling pipeline for a single request:
-    /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
+    fn select_worker_for_request(
+        &self,
+        request: &mut SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
-        let selection = {
+        {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
@@ -891,7 +933,7 @@ impl<
                 .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
+                .select_worker(&workers, request, eligibility, self.block_size)
                 .map(|selection| {
                     let config = workers
                         .get(&selection.worker.worker_id)
@@ -899,11 +941,47 @@ impl<
                     let selected_worker_tiers = request
                         .overlap
                         .selected_worker_tiers(selection.worker, config);
-                    (selection, selected_worker_tiers)
+                    let worker_load = request.worker_load_for(selection.worker);
+                    let selected_worker_load = AdvisoryWorkerLoad {
+                        active_prefill_tokens: worker_load.active_prefill_tokens,
+                        prefill_token_capacity: config
+                            .max_num_batched_tokens()
+                            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
+                            as usize,
+                        total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
+                    };
+                    SelectedWorkerForRequest {
+                        selection,
+                        selected_worker_tiers,
+                        selected_worker_load,
+                    }
                 })
-        };
+        }
+    }
 
-        let (selection, selected_worker_tiers) = match selection {
+    fn select_without_admission_inner(
+        &self,
+        request: &mut SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        let selected = self.select_worker_for_request(request, decay_now)?;
+
+        Ok(AdvisorySchedulingResponse {
+            selected_worker_load: selected.selected_worker_load,
+            response: SchedulingResponse {
+                best_worker: selected.selection.worker,
+                effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+                cached_tokens: selected.selection.cached_tokens,
+                selected_worker_tiers: selected.selected_worker_tiers,
+                potential_decode_blocks: selected.selection.potential_decode_blocks,
+            },
+        })
+    }
+
+    /// Run the full scheduling pipeline for a single request:
+    /// compute projected load -> select worker -> book tracked state -> respond.
+    fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
+        let selected = match self.select_worker_for_request(&mut request, decay_now) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -913,11 +991,11 @@ impl<
         };
 
         let response = SchedulingResponse {
-            best_worker: selection.worker,
-            effective_overlap_blocks: selection.effective_overlap_blocks,
-            cached_tokens: selection.cached_tokens,
-            selected_worker_tiers,
-            potential_decode_blocks: selection.potential_decode_blocks,
+            best_worker: selected.selection.worker,
+            effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+            cached_tokens: selected.selection.cached_tokens,
+            selected_worker_tiers: selected.selected_worker_tiers,
+            potential_decode_blocks: selected.selection.potential_decode_blocks,
         };
 
         if !request.mode.is_tracked() {
@@ -933,7 +1011,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.cached_tokens,
+            selected.selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -943,7 +1021,7 @@ impl<
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
-            worker: selection.worker,
+            worker: selected.selection.worker,
             lora_name: request.lora_name.take(),
         };
         self.book_and_respond(request, sequence_request, response)

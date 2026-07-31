@@ -33,7 +33,7 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/kubernetes/quickstart.mdx).
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **Hugging Face token** with access to `nvidia/GLM-5.2-NVFP4` for B200 or
    `zai-org/GLM-5.2-FP8` for H200.
 
