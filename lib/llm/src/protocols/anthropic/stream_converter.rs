@@ -57,7 +57,13 @@ pub struct AnthropicStreamConverter {
 struct ToolCallState {
     id: String,
     name: String,
-    argument_fragments: Vec<String>,
+    /// Each buffered argument fragment paired with the cumulative usage snapshot
+    /// taken when its backend chunk was processed. Tool-call blocks are flushed
+    /// lazily (at the finish reason or EOF), long after their chunks were seen,
+    /// so serializing them against the converter's *current* usage would stamp
+    /// every `input_json_delta` with the final token count. Snapshotting per
+    /// fragment preserves the per-chunk cumulative count instead.
+    argument_fragments: Vec<(String, AnthropicUsage)>,
 }
 
 impl ToolCallState {
@@ -122,7 +128,11 @@ impl AnthropicStreamConverter {
     ///   `tool_call_states` by `tool_call.index` keeps each call's state separate
     ///   regardless, so interleaved indices would also be handled — but no current
     ///   parser emits them, so that path is defensive rather than exercised.
-    fn record_tool_call(&mut self, tool_call: &ChatCompletionMessageToolCallChunk) {
+    fn record_tool_call(
+        &mut self,
+        tool_call: &ChatCompletionMessageToolCallChunk,
+        usage_snapshot: &AnthropicUsage,
+    ) {
         let tool_call_index = tool_call.index as usize;
         while self.tool_call_states.len() <= tool_call_index {
             self.tool_call_states.push(ToolCallState {
@@ -141,12 +151,22 @@ impl AnthropicStreamConverter {
                 state.name = name.clone();
             }
             if let Some(arguments) = &function.arguments {
-                state.argument_fragments.push(arguments.clone());
+                state
+                    .argument_fragments
+                    .push((arguments.clone(), usage_snapshot.clone()));
             }
         }
     }
 
-    fn drain_buffered_tool_events(&mut self) -> Vec<(&'static str, AnthropicStreamEvent)> {
+    /// Drain buffered tool blocks into taggable events. Each event carries an
+    /// optional usage override: `Some` for `input_json_delta` fragments (the
+    /// per-fragment snapshot taken at record time), `None` for the surrounding
+    /// `content_block_start`/`content_block_stop` (which stamp the current usage
+    /// like any other non-fragment event).
+    #[allow(clippy::type_complexity)]
+    fn drain_buffered_tool_events(
+        &mut self,
+    ) -> Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)> {
         if self.tool_blocks_flushed {
             return Vec::new();
         }
@@ -171,9 +191,10 @@ impl AnthropicStreamConverter {
                         input: serde_json::json!({}),
                     },
                 },
+                None,
             ));
 
-            for arguments in &tool_call.argument_fragments {
+            for (arguments, usage_snapshot) in &tool_call.argument_fragments {
                 events.push((
                     "content_block_delta",
                     AnthropicStreamEvent::ContentBlockDelta {
@@ -182,12 +203,14 @@ impl AnthropicStreamConverter {
                             partial_json: arguments.clone(),
                         },
                     },
+                    Some(usage_snapshot.clone()),
                 ));
             }
 
             events.push((
                 "content_block_stop",
                 AnthropicStreamEvent::ContentBlockStop { index: block_index },
+                None,
             ));
             block_index += 1;
         }
@@ -197,10 +220,13 @@ impl AnthropicStreamConverter {
     }
 
     fn append_buffered_tool_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        for (event_type, event) in self.drain_buffered_tool_events() {
+        for (event_type, event, usage_override) in self.drain_buffered_tool_events() {
             // Route through serialize_event so tool-argument `content_block_delta`
-            // chunks also carry the per-chunk usage triple.
-            events.push(self.serialize_event(event_type, &event));
+            // chunks also carry the per-chunk usage triple. Fragments carry the
+            // snapshot taken when their chunk was processed; everything else uses
+            // the current usage.
+            let usage = usage_override.as_ref().unwrap_or(&self.usage);
+            events.push(self.serialize_event_with_usage(event_type, &event, usage));
         }
     }
 
@@ -230,7 +256,19 @@ impl AnthropicStreamConverter {
         event_type: &'static str,
         event: &AnthropicStreamEvent,
     ) -> Result<Event, anyhow::Error> {
-        let value = event_json_with_usage(event, &self.usage)?;
+        self.serialize_event_with_usage(event_type, event, &self.usage)
+    }
+
+    /// Like `serialize_event` but stamps an explicit `usage` onto the
+    /// `content_block_delta`. Used to replay buffered tool-argument fragments
+    /// with the usage snapshot from their own chunk (see `record_tool_call`).
+    fn serialize_event_with_usage(
+        &self,
+        event_type: &'static str,
+        event: &AnthropicStreamEvent,
+        usage: &AnthropicUsage,
+    ) -> Result<Event, anyhow::Error> {
+        let value = event_json_with_usage(event, usage)?;
         Ok(Event::default()
             .event(event_type)
             .data(serde_json::to_string(&value)?))
@@ -315,6 +353,12 @@ impl AnthropicStreamConverter {
                 self.usage.output_tokens += 1;
             }
         }
+
+        // Snapshot the cumulative usage for this chunk so buffered tool-argument
+        // fragments recorded below are stamped with the count as of *this* chunk,
+        // not the final count at flush time. `self.usage` is stable for the rest
+        // of this call (record_usage / the fallback above already ran).
+        let usage_snapshot = self.usage.clone();
 
         let mut should_flush_tool_blocks = false;
         for choice in &chunk.inner.choices {
@@ -462,7 +506,7 @@ impl AnthropicStreamConverter {
                 }
 
                 for tool_call in tool_calls {
-                    self.record_tool_call(tool_call);
+                    self.record_tool_call(tool_call, &usage_snapshot);
                 }
             }
         }
@@ -559,9 +603,16 @@ fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Even
 /// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
 /// field — the type is an external crate we don't own — so the field is added at
 /// the JSON layer. The triple is `{input_tokens, output_tokens, total_tokens}`
-/// (plus any Anthropic cache fields), where `total_tokens = input + output`,
-/// giving proxies the same per-chunk accounting OpenAI exposes via
-/// `continuous_usage_stats`.
+/// (plus any Anthropic cache fields).
+///
+/// `total_tokens` counts the *complete* prompt plus the output, i.e.
+/// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens +
+/// output_tokens`. Anthropic reports the cached prefix separately from
+/// `input_tokens` (`completion_usage_to_anthropic` subtracts it out), so the
+/// cache fields must be added back here; otherwise a cache-hit request would
+/// under-report and disagree with the `total_tokens` a proxy sees on the
+/// equivalent `/v1/chat/completions` request (`prompt_tokens + completion_tokens`,
+/// cached tokens included). Saturating arithmetic guards against overflow.
 fn event_json_with_usage(
     event: &AnthropicStreamEvent,
     usage: &AnthropicUsage,
@@ -572,7 +623,11 @@ fn event_json_with_usage(
     {
         let mut usage_value = serde_json::to_value(usage)?;
         if let serde_json::Value::Object(usage_map) = &mut usage_value {
-            let total = usage.input_tokens.saturating_add(usage.output_tokens);
+            let total = usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
+                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
+                .saturating_add(usage.output_tokens);
             usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
         }
         map.insert("usage".to_string(), usage_value);
@@ -610,6 +665,8 @@ impl AnthropicStreamConverter {
         if let Some(usage) = &chunk.inner.usage {
             self.record_usage(usage);
         }
+
+        let usage_snapshot = self.usage.clone();
 
         let mut should_flush_tool_blocks = false;
         for choice in &chunk.inner.choices {
@@ -739,7 +796,7 @@ impl AnthropicStreamConverter {
                 }
 
                 for tool_call in tool_calls {
-                    self.record_tool_call(tool_call);
+                    self.record_tool_call(tool_call, &usage_snapshot);
                 }
             }
         }
@@ -748,7 +805,7 @@ impl AnthropicStreamConverter {
         // streams carry a tool-call finish reason, while interrupted streams use
         // the EOF fallback in `emit_end_events_tagged`.
         if should_flush_tool_blocks {
-            for (event_type, event) in self.drain_buffered_tool_events() {
+            for (event_type, event, _usage) in self.drain_buffered_tool_events() {
                 events.push(make_tagged_event(event_type, &event));
             }
         }
@@ -784,7 +841,7 @@ impl AnthropicStreamConverter {
         }
 
         // EOF fallback; a finish-triggered drain leaves no events here.
-        for (event_type, event) in self.drain_buffered_tool_events() {
+        for (event_type, event, _usage) in self.drain_buffered_tool_events() {
             events.push(make_tagged_event(event_type, &event));
         }
 
@@ -1080,6 +1137,48 @@ mod tests {
             "total_tokens must equal input + output"
         );
 
+        // Cache-hit case: `total_tokens` must count the complete prompt
+        // (visible input + cached prefix + cache writes) plus output, matching
+        // the `prompt_tokens + completion_tokens` total a proxy sees on
+        // `/v1/chat/completions`. Anthropic reports the cached prefix outside
+        // `input_tokens`, so it must be added back into the total.
+        let cached_usage = AnthropicUsage {
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_input_tokens: Some(9),
+            cache_creation_input_tokens: Some(1),
+        };
+        let cached_value = event_json_with_usage(&delta, &cached_usage).expect("serialize");
+        let cached_usage_obj = cached_value
+            .get("usage")
+            .expect("content_block_delta must carry usage");
+        assert_eq!(
+            cached_usage_obj
+                .get("input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(2),
+            "input_tokens stays the visible (non-cached) prompt count"
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(9)
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            cached_usage_obj
+                .get("total_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(15),
+            "total_tokens must equal input + cache_read + cache_creation + output"
+        );
+
         // A non-delta event carries no injected usage.
         let stop = AnthropicStreamEvent::ContentBlockStop { index: 0 };
         let stop_value = event_json_with_usage(&stop, &usage).expect("serialize");
@@ -1263,6 +1362,55 @@ mod tests {
                 ..
             } if partial_json == "{}"
         ));
+    }
+
+    /// Buffered tool-argument fragments must carry the usage snapshot from their
+    /// own chunk, not the cumulative count at flush time. With no backend usage
+    /// the fallback advances `output_tokens` by one per tool-call chunk, so two
+    /// argument fragments serialize with `output_tokens` 1 and 2 respectively.
+    #[test]
+    fn test_buffered_tool_fragments_snapshot_per_chunk_usage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut sink = Vec::new();
+
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{\"path\":\"/a")),
+            &mut sink,
+        );
+        conv.append_chunk_events(&tool_call_chunk(0, None, None, Some(".txt\"}")), &mut sink);
+        // Tool blocks are buffered until a finish/EOF flush, so nothing is
+        // emitted per chunk.
+        assert!(
+            sink.is_empty(),
+            "tool blocks are buffered, not emitted per chunk"
+        );
+        // Fallback counted one token per tool-call chunk.
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let fragment_outputs: Vec<u32> = conv
+            .drain_buffered_tool_events()
+            .iter()
+            .filter_map(|(event_type, event, usage)| match (event_type, event) {
+                (
+                    &"content_block_delta",
+                    AnthropicStreamEvent::ContentBlockDelta {
+                        delta: AnthropicDelta::InputJsonDelta { .. },
+                        ..
+                    },
+                ) => Some(
+                    usage
+                        .as_ref()
+                        .expect("tool-argument fragment carries a usage snapshot")
+                        .output_tokens,
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fragment_outputs,
+            vec![1, 2],
+            "each fragment stamps the cumulative output count as of its own chunk"
+        );
     }
 
     #[test]
