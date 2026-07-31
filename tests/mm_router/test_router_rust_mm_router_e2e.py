@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end tests for MM-aware KV routing with the Rust frontend (lightseek-mm).
+"""End-to-end tests for MM-aware KV routing with the Rust frontend (mm-routing).
 
 Architecture:
-  Frontend (Rust preprocessor + lightseek + KV router)
-       └─ resolves <|image_pad|>, computes per-image N via lightseek,
+  Frontend (Rust preprocessor + KV router)
+       └─ resolves <|image_pad|>, computes per-image N,
           expands placeholders, hashes URL→u64→64-char hex,
           forwards mm_hashes via extra_args["mm_hashes"]
        → vLLM worker (publishes KV events with the forwarded UUID)
@@ -17,7 +17,7 @@ These tests assert that:
   3. Different images on the same prompt produce strictly less overlap
      than identical-image repeats.
 
-The fallback path (model unsupported by lightseek or image-token
+The fallback path (model unsupported by the image-processor registry or image-token
 unresolvable) is unit-tested via `image_token::tests` and the
 graceful-degrade branches in `gather_mm_exact_routing_info`; reproducing
 it e2e would require a model whose loading is heavy and whose worker
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import tempfile
 import threading
 import time
@@ -45,6 +44,10 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
@@ -61,11 +64,6 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(18.7),
 ]
 
-# Format produced by lib/llm/src/kv_router/push_router.rs's [ROUTING] log.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
-
 
 def _check_ready(response) -> bool:
     try:
@@ -78,7 +76,6 @@ def _make_process_env(
     log_level: str = (
         "info,mm_routing=debug,"
         "dynamo_kv_router::scheduling=debug,"
-        # The [ROUTING] log line we parse below lives here at debug level.
         "dynamo_llm::kv_router=debug"
     ),
     **extra,
@@ -97,7 +94,8 @@ def _prepare_log_dir(request, suffix: str) -> str:
 
 
 _COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": True,
+    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
+    "display_output": False,
     "terminate_all_matching_process_names": False,
 }
 
@@ -146,7 +144,7 @@ class VLLMWorkerProcess(ManagedProcess):
 
 
 class FrontendProcess(ManagedProcess):
-    """Rust frontend with lightseek-mm. No --dyn-chat-processor flag (default 'dynamo')."""
+    """Rust frontend with mm-routing. No --dyn-chat-processor flag (default 'dynamo')."""
 
     def __init__(self, request, *, frontend_port: int):
         super().__init__(
@@ -224,34 +222,15 @@ def _build_payload(
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    pre_request_records: int,
-    timeout_s: float = 25.0,
-) -> tuple[int, int]:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        records = _extract_routing_records(router_proc.read_logs())
-        if len(records) >= pre_request_records + 1:
-            return records[-1]
-        time.sleep(1)
-    return 0, 0
-
-
 def _send(
     frontend_port: int,
     router_proc: ManagedProcess,
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, dict[str, Any]]:
-    pre_count = len(_extract_routing_records(router_proc.read_logs()))
+    pre_request_logs = router_proc.read_logs()
+    start_offset = len(pre_request_logs)
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -260,7 +239,13 @@ def _send(
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
     data = resp.json()
     assert "choices" in data, f"missing choices in response: {data}"
-    overlap, total = _wait_for_new_routing_score(router_proc, pre_count)
+    overlap, total, _recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
+        start_offset=start_offset,
+        pre_request_record_count=pre_request_record_count,
+        context=label,
+        log_label="frontend",
+    )
     print(
         f"[ROUTER_RUST_MM] {label}: overlap={overlap}/{total} usage={data.get('usage')}"
     )
@@ -478,7 +463,7 @@ def test_router_rust_mm_repeated_http_image_overlap(
     assert overlap_2 > overlap_1 + 1, (
         f"expected warm-request overlap to dominate cold by more than just the "
         f"text-prefix block, got req1={overlap_1}/{total_1}, "
-        f"req2={overlap_2}/{total_2} — if not, header-fetch + lightseek expansion "
+        f"req2={overlap_2}/{total_2} — if not, header-fetch + token expansion "
         f"is misaligned with the worker's KV events"
     )
     cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
@@ -531,10 +516,10 @@ def test_router_rust_mm_http_url_distinct_query_strings_dont_collide(
 
 
 @pytest.mark.timeout(300)
-def test_router_rust_mm_logs_lightseek_initialization(
+def test_router_rust_mm_logs_initialization(
     start_router_rust_mm_services, predownload_models
 ):
-    """Smoke test: frontend must emit the lightseek init + image-token-resolved
+    """Smoke test: frontend must emit the MM-routing init + image-token-resolved
     log lines for the served model. Catches regressions where the model dir
     isn't reachable from the MDC or the resolver silently misses a tier."""
     frontend_port, router_proc = start_router_rust_mm_services
@@ -547,8 +532,8 @@ def test_router_rust_mm_logs_lightseek_initialization(
     )
     log_text = router_proc.read_logs()
     assert (
-        "MM-aware KV routing enabled (lightseek)" in log_text
-    ), "frontend should emit lightseek init log line on model registration"
+        "MM-aware KV routing enabled" in log_text
+    ), "frontend should emit MM-routing init log line on model registration"
     assert (
         "resolved image-placeholder token id" in log_text
     ), "image_token resolver should log which tier produced the hit"

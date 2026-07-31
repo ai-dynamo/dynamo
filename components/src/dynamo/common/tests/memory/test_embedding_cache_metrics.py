@@ -44,7 +44,7 @@ def cache_env():
     endpoint = MagicMock()
     endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
     cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-    register_embedding_cache_metrics(endpoint, cache, "test-model", "encoder")
+    register_embedding_cache_metrics(endpoint, cache, "test-model", "encode")
     endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once()
     callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
     return cache, callback
@@ -162,13 +162,13 @@ class TestLabelsAndCompleteness:
         endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024)
         register_embedding_cache_metrics(
-            endpoint, cache, "Qwen/Qwen2.5-VL-3B", "encoder"
+            endpoint, cache, "Qwen/Qwen2.5-VL-3B", "encode"
         )
         callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
 
         text = callback()
         assert 'model="Qwen/Qwen2.5-VL-3B"' in text
-        assert 'dynamo_component="encoder"' in text
+        assert 'dynamo_component="encode"' in text
 
     def test_all_metric_names_present(self, cache_env):
         """Every expected metric name appears in the scrape output."""

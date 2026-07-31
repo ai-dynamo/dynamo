@@ -749,7 +749,7 @@ fn derive_nixl_metadata(agent: &NixlAgent, entries: &[MemoryEntry]) -> Result<Ni
     {
         // In test builds, allow layouts without NIXL registration
         // Use defaults for local-only transfers
-        if let Some(descriptor) = descriptor_opt {
+        if let Some(descriptor) = descriptor_opt.as_ref() {
             Ok(NixlMetadata::new(
                 agent.name().to_string(),
                 descriptor.mem_type,

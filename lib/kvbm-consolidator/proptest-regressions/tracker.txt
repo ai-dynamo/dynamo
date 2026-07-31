@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e451a876a68cbb14dc25fcd7157bce1ae388968f4b6e41107ec6e09a19042f80 # shrinks to ops = [StoreKvbm { idx: 1 }]
+cc 0870edea4db1d4537a72cd38ced0e0bf5e012a67fb0d6b00f68953b08a85454d # shrinks to ops = [StoreKvbm { idx: 4 }, RemoveKvbm { idx: 4 }, StoreKvbm { idx: 4 }]

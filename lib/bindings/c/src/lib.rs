@@ -12,20 +12,24 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{
-        KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
-    },
+    config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env},
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::{
+    NvExt, request_cache_salt, routing_constraints_to_kv,
+};
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
@@ -109,11 +113,12 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
 }
 
 /// # Safety
-/// the namespace_c_str and component_c_str are passed as pointers to C strings
+/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
+    endpoint_c_str: *const c_char,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -161,9 +166,25 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
     let component: String = component_cow.into_owned();
 
+    if endpoint_c_str.is_null() {
+        tracing::error!("Serving endpoint name is required");
+        return DynamoLlmResult::ERR;
+    }
+    let endpoint = match unsafe { CStr::from_ptr(endpoint_c_str) }.to_str() {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Serving endpoint name must not be empty");
+            return DynamoLlmResult::ERR;
+        }
+        Err(error) => {
+            tracing::error!(?error, "Failed to convert serving endpoint name to UTF-8");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, endpoint, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -205,16 +226,17 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
+    endpoint: String,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
-    tracing::info!("Creating KV Publisher for model: {}", component);
+    tracing::info!(%namespace, %component, %endpoint, "Creating endpoint-scoped KV publisher");
     match DRT
         .get()
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, kv_block_size, None)
+            KvEventPublisher::new(backend.endpoint(endpoint), kv_block_size, None)
         }
         Err(e) => Err(e),
     }
@@ -232,6 +254,7 @@ fn kv_event_create_stored_block_from_parts(
         kv_block_size,
         BlockHashOptions {
             lora_name,
+            cache_namespace: None,
             ..Default::default()
         },
     )[0];
@@ -415,6 +438,10 @@ pub struct CRoutingResult {
     pub token_ids: *mut u32,
     /// Number of tokens in the request
     pub token_count: usize,
+    /// UTF-8 cache namespace bytes (needed for add_request callback)
+    pub cache_namespace: *mut u8,
+    /// Number of bytes in the cache namespace
+    pub cache_namespace_len: usize,
 }
 
 impl Default for CRoutingResult {
@@ -427,6 +454,8 @@ impl Default for CRoutingResult {
             decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
+            cache_namespace: ptr::null_mut(),
+            cache_namespace_len: 0,
         }
     }
 }
@@ -450,42 +479,61 @@ impl RouterHandles {
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// Returns worker_id on success.
+    #[expect(clippy::too_many_arguments)]
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        update_states: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
 
-        self.prefill_router
+        let outcome = self
+            .prefill_router
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
-                update_states,
                 lora_name,
+                cache_namespace,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            // Advisory only: the external caller owns dispatch and lifecycle state.
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 
     /// Query optimal decode worker for a request.
     /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
     /// (since KV cache is being transferred from prefill, not reused).
     ///
-    /// `priority_jump` is forwarded to the decode scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// This does NOT overwrite the router's internal worker state — it only filters this decision.
@@ -494,12 +542,16 @@ impl RouterHandles {
     /// selection. State updates require a `context_id` (request id) and are managed via the
     /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
     /// Returns (worker, overlap_blocks) on success.
+    #[expect(clippy::too_many_arguments)]
     async fn query_decode_worker(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        cache_namespace: Option<String>,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
@@ -518,49 +570,87 @@ impl RouterHandles {
             None
         };
 
-        self.decode_router
-            .find_best_match(
+        let outcome = self
+            .decode_router
+            .find_best_match_details(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
+                cache_namespace,
                 priority_jump,
+                strict_priority,
+                None,
                 None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
+/// Extract the router queue `priority_jump` from an OpenAI request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative values from either `priority` or the deprecated
 /// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
 /// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
 /// or `agent_hints` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|v| v.max(0.0))
         .unwrap_or(0.0)
 }
 
+fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
+    nvext
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
+}
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
-/// Result codes for query router C FFI
+/// Result codes for query router C FFI.
+///
+/// Numbering is append-only. Existing variants must keep their integer
+/// values so out-of-tree consumers (notably
+/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
+/// these integers in a Go shim) keep working without recompilation. When
+/// adding a new variant, use the next free integer at the end.
 #[repr(u32)]
 pub enum QueryRouterResult {
     Ok = 0,
@@ -570,85 +660,7 @@ pub enum QueryRouterResult {
     ErrQueryFailed = 4,
     ErrDisaggEnforced = 5,
     ErrTimeout = 6,
-}
-
-/// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
-fn kv_router_config_from_env() -> KvRouterConfig {
-    let mut cfg = KvRouterConfig::default();
-
-    fn env_f64(key: &str) -> Option<f64> {
-        std::env::var(key).ok().and_then(|v| v.parse().ok())
-    }
-    fn env_bool(key: &str) -> Option<bool> {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            })
-    }
-
-    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
-        cfg.overlap_score_credit = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
-        cfg.prefill_load_scale = v;
-    }
-    for key in [
-        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
-        "DYN_OVERLAP_SCORE_WEIGHT",
-    ] {
-        if let Some(v) = env_f64(key) {
-            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
-            apply_deprecated_overlap_score_weight_override(
-                v,
-                &mut cfg.overlap_score_credit,
-                &mut cfg.prefill_load_scale,
-            );
-            break;
-        }
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
-        cfg.router_temperature = v;
-    }
-    if let Some(v) = env_bool("DYN_USE_KV_EVENTS") {
-        cfg.use_kv_events = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_REPLICA_SYNC") {
-        cfg.router_replica_sync = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
-        cfg.router_track_active_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
-        cfg.router_track_output_blocks = v;
-    }
-    if let Some(v) = env_bool("DYN_ROUTER_TRACK_PREFILL_TOKENS") {
-        cfg.router_track_prefill_tokens = v;
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
-        cfg.router_queue_threshold = Some(v);
-    }
-    if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
-        cfg.router_predicted_ttl_secs = Some(v);
-    }
-
-    tracing::info!(
-        overlap_score_credit = cfg.overlap_score_credit,
-        prefill_load_scale = cfg.prefill_load_scale,
-        router_temperature = cfg.router_temperature,
-        use_kv_events = cfg.use_kv_events,
-        router_replica_sync = cfg.router_replica_sync,
-        router_track_active_blocks = cfg.router_track_active_blocks,
-        router_track_output_blocks = cfg.router_track_output_blocks,
-        router_track_prefill_tokens = cfg.router_track_prefill_tokens,
-        router_queue_threshold = ?cfg.router_queue_threshold,
-        router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
-        "KvRouterConfig initialized (DYN_* env overrides applied)"
-    );
-
-    cfg
+    ErrBackpressure = 7,
 }
 
 /// Create router handles for query-only routing
@@ -660,7 +672,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
+/// - `enforce_disagg`: Deprecated compatibility parameter. The value is ignored.
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -674,6 +686,12 @@ pub unsafe extern "C" fn create_routers(
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     initialize_tracing();
+
+    if enforce_disagg {
+        tracing::warn!(
+            "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+        );
+    }
 
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -737,7 +755,13 @@ pub unsafe extern "C" fn create_routers(
             );
         }
 
-        let mut kv_router_config = kv_router_config_from_env();
+        let mut kv_router_config = match try_kv_router_config_from_dynamo_env() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::error!(%error, "Invalid KV router environment configuration");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
         kv_router_config.skip_initial_worker_wait = true;
 
         // Build endpoint using the actual namespace discovered from workers,
@@ -761,11 +785,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -832,10 +857,13 @@ pub unsafe extern "C" fn create_routers(
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.
@@ -889,6 +917,42 @@ pub unsafe extern "C" fn add_request(
     worker_id: u64,
     dp_rank: u32,
 ) -> QueryRouterResult {
+    unsafe {
+        add_request_with_cache_namespace(
+            handle,
+            request_id,
+            token_ids,
+            token_count,
+            worker_id,
+            dp_rank,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+/// Add a cache-namespaced request to the router's bookkeeping after worker selection.
+///
+/// This preserves the original `add_request` ABI for unsalted callers while allowing callers
+/// that routed with a namespace to use the same hashes for scheduler bookkeeping.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+/// - `cache_namespace` must point to at least `cache_namespace_len` valid UTF-8 bytes when the
+///   length is non-zero
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn add_request_with_cache_namespace(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+    cache_namespace: *const u8,
+    cache_namespace_len: usize,
+) -> QueryRouterResult {
     if handle.is_null() || request_id.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -897,6 +961,19 @@ pub unsafe extern "C" fn add_request(
     let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+    let cache_namespace = if cache_namespace_len == 0 {
+        None
+    } else if cache_namespace.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    } else {
+        match std::str::from_utf8(unsafe {
+            std::slice::from_raw_parts(cache_namespace, cache_namespace_len)
+        }) {
+            Ok("") => None,
+            Ok(namespace) => Some(namespace.to_owned()),
+            Err(_) => return QueryRouterResult::ErrInvalidParam,
+        }
     };
 
     let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
@@ -921,7 +998,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, None, worker, None)
+                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
                 .await
             {
                 Ok(overlap) => overlap,
@@ -941,6 +1018,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
+                    cache_namespace.clone(),
                     Some(&router_config_override),
                 )
                 .await;
@@ -949,6 +1027,7 @@ pub unsafe extern "C" fn add_request(
                 request_id = %request_id_str,
                 worker_id = worker_id,
                 dp_rank = dp_rank,
+                has_cache_namespace = cache_namespace.is_some(),
                 overlap_blocks = overlap_blocks,
                 token_count = tokens.len(),
                 "add_request completed"
@@ -1119,20 +1198,35 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
     }
+
+    // Free cache namespace bytes
+    if !res.cache_namespace.is_null() && res.cache_namespace_len > 0 {
+        drop(unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                res.cache_namespace,
+                res.cache_namespace_len,
+            ))
+        });
+        res.cache_namespace = ptr::null_mut();
+        res.cache_namespace_len = 0;
+    }
 }
 
-/// Parse a JSON request string, apply the chat template, tokenize, and lift
-/// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
+/// Parse a JSON request string, collect completion prompts directly or apply
+/// the chat template and tokenize, then lift router queue priorities
+/// out of `nvext.agent_hints`.
 ///
-/// Returns `(token_ids, priority_jump)` on success, or a `QueryRouterResult`
-/// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
-/// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`
-/// so the GAIE/EPP path produces the same queue ordering as a non-EPP
-/// deployment.
+/// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
+/// or a `QueryRouterResult` error code. Queue priorities default to zero when
+/// absent. This mirrors the standalone Dynamo preprocessor lift in
+/// `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces the same queue
+/// ordering as a non-EPP deployment.
+type PreprocessedRequest = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
+
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64), QueryRouterResult> {
+) -> Result<PreprocessedRequest, QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1146,27 +1240,77 @@ unsafe fn preprocess_request(
         Err(_) => return Err(QueryRouterResult::ErrInvalidParam),
     };
 
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
+    let request_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    if request_json.get("prompt").is_some() {
+        let request: NvCreateCompletionRequest = match serde_json::from_value(request_json) {
             Ok(req) => req,
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
+                tracing::error!(error = ?e, "Failed to parse completion request JSON");
                 return Err(QueryRouterResult::ErrInvalidParam);
             }
         };
+        let priority_jump = extract_priority_jump(request.nvext.as_ref());
+        let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+        let (token_ids, _) = match handles
+            .runtime
+            .secondary()
+            .block_on(preprocessor.gather_tokens(&request, None, None))
+        {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to collect completion prompt tokens");
+                return Err(QueryRouterResult::ErrQueryFailed);
+            }
+        };
 
-    let priority_jump = extract_priority_jump(&request);
+        tracing::debug!(
+            token_count = token_ids.len(),
+            first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+            priority_jump,
+            strict_priority,
+            "[EPP-TOKENIZE] Collected completion prompt tokens in C bindings"
+        );
 
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
+        return Ok((
+            token_ids,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+        ));
+    }
+
+    let request: NvCreateChatCompletionRequest = match serde_json::from_value(request_json) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse chat completion request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    let priority_jump = extract_priority_jump(request.nvext.as_ref());
+    let strict_priority = extract_strict_priority(request.nvext.as_ref());
+    let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+    let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+
+    let encoding = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => preprocessor.tokenize_rendered_prompt(&prompt),
+        Ok(None) => preprocessor.tokenize(""),
         Err(e) => {
             tracing::error!(error = ?e, "Failed to apply chat template");
             return Err(QueryRouterResult::ErrQueryFailed);
         }
     };
-
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+    let encoding = match encoding {
         Ok(enc) => enc,
         Err(e) => {
             tracing::error!(error = ?e, "Failed to tokenize");
@@ -1179,10 +1323,17 @@ unsafe fn preprocess_request(
         token_count = token_ids.len(),
         first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
         priority_jump,
+        strict_priority,
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok((token_ids, priority_jump))
+    Ok((
+        token_ids,
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        routing_constraints,
+    ))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1239,6 +1390,17 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
+/// Write cache namespace bytes into a `CRoutingResult`, transferring ownership to the caller.
+fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRoutingResult) {
+    let Some(cache_namespace) = cache_namespace.filter(|namespace| !namespace.is_empty()) else {
+        return;
+    };
+    let mut namespace_boxed = cache_namespace.as_bytes().to_vec().into_boxed_slice();
+    out.cache_namespace = namespace_boxed.as_mut_ptr();
+    out.cache_namespace_len = namespace_boxed.len();
+    std::mem::forget(namespace_boxed);
+}
+
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1268,10 +1430,11 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
-        Ok(t) => t,
-        Err(code) => return code,
-    };
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
@@ -1280,10 +1443,12 @@ pub unsafe extern "C" fn route_prefill_request(
             .query_prefill_worker(
                 &tokens,
                 None,
-                false,
                 None,
+                cache_namespace.clone(),
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await?;
 
@@ -1294,6 +1459,7 @@ pub unsafe extern "C" fn route_prefill_request(
             prefill_dp_rank = prefill_dp_rank,
             token_count = tokens.len(),
             priority_jump,
+            strict_priority,
             "Routed prefill request"
         );
 
@@ -1308,6 +1474,7 @@ pub unsafe extern "C" fn route_prefill_request(
             out.prefill_worker_id = prefill_worker_id;
             out.prefill_dp_rank = prefill_dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1346,16 +1513,25 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
-        Ok(t) => t,
-        Err(code) => return code,
-    };
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
 
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
     let result = handles.runtime.secondary().block_on(async {
         let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .query_decode_worker(
+                &tokens,
+                is_disaggregated,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
             .await?;
 
         tracing::info!(
@@ -1364,6 +1540,7 @@ pub unsafe extern "C" fn route_decode_request(
             decode_dp_rank = decode_worker.dp_rank,
             token_count = tokens.len(),
             priority_jump,
+            strict_priority,
             "Routed decode request"
         );
 
@@ -1378,6 +1555,7 @@ pub unsafe extern "C" fn route_decode_request(
             out.decode_worker_id = decode_worker.worker_id;
             out.decode_dp_rank = decode_worker.dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1466,10 +1644,10 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        // Prefill workers are identified by `worker_type`.
+                        // Skip any card that is not a Prefill worker.
+                        use dynamo_llm::worker_type::WorkerType;
+                        if card.worker_type != Some(WorkerType::Prefill) {
                             continue;
                         }
 
@@ -1501,7 +1679,7 @@ fn spawn_prefill_discovery_watcher(
 ///
 /// This function:
 /// 1. Lists all models via discovery
-/// 2. Finds the first model in the target namespace (decode workers only)
+/// 2. Finds the first model in the target namespace (Decode or Aggregated only)
 /// 3. Downloads the model config (tokenizer files) if needed
 /// 4. Creates an OpenAIPreprocessor from the model card
 /// 5. Returns the preprocessor, the model card, and the resolved worker namespace
@@ -1516,7 +1694,10 @@ async fn fetch_preprocessor_from_discovery(
     // List all models
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-    // Find first model card in the target namespace (decode workers only).
+    // Find first model card in the target namespace. We want a worker that
+    // owns the OpenAI surface (tokenizer + chat/completions), which is
+    // Decode or Aggregated — Prefill and Encode workers register cards with
+    // no engine and an empty OpenAI surface and must be skipped.
     // Use prefix matching because workers may append a rolling-update hash
     // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
@@ -1530,11 +1711,11 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    // Skip prefill-only workers, we want decode workers for routing
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    use dynamo_llm::worker_type::WorkerType;
+                    if matches!(
+                        card.worker_type,
+                        Some(WorkerType::Prefill) | Some(WorkerType::Encode)
+                    ) {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));
@@ -1590,6 +1771,60 @@ mod tests {
             }"#,
             )
             .expect("test request must parse as chat completion");
-        assert_eq!(extract_priority_jump(&req), 5.0);
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
+
+    #[test]
+    fn strict_priority_lifted_from_agent_hints() {
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"strict_priority": 7}}
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(req.nvext.as_ref()), 7);
+
+        let default_req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}]
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_strict_priority(default_req.nvext.as_ref()), 0);
+    }
+
+    #[test]
+    fn priority_jump_lifted_from_completion_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::completions::NvCreateCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+            )
+            .expect("test request must parse as completion");
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
+
+    #[test]
+    fn routing_result_round_trips_cache_namespace_bytes() {
+        let mut result = CRoutingResult::default();
+        write_cache_namespace_to_result(Some("tenant\0a"), &mut result);
+
+        assert_eq!(result.cache_namespace_len, 8);
+        let namespace = unsafe {
+            std::slice::from_raw_parts(result.cache_namespace, result.cache_namespace_len)
+        };
+        assert_eq!(namespace, b"tenant\0a");
+
+        unsafe { free_routing_result(&mut result) };
+        assert!(result.cache_namespace.is_null());
+        assert_eq!(result.cache_namespace_len, 0);
     }
 }

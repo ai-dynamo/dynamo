@@ -460,7 +460,11 @@ mod push_handler_notify_tests {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new(options).await.unwrap();
 
-        let context = crate::pipeline::Context::with_id((), request_id.to_string());
+        let context = crate::pipeline::Context::with_id_and_metadata(
+            (),
+            request_id.to_string(),
+            Default::default(),
+        );
         let stream_options = StreamOptions::builder()
             .context(context.context())
             .enable_request_stream(false)

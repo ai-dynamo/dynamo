@@ -13,8 +13,9 @@ a grid-based pool selection strategy. It supports two modes:
   requests based on (ISL, TTFT) and decode requests based on (context_length, ITL)
   to separate pool types.
 
-- "agg" mode: Registers as a single generate worker. Routes all requests based
-  on (ISL, ITL) to unified pools that handle both prefill and decode.
+- "agg" mode: Registers as a single generate worker. Routes all requests by
+  (TTFT, ITL), optionally extended with ISL, to unified pools that handle both
+  prefill and decode.
 
 Both modes support priority-based pool overrides from agent hints.
 """
@@ -25,7 +26,7 @@ import logging
 
 import uvloop
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -102,10 +103,17 @@ async def _serve_disagg(
     logger.info("Registering as prefill worker...")
     await register_model(
         model_input=ModelInput.Tokens,
+        # Prefill workers have no OpenAI surface; the role is declared via
+        # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
+        # marker bit (not a surface) so an OLD frontend, which detects prefill
+        # via that bit, still routes disaggregated traffic during the
+        # cross-version rollout. A new frontend ignores it and dispatches off `worker_type`.
         model_type=ModelType.Prefill,
         endpoint=prefill_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Prefill,
+        needs=[[WorkerType.Decode]],
     )
     logger.info(
         f"Registered prefill endpoint: {config.namespace}.{config.component_name}.prefill_generate"
@@ -118,6 +126,8 @@ async def _serve_disagg(
         endpoint=decode_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Decode,
+        needs=[[WorkerType.Prefill]],
     )
     logger.info(
         f"Registered decode endpoint: {config.namespace}.{config.component_name}.decode_generate"
@@ -169,6 +179,7 @@ async def _serve_agg(
         endpoint=generate_endpoint,
         model_path=config.model_name,
         model_name=config.model_name,
+        worker_type=WorkerType.Aggregated,
     )
     logger.info(
         f"Registered agg endpoint: {config.namespace}.{config.component_name}.generate"

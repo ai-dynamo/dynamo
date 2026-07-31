@@ -27,6 +27,8 @@ from dynamo.planner.core.load.predictors import (
     KalmanPredictor,
     ProphetPredictor,
 )
+from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
+from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -59,6 +61,9 @@ def _make_config(
     cfg.kalman_q_trend = kalman_q_trend
     cfg.kalman_r = kalman_r
     cfg.kalman_min_points = kalman_min_points
+    cfg.load_predictor = "constant"
+    cfg.optimization_target = "sla"
+    cfg.speculative_nextn = 0
     return cfg
 
 
@@ -104,6 +109,36 @@ class TestConstantPredictor:
         predictor.add_data_point(10.0)
         predictor.add_data_point(float("nan"))
         assert predictor.predict_next() == 0
+
+
+class TestBuiltinLoadPredictIdleTraffic:
+    def test_carries_request_shape_forward_across_idle_windows(self):
+        plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())
+
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=10, isl=512, osl=128)
+        )
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+
+        assert plugin._num_req_predictor.data_buffer == [10, 0, 0]
+        assert plugin._isl_predictor.data_buffer == [512, 512, 512]
+        assert plugin._osl_predictor.data_buffer == [128, 128, 128]
+
+    def test_leading_idle_windows_do_not_seed_request_shape(self):
+        plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())
+
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+
+        assert plugin._num_req_predictor.data_buffer == []
+        assert plugin._isl_predictor.data_buffer == []
+        assert plugin._osl_predictor.data_buffer == []
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +461,22 @@ class TestKalmanPredictor:
             predictor.add_data_point(v)
         result = predictor.predict_next()
         assert result >= 0.0
+
+    def test_uses_last_value_until_minimum_points(self):
+        """Forecasting starts only after kalman_min_points observations."""
+        predictor = KalmanPredictor(_make_config(kalman_min_points=3))
+
+        predictor.add_data_point(10.0)
+        assert predictor.predict_next() == 10.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(20.0)
+        assert predictor.predict_next() == 20.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(30.0)
+        predictor.predict_next()
+        assert predictor._has_cached_pred
 
     def test_caches_prediction_between_observations(self):
         """Calling predict_next() twice without new data returns the same value."""

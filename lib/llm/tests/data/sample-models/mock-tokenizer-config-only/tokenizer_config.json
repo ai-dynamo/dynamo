@@ -1,0 +1,22 @@
+{
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "added_tokens_decoder": {
+    "100": {
+      "content": "<eos>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "101": {
+      "content": "<bos>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    }
+  }
+}

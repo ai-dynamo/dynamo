@@ -11,14 +11,14 @@
 //! and lazily allocates each tier on first event arrival.
 //!
 //! Both the request-plane indexer (`dynamo-llm`) and the standalone HTTP
-//! indexer (this crate's `standalone_indexer` module) share this implementation
+//! indexer (this crate's `services::indexer` module) share this implementation
 //! so tier semantics stay aligned across the two surfaces.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
-    LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
+    KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails,
 };
 use crate::protocols::{LocalBlockHash, StorageTier};
@@ -27,13 +27,28 @@ use crate::protocols::{LocalBlockHash, StorageTier};
 /// non-device [`StorageTier`] that has received at least one event.
 #[derive(Clone)]
 pub struct LowerTierIndexers {
+    metrics: Option<Arc<KvIndexerMetrics>>,
     num_threads: usize,
     block_size: u32,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
 impl LowerTierIndexers {
+    /// Metrics-less constructor for call sites without a `KvIndexerMetrics` handle.
+    /// Router production assembly should use [`new_with_metrics`](Self::new_with_metrics)
+    /// so lower-tier traffic is included in `kv_cache_events_applied`.
     pub fn new(num_threads: usize, block_size: u32) -> Self {
+        Self::new_with_metrics(num_threads, block_size, None)
+    }
+
+    /// Same as [`new`](Self::new) but wires `kv_cache_events_applied`
+    /// counters into every lazily created per-tier indexer, matching the
+    /// observability of the device-tier path.
+    pub fn new_with_metrics(
+        num_threads: usize,
+        block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> Self {
         assert!(
             num_threads > 0,
             "lower-tier indexer threads must be non-zero"
@@ -41,6 +56,7 @@ impl LowerTierIndexers {
         Self {
             num_threads,
             block_size,
+            metrics,
             indexers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -60,10 +76,11 @@ impl LowerTierIndexers {
             .unwrap()
             .entry(storage_tier)
             .or_insert_with(|| {
-                Arc::new(ThreadPoolIndexer::new(
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
                     LowerTierIndexer::new(),
                     self.num_threads,
                     self.block_size,
+                    self.metrics.clone(),
                 ))
             })
             .clone()
@@ -159,6 +176,14 @@ pub fn query_lower_tiers(
     sequence: &[LocalBlockHash],
     device_matches: &MatchDetails,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    // No lower-tier indexers are allocated, so there is no continuation
+    // work to perform. Return before validating device score/hash lockstep;
+    // that invariant only matters when a lower tier will consume the
+    // continuations.
+    if indexers.indexers.read().unwrap().is_empty() {
+        return HashMap::new();
+    }
+
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
@@ -206,4 +231,31 @@ pub fn query_lower_tiers(
     }
 
     lower_tier_matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+
+    #[test]
+    fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
+        let indexers = LowerTierIndexers::new(1, 4);
+
+        // Mismatched device_matches: a score entry with no paired
+        // `last_matched_hashes` entry. Would `debug_assert!`-panic in the
+        // old body; the early-return must skip the seeding loop entirely.
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores
+            .scores
+            .insert(WorkerWithDpRank::new(99, 0), 3);
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes: Default::default(),
+        };
+
+        let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
+        let result = query_lower_tiers(&indexers, &sequence, &device_matches);
+        assert!(result.is_empty());
+    }
 }

@@ -6,10 +6,16 @@ Minimal Python wrapper around Rust LoRA core with extension points for custom so
 """
 
 import asyncio
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
+from dynamo.common.lora.once import OnceLock
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import LoRADownloader
+
+logger = logging.getLogger(__name__)
 
 
 class LoRASourceProtocol(Protocol):
@@ -31,8 +37,8 @@ class LoRAManager:
     """
     Minimal Python wrapper around Rust core with extension points.
 
-    The manager uses the Rust-based LoRADownloader for S3 and local file sources,
-    and allows registering custom Python sources for other protocols.
+    The manager uses the Rust-based LoRADownloader for local, S3, and Hugging Face
+    sources, and allows registering custom Python sources for other protocols.
     """
 
     def __init__(self, cache_path: Optional[Path] = None):
@@ -66,10 +72,11 @@ class LoRAManager:
         The source is inferred from the URI scheme:
         - file:// -> Local filesystem (Rust)
         - s3:// -> S3 (Rust)
+        - hf:// -> Hugging Face Hub (Rust)
         - Custom schemes -> Registered Python sources
 
         Args:
-            lora_uri: Source URI (file://, s3://, or custom scheme)
+            lora_uri: Source URI (file://, s3://, hf://, or custom scheme)
 
         Returns:
             Dictionary with:
@@ -95,7 +102,7 @@ class LoRAManager:
                 dest_path = Path(self._downloader.get_cache_path(cache_key))
                 local_path = await source.download(lora_uri, dest_path)
             else:
-                # Use Rust downloader (handles file:// and s3://)
+                # Use Rust downloader (handles file://, s3://, and hf://)
                 local_path = Path(await self._downloader.download_if_needed(lora_uri))
 
             return {"status": "success", "local_path": str(local_path)}
@@ -106,9 +113,44 @@ class LoRAManager:
 
     def is_cached(self, lora_uri: str) -> bool:
         """Check if LoRA is already cached locally."""
-        cache_key = LoRADownloader.uri_to_cache_key(lora_uri)
-        return self._downloader.is_cached(cache_key)
+        return self._downloader.is_cached(lora_uri)
 
     def _uri_to_cache_key(self, uri: str) -> str:
         """Convert URI to cache key. Delegates to Rust for consistency."""
         return LoRADownloader.uri_to_cache_key(uri)
+
+
+@dataclass(frozen=True)
+class LoRAInfo:
+    """Metadata for a loaded LoRA adapter."""
+
+    id: int
+    path: str
+
+
+_lora_manager: OnceLock[LoRAManager] = OnceLock()
+
+
+def _lora_enabled() -> bool:
+    """Return True when DYN_LORA_ENABLED is set to a truthy value."""
+    return env_bool("DYN_LORA_ENABLED")
+
+
+def _init_lora_manager() -> LoRAManager:
+    manager = LoRAManager()
+    logger.info("LoRAManager initialized successfully")
+    return manager
+
+
+def get_lora_manager() -> Optional[LoRAManager]:
+    """Return the LoRAManager singleton, or None when DYN_LORA_ENABLED is unset.
+
+    Initializes on first call. Initialization errors propagate to the caller —
+    OnceLock does not cache failures, so subsequent calls will retry.
+    """
+    existing = _lora_manager.get()
+    if existing is not None:
+        return existing
+    if not _lora_enabled():
+        return None
+    return _lora_manager.get_or_init(_init_lora_manager)

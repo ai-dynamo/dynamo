@@ -62,13 +62,35 @@ func containerHasArg(container *corev1.Container, flag, value string) bool {
 	if container == nil {
 		return false
 	}
+	return hasArg(container.Args, flag, value)
+}
+
+func containerCommandLineHasArg(container *corev1.Container, flag, value string) bool {
+	if container == nil {
+		return false
+	}
+	commandLine := make([]string, 0, len(container.Command)+len(container.Args))
+	commandLine = append(commandLine, container.Command...)
+	commandLine = append(commandLine, container.Args...)
+	if hasArg(commandLine, flag, value) {
+		return true
+	}
+
+	expandedCommandLine := []string{}
+	for _, arg := range commandLine {
+		expandedCommandLine = append(expandedCommandLine, strings.Fields(arg)...)
+	}
+	return hasArg(expandedCommandLine, flag, value)
+}
+
+func hasArg(args []string, flag, value string) bool {
 	joined := flag + " " + value
 	equals := flag + "=" + value
-	for i, arg := range container.Args {
+	for i, arg := range args {
 		if strings.Contains(arg, joined) || strings.Contains(arg, equals) {
 			return true
 		}
-		if arg == flag && i+1 < len(container.Args) && container.Args[i+1] == value {
+		if arg == flag && i+1 < len(args) && args[i+1] == value {
 			return true
 		}
 	}

@@ -1,11 +1,24 @@
 ---
 name: pr-monitor
-description: Check CI status, analyze failures, and explain skips for a Dynamo PR
+description: Runs a CI health check on an ai-dynamo/dynamo pull request — report check status, explain why full CI has or has not triggered, root-cause failed job logs, cross-reference failures against main to separate PR-caused regressions from pre-existing flakes, and flag unexpected skips. Use when asked whether a PR's CI is healthy, why checks are failing or missing, or whether a failure is a flake.
+license: Apache-2.0
 user-invocable: true
 disable-model-invocation: true
+metadata:
+  author: NVIDIA
+  tags:
+    - dynamo
+    - github
+    - ci
+    - pull-request
 ---
 
 # PR CI Monitor
+
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
 
 Perform a full health check on a Dynamo pull request. Takes a PR number as argument (e.g., `/dynamo:pr-monitor 6554`).
 

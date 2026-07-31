@@ -18,8 +18,8 @@ spec:
         - /bin/sh
         - -c
         - |
-          apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75;
+          apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
+          pip install "aiperf==0.10.0";
           echo "aiperf installation completed";
           sysctl -w net.ipv4.ip_local_port_range="1024 65000"
           cat /proc/sys/net/ipv4/ip_local_port_range
@@ -58,7 +58,6 @@ spec:
                 --extra-inputs "max_tokens:$osl" \
                 --extra-inputs "min_tokens:$osl" \
                 --extra-inputs "ignore_eos:true" \
-                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                 --extra-inputs "repetition_penalty:1.0" \
                 --extra-inputs "temperature: 0.0" \
                 --concurrency $concurrency \

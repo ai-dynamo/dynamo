@@ -44,6 +44,24 @@ pub mod openai {
         >;
     }
 
+    pub mod generate {
+        use super::*;
+        use crate::protocols::common::llm_backend::LLMEngineOutput;
+        use crate::protocols::common::preprocessor::PreprocessedRequest;
+
+        pub use protocols::openai::generate::{GenerateRequest, GenerateResponse};
+
+        /// A [`ServerStreamingEngine`] implementation for the token-in/token-out
+        /// `Generate` API.
+        ///
+        /// The registered engine is **raw**: it consumes a preprocessed
+        /// [`PreprocessedRequest`] and streams [`LLMEngineOutput`] directly, with
+        /// no Backend/decoder in between. The handler is responsible for
+        /// accumulating engine output into a `GenerateResponse`.
+        pub type GenerateStreamingEngine =
+            ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+    }
+
     pub mod embeddings {
         use super::*;
 
@@ -134,26 +152,19 @@ pub mod generic {
     pub mod realtime {
         use super::*;
 
-        pub use protocols::openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        };
+        pub use dynamo_protocols::types::realtime::{RealtimeClientEvent, RealtimeServerEvent};
 
-        /// TODO (#9175): reuses chat-completion request/response for now, as
-        /// the request can carry audio data on the request side and text data
-        /// on the response side. Will move to a dedicated realtime-API
-        /// protocol type.
+        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
+        /// Realtime API.
         ///
-        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI Chat
-        /// Completions API.
-        ///
-        /// Many-in / many-out: the client streams a sequence of `NvCreateChatCompletionRequest`
-        /// chunks for the same logical session and receives a stream of
-        /// `NvCreateChatCompletionStreamResponse` chunks back. Used by the experimental
+        /// Many-in / many-out: the client streams a sequence of [`RealtimeClientEvent`]
+        /// frames over the lifetime of one session and receives a stream of
+        /// [`RealtimeServerEvent`] frames back. Used by the experimental
         /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
         /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
-        pub type RealtimeBidirectionalEngine = BidirectionalStreamingEngine<
-            NvCreateChatCompletionRequest,
-            Annotated<NvCreateChatCompletionStreamResponse>,
-        >;
+        pub type RealtimeBidirectionalEngine =
+            BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }
+
+pub use generic::realtime::RealtimeBidirectionalEngine;

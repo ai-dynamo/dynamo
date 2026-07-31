@@ -14,7 +14,7 @@ from typing import Any
 import uvloop
 from transformers import AutoTokenizer
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
 from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
@@ -75,6 +75,7 @@ async def main():
         endpoint,
         QWEN,
         model_name=QWEN,
+        worker_type=WorkerType.Aggregated,
     )
 
     handler = VllmPrepostTestHandler(QWEN)

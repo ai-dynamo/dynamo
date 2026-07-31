@@ -121,7 +121,7 @@ except json.JSONDecodeError:
 try:
     result = something()
 except Exception as e:
-    logger.error(f"Failed: {e}")
+    logger.error("Failed: %s", e)
     raise
 ```
 
@@ -270,6 +270,29 @@ for line in lines:
 # GOOD -- O(n) with join
 result = "\n".join(lines)
 ```
+
+### Use lazy formatting for log messages
+
+**Always flag** f-strings and other eagerly formatted strings passed to Python
+logging calls (`logging.*` or `logger.*`). Formatting the message before the
+logging call runs wastes CPU and can serialize large request payloads even when
+the log level is disabled. Pass a static format string and arguments separately
+so the logging framework performs interpolation only when it emits the message.
+
+```python
+# BAD -- request is serialized even when debug logging is disabled; flag this
+logger.debug(f"Request: {request}")
+logging.info("Worker %s started" % worker_id)
+logger.warning("Retrying {}".format(request_id))
+
+# GOOD -- logging interpolates only when the message is emitted
+logger.debug("Request: %s", request)
+logging.info("Worker %s started", worker_id)
+logger.warning("Retrying %s", request_id)
+```
+
+If constructing a log argument is itself expensive, guard that work with the
+appropriate `logger.isEnabledFor(...)` check or log a compact summary instead.
 
 ### Late-binding closures in loops
 

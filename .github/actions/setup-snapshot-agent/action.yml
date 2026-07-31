@@ -1,0 +1,146 @@
+name: 'Setup Snapshot Agent'
+description: 'Install the Dynamo snapshot-agent Helm chart in a vCluster namespace'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for the vCluster'
+    required: true
+  namespace:
+    description: 'Kubernetes namespace for the snapshot-agent'
+    required: false
+    default: default
+  release_name:
+    description: 'Helm release name'
+    required: false
+    default: snapshot
+  snapshot_agent_image:
+    description: 'Full snapshot-agent image reference'
+    required: true
+  storage_size:
+    description: 'Checkpoint PVC size for agentMount mode'
+    required: false
+    default: 1Gi
+  storage_access_mode:
+    description: 'How the snapshot-agent accesses checkpoint storage'
+    required: false
+    default: podMount
+  storage_pvc_name:
+    description: 'Checkpoint PVC name used by snapshot metadata'
+    required: false
+    default: snapshot-pvc
+  storage_pvc_access_mode:
+    description: 'Checkpoint PVC Kubernetes access mode'
+    required: false
+    default: ReadWriteOnce
+  storage_base_path:
+    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    required: false
+    default: /checkpoints
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Kubeconfig
+      shell: bash
+      env:
+        KUBECONFIG_B64: ${{ inputs.kubeconfig_base64 }}
+      run: |
+        set +x
+        echo "${KUBECONFIG_B64}" | base64 -d > "${{ github.workspace }}/.kubeconfig-snapshot"
+        chmod 600 "${{ github.workspace }}/.kubeconfig-snapshot"
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-snapshot" >> "$GITHUB_ENV"
+
+    - name: Install snapshot-agent
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        RELEASE_NAME: ${{ inputs.release_name }}
+        SNAPSHOT_AGENT_IMAGE: ${{ inputs.snapshot_agent_image }}
+        STORAGE_SIZE: ${{ inputs.storage_size }}
+        STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
+        STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
+        STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
+        STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
+      run: |
+        echo "::group::Install snapshot-agent"
+        set -euo pipefail
+
+        SNAPSHOT_IMAGE_REPO="${SNAPSHOT_AGENT_IMAGE%:*}"
+        SNAPSHOT_IMAGE_TAG="${SNAPSHOT_AGENT_IMAGE##*:}"
+        if [[ -z "${SNAPSHOT_IMAGE_REPO}" || -z "${SNAPSHOT_IMAGE_TAG}" || "${SNAPSHOT_IMAGE_REPO}" == "${SNAPSHOT_AGENT_IMAGE}" ]]; then
+          echo "::error::snapshot_agent_image must include an explicit tag: ${SNAPSHOT_AGENT_IMAGE}"
+          exit 1
+        fi
+
+        helm upgrade --install "${RELEASE_NAME}" ./deploy/helm/charts/snapshot \
+          --namespace "${NAMESPACE}" \
+          --create-namespace \
+          --wait \
+          --timeout 15m \
+          --set daemonset.image.repository="${SNAPSHOT_IMAGE_REPO}" \
+          --set daemonset.image.tag="${SNAPSHOT_IMAGE_TAG}" \
+          --set daemonset.image.pullPolicy=Always \
+          --set-json=daemonset.imagePullSecrets=[] \
+          --set rbac.namespaceRestricted=true \
+          --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
+          --set storage.pvc.name="${STORAGE_PVC_NAME}" \
+          --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
+          --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
+          --set storage.pvc.create=false \
+          --set storage.pvc.size="${STORAGE_SIZE}" \
+          --debug
+
+        DAEMONSET_NAME="$(kubectl get daemonset \
+          -n "${NAMESPACE}" \
+          -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME}" \
+          -o jsonpath='{.items[0].metadata.name}')"
+        if [[ -z "${DAEMONSET_NAME}" ]]; then
+          echo "::error::snapshot-agent DaemonSet was not created"
+          exit 1
+        fi
+
+        RESTRICTED_NAMESPACE_FIELD="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="RESTRICTED_NAMESPACE")].valueFrom.fieldRef.fieldPath}')"
+        if [[ "${RESTRICTED_NAMESPACE_FIELD}" != "metadata.namespace" ]]; then
+          echo "::error::snapshot-agent is not configured for namespace-restricted pod watching"
+          kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o yaml
+          exit 1
+        fi
+
+        DESIRED_SCHEDULED="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.status.desiredNumberScheduled}')"
+        if [[ -z "${DESIRED_SCHEDULED}" || "${DESIRED_SCHEDULED}" == "0" ]]; then
+          echo "::error::snapshot-agent DaemonSet matches 0 nodes in namespace ${NAMESPACE}"
+          kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o wide
+          kubectl get nodes -o wide --show-labels
+          exit 1
+        fi
+
+        kubectl rollout status "daemonset/${DAEMONSET_NAME}" \
+          -n "${NAMESPACE}" \
+          --timeout=900s
+        kubectl get daemonset,pods,pvc \
+          -n "${NAMESPACE}" \
+          -l app.kubernetes.io/name=snapshot \
+          -o wide
+        echo "::endgroup::"
+
+    - name: Debug snapshot-agent failure
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set +e
+        echo "::group::Snapshot-agent status"
+        kubectl get daemonset,pods,pvc -n "${NAMESPACE}" -o wide
+        echo "::endgroup::"
+        echo "::group::Snapshot-agent describe"
+        kubectl describe daemonset -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
+        kubectl describe pods -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
+        echo "::endgroup::"
+        echo "::group::Snapshot-agent logs"
+        kubectl logs -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot --all-containers --tail=100
+        echo "::endgroup::"

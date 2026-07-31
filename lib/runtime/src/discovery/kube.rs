@@ -16,7 +16,7 @@ use utils::{KubeDiscoveryMode, PodInfo};
 use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
-    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
+    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,6 +24,17 @@ use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
+    if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
+        anyhow::bail!(
+            "Kubernetes discovery publisher ID {publisher_id} exceeds the JSON-safe maximum \
+             {MAX_JSON_SAFE_PUBLISHER_ID}"
+        );
+    }
+
+    Ok(())
+}
 
 /// Kubernetes-based discovery client
 #[derive(Clone)]
@@ -115,11 +126,18 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        match &spec {
+            DiscoverySpec::EventChannel { publisher_id, .. }
+            | DiscoverySpec::EventSource { publisher_id, .. } => {
+                validate_kubernetes_publisher_id(*publisher_id)?;
+            }
+            _ => {}
+        }
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}",
+            "Registering discovery instance: {:?}, instance_id={:x}",
             instance,
             instance_id
         );
@@ -157,20 +175,23 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Registering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
+            }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.register_event_source(instance.clone())?;
             }
         }
 
@@ -200,7 +221,7 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = self.instance_id();
+        let instance_id = instance.instance_id();
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
@@ -235,20 +256,23 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.unregister_model_card(&instance)?;
             }
-            DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                ..
-            } => {
+            DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
-                    "Unregistering event channel: namespace={}, component={}, topic={}, instance_id={:x}",
-                    namespace,
-                    component,
+                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                    scope,
                     topic,
                     instance_id
                 );
                 metadata.unregister_event_channel(&instance)?;
+            }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.unregister_event_source(&instance)?;
             }
         }
 
@@ -495,5 +519,17 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publisher_ids_must_fit_kubernetes_json_safe_range() {
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID).is_ok());
+        assert!(validate_kubernetes_publisher_id(MAX_JSON_SAFE_PUBLISHER_ID + 1).is_err());
+        assert!(validate_kubernetes_publisher_id(u64::MAX).is_err());
     }
 }

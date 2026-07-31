@@ -14,14 +14,16 @@ use dynamo_kv_router::zmq_wire::*;
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
+    image_token_id: Option<u32>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -29,7 +31,7 @@ pub(super) async fn start_zmq_listener(
         zmq_topic
     );
 
-    let mut normalizer = ZmqEventNormalizer::new(kv_block_size);
+    let mut normalizer = ZmqEventNormalizer::new(kv_block_size).with_image_token_id(image_token_id);
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -103,6 +105,7 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
+                let mut events = Vec::with_capacity(batch.events.len());
                 for raw_event in batch.events {
                     let event_type = raw_event.event_type_label();
                     if let Some(metrics) = &metrics {
@@ -135,11 +138,15 @@ pub(super) async fn start_zmq_listener(
                     {
                         metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
-                    if tx.send(event).is_err() {
+                    events.push(event);
+                }
+                if !events.is_empty() {
+                    let event_count = events.len() as u64;
+                    if tx.send(events).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }
-                    messages_processed += 1;
+                    messages_processed += event_count;
                 }
             }
         }

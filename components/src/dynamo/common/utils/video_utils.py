@@ -154,13 +154,15 @@ def encode_to_mp4(
     logger.info(f"Encoding {len(frames)} frames to {output_path} at {fps} fps")
 
     try:
-        # Use imageio to write MP4
-        # imageio.v3 API
+        # Use imageio to write MP4. We use h264_nvenc (NVIDIA HW encoder) instead
+        # of libx264 because the in-tree ffmpeg build is LGPL-only and libx264
+        # is GPL-licensed; see container/templates/wheel_builder.Dockerfile.
+        # Requires a CUDA-capable GPU at runtime.
         if hasattr(iio, "imwrite"):
-            iio.imwrite(output_path, frames, fps=fps, codec="libx264")
+            iio.imwrite(output_path, frames, fps=fps, codec="h264_nvenc")
         else:
             # Fall back to v2 API
-            writer = iio.get_writer(output_path, fps=fps, codec="libx264")  # type: ignore[attr-defined]
+            writer = iio.get_writer(output_path, fps=fps, codec="h264_nvenc")  # type: ignore[attr-defined]
             try:
                 for frame in frames:
                     writer.append_data(frame)
@@ -215,7 +217,7 @@ def encode_to_video_bytes(
         if output_format == "webm":
             kwargs["codec"] = "libvpx-vp9"
         elif output_format == "mp4":
-            kwargs["codec"] = "libx264"
+            kwargs["codec"] = "h264_nvenc"
         else:
             raise ValueError(f"No codec specified for response format: {output_format}")
 

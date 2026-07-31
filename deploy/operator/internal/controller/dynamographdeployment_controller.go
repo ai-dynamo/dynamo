@@ -25,6 +25,8 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/imdario/mergo"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 
@@ -39,8 +41,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,6 +62,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -69,6 +75,8 @@ type Message string
 const (
 	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
 	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
+
+	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // rbacManager interface for managing RBAC resources
@@ -81,6 +89,7 @@ type DynamoGraphDeploymentReconciler struct {
 	client.Client
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
+	RestConfig            *rest.Config
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
@@ -97,14 +106,18 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
-// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -149,11 +162,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  readyStatus,
+			Reason:  string(reason),
+			Message: string(message),
 		})
 
 		// Only set ObservedGeneration when reconciliation succeeded (no error),
@@ -230,7 +242,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
+			r.setCurrentWorkerHashes(dynamoDeployment, workerHashesForCompletedGeneration(hashes.v2, hashes))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
@@ -276,17 +288,22 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
 
-	state = reconcileResult.State
-	reason = reconcileResult.Reason
-	message = reconcileResult.Message
-	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
-	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
-
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
 		return ctrl.Result{}, err
 	}
+
+	// Assign status only after confirming the reconcile succeeded. On error,
+	// reconcileResources returns an empty ReconcileResult; assigning it here
+	// would wipe Components/Restart, which the deferred status update would then
+	// persist. Deferring the assignment past the error check preserves the
+	// last-known-good status on a transient failure.
+	state = reconcileResult.State
+	reason = reconcileResult.Reason
+	message = reconcileResult.Message
+	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
+	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -365,6 +382,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
+	// Reconcile discovery RBAC before checkpoints so auto-created checkpoint
+	// Jobs can reference the DGD discovery service account in their prepared
+	// pod template.
+	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
+	}
+
 	// Reconcile checkpoints for components with checkpointing enabled.
 	checkpointStatuses, checkpointInfos, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
 	if err != nil {
@@ -372,20 +402,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)
 	}
 	dynamoDeployment.Status.Checkpoints = checkpointStatuses
-
-	// Reconcile DynamoGraphDeploymentScalingAdapters for each component.
-	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile scaling adapters")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
-	}
-
-	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
-	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "Failed to reconcile K8s discovery resources")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
-	}
 
 	// Reconcile EPP resources (ConfigMaps, Services, InferencePools) if EPP service exists
 	err = r.reconcileEPPResources(ctx, dynamoDeployment)
@@ -412,9 +428,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 
 	// return error early if Grove and LWS is not available for multinode
-	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.LWSEnabled {
+	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.Gate.Enabled(features.LWS) {
 		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 
@@ -423,30 +439,37 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
-		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 	} else {
-		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
+		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
+		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
 	}
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Dynamo components deployments")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	result.RestartStatus = restartStatus
+	result = applyCheckpointStartupReadiness(result, checkpointInfos)
+
+	// Reconcile DynamoGraphDeploymentScalingAdapters after applying checkpoint
+	// startup readiness. In WaitForCheckpoint, the DGD deliberately reports
+	// pending before regular workers exist; letting a scaling adapter write
+	// replicas while gated would create an avoidable update loop.
+	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != "waiting_for_checkpoint" {
+		err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
+		if err != nil {
+			logger.Error(err, "Failed to reconcile scaling adapters")
+			return ReconcileResult{}, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+		}
+	}
+
 	return result, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
-	// Unset or not "false": Grove if available; else component mode
-	// "false": component mode (multinode -> LWS; single-node -> standard)
-	enableGrove := true
-	if dgd.Annotations != nil && strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
-		enableGrove = false
-	}
-
-	return enableGrove && r.RuntimeConfig.GroveEnabled
+	return r.RuntimeConfig.Gate.Enabled(features.Grove) && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
@@ -495,10 +518,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		// A transient read error surfaces here as isReady=false, so the component
+		// conservatively remains in-progress (we never mark a restart complete on
+		// a component we could not read). The reconcile that owns readiness
+		// classification propagates the error and retries, so it is safe to
+		// discard it in this progress-tracking helper.
 		if usesPCSG {
-			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -540,11 +568,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	if groveTopoCond == nil {
 		// No topology condition from Grove yet — don't assume healthy.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionUnknown,
-			Reason:             nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
-			Message:            "Waiting for topology condition from the scheduling framework",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionUnknown,
+			Reason:  nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
+			Message: "Waiting for topology condition from the scheduling framework",
 		}
 	} else if groveTopoCond.Status == metav1.ConditionTrue {
 		// Grove reports topology levels are unavailable.
@@ -553,11 +580,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			reason = nvidiacomv1beta1.ConditionReasonTopologyDefinitionNotFound
 		}
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            groveTopoCond.Message,
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: groveTopoCond.Message,
 		}
 		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
@@ -567,11 +593,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionTrue,
-			Reason:             nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
-			Message:            "All required topology levels are available in the cluster topology",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionTrue,
+			Reason:  nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
+			Message: "All required topology levels are available in the cluster topology",
 		}
 	}
 
@@ -644,7 +669,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
+	prepareGroveTopologyConstraintUpgrade(grovePodCliqueSet, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
+	preserveGrovePodCliqueSetReplicas(grovePodCliqueSet, existingPodCliqueSet, checkpointInfos)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return grovePodCliqueSet, false, nil
 	})
@@ -655,8 +682,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
-			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
-			allComponentsReady, reason, componentStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas.
+			// A transient (non-NotFound) read error is handled authoritatively by
+			// reconcileGroveResources, which re-evaluates and returns the error so
+			// the reconcile retries; here we defensively treat it as not-ready so a
+			// read blip can never surface as "ready".
+			allComponentsReady, reason, componentStatuses, readErr := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			if readErr != nil {
+				return false, nvidiacomv1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}
@@ -706,6 +740,136 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
 	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+// prepareGroveTopologyConstraintUpgrade performs the first half of Grove's
+// supported legacy topology migration. A pre-alpha.9 constraint has
+// packDomain but no topologyName; Grove requires that object to be repaired by
+// adding topologyName before packDomain can be migrated to pack.required.
+// Keeping the legacy packing shape for this reconciliation lets the next
+// reconciliation apply the generated modern shape without recreating the PCS.
+func prepareGroveTopologyConstraintUpgrade(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+
+	prepareLegacyGroveTopologyConstraintRepair(
+		desired.Spec.Template.TopologyConstraint,
+		existing.Spec.Template.TopologyConstraint,
+	)
+
+	existingCliqueConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique != nil {
+			existingCliqueConstraints[clique.Name] = clique.TopologyConstraint
+		}
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique != nil {
+			prepareLegacyGroveTopologyConstraintRepair(clique.TopologyConstraint, existingCliqueConstraints[clique.Name])
+		}
+	}
+
+	existingScalingGroupConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for i := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &existing.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		existingScalingGroupConstraints[config.Name] = config.TopologyConstraint
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		prepareLegacyGroveTopologyConstraintRepair(config.TopologyConstraint, existingScalingGroupConstraints[config.Name])
+	}
+}
+
+func prepareLegacyGroveTopologyConstraintRepair(desired *grovev1alpha1.TopologyConstraint, existing *grovev1alpha1.TopologyConstraint) {
+	if desired == nil || existing == nil {
+		return
+	}
+	// A constraint without an explicit desired name inherits from its repaired
+	// parent and can migrate packDomain directly in the same update.
+	if desired.TopologyName == "" || existing.TopologyName != "" || existing.PackDomain == "" {
+		return
+	}
+
+	desired.PackDomain = existing.PackDomain
+	if existing.Pack == nil {
+		desired.Pack = nil
+		return
+	}
+	pack := *existing.Pack
+	desired.Pack = &pack
+}
+
+// Grove horizontal replicas are driven through scale subresources after creation;
+// keep existing template values so DGD replica changes do not update the PCS spec.
+func preserveGrovePodCliqueSetReplicas(
+	desired *grovev1alpha1.PodCliqueSet,
+	existing *grovev1alpha1.PodCliqueSet,
+	checkpointInfoByComponent ...map[string]*checkpoint.CheckpointInfo,
+) {
+	if desired == nil || existing == nil {
+		return
+	}
+	replicaPreserveSkips := map[string]struct{}{}
+	if len(checkpointInfoByComponent) > 0 {
+		for componentName, info := range checkpointInfoByComponent[0] {
+			if info != nil &&
+				info.Enabled &&
+				info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+				!info.Ready {
+				replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
+			}
+		}
+	}
+
+	cliquesInScalingGroups := make(map[string]struct{})
+	for _, config := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		for _, cliqueName := range config.CliqueNames {
+			cliquesInScalingGroups[cliqueName] = struct{}{}
+		}
+	}
+
+	cliqueReplicasByName := make(map[string]int32, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique == nil || clique.Name == "" {
+			continue
+		}
+		cliqueReplicasByName[clique.Name] = clique.Spec.Replicas
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique == nil {
+			continue
+		}
+		if _, inScalingGroup := cliquesInScalingGroups[clique.Name]; inScalingGroup {
+			continue
+		}
+		if componentName := clique.Labels[consts.KubeLabelDynamoComponent]; componentName != "" {
+			if _, skip := replicaPreserveSkips[strings.ToLower(componentName)]; skip {
+				continue
+			}
+		}
+		if replicas, ok := cliqueReplicasByName[clique.Name]; ok {
+			clique.Spec.Replicas = replicas
+		}
+	}
+
+	scalingGroupReplicasByName := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		if config.Name == "" {
+			// Defensive only; generated PCSG configs always have names.
+			continue
+		}
+		scalingGroupReplicasByName[config.Name] = config.Replicas
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if _, skip := replicaPreserveSkips[strings.ToLower(config.Name)]; skip {
+			continue
+		}
+		if replicas, ok := scalingGroupReplicasByName[config.Name]; ok {
+			config.Replicas = replicas
+		}
+	}
 }
 
 func orderLikeExisting[T any](existing []T, desired []T, nameOf func(T) string) []T {
@@ -808,7 +972,11 @@ func applyLegacyGroveWorkerComponentType(component *nvidiacomv1beta1.DynamoCompo
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on component replica changes.
-func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 
@@ -817,9 +985,20 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
-		// Skip if replicas are not specified
-		if component.Replicas == nil {
+		info := checkpointInfos[componentName]
+		gated := info != nil &&
+			info.Enabled &&
+			info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+			!info.Ready
+		if component.Replicas == nil && !gated {
 			continue
+		}
+		replicas := int32(1)
+		if component.Replicas != nil {
+			replicas = *component.Replicas
+		}
+		if gated {
+			replicas = 0
 		}
 
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
@@ -829,20 +1008,20 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
-				*component.Replicas,
+				replicas,
 				"PodCliqueScalingGroup")
 			if err != nil {
-				logger.Error(err, "Failed to scale PodCliqueScalingGroup", "componentName", componentName, "resourceName", resourceName, "replicas", *component.Replicas)
+				logger.Error(err, "Failed to scale PodCliqueScalingGroup", "componentName", componentName, "resourceName", resourceName, "replicas", replicas)
 				return fmt.Errorf("failed to scale PodCliqueScalingGroup %s: %w", resourceName, err)
 			}
 		} else {
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
-				*component.Replicas,
+				replicas,
 				"PodClique")
 			if err != nil {
-				logger.Error(err, "Failed to scale PodClique", "componentName", componentName, "resourceName", resourceName, "replicas", *component.Replicas)
+				logger.Error(err, "Failed to scale PodClique", "componentName", componentName, "resourceName", resourceName, "replicas", replicas)
 				return fmt.Errorf("failed to scale PodClique %s: %w", resourceName, err)
 			}
 		}
@@ -852,9 +1031,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-// reconcileGMSResourceClaimTemplates syncs one ResourceClaimTemplate per
-// component when DRA is available, and otherwise fails fast if any component
-// needs DRA-backed GPU allocation.
+// reconcileGMSResourceClaimTemplates syncs ResourceClaimTemplates when DRA is
+// available, including deleting stale templates for components that no longer
+// use GMS. When DRA is unavailable, it fails fast if any component needs
+// DRA-backed GPU allocation.
 //
 // Both the GMS sidecar and inter-pod GMS
 // failover (failover.mode=interPod) allocate GPUs via DRA ResourceClaims.
@@ -865,11 +1045,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	if !r.RuntimeConfig.DRAEnabled {
+	if !r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		for i := range dynamoDeployment.Spec.Components {
 			component := &dynamoDeployment.Spec.Components[i]
 			if dynamo.GetGPUMemoryService(component) != nil || component.IsInterPodFailoverEnabled() {
-				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but DRA is not available (either the resource.k8s.io API group is not registered on this cluster, which requires Kubernetes 1.32+, or DRA has been explicitly disabled in the operator configuration)")
+				return fmt.Errorf(
+					"gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), " +
+						"but DRA is not available (either the resource.k8s.io/v1 API is not registered on this cluster, " +
+						"which requires Kubernetes 1.34+, or DRA has been explicitly disabled in the operator configuration)")
 			}
 		}
 		return nil
@@ -877,13 +1060,23 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		gmsSpec := dynamo.GetGPUMemoryService(component)
 		componentName := component.ComponentName
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(component), dynamo.GetMainContainerResources(component))
-		if err != nil {
-			return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
+		gpuCount := 0
+		deviceClassName := ""
+		if gmsSpec != nil {
+			var err error
+			gpuCount, err = dra.ExtractGPUCountFromResourceRequirements(dynamo.GetMainContainerResources(component))
+			if err != nil {
+				return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
+			}
+			deviceClassName = gmsSpec.DeviceClassName
+			if deviceClassName == "" {
+				deviceClassName = dra.DefaultDeviceClassName
+			}
 		}
 		claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, componentName)
-		_, _, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
 		})
 		if err != nil {
@@ -894,12 +1087,17 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 	return nil
 }
 
+func findPodTemplateContainer(podTemplate *corev1.PodTemplateSpec, containerName string) (*corev1.Container, error) {
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == containerName {
+			return &podTemplate.Spec.Containers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", containerName)
+}
+
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
-	}
 
 	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
 	if err != nil {
@@ -913,7 +1111,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	}
 
 	// Handle Grove scaling operations after structural changes
-	if err := r.reconcileGroveScaling(ctx, dynamoDeployment); err != nil {
+	if err := r.reconcileGroveScaling(ctx, dynamoDeployment, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
@@ -947,6 +1145,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
 				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+				Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
 			})
 			if err != nil {
@@ -961,6 +1160,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
 			if syncedMainComponentService != nil {
+				if syncedMainComponentService.Annotations == nil {
+					syncedMainComponentService.Annotations = make(map[string]string)
+				}
+				desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
+				var updateAnnotations bool
+				for key, value := range desiredAnnotations {
+					if val, ok := syncedMainComponentService.Annotations[key]; !ok || val != value {
+						syncedMainComponentService.Annotations[key] = value
+						updateAnnotations = true
+					}
+				}
+				if updateAnnotations {
+					err = r.Update(ctx, syncedMainComponentService)
+					if err != nil {
+						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
+						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
+						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+					}
+				}
 				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
 					func() (bool, string) {
 						return true, ""
@@ -1028,9 +1246,48 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		}
 	}
 
-	// Check resource readiness
+	// Check resource readiness and overlay the Grove-specific Ready reason.
+	// Extracted to keep this function's cyclomatic complexity within the
+	// gocyclo limit.
+	return r.checkGroveResourcesReadiness(ctx, dynamoDeployment, resources)
+}
+
+// checkGroveResourcesReadiness computes the readiness result for the synced
+// Grove resources and overlays the Grove-specific Ready reason
+// classification on a not-ready result. A transient Grove read error is
+// returned (not folded into the result) so the reconcile retries and does not
+// advance ObservedGeneration on a blip.
+func (r *DynamoGraphDeploymentReconciler) checkGroveResourcesReadiness(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) (ReconcileResult, error) {
 	result := r.checkResourcesReadiness(resources)
+	if err := r.applyGroveReadyClassification(ctx, dynamoDeployment, &result); err != nil {
+		return ReconcileResult{}, err
+	}
 	return result, nil
+}
+
+// applyGroveReadyClassification replaces the generic not-ready reason on result
+// with a Grove-specific classification (insufficient_capacity / pods_not_ready /
+// updating / mixed_not_ready_reasons / some_resources_are_not_ready) computed
+// from Grove PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides
+// when the result is not successful; the ready path keeps checkResourcesReadiness's
+// success result.
+//
+// A non-nil error is a transient (non-NotFound) Grove read failure: the caller
+// should return it so the reconcile retries rather than publishing a possibly
+// wrong not-ready diagnosis and advancing ObservedGeneration. NotFound is not an
+// error and is classified as a legitimate not-ready state.
+func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) error {
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
+		return nil
+	}
+	classification, err := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment)
+	if err != nil {
+		return err
+	}
+	if classification != "" {
+		result.Reason = Reason(classification)
+	}
+	return nil
 }
 
 // isNewRestartRequest checks if the current spec.restart.id represents a new restart request
@@ -1373,7 +1630,38 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 	}
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState) (ReconcileResult, error) {
+func applyCheckpointStartupReadiness(
+	result ReconcileResult,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) ReconcileResult {
+	if result.State == nvidiacomv1beta1.DGDStateFailed {
+		return result
+	}
+	var waiting []string
+	for componentName, info := range checkpointInfos {
+		if info == nil ||
+			!info.Enabled ||
+			info.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint ||
+			info.Ready {
+			continue
+		}
+		if info.CheckpointName != "" {
+			waiting = append(waiting, fmt.Sprintf("%s (%s)", componentName, info.CheckpointName))
+		} else {
+			waiting = append(waiting, componentName)
+		}
+	}
+	if len(waiting) == 0 {
+		return result
+	}
+	sort.Strings(waiting)
+	result.State = nvidiacomv1beta1.DGDStatePending
+	result.Reason = "waiting_for_checkpoint"
+	result.Message = Message(fmt.Sprintf("Waiting for checkpoints: %s", strings.Join(waiting, ", ")))
+	return result
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
@@ -1390,7 +1678,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	if rollingUpdateCtx.InProgress() {
 		logger.Info("Rolling update in progress",
 			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
-			"oldWorkerReplicas", rollingUpdateCtx.OldWorkerReplicas)
+			"oldWorkerComponentReplicas", rollingUpdateCtx.OldWorkerReplicaTargetsByComponent)
 	}
 
 	// Generate all DCDs (handles both normal and rolling update cases)
@@ -1404,6 +1692,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	// Sync all generated DCDs
 	for key, dcd := range dynamoComponentsDeployments {
+		if err := applyDCDCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
+			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
+		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
 		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
@@ -1445,6 +1736,69 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	}
 
 	return result, nil
+}
+
+func applyDCDCheckpointStartupPolicy(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) error {
+	if dcd == nil || checkpointInfo == nil || !checkpointInfo.Enabled {
+		return nil
+	}
+
+	// DGD-managed automatic checkpoints deliberately bypass identity lookup and
+	// are resolved by the exact DynamoCheckpoint CR created for this
+	// DGD/component generation. Propagate that resolved reference into the child
+	// DCD so the DCD controller does not independently fall back to legacy
+	// identity-based reuse logic.
+	if checkpointInfo.Exists && checkpointInfo.CheckpointName != "" {
+		if dcd.Spec.Experimental == nil {
+			dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+		}
+		if dcd.Spec.Experimental.Checkpoint == nil {
+			dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
+		}
+		checkpointName := checkpointInfo.CheckpointName
+		dcd.Spec.Experimental.Checkpoint.Enabled = true
+		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
+		dcd.Spec.Experimental.Checkpoint.Identity = nil
+		dcd.Spec.Experimental.Checkpoint.Job = nil
+		startupPolicy := checkpointInfo.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
+		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
+	}
+
+	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
+		dcd.Spec.Replicas = ptr.To(int32(0))
+		return nil
+	}
+	if checkpointInfo.StartupPolicy == "" ||
+		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
+		labels := dynamo.GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+		if labels == nil {
+			if dcd.Spec.PodTemplate == nil {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+			}
+			if dcd.Spec.PodTemplate.Labels == nil {
+				dcd.Spec.PodTemplate.Labels = map[string]string{}
+			}
+			labels = dcd.Spec.PodTemplate.Labels
+		}
+		annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+		if annotations == nil {
+			if dcd.Spec.PodTemplate == nil {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+			}
+			if dcd.Spec.PodTemplate.Annotations == nil {
+				dcd.Spec.PodTemplate.Annotations = map[string]string{}
+			}
+			annotations = dcd.Spec.PodTemplate.Annotations
+		}
+		return checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, checkpointInfo)
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(ctx context.Context, desired *nvidiacomv1beta1.DynamoComponentDeployment) error {
@@ -1595,8 +1949,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
-// reconcileCheckpoints reconciles Checkpoint CRs for components with checkpointing enabled.
-// For Auto mode, it creates Checkpoint CRs if they do not exist.
+// reconcileCheckpoints reconciles checkpoint state for checkpoint-enabled components.
+// Without checkpointRef, it creates DGD-managed DynamoCheckpoint CRs when they
+// do not exist. With checkpointRef, it resolves the referenced checkpoint only.
 // Returns per-component checkpoint status and resolved checkpoint info.
 func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	ctx context.Context,
@@ -1614,6 +1969,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if checkpointConfig == nil {
 			continue
 		}
+		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+			return nil, nil, fmt.Errorf("component %s: checkpoint functionality is disabled in the operator configuration", componentName)
+		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
 
@@ -1625,27 +1983,69 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			storageEnsured = true
 		}
 
-		// Resolve checkpoint for this component.
-		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
+		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+		startupPolicy := alphaCheckpointConfig.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
+
+		var info *checkpoint.CheckpointInfo
+		var err error
+		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
+		if !hasCheckpointRef {
+			workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+			}
+			checkpointID := checkpoint.DGDCheckpointID(
+				dynamoDeployment.Namespace,
+				dynamoDeployment.Name,
+				string(dynamoDeployment.UID),
+				componentName,
+				workerHash,
+			)
+			checkpointName := fmt.Sprintf("checkpoint-%s", checkpointID)
+			refConfig := *alphaCheckpointConfig.DeepCopy()
+			refConfig.CheckpointRef = &checkpointName
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, &refConfig, r.RuntimeConfig.Gate)
+			if errors.IsNotFound(err) {
+				info = nil
+				err = nil
+			}
+			if err == nil && info == nil {
+				info = &checkpoint.CheckpointInfo{
+					Enabled:       true,
+					StartupPolicy: startupPolicy,
+				}
+			}
+		} else {
+			// Resolve checkpoint for this component.
+			info, err = checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, alphaCheckpointConfig, r.RuntimeConfig.Gate)
+		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
 			return nil, nil, fmt.Errorf("failed to resolve checkpoint for component %s: %w", componentName, err)
 		}
+		info.StartupPolicy = startupPolicy
+		if len(info.RestoreTargetContainers) == 0 && alphaCheckpointConfig.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
+		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		}
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+			return nil, nil, fmt.Errorf("failed to apply checkpoint gpuMemoryService config for component %s: %w", componentName, err)
 		}
 
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[componentName] = info
 
-		// checkpointRef is authoritative. Auto mode should only create the canonical checkpoint
-		// when the component is using identity-based lookup.
-		if checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto &&
-			(checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "") &&
-			!info.Exists &&
-			info.Identity != nil &&
-			!info.Ready {
-			logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
+		// Without checkpointRef, the DGD creates a scoped automatic checkpoint for
+		// this component generation without looking for reusable checkpoints.
+		if !hasCheckpointRef {
+			if !info.Exists {
+				logger.Info("Creating DGD-managed DynamoCheckpoint CR", "component", componentName)
+			}
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, componentName, component)
 			if err != nil {
@@ -1654,14 +2054,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 			}
 			info.Exists = true
 			info.CheckpointName = ckpt.Name
-			if info.Hash == "" {
-				info.Hash = ckpt.Status.IdentityHash
+			info.Hash, err = checkpoint.CheckpointID(ckpt)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to resolve checkpoint ID for component %s: %w", componentName, err)
 			}
-			info.Ready = false
+			if info.GPUMemoryService == nil {
+				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
+			}
+			info.Ready = ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		}
 
 		checkpointStatuses[componentName] = nvidiacomv1beta1.ComponentCheckpointStatus{
 			CheckpointName: info.CheckpointName,
+			CheckpointID:   info.Hash,
 			IdentityHash:   info.Hash,
 			Ready:          info.Ready,
 		}
@@ -1670,7 +2075,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	return checkpointStatuses, checkpointInfos, nil
 }
 
-// createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
+// createCheckpointCR creates a DGD-managed DynamoCheckpoint CR for a component.
+//
+//nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	ctx context.Context,
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1678,76 +2085,361 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
-	if checkpointConfig == nil || checkpointConfig.Identity == nil {
-		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
+	if checkpointConfig == nil {
+		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
-	checkpointIdentity := *dynamo.ToAlphaCheckpointIdentity(checkpointConfig.Identity)
+	workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+	}
+	checkpointID := checkpoint.DGDCheckpointID(
+		dynamoDeployment.Namespace,
+		dynamoDeployment.Name,
+		string(dynamoDeployment.UID),
+		componentName,
+		workerHash,
+	)
 
-	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
-	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
+	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
+	}
+	if (backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop) &&
+		checkpointConfig.Identity != nil &&
+		checkpointConfig.Identity.BackendFramework != "" {
+		backendFramework, err = dynamo.ParseBackendFramework(checkpointConfig.Identity.BackendFramework)
+		if err != nil {
+			return nil, fmt.Errorf("invalid legacy checkpoint identity backend framework for component %s: %w", componentName, err)
+		}
+	}
+	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
+		return nil, fmt.Errorf("checkpoint backend framework for component %s could not be determined; set spec.backendFramework or use a recognizable worker command", componentName)
+	}
+
 	podTemplate, err := r.buildCheckpointJobPodTemplate(
 		dynamoDeployment,
 		component,
 		componentName,
-		checkpointIdentity.BackendFramework,
+		backendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
+	if commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoDeployment.Annotations) &&
+		podTemplate.Spec.ServiceAccountName == "" {
+		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(dynamoDeployment.Name)
+	}
+	if podTemplate.Labels == nil {
+		podTemplate.Labels = map[string]string{}
+	}
+	podTemplate.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+	podTemplate.Labels[consts.KubeLabelDynamoComponent] = componentName
+	if workerHash != "" {
+		podTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = workerHash
+	}
 
-	return checkpoint.CreateOrGetAutoCheckpoint(
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
+	}
+	targetContainer, err := findPodTemplateContainer(&podTemplate, targetContainerName)
+	if err != nil {
+		return nil, err
+	}
+	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
+	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
+		gmsSpec = converted.DeepCopy()
+		gmsSpec.ExtraClientContainers = nil
+		if checkpointConfig.Job != nil {
+			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
+		}
+	}
+	var checkpointGMSClaimTemplateName string
+	if gmsSpec != nil && gmsSpec.Enabled {
+		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec, r.RuntimeConfig.Gate); err != nil {
+			return nil, err
+		}
+		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
+		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
+		}
+		checkpointGMSDeviceClassName := gmsSpec.DeviceClassName
+		if checkpointGMSDeviceClassName == "" {
+			checkpointGMSDeviceClassName = dra.DefaultDeviceClassName
+		}
+		if err := r.syncCheckpointGMSResourceClaimTemplate(
+			ctx,
+			dynamoDeployment.Namespace,
+			checkpointGMSClaimTemplateName,
+			checkpointGMSGPUCount,
+			checkpointGMSDeviceClassName,
+		); err != nil {
+			return nil, err
+		}
+		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, checkpointID, gmsSpec); err != nil {
+			return nil, err
+		}
+	}
+	deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(checkpointConfig.DeletionPolicy)
+	if deletionPolicy == "" {
+		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
+	}
+
+	ckpt, err := checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
 		r.Client,
 		dynamoDeployment.Namespace,
-		checkpointIdentity,
+		checkpointID,
+		nvidiacomv1alpha1.DynamoCheckpointIdentity{
+			Model:            fmt.Sprintf("%s/%s", dynamoDeployment.Namespace, dynamoDeployment.Name),
+			BackendFramework: string(backendFramework),
+			ExtraParameters: map[string]string{
+				"dgdUID":       string(dynamoDeployment.UID),
+				"component":    componentName,
+				"checkpointID": checkpointID,
+			},
+		},
 		podTemplate,
-		dynamo.ToAlphaGPUMemoryService(dynamo.GetGPUMemoryService(component)),
+		targetContainerName,
+		deletionPolicy,
+		gmsSpec,
+		dynamoDeployment,
+		r.RuntimeConfig.Gate,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if gmsSpec != nil && gmsSpec.Enabled {
+		if err := r.adoptCheckpointGMSResourceClaimTemplate(ctx, ckpt, checkpointGMSClaimTemplateName); err != nil {
+			return nil, err
+		}
+	}
+	return ckpt, nil
 }
 
-// buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from the component spec.
-// It reuses GenerateBasePodSpec to ensure checkpoint jobs have the same configuration as regular pods,
-// including auto-discovered image pull secrets, envFromSecret, resources, security context, etc.
+func checkpointGMSResourceClaimTemplateName(checkpointID string) string {
+	return dra.ResourceClaimTemplateName("checkpoint-"+checkpointID, "worker")
+}
+
+func (r *DynamoGraphDeploymentReconciler) syncCheckpointGMSResourceClaimTemplate(
+	ctx context.Context,
+	namespace string,
+	claimTemplateName string,
+	gpuCount int,
+	deviceClassName string,
+) error {
+	_, _, err := commoncontroller.SyncResource(ctx, r, nil, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, namespace, gpuCount, deviceClassName)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync checkpoint GMS ResourceClaimTemplate %s/%s: %w", namespace, claimTemplateName, err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) adoptCheckpointGMSResourceClaimTemplate(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	claimTemplateName string,
+) error {
+	template := &resourcev1.ResourceClaimTemplate{}
+	key := types.NamespacedName{Name: claimTemplateName, Namespace: ckpt.Namespace}
+	if err := r.Get(ctx, key, template); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get checkpoint GMS ResourceClaimTemplate %s/%s: %w", ckpt.Namespace, claimTemplateName, err)
+	}
+	if metav1.IsControlledBy(template, ckpt) {
+		return nil
+	}
+
+	ownerReferences := template.GetOwnerReferences()
+	filtered := make([]metav1.OwnerReference, 0, len(ownerReferences))
+	for _, ref := range ownerReferences {
+		if ref.Controller != nil && *ref.Controller {
+			continue
+		}
+		filtered = append(filtered, ref)
+	}
+	template.SetOwnerReferences(filtered)
+	if err := controllerutil.SetControllerReference(ckpt, template, r.Scheme()); err != nil {
+		return fmt.Errorf("failed to set DynamoCheckpoint owner on GMS ResourceClaimTemplate %s/%s: %w", ckpt.Namespace, claimTemplateName, err)
+	}
+	if err := r.Update(ctx, template); err != nil {
+		return fmt.Errorf("failed to update checkpoint GMS ResourceClaimTemplate owner %s/%s: %w", ckpt.Namespace, claimTemplateName, err)
+	}
+	return nil
+}
+
+func prepareCheckpointGMSPodTemplate(
+	podTemplate *corev1.PodTemplateSpec,
+	targetContainerName string,
+	checkpointID string,
+	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+) error {
+	switch gmsSpec.Mode {
+	case "", nvidiacomv1alpha1.GMSModeIntraPod:
+	case nvidiacomv1alpha1.GMSModeInterPod:
+		return fmt.Errorf("gpuMemoryService checkpoint jobs for mode %q are not implemented", gmsSpec.Mode)
+	default:
+		return fmt.Errorf("gpuMemoryService checkpoint job has unsupported mode %q", gmsSpec.Mode)
+	}
+
+	targetContainer, err := findPodTemplateContainer(podTemplate, targetContainerName)
+	if err != nil {
+		return err
+	}
+	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
+	checkpoint.EnsureIntraPodGPUMemoryService(
+		&podTemplate.Spec,
+		[]*corev1.Container{targetContainer},
+		gmsSpec.ExtraClientContainers,
+	)
+	return nil
+}
+
+func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
+	foundToleration := false
+	for i := range podSpec.Tolerations {
+		toleration := podSpec.Tolerations[i]
+		if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
+			foundToleration = true
+			break
+		}
+	}
+	if !foundToleration {
+		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
+			Key:      consts.KubeResourceGPUNvidia,
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		})
+	}
+
+	podClaim := corev1.PodResourceClaim{
+		Name:                      dra.ClaimName,
+		ResourceClaimTemplateName: &claimTemplateName,
+	}
+	for i := range podSpec.ResourceClaims {
+		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
+			podSpec.ResourceClaims[i] = podClaim
+			return
+		}
+	}
+	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteAutoCheckpointsForDGD(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	checkpoints := &nvidiacomv1alpha1.DynamoCheckpointList{}
+	if err := r.List(
+		ctx,
+		checkpoints,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
+	); err != nil {
+		return err
+	}
+	for i := range checkpoints.Items {
+		ckpt := &checkpoints.Items[i]
+		if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+			continue
+		}
+		if ckpt.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
+			if err := r.detachRetainedAutoCheckpoint(ctx, ckpt); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := r.Delete(ctx, ckpt); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) detachRetainedAutoCheckpoint(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+) error {
+	updated := ckpt.DeepCopy()
+	updated.OwnerReferences = nil
+	if updated.Labels != nil {
+		delete(updated.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+	}
+	if equality.Semantic.DeepEqual(ckpt.OwnerReferences, updated.OwnerReferences) &&
+		equality.Semantic.DeepEqual(ckpt.Labels, updated.Labels) {
+		return nil
+	}
+	if err := r.Patch(ctx, updated, client.MergeFrom(ckpt)); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("detach retained auto checkpoint %s/%s: %w", ckpt.Namespace, ckpt.Name, err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) (string, error) {
+	if dgd == nil {
+		return "", nil
+	}
+	component := dgd.GetComponentByName(componentName)
+	if component == nil || !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+		return "", nil
+	}
+	if r == nil {
+		return "", nil
+	}
+	desired, err := r.desiredWorkerHashes(dgd)
+	if err != nil {
+		return "", err
+	}
+	return r.activeWorkerHashForDCDGeneration(dgd, desired), nil
+}
+
+// buildCheckpointJobPodTemplate builds a checkpoint job template from the same
+// component defaults used for regular DGD pods, then keeps only the target
+// container plus any checkpoint-job sidecars supplied by the user.
+//
+//nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentName string,
-	framework string, // From checkpoint identity (e.g., "vllm", "sglang", "trtllm")
+	backendFramework dynamo.BackendFramework,
 ) (corev1.PodTemplateSpec, error) {
-	// Parse framework string to BackendFramework type
-	backendFramework, err := dynamo.ParseBackendFramework(framework)
-	if err != nil {
-		return corev1.PodTemplateSpec{}, err
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
 	}
 
 	// Create a copy of the component spec stripped of features that buildCheckpointJob
 	// or the checkpoint controller handle independently. GenerateBasePodSpec would
 	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
-	// frontend sidecar) that conflict with the checkpoint path's own setup.
+	// frontend sidecar, failover transforms) that conflict with the checkpoint path's
+	// own setup.
 	componentForJob := component.DeepCopy()
 	if componentForJob.Experimental != nil {
 		componentForJob.Experimental.Checkpoint = nil
 		componentForJob.Experimental.GPUMemoryService = nil
-		if componentForJob.Experimental.Failover == nil {
+		componentForJob.Experimental.Failover = nil
+		if componentForJob.Experimental.GPUMemoryService == nil &&
+			componentForJob.Experimental.Failover == nil &&
+			componentForJob.Experimental.Checkpoint == nil {
 			componentForJob.Experimental = nil
 		}
 	}
 	componentForJob.FrontendSidecar = nil
 
-	// Generate base PodSpec using the same logic as regular worker pods
-	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
-	// resources, security context, tolerations, node selectors, etc.
-	//
-	// Note: For checkpoint jobs, we use Grove deployment type even though it's single-node.
-	// This is because GenerateBasePodSpec requires a valid MultinodeDeployer, and for
-	// single-node cases, the backends simply return early without modifications.
-	podSpec, err := dynamo.GenerateBasePodSpec(
+	// Use the normal DGD path so graph-level defaults such as spec.env,
+	// annotations, labels, and pod-template metadata are applied consistently.
+	podSpec, err := dynamo.GeneratePodSpecForComponent(
 		componentForJob,
 		backendFramework,
 		r.DockerSecretRetriever,
-		dynamoDeployment.Name,
-		dynamoDeployment.Namespace,
+		dynamoDeployment,
 		dynamo.RoleCheckpoint, // Use checkpoint role
 		1,                     // Single node for checkpoint job
 		r.Config,
@@ -1760,17 +2452,116 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
 	}
 
+	if podSpec == nil {
+		return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint job pod spec is nil")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == targetContainerName {
+			podSpec.Containers = []corev1.Container{*podSpec.Containers[i].DeepCopy()}
+			break
+		}
+	}
+	if len(podSpec.Containers) != 1 || podSpec.Containers[0].Name != targetContainerName {
+		return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q not found", targetContainerName)
+	}
+
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
-	return corev1.PodTemplateSpec{
+	// Seed the checkpoint job pod-template metadata from the component's own
+	// PodTemplate.ObjectMeta so workload-level labels/annotations (e.g. Istio
+	// sidecar opt-out or policy annotations) are not silently dropped on the
+	// auto-created checkpoint job. GeneratePodSpecForComponent only returns the
+	// PodSpec, so the template metadata must be carried over explicitly here.
+	// Precedence: component pod-template metadata < controller-managed labels <
+	// explicit checkpoint.job.podTemplate overrides (applied below).
+	podLabels := map[string]string{}
+	podAnnotations := map[string]string{}
+	if component.PodTemplate != nil {
+		for k, v := range component.PodTemplate.Labels {
+			podLabels[k] = v
+		}
+		for k, v := range component.PodTemplate.Annotations {
+			podAnnotations[k] = v
+		}
+	}
+	podLabels[consts.KubeLabelDynamoComponent] = componentName
+
+	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: componentName,
-			},
+			Labels:      podLabels,
+			Annotations: podAnnotations,
 		},
 		Spec: *podSpec,
-	}, nil
+	}
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.Job != nil {
+		if overrides := checkpointConfig.Job.PodTemplate; overrides != nil {
+			if len(overrides.Labels) > 0 {
+				if podTemplate.Labels == nil {
+					podTemplate.Labels = make(map[string]string, len(overrides.Labels))
+				}
+				for k, v := range overrides.Labels {
+					podTemplate.Labels[k] = v
+				}
+			}
+			if len(overrides.Annotations) > 0 {
+				if podTemplate.Annotations == nil {
+					podTemplate.Annotations = make(map[string]string, len(overrides.Annotations))
+				}
+				for k, v := range overrides.Annotations {
+					podTemplate.Annotations[k] = v
+				}
+			}
+
+			overlay := overrides.Spec.DeepCopy()
+			containers := overlay.Containers
+			initContainers := overlay.InitContainers
+			volumes := overlay.Volumes
+			overlay.Containers = nil
+			overlay.InitContainers = nil
+			overlay.Volumes = nil
+			if err := mergo.Merge(&podTemplate.Spec, *overlay, mergo.WithOverride); err != nil {
+				return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job pod spec: %w", err)
+			}
+
+			podTemplate.Spec.Volumes = mergeNamedSlice(podTemplate.Spec.Volumes, volumes, func(v corev1.Volume) string { return v.Name })
+			podTemplate.Spec.InitContainers = mergeNamedSlice(podTemplate.Spec.InitContainers, initContainers, func(c corev1.Container) string { return c.Name })
+			for _, override := range containers {
+				if override.Name == "" {
+					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
+					continue
+				}
+				var existing *corev1.Container
+				for i := range podTemplate.Spec.Containers {
+					if podTemplate.Spec.Containers[i].Name == override.Name {
+						existing = &podTemplate.Spec.Containers[i]
+						break
+					}
+				}
+				if existing == nil {
+					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
+					continue
+				}
+
+				baseEnv := existing.Env
+				user := override.DeepCopy()
+				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
+					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job container %q: %w", override.Name, err)
+				}
+				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
+				if user.LivenessProbe != nil {
+					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
+				}
+				if user.ReadinessProbe != nil {
+					existing.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+				}
+				if user.StartupProbe != nil {
+					existing.StartupProbe = user.StartupProbe.DeepCopy()
+				}
+			}
+		}
+	}
+	return podTemplate, nil
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each component in the DGD
@@ -1779,47 +2570,68 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Process each component - SyncResource handles create, update, and delete via toDelete flag.
+	// Process each component. The DGD controller owns the adapter lifecycle and
+	// identity, while the adapter owns its replica count after creation.
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
 		componentName := component.ComponentName
-		// Check if scaling adapter is enabled for this component (disabled by default).
-		scalingAdapterEnabled := component.ScalingAdapter != nil
-
-		// Get current replicas (default to 1 if not set)
-		currentReplicas := int32(1)
-		if component.Replicas != nil {
-			currentReplicas = *component.Replicas
+		adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
+		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      adapterName,
+				Namespace: dynamoDeployment.Namespace,
+			},
 		}
 
-		// Use SyncResource to handle creation/updates/deletion
-		// When toDelete=true, SyncResource will delete the existing resource if it exists
-		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
-			adapterName := generateAdapterName(dynamoDeployment.Name, componentName)
-			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
-					Namespace: dynamoDeployment.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
-						consts.KubeLabelDynamoComponent:           componentName,
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-					Replicas: currentReplicas,
-					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:        dynamoDeployment.Name,
-						ServiceName: componentName,
-					},
-				},
+		if component.ScalingAdapter == nil {
+			if err := r.Delete(ctx, adapter); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				logger.Error(err, "Failed to delete DynamoGraphDeploymentScalingAdapter", "component", componentName)
+				return err
 			}
-			// Return toDelete=true if scaling adapter is not enabled
-			return adapter, !scalingAdapterEnabled, nil
+			logger.Info("Deleted DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+				"Deleted scaling adapter %s for component %s", adapterName, componentName)
+			continue
+		}
+
+		initialReplicas := ptr.Deref(component.Replicas, int32(1))
+		operation, err := controllerutil.CreateOrPatch(ctx, r.Client, adapter, func() error {
+			if adapter.Labels == nil {
+				adapter.Labels = map[string]string{}
+			}
+			adapter.Labels[consts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
+			adapter.Labels[consts.KubeLabelDynamoComponent] = componentName
+			adapter.Spec.DGDRef = nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
+				Name:        dynamoDeployment.Name,
+				ServiceName: componentName,
+			}
+
+			// The DGD replica count seeds a new adapter. Once created, the
+			// adapter is the sole source of truth for desired replicas.
+			if adapter.GetResourceVersion() == "" {
+				adapter.Spec.Replicas = initialReplicas
+			}
+
+			return controllerutil.SetControllerReference(dynamoDeployment, adapter, r.Scheme())
 		})
 
 		if err != nil {
-			logger.Error(err, "Failed to sync DynamoGraphDeploymentScalingAdapter", "component", componentName)
+			logger.Error(err, "Failed to reconcile DynamoGraphDeploymentScalingAdapter", "component", componentName)
 			return err
+		}
+
+		switch operation {
+		case controllerutil.OperationResultCreated:
+			logger.Info("Created DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterCreated",
+				"Created scaling adapter %s for component %s", adapterName, componentName)
+		case controllerutil.OperationResultUpdated:
+			logger.Info("Updated DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterUpdated",
+				"Updated scaling adapter %s for component %s", adapterName, componentName)
 		}
 	}
 
@@ -1912,8 +2724,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	if r.RuntimeConfig.IstioAvailable {
-		meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	// When disabled, still best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.RuntimeConfig.Gate.Enabled(features.Istio)
+	istioAvailable := meshEnabled
+	if !meshEnabled {
+		istioAvailable = features.DetectIstioDestinationRuleAvailability(ctx, r.RestConfig)
+	}
+	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
@@ -1924,9 +2741,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		}
 		if meshEnabled {
 			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		} else {
+			logger.Info("Cleaned up EPP DestinationRule", "name", eppServiceName)
 		}
-	} else if r.Config.ServiceMesh.IsEnabled() {
-		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
 	}
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
@@ -1949,17 +2766,40 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx conte
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
-	// for now doing nothing
-	return nil
+	return r.deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		dgdComponentPodIndex,
+		dgdComponentPodIndexValues,
+	); err != nil {
+		return fmt.Errorf("register DGD component Pod index: %w", err)
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
+		Watches(
+			&nvidiacomv1alpha1.DynamoCheckpoint{},
+			handler.EnqueueRequestsFromMapFunc(r.mapAutoCheckpointToDGDRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return true },
+			}),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
+			builder.WithPredicates(dgdWorkerPodEventPredicate()),
+		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1982,7 +2822,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioAvailable {
+	if r.RuntimeConfig.Gate.Enabled(features.Istio) {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
@@ -1990,7 +2830,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
 	}
-	if r.RuntimeConfig.GroveEnabled {
+	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -2011,16 +2851,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// Mirrors the readiness gates in CheckPodCliqueReady
-						// (dynamo/grove.go): ObservedGeneration, Status.Replicas,
-						// UpdatedReplicas, and ReadyReplicas. Without the
-						// non-ReadyReplicas signals, the DGD can stay stale at the
-						// tail of a rolling update when ReadyReplicas is flat.
-						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
-							oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
-							oldPC.Status.Replicas != newPC.Status.Replicas ||
-							oldPC.Spec.Replicas != newPC.Spec.Replicas ||
-							!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration)
+						return podCliqueStatusChangeIsSignificant(oldPC, newPC)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2043,16 +2874,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// ObservedGeneration is tracked because CheckPCSGReady uses it as
-						// a readiness gate ("spec not yet processed" while
-						// ObservedGeneration < Generation). A PCSG spec edit that does
-						// not change Spec.Replicas (e.g. template/topology edits) would
-						// otherwise not wake the DGD when Grove catches up.
-						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
-							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
-							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
-							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
-							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration)
+						return pcsgStatusChangeIsSignificant(oldPCSG, newPCSG)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2066,6 +2888,100 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+func isDGDManagedWorkerPod(obj client.Object) bool {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return false
+	}
+	labels := pod.GetLabels()
+	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
+		labels[consts.KubeLabelDynamoComponent] != "" &&
+		labels[consts.KubeLabelDynamoSelector] != "" &&
+		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
+}
+
+func dgdComponentPodIndexValues(obj client.Object) []string {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return nil
+	}
+	labels := pod.GetLabels()
+	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
+	componentName := labels[consts.KubeLabelDynamoComponent]
+	if dgdName == "" || componentName == "" {
+		return nil
+	}
+	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
+}
+
+func dgdComponentPodIndexValue(dgdName, componentName string) string {
+	// Both inputs are label values, which cannot contain '/', so this encoding
+	// is collision-free.
+	return dgdName + "/" + componentName
+}
+
+// dgdWorkerPodEventPredicate admits only events that can change whether a
+// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// membership; updates matter only when membership or terminality changes. A
+// deletion timestamp alone leaves the pod non-terminal and does not enqueue.
+func dgdWorkerPodEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return isDGDManagedWorkerPod(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldManaged := isDGDManagedWorkerPod(e.ObjectOld)
+			newManaged := isDGDManagedWorkerPod(e.ObjectNew)
+			if oldManaged != newManaged {
+				return true
+			}
+			if !newManaged {
+				return false
+			}
+			oldPod := e.ObjectOld.(*corev1.Pod)
+			newPod := e.ObjectNew.(*corev1.Pod)
+			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
+				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				return true
+			}
+			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
+		},
+		GenericFunc: func(event.GenericEvent) bool {
+			return false
+		},
+	}
+}
+
+func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Request {
+	if !isDGDManagedWorkerPod(obj) {
+		return nil
+	}
+	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
+}
+
+func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	ckpt, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
+	if !ok || ckpt == nil {
+		return nil
+	}
+	if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return nil
+	}
+	if ckpt.Labels == nil {
+		return nil
+	}
+	dgdName := ckpt.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+	if dgdName == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: ckpt.Namespace, Name: dgdName}}}
 }
 
 // mapPodCliqueToRequests maps a PodClique to reconcile requests for its owning DGD
@@ -2158,4 +3074,68 @@ func ptrInt64Equal(a, b *int64) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// groveScheduledConditionChanged reports whether either of the Grove scheduling
+// conditions consumed by the Ready-reason classification (dynamo/grove.go)
+// changed between two condition slices. It watches PodCliqueScheduled (set on
+// PodCliques) and MinAvailableBreached (set on PodCliqueScalingGroups); a single
+// helper serves both since each object only carries the condition relevant to
+// it. A change in Status or Reason on either condition is treated as a change,
+// so a scheduling shortfall clearing (or appearing) re-wakes the DGD even when
+// the replica counters are otherwise flat.
+func groveScheduledConditionChanged(oldConds, newConds []metav1.Condition) bool {
+	for _, condType := range []string{
+		groveconstants.ConditionTypePodCliqueScheduled,
+		groveconstants.ConditionTypeMinAvailableBreached,
+	} {
+		oldCond := meta.FindStatusCondition(oldConds, condType)
+		newCond := meta.FindStatusCondition(newConds, condType)
+		if (oldCond == nil) != (newCond == nil) {
+			return true
+		}
+		if oldCond != nil && newCond != nil &&
+			(oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason) {
+			return true
+		}
+	}
+	return false
+}
+
+// podCliqueStatusChangeIsSignificant reports whether a PodClique status update
+// affects the DGD's Grove readiness/classification and therefore must not be
+// filtered out by the watch predicate.
+//
+// It mirrors every field CheckPodCliqueReady (dynamo/grove.go) reads: the
+// replica counters gate readiness and rolling-update detection; ScheduledReplicas
+// and ScheduleGatedReplicas feed the InsufficientCapacity classification and the
+// exposed status.components[*].scheduledReplicas; the PodCliqueScheduled
+// condition is another capacity signal; ObservedGeneration gates "spec not yet
+// processed". In particular, scheduling can advance (e.g. 1/N -> N/N) while the
+// ready/updated/replica counters and the condition stay flat, so ScheduledReplicas
+// must be compared or that event would be dropped and the DGD left stale.
+func podCliqueStatusChangeIsSignificant(oldPC, newPC *grovev1alpha1.PodClique) bool {
+	return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
+		oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
+		oldPC.Status.Replicas != newPC.Status.Replicas ||
+		oldPC.Status.ScheduledReplicas != newPC.Status.ScheduledReplicas ||
+		oldPC.Status.ScheduleGatedReplicas != newPC.Status.ScheduleGatedReplicas ||
+		oldPC.Spec.Replicas != newPC.Spec.Replicas ||
+		!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPC.Status.Conditions, newPC.Status.Conditions)
+}
+
+// pcsgStatusChangeIsSignificant is the PodCliqueScalingGroup analogue of
+// podCliqueStatusChangeIsSignificant. It mirrors every field CheckPCSGReady
+// reads, including ScheduledReplicas (capacity classification + exposed counter)
+// and the MinAvailableBreached condition, so a scheduling-only advance re-wakes
+// the DGD.
+func pcsgStatusChangeIsSignificant(oldPCSG, newPCSG *grovev1alpha1.PodCliqueScalingGroup) bool {
+	return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
+		oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
+		oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
+		oldPCSG.Status.ScheduledReplicas != newPCSG.Status.ScheduledReplicas ||
+		oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
+		!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPCSG.Status.Conditions, newPCSG.Status.Conditions)
 }

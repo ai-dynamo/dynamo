@@ -160,8 +160,6 @@ def get_common_aiperf_flags():
     return [
         "--endpoint-type",
         "chat",
-        "--endpoint",
-        "v1/chat/completions",
         "--streaming",
         "--extra-inputs",
         "ignore_eos:true",
@@ -198,8 +196,6 @@ def get_aiperf_cmd_for_trace(
         "mooncake_trace",
         "--fixed-schedule",
         "--fixed-schedule-auto-offset",
-        "--prompt-input-tokens-block-size",
-        str(block_size),
         "--random-seed",
         str(seed),
         "--artifact-dir",

@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Development-only tools — NOT for runtime or test containers.
+# Some editable-install sanity checks import planner modules in dev images.
+# Keep planner's Kubernetes client available there so those imports succeed.
+kubernetes==32.0.1
 
 mypy==1.18.2
 pre-commit==4.5.0

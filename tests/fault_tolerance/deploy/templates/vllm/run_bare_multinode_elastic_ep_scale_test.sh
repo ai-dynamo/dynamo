@@ -163,7 +163,7 @@ print('text:', repr(text), '  usage:', tokens)
 }
 
 # Calls vLLM's native scale endpoint on port 8000 (same port as inference).
-# NOTE: bare vLLM uses /scale_elastic_ep directly, NOT /engine/scale_elastic_ep.
+# NOTE: bare vLLM uses /scale_elastic_ep directly, NOT /engine/control/scale_elastic_ep.
 scale() {
   local from_dp="$1"
   local to_dp="$2"

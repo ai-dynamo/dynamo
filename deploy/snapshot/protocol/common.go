@@ -13,11 +13,21 @@ import (
 const (
 	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
 
+	// CaptureEligibleLabel is the gate-applied promotion label. The operator stamps
+	// CheckpointSourceLabel on the checkpoint Job pod at creation; the node agent's pre-bind gate adds
+	// CaptureEligibleLabel only after the source pod passes validation. The source-pod capture
+	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
+	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
+
 	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
 	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
+
+	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
+	// object so the per-node agent's cache can label-select work for its node.
+	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
@@ -47,6 +57,11 @@ const (
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"
+
+	linkerdInjectAnnotation      = "linkerd.io/inject"
+	linkerdInjectDisabled        = "disabled"
+	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
+	istioSidecarInjectDisabled   = "false"
 )
 
 type Storage struct {

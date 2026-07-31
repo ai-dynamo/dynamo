@@ -86,9 +86,25 @@ STUB_MODULES = [
     "kr8s.objects",
     "tritonclient",
     "tritonclient.grpc",
+    # gRPC core + generated protobuf modules — required by planner
+    # plugin framework test files (test_gateway / test_transport_contract
+    # / test_external_plugin_e2e and friends).  CI's pre-commit env
+    # doesn't install grpcio / protobuf, so collection-time
+    # ``import grpc`` would fail without these stubs.
+    "grpc",
+    "grpc.aio",
+    "google",
+    "google.protobuf",
+    "google.protobuf.message",
+    # msgspec — used by FPM encoding in engine_adapter and by perf metric
+    # ingestion in monitoring/perf_metrics; not in the pre-commit env.
+    "msgspec",
+    "msgspec.msgpack",
+    "msgspec.json",
     "aiohttp",
     "aiofiles",
     "httpx",
+    "uvloop",
     "yarl",
     "pytest_asyncio",
     "tabulate",
@@ -113,11 +129,7 @@ STUB_MODULES = [
     "psutil",
     "requests",
     "numpy",
-    "gradio",
     "aiconfigurator",
-    "aiconfigurator.webapp",
-    "aiconfigurator.webapp.components",
-    "aiconfigurator.webapp.components.profiling",
     "boto3",
     "botocore",
     "botocore.client",
@@ -134,7 +146,9 @@ STUB_MODULES = [
     "gpu_memory_service.client.torch.tensor",
     "gpu_memory_service.common",
     "gpu_memory_service.common.locks",
-    "gpu_memory_service.common.cuda_utils",
+    "gpu_memory_service.common.vmm",
+    "gpu_memory_service.common.vmm.device",
+    "gpu_memory_service.common.vmm.cuda_utils",
     "gpu_memory_service.common.protocol",
     "gpu_memory_service.common.protocol.messages",
     "gpu_memory_service.common.protocol.wire",
@@ -176,9 +190,14 @@ STUB_MODULES = [
     "sglang.srt.function_call.function_call_parser",
     "sglang.srt.function_call.json_array_parser",
     "sglang.srt.function_call.utils",
+    "sglang.srt.managers",
+    "sglang.srt.managers.io_struct",
     "sglang.srt.parser",
     "sglang.srt.parser.conversation",
+    "sglang.srt.parser.jinja_template_utils",
     "sglang.srt.parser.reasoning_parser",
+    "sglang.srt.sampling",
+    "sglang.srt.sampling.custom_logit_processor",
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
@@ -212,7 +231,7 @@ STUB_MODULES = [
     "vllm.outputs",
     "vllm.reasoning",
     "vllm.reasoning.mistral_reasoning_parser",
-    "vllm.reasoning.qwen3_reasoning_parser",
+    "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",
     "vllm.renderers.embed_utils",
     "vllm.sampling_params",
@@ -221,6 +240,7 @@ STUB_MODULES = [
     "vllm.tool_parsers",
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
+    "vllm.tool_parsers.qwen3_engine_tool_parser",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -228,6 +248,7 @@ STUB_MODULES = [
     "vllm.v1",
     "vllm.v1.core",
     "vllm.v1.core.kv_cache_utils",
+    "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.async_scheduler",
     "vllm.v1.core.sched.output",
@@ -240,6 +261,8 @@ STUB_MODULES = [
     "vllm.v1.metrics.loggers",
     "vllm.v1.metrics.stats",
     "vllm.v1.request",
+    "vllm.v1.sample",
+    "vllm.v1.sample.logits_processor",
     "msgspec",
     "msgspec.structs",
     "mistral_common",
@@ -251,8 +274,15 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
+    "aiconfigurator.generator",
+    "aiconfigurator.generator.naive",
     "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task",
+    "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.cli",
+    "aiconfigurator.cli.main",
+    "aiconfigurator_core.sdk",
+    "aiconfigurator_core.sdk.engine",
+    "aiconfigurator_core.sdk.memory",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -262,9 +292,20 @@ STUB_MODULES = [
     "blake3",
 ]
 
+# These APIs define the AIC 0.11 upper/core contract. The marker-report
+# environment may contain an older, otherwise importable AIC release, so force
+# stubs for these versioned modules during marker-only collection.
+FORCE_STUB_MODULES = {
+    "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.cli.main",
+    "aiconfigurator_core.sdk.engine",
+    "aiconfigurator_core.sdk.memory",
+}
+
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
+    os.path.join(os.getcwd(), "aisimulate", "src"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
@@ -388,9 +429,9 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
-    def ensure_available(self, module_name: str) -> ModuleType:
+    def ensure_available(self, module_name: str, *, force: bool = False) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        if module_name in sys.modules and not force:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -398,7 +439,7 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_stubbed:
+        if not force and not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
@@ -418,6 +459,11 @@ class DependencyStubber:
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
+        if "." in module_name:
+            parent_name, child_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, child_name, stub)
         return stub
 
 
@@ -580,8 +626,8 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src"],
-        help="Paths to test directories (default: tests components/src)",
+        default=["tests", "components/src", "aisimulate/tests"],
+        help="Paths to test directories (default: tests components/src aisimulate/tests)",
     )
     parser.add_argument(
         "--verbose",
@@ -600,7 +646,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module)
+            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:

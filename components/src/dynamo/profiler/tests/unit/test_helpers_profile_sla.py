@@ -8,6 +8,7 @@ profiling pipeline.  External I/O (DGD generation, deployment) is mocked
 where needed.
 """
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +29,7 @@ try:
         PlannerPreDeploymentSweepMode,
     )
     from dynamo.profiler.profile_sla import (
+        _check_dgdr_aic_support,
         _extract_profiler_params,
         _write_final_output,
     )
@@ -38,12 +40,14 @@ try:
     from dynamo.profiler.utils.dgd_generation import (
         add_profile_data_to_config,
         assemble_final_config,
+        enable_planner_worker_scaling_adapters,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
         MockerSpec,
+        ModelCacheSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -99,6 +103,65 @@ def _make_ops(tmp_path, **kwargs) -> ProfilerOperationalConfig:
         output_dir=str(tmp_path / "out"),
         **kwargs,
     )
+
+
+def test_aic_support_check_uses_local_pvc_config(tmp_path) -> None:
+    """Preflight support checks avoid Hugging Face when PVC config is present."""
+    local_dir = tmp_path / "model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+    dgdr = _make_dgdr(
+        backend="vllm",
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcMountPath=str(tmp_path),
+            pvcModelPath="model",
+        ),
+    )
+
+    with patch(
+        "dynamo.profiler.profile_sla.check_model_hardware_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "vllm", "h200_sxm")
+
+    mock_check.assert_called_once_with(str(local_dir), "h200_sxm", "vllm")
+
+
+def test_aic_support_check_auto_uses_local_pvc_config(tmp_path) -> None:
+    """Auto backend checks receive the resolved PVC model path."""
+    local_dir = tmp_path / "model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+    dgdr = _make_dgdr(
+        backend="auto",
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcMountPath=str(tmp_path),
+            pvcModelPath="model",
+        ),
+    )
+
+    with patch(
+        "dynamo.profiler.profile_sla._check_auto_backend_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "auto", "h200_sxm")
+
+    mock_check.assert_called_once_with(str(local_dir), "h200_sxm")
+
+
+def test_aic_support_check_without_pvc_uses_dgdr_model() -> None:
+    """Preflight falls back to the DGDR model when no PVC is configured."""
+    dgdr = _make_dgdr(backend="vllm")
+
+    with patch(
+        "dynamo.profiler.profile_sla.check_model_hardware_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "vllm", "h200_sxm")
+
+    mock_check.assert_called_once_with(dgdr.model, "h200_sxm", "vllm")
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +365,10 @@ class TestValidateDgdrDynamoFeatures:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_raises(self):
-        """Throughput scaling + rapid sweep + AIC unsupported is rejected."""
+    def test_planner_throughput_scaling_aic_unsupported_rapid_sweep_passes(
+        self, caplog
+    ):
+        """Throughput scaling + rapid sweep + AIC unsupported falls back."""
         dgdr = _make_dgdr(
             features=FeaturesSpec(
                 planner=_make_planner(
@@ -313,8 +378,10 @@ class TestValidateDgdrDynamoFeatures:
                 )
             )
         )
-        with pytest.raises(ValueError, match="AIC does not support"):
+        with caplog.at_level(logging.WARNING):
             validate_dgdr_dynamo_features(dgdr, aic_supported=False)
+        assert "AIC does not support" in caplog.text
+        assert "Rust perf shim fallback" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -466,6 +533,39 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
+        dgdr = _make_dgdr()
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            },
+        }
+
+        result = assemble_final_config(
+            dgdr,
+            ops,
+            dgd_config,
+            PickedParallelConfig(tp=1),
+            PickedParallelConfig(tp=1),
+            resolved_backend="trtllm",
+        )
+
+        args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        idx = args.index("--trtllm.enable_chunked_prefill")
+        assert args[idx + 1] == "true"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_none_dgd_config_passes_through_as_none(self, tmp_path):
         dgdr = _make_dgdr()
         ops = _make_ops(tmp_path)
@@ -479,6 +579,182 @@ class TestAssembleFinalConfig:
         )
 
         assert result is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_enables_scaling_adapter_on_worker_services(self, tmp_path):
+        """Planner-generated workers should be scaled through DGDSA."""
+        dgdr = _make_dgdr(features=FeaturesSpec(planner=_make_planner()))
+        ops = _make_ops(tmp_path)
+        os.makedirs(ops.output_dir, exist_ok=True)
+        dgd_config = {
+            "kind": "DGD",
+            "spec": {
+                "services": {
+                    "Frontend": {"componentType": "frontend", "replicas": 1},
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "replicas": 1,
+                    },
+                    "prefill": {
+                        "componentType": "worker",
+                        "subComponentType": "prefill",
+                        "replicas": 1,
+                    },
+                }
+            },
+        }
+        planner_cm = {"kind": "ConfigMap", "metadata": {"name": "planner-cm"}}
+
+        with patch(
+            f"{_DGD_GEN}.add_planner_to_config",
+            return_value=planner_cm,
+        ):
+            result = assemble_final_config(
+                dgdr,
+                ops,
+                dgd_config,
+                PickedParallelConfig(tp=1),
+                PickedParallelConfig(tp=1),
+            )
+
+        assert result == [planner_cm, dgd_config]
+        services = dgd_config["spec"]["services"]
+        assert services["decode"]["scalingAdapter"] == {"enabled": True}
+        assert services["prefill"]["scalingAdapter"] == {"enabled": True}
+        assert "scalingAdapter" not in services["Frontend"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_enable_planner_worker_scaling_adapters_updates_existing_config(self):
+        dgd_config = {
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "scalingAdapter": {"enabled": False},
+                    },
+                    "Planner": {"componentType": "planner"},
+                }
+            }
+        }
+
+        enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode="decode"))
+
+        assert dgd_config["spec"]["services"]["decode"]["scalingAdapter"] == {
+            "enabled": True,
+        }
+        assert "scalingAdapter" not in dgd_config["spec"]["services"]["Planner"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.parametrize(
+        ("mode", "enabled_services", "disabled_services"),
+        [
+            ("disagg", {"prefill", "decode"}, set()),
+            ("prefill", {"prefill"}, {"decode"}),
+            ("decode", {"decode"}, {"prefill"}),
+            ("agg", {"decode"}, {"prefill"}),
+        ],
+    )
+    def test_enable_planner_worker_scaling_adapters_honors_planner_mode(
+        self, mode, enabled_services, disabled_services
+    ):
+        dgd_config = {
+            "spec": {
+                "services": {
+                    "Frontend": {"componentType": "frontend"},
+                    "prefill": {
+                        "componentType": "worker",
+                        "subComponentType": "prefill",
+                    },
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                    },
+                }
+            }
+        }
+
+        enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode=mode))
+
+        services = dgd_config["spec"]["services"]
+        for service_name in enabled_services:
+            assert services[service_name]["scalingAdapter"] == {"enabled": True}
+        for service_name in disabled_services:
+            assert "scalingAdapter" not in services[service_name]
+        assert "scalingAdapter" not in services["Frontend"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_enable_planner_worker_scaling_adapters_uses_service_name_fallback(self):
+        dgd_config = {
+            "spec": {
+                "services": {
+                    "VllmPrefillWorker": {"componentType": "worker"},
+                    "VllmDecodeWorker": {"componentType": "worker"},
+                }
+            }
+        }
+
+        enable_planner_worker_scaling_adapters(
+            dgd_config, _make_planner(mode="prefill")
+        )
+
+        services = dgd_config["spec"]["services"]
+        assert services["VllmPrefillWorker"]["scalingAdapter"] == {"enabled": True}
+        assert services["VllmPrefillWorker"]["subComponentType"] == "prefill"
+        assert "scalingAdapter" not in services["VllmDecodeWorker"]
+        assert "subComponentType" not in services["VllmDecodeWorker"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_enable_planner_worker_scaling_adapters_handles_agg_worker(self):
+        dgd_config = {
+            "spec": {
+                "services": {
+                    "Frontend": {"componentType": "frontend"},
+                    "TRTLLMWorker": {"componentType": "worker"},
+                }
+            }
+        }
+
+        enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode="agg"))
+
+        assert dgd_config["spec"]["services"]["TRTLLMWorker"]["scalingAdapter"] == {
+            "enabled": True,
+        }
+        assert (
+            dgd_config["spec"]["services"]["TRTLLMWorker"]["subComponentType"]
+            == "decode"
+        )
+        assert "scalingAdapter" not in dgd_config["spec"]["services"]["Frontend"]
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_enable_planner_worker_scaling_adapters_skips_advisory_mode(self):
+        dgd_config = {
+            "spec": {
+                "services": {
+                    "prefill": {
+                        "componentType": "worker",
+                        "subComponentType": "prefill",
+                    },
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                    },
+                }
+            }
+        }
+
+        enable_planner_worker_scaling_adapters(
+            dgd_config, _make_planner(mode="disagg", advisory=True)
+        )
+
+        assert "scalingAdapter" not in dgd_config["spec"]["services"]["prefill"]
+        assert "scalingAdapter" not in dgd_config["spec"]["services"]["decode"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

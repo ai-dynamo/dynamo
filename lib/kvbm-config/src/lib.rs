@@ -443,10 +443,10 @@ mod tests {
 
     #[test]
     fn test_from_figment_with_empty_json() {
-        // Empty JSON object should not cause errors and should use env/defaults
-        // We just verify it doesn't fail - the actual values depend on environment
-        let config = KvbmConfig::from_figment_with_json("{}");
-        assert!(config.is_ok(), "Empty JSON should not cause errors");
+        temp_env::with_vars_unset(["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"], || {
+            let config = KvbmConfig::from_figment_with_json("{}");
+            assert!(config.is_ok(), "Empty JSON should not cause errors");
+        });
     }
 
     // ==================== Profile Selection Tests ====================
