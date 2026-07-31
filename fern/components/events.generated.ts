@@ -20,7 +20,9 @@ export interface DynamoEvent {
   addUrl: string;
 }
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [
+export const UPCOMING_EVENTS: DynamoEvent[] = [];
+
+export const PAST_EVENTS: DynamoEvent[] = [
   {
     "title": "Dynamo Afterhours",
     "start": "2026-07-31T01:00:00.000Z",
@@ -29,14 +31,11 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "year": "2026",
     "dateLabel": "Thu, Jul 30, 2026",
     "timeLabel": "6:00 PM",
-    "isPast": false,
+    "isPast": true,
     "location": "Luma",
     "locationUrl": "https://luma.com/JulyDynamoAfterHours",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours"
-  }
-];
-
-export const PAST_EVENTS: DynamoEvent[] = [
+  },
   {
     "title": "Dynamo community meeting",
     "start": "2026-07-29T17:30:00.000Z",
