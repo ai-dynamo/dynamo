@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Required by experimental KV router --router-prefill-load-model=aic.
+aiconfigurator-core==0.11.0.dev20260728
+
 # tritonclient<=2.62.0 requires grpcio<1.68 and protobuf<6.0dev; pin here so the
 # resolver picks compatible versions when installed alongside runtime deps.
 grpcio<1.68,>=1.63.0

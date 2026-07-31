@@ -756,7 +756,7 @@ mod cached_multimodal_uuid {
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": null}
+                    {"type": "image_url", "image_url": {"url": ""}}
                 ]
             }
         ]"#;

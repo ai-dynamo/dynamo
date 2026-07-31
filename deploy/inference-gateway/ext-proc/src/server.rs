@@ -13,12 +13,14 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
-use crate::picker::{Endpoint, EndpointPicker, PickError, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage};
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
@@ -46,6 +48,10 @@ struct RequestContext {
     incoming_model_name: String,
     target_model_name: String,
     request_id: String,
+    /// Booking id the picker returned from `pick()` for this stream's load
+    /// reservation (`None` if it booked nothing). Handed back to the lifecycle
+    /// callbacks so the picker frees the exact reservation — no shared map.
+    booking_id: Option<String>,
     request_size: usize,
     response_size: usize,
     response_complete: bool,
@@ -69,6 +75,12 @@ struct RequestContext {
     resp_header_resp: Option<ProcessingResponse>,
     resp_body_resp: Vec<ProcessingResponse>,
     resp_trailer_resp: Option<ProcessingResponse>,
+
+    /// Parsed response `usage`, passed to the picker on completion.
+    parsed_usage: Option<ResponseUsage>,
+
+    /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
+    sse_usage_buf: Vec<u8>,
 }
 
 impl RequestContext {
@@ -79,6 +91,7 @@ impl RequestContext {
             incoming_model_name: String::new(),
             target_model_name: String::new(),
             request_id: String::new(),
+            booking_id: None,
             request_size: 0,
             response_size: 0,
             response_complete: false,
@@ -95,6 +108,8 @@ impl RequestContext {
             resp_header_resp: None,
             resp_body_resp: Vec::new(),
             resp_trailer_resp: None,
+            parsed_usage: None,
+            sse_usage_buf: Vec::new(),
         }
     }
 
@@ -239,7 +254,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let req_info = RequestInfo {
             request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
-            body: vec![],
+            body: Bytes::new(),
             model: String::new(),
             candidate_subset: vec![],
         };
@@ -249,6 +264,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .await
             .map_err(ExtProcError::from_pick_error)?;
 
+        ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
@@ -263,18 +279,19 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     async fn handle_request_body(
         picker: &P,
         ctx: &mut RequestContext,
-        raw_body: &[u8],
+        raw_body: Bytes,
         endpoints: &[Endpoint],
     ) -> Result<(), ExtProcError> {
         ctx.request_size = raw_body.len();
 
-        let model = extract_model_from_body(raw_body);
+        let model = extract_model_from_body(&raw_body);
         let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
         let req_info = RequestInfo {
             request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
-            body: raw_body.to_vec(),
+            // Cheap refcount clone; the picker/renderer share this buffer.
+            body: raw_body.clone(),
             model: model.clone(),
             candidate_subset,
         };
@@ -285,6 +302,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .map_err(ExtProcError::from_pick_error)?;
 
         ctx.body_routed = true;
+        ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
@@ -310,8 +328,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         // Inject nvext.token_data into the request body JSON so the backend
         // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
-        let forwarded_body = if let Some(ref token_ids) = result.token_ids {
-            match inject_token_data(raw_body, token_ids) {
+        // Only the injection path allocates a new body; forwarding the unchanged
+        // body is a cheap `Bytes` clone (no copy).
+        let forwarded_body: Bytes = if let Some(ref token_ids) = result.token_ids {
+            match inject_token_data(&raw_body, token_ids) {
                 Ok(modified) => {
                     tracing::debug!(
                         token_count = token_ids.len(),
@@ -319,15 +339,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                         body_size_after = modified.len(),
                         "Injected nvext.token_data into request body"
                     );
-                    modified
+                    Bytes::from(modified)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
-                    raw_body.to_vec()
+                    raw_body.clone()
                 }
             }
         } else {
-            raw_body.to_vec()
+            raw_body.clone()
         };
 
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
@@ -364,6 +384,8 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.response_size += chunk.len();
 
         if ctx.model_server_streaming {
+            // Reassemble SSE across Envoy chunk boundaries before parsing usage.
+            ingest_streaming_usage(ctx, chunk, end_of_stream);
             if end_of_stream {
                 ctx.response_complete = true;
             }
@@ -376,6 +398,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 envoy_helpers::build_response_body_responses(&rewritten, end_of_stream, None);
         } else if end_of_stream {
             ctx.response_complete = true;
+            // Non-streaming: `chunk` is the fully buffered JSON body.
+            if let Some(usage) = parse_unary_usage(chunk) {
+                ctx.parsed_usage = Some(usage);
+            }
             let rewritten = envoy_helpers::rewrite_model_name(
                 chunk,
                 &ctx.target_model_name,
@@ -385,6 +411,116 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 envoy_helpers::build_response_body_responses(&rewritten, true, None);
         }
     }
+}
+
+/// Extract [`ResponseUsage`] from a JSON `usage` object.
+fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
+    let usage = value.get("usage")?;
+    if usage.is_null() {
+        return None;
+    }
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    Some(ResponseUsage {
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .and_then(serde_json::Value::as_u64),
+        completion_tokens: usage
+            .get("completion_tokens")
+            .and_then(serde_json::Value::as_u64),
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(serde_json::Value::as_u64),
+        cached_tokens,
+    })
+}
+
+/// Parse `usage` from a buffered non-streaming JSON body.
+fn parse_unary_usage(body: &[u8]) -> Option<ResponseUsage> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    usage_from_json(&value)
+}
+
+/// Buffer SSE bytes across chunks; parse complete lines, keep the incomplete suffix.
+fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream: bool) {
+    if end_of_stream {
+        if ctx.sse_usage_buf.is_empty() {
+            update_streaming_usage(ctx, chunk);
+        } else {
+            ctx.sse_usage_buf.extend_from_slice(chunk);
+            if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
+                ctx.parsed_usage = Some(usage);
+            }
+            ctx.sse_usage_buf.clear();
+        }
+        return;
+    }
+
+    let Some(complete_len) = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
+        buffer_incomplete_sse(&mut ctx.sse_usage_buf, chunk);
+        return;
+    };
+
+    if ctx.sse_usage_buf.is_empty() {
+        update_streaming_usage(ctx, &chunk[..complete_len]);
+    } else {
+        ctx.sse_usage_buf.extend_from_slice(&chunk[..complete_len]);
+        if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
+            ctx.parsed_usage = Some(usage);
+        }
+        ctx.sse_usage_buf.clear();
+    }
+    buffer_incomplete_sse(&mut ctx.sse_usage_buf, &chunk[complete_len..]);
+}
+
+fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
+    if let Some(usage) = parse_streaming_usage(complete) {
+        ctx.parsed_usage = Some(usage);
+    }
+}
+
+/// Append an incomplete SSE line, bounding memory. A `usage` event is small, so
+/// a partial line larger than the cap can't be one; drop it (self-corrects once
+/// the next newline lands).
+fn buffer_incomplete_sse(buf: &mut Vec<u8>, bytes: &[u8]) {
+    const MAX_SSE_USAGE_BUF: usize = 64 * 1024;
+    if buf.len() + bytes.len() > MAX_SSE_USAGE_BUF {
+        buf.clear();
+        return;
+    }
+    buf.extend_from_slice(bytes);
+}
+
+/// Parse `usage` from complete SSE `data:` lines (last wins).
+fn parse_streaming_usage(chunk: &[u8]) -> Option<ResponseUsage> {
+    // Skip JSON work unless the terminal `"usage"` field is present.
+    const USAGE_FIELD: &str = "\"usage\"";
+    if !chunk
+        .windows(USAGE_FIELD.len())
+        .any(|window| window == USAGE_FIELD.as_bytes())
+    {
+        return None;
+    }
+    let text = std::str::from_utf8(chunk).ok()?;
+    let mut latest = None;
+    for line in text.lines() {
+        let line = line.trim_start();
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload.is_empty() || payload == "[DONE]" || !payload.contains(USAGE_FIELD) {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
+            && let Some(usage) = usage_from_json(&value)
+        {
+            latest = Some(usage);
+        }
+    }
+    latest
 }
 
 #[tonic::async_trait]
@@ -437,17 +573,30 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             );
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
-                            if hdr.end_of_stream
-                                && let Err(e) = ExtProcServer::handle_header_only_request(
-                                    &*picker,
-                                    &mut ctx,
-                                    &[],
-                                )
-                                .await
-                            {
-                                let resp = e.into_processing_response();
-                                let _ = tx.send(Ok(resp)).await;
-                                return Ok(());
+                            if hdr.end_of_stream {
+                                // Same cancellation race as the body path below:
+                                // if the stream closes while the header-only pick
+                                // is queued, drop the pick future to cancel it.
+                                let routed = tokio::select! {
+                                    biased;
+                                    _ = tx.closed() => {
+                                        tracing::debug!(
+                                            request_id = %ctx.request_id,
+                                            "ext_proc stream closed during selection; cancelling"
+                                        );
+                                        return Ok(());
+                                    }
+                                    result = ExtProcServer::handle_header_only_request(
+                                        &*picker,
+                                        &mut ctx,
+                                        &[],
+                                    ) => result,
+                                };
+                                if let Err(e) = routed {
+                                    let resp = e.into_processing_response();
+                                    let _ = tx.send(Ok(resp)).await;
+                                    return Ok(());
+                                }
                             }
                         }
                         Some(processing_request::Request::RequestBody(ref body)) => {
@@ -459,15 +608,35 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {
-                                let raw_body = std::mem::take(&mut body_buf);
-                                if let Err(e) = ExtProcServer::handle_request_body(
-                                    &*picker,
-                                    &mut ctx,
-                                    &raw_body,
-                                    &[],
-                                )
-                                .await
-                                {
+                                // Freeze the accumulated body once into `Bytes`
+                                // (moves the Vec, no copy); downstream sharing is
+                                // by cheap refcount clone.
+                                let raw_body = Bytes::from(std::mem::take(&mut body_buf));
+                                // Race selection against the client dropping the
+                                // stream. If Envoy closes it while `pick()` is
+                                // queued in the selector, dropping the pick future
+                                // closes the scheduler's response receiver, so the
+                                // queued request is cancelled (its capacity
+                                // reservation is skipped/released) instead of
+                                // booking for a request that is already gone.
+                                // Biased: check closure before polling the pick.
+                                let routed = tokio::select! {
+                                    biased;
+                                    _ = tx.closed() => {
+                                        tracing::debug!(
+                                            request_id = %ctx.request_id,
+                                            "ext_proc stream closed during selection; cancelling"
+                                        );
+                                        return Ok(());
+                                    }
+                                    result = ExtProcServer::handle_request_body(
+                                        &*picker,
+                                        &mut ctx,
+                                        raw_body,
+                                        &[],
+                                    ) => result,
+                                };
+                                if let Err(e) = routed {
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -492,7 +661,23 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
-                                picker.on_prefill_complete(&ctx.request_id).await;
+                                // Hand back the picker's own booking id (falls
+                                // back to request_id if it booked nothing).
+                                let booking_id = ctx
+                                    .booking_id
+                                    .clone()
+                                    .unwrap_or_else(|| ctx.request_id.clone());
+                                // Detach: prefill-completion is idempotent,
+                                // best-effort load bookkeeping. Awaiting it inline
+                                // would gate first-token forwarding on the router's
+                                // admission actor (an unbounded, untimed send+ack
+                                // when queueing is enabled) — a TTFT stall. Spawn it
+                                // so the token forwards immediately; the callback
+                                // logs its own errors.
+                                let picker = picker.clone();
+                                tokio::spawn(async move {
+                                    picker.on_prefill_complete(&booking_id).await;
+                                });
                             }
 
                             // TODO(epp-output-tracking): Parse generated-token progress and
@@ -556,7 +741,17 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // Notify the picker that this request is complete so it can free router
             // bookkeeping state (mirrors Go EPP PostResponse).
             if ctx.body_routed && !ctx.request_id.is_empty() {
-                picker.on_request_complete(&ctx.request_id).await;
+                let booking_id = ctx
+                    .booking_id
+                    .clone()
+                    .unwrap_or_else(|| ctx.request_id.clone());
+                let usage = ctx.parsed_usage.take();
+                if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
+                    crate::metrics::observe_cached_tokens(cached_tokens);
+                }
+                picker
+                    .on_request_complete_with_usage(&booking_id, usage)
+                    .await;
             }
         });
 
@@ -569,10 +764,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // ---------------------------------------------------------------------------
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
-/// contract this EPP requires.
+/// contract this EPP requires: `FULL_DUPLEX_STREAMED` on both body
+/// directions plus `send_body_without_waiting_for_header_response`.
 ///
-/// We build the `RequestHeaders` response only after receiving the request
-/// body, because:
+/// **Request direction.** We build the `RequestHeaders` response only after
+/// receiving the request body, because:
 ///   * The body holds the chat-completion prompt.
 ///   * We tokenize it.
 ///   * We feed those tokens to the KV-aware router to choose a worker.
@@ -586,9 +782,24 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 /// we wait for body chunks before producing the header response, which
 /// silently deadlocks until the ext_proc timeout fires.
 ///
+/// **Response direction.** `response_body_mode` defaults to `NONE` in Envoy,
+/// which delivers no `ResponseBody` messages at all. Three behaviours depend
+/// on receiving them, and all three fail silently under `NONE`:
+///   * `on_prefill_complete` fires on the first non-empty body chunk, so
+///     disaggregated prefill bookkeeping would stay held for the whole stream.
+///   * Token usage (`cached_tokens`) is parsed out of the terminal chunk.
+///   * Model-name rewriting mutates body bytes on their way to the client.
+///
+/// Streaming the response also requires `FULL_DUPLEX_STREAMED` specifically:
+/// the buffering modes hold the whole body before handing it over, which
+/// would break SSE token streaming. This matches the llm-d router, which
+/// documents `FULL_DUPLEX_STREAMED` as the only supported mode for both
+/// directions.
+///
 /// Failing fast with `Status::failed_precondition` here turns a multi-second
-/// hidden timeout into an immediate, self-explaining error visible in Envoy
-/// logs the first time the EPP is wired up behind a misconfigured gateway.
+/// hidden timeout (or silently absent telemetry) into an immediate,
+/// self-explaining error visible in Envoy logs the first time the EPP is
+/// wired up behind a misconfigured gateway.
 ///
 /// Older Envoy versions (pre-1.32) do not send `ProtocolConfiguration`; in
 /// that case the caller skips this validation entirely and trusts the
@@ -603,23 +814,27 @@ fn validate_protocol_config(
     use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
     let request_mode = BodySendMode::try_from(pc.request_body_mode).ok();
-    let mode_ok = matches!(request_mode, Some(BodySendMode::FullDuplexStreamed));
+    let response_mode = BodySendMode::try_from(pc.response_body_mode).ok();
+    let full_duplex = Some(BodySendMode::FullDuplexStreamed);
     let flag_ok = pc.send_body_without_waiting_for_header_response;
 
-    if mode_ok && flag_ok {
+    if request_mode == full_duplex && response_mode == full_duplex && flag_ok {
         return Ok(());
     }
 
     let detail = format!(
-        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED \
-         and send_body_without_waiting_for_header_response=true; got \
-         request_body_mode={:?}, send_body_without_waiting_for_header_response={}. \
+        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED, \
+         response_body_mode=FULL_DUPLEX_STREAMED and \
+         send_body_without_waiting_for_header_response=true; got \
+         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}, \
+         send_body_without_waiting_for_header_response={flag_ok}. \
          The Rust EPP defers its RequestHeaders response until after it has tokenized \
-         the body and selected a worker, so any other mode deadlocks Envoy.",
-        request_mode, flag_ok,
+         the body and selected a worker, and it reads response bodies to signal prefill \
+         completion, parse token usage, and rewrite the model name."
     );
     tracing::error!(
         request_body_mode = pc.request_body_mode,
+        response_body_mode = pc.response_body_mode,
         send_body_without_waiting = flag_ok,
         "ProtocolConfiguration mismatch — failing stream"
     );
@@ -734,6 +949,27 @@ impl ExtProcError {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
+            // Upstream tokenizer failures are not client errors: preserve their
+            // semantics so clients retry appropriately. `e.to_string()` is the
+            // client-safe variant message; the detailed cause is logged upstream.
+            PickError::TokenizerUnavailable => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::TokenizerTimeout => Self {
+                status_code: StatusCode::GatewayTimeout,
+                message: e.to_string(),
+            },
+            PickError::TokenizerUpstreamError => Self {
+                status_code: StatusCode::BadGateway,
+                message: e.to_string(),
+            },
+            // In-flight limit saturated: shed as retryable backpressure. The
+            // variant message ("endpoint picker overloaded") is client-safe.
+            PickError::Overloaded => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
         }
     }
 
@@ -745,7 +981,12 @@ impl ExtProcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
 
     use crate::picker::{PickError, PickResult};
     use crate::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
@@ -754,30 +995,268 @@ mod tests {
         external_processor_client::ExternalProcessorClient, processing_request::Request as ProcReq,
     };
 
+    fn protocol_config(
+        request_body_mode: i32,
+        response_body_mode: i32,
+        send_body_without_waiting_for_header_response: bool,
+    ) -> crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration {
+        crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration {
+            request_body_mode,
+            response_body_mode,
+            send_body_without_waiting_for_header_response,
+        }
+    }
+
+    #[test]
+    fn protocol_config_accepts_full_duplex_on_both_directions() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        assert!(validate_protocol_config(&protocol_config(full_duplex, full_duplex, true)).is_ok());
+    }
+
+    #[test]
+    fn protocol_config_rejects_response_body_mode_none() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        // Envoy's default. Without response bodies the EPP never signals
+        // prefill completion, parses usage, or rewrites the model name.
+        let err = validate_protocol_config(&protocol_config(
+            BodySendMode::FullDuplexStreamed as i32,
+            BodySendMode::None as i32,
+            true,
+        ))
+        .expect_err("response_body_mode=NONE must be rejected");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("response_body_mode"));
+    }
+
+    #[test]
+    fn protocol_config_rejects_buffered_response_body_mode() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        // Buffering holds the whole body, which would break SSE streaming.
+        let err = validate_protocol_config(&protocol_config(
+            BodySendMode::FullDuplexStreamed as i32,
+            BodySendMode::Buffered as i32,
+            true,
+        ))
+        .expect_err("response_body_mode=BUFFERED must be rejected");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn protocol_config_still_rejects_request_side_misconfiguration() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        assert!(
+            validate_protocol_config(&protocol_config(
+                BodySendMode::Streamed as i32,
+                full_duplex,
+                true
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_unary_usage_extracts_cached_tokens() {
+        let body = br#"{
+            "id": "cmpl-1",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 64}
+            }
+        }"#;
+        let usage = parse_unary_usage(body).expect("usage present");
+        assert_eq!(usage.prompt_tokens, Some(100));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(120));
+        assert_eq!(usage.cached_tokens, Some(64));
+    }
+
+    #[test]
+    fn parse_unary_usage_without_details_has_no_cached_tokens() {
+        let body = br#"{"usage": {"prompt_tokens": 10, "total_tokens": 10}}"#;
+        let usage = parse_unary_usage(body).expect("usage present");
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.cached_tokens, None);
+    }
+
+    #[test]
+    fn parse_unary_usage_none_when_absent_or_invalid() {
+        assert!(parse_unary_usage(br#"{"choices": []}"#).is_none());
+        assert!(parse_unary_usage(br#"{"usage": null}"#).is_none());
+        assert!(parse_unary_usage(b"not json").is_none());
+    }
+
+    #[test]
+    fn parse_streaming_usage_returns_last_event_with_usage() {
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let usage = parse_streaming_usage(chunk.as_bytes()).expect("usage present");
+        assert_eq!(usage.total_tokens, Some(10));
+        assert_eq!(usage.cached_tokens, Some(4));
+    }
+
+    #[test]
+    fn parse_streaming_usage_none_without_usage_event() {
+        let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        assert!(parse_streaming_usage(chunk.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_does_not_buffer_complete_chunks() {
+        let mut ctx = RequestContext::new();
+        let chunk = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+
+        ingest_streaming_usage(&mut ctx, chunk, false);
+
+        assert!(ctx.sse_usage_buf.is_empty());
+        assert!(ctx.parsed_usage.is_none());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_survives_split_data_event() {
+        let mut ctx = RequestContext::new();
+        let part1 = br#"data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":"#;
+        let part2 = br#"4}}}"#;
+        let part3 = b"\n\ndata: [DONE]\n\n";
+
+        ingest_streaming_usage(&mut ctx, part1, false);
+        assert!(ctx.parsed_usage.is_none());
+        assert!(!ctx.sse_usage_buf.is_empty());
+
+        ingest_streaming_usage(&mut ctx, part2, false);
+        assert!(ctx.parsed_usage.is_none());
+        assert!(!ctx.sse_usage_buf.is_empty());
+
+        ingest_streaming_usage(&mut ctx, part3, true);
+        let usage = ctx.parsed_usage.expect("usage across split chunks");
+        assert_eq!(usage.total_tokens, Some(10));
+        assert_eq!(usage.cached_tokens, Some(4));
+        assert!(ctx.sse_usage_buf.is_empty());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_keeps_incomplete_suffix_only() {
+        let mut ctx = RequestContext::new();
+        let chunk = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
+        );
+        ingest_streaming_usage(&mut ctx, chunk.as_bytes(), false);
+        assert!(ctx.parsed_usage.is_none());
+        assert_eq!(
+            std::str::from_utf8(&ctx.sse_usage_buf).unwrap(),
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1"
+        );
+
+        ingest_streaming_usage(&mut ctx, b"}}}\n\n", true);
+        let usage = ctx.parsed_usage.expect("usage after completing suffix");
+        assert_eq!(usage.cached_tokens, Some(1));
+        assert!(ctx.sse_usage_buf.is_empty());
+    }
+
+    #[test]
+    fn ingest_streaming_usage_bounds_incomplete_buffer() {
+        let mut ctx = RequestContext::new();
+        // A very long newline-less run must not grow the buffer unboundedly.
+        let huge = vec![b'x'; 128 * 1024];
+        ingest_streaming_usage(&mut ctx, &huge, false);
+        assert!(ctx.sse_usage_buf.len() <= 64 * 1024);
+
+        // Once a real usage event completes afterward, it is still parsed.
+        let tail = concat!(
+            "\n\n",
+            "data: {\"choices\":[],\"usage\":{\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n"
+        );
+        ingest_streaming_usage(&mut ctx, tail.as_bytes(), true);
+        let usage = ctx.parsed_usage.expect("usage after oversized run");
+        assert_eq!(usage.cached_tokens, Some(4));
+    }
+
+    /// RAII probe that records, on drop, that a `pick` future was torn down. A
+    /// blocked `pick` that never resolves only drops when the server cancels it,
+    /// so this observes the disconnect-cancellation path.
+    struct CancelProbe(Arc<AtomicBool>);
+    impl Drop for CancelProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Mock `EndpointPicker` with per-callback counters. Extended beyond the
+    /// simple 3-counter form to support the reservation-lifecycle tests:
+    ///
+    /// * `mint_reservations` makes `pick` return a fresh, distinct
+    ///   `reservation_id` per call and records the booking ids handed back to the
+    ///   lifecycle callbacks, so a test can prove each stream frees its own
+    ///   booking (keyed by the EPP-minted id, not `x-request-id`).
+    /// * `block` makes `pick` park until cancelled, so a test can close the
+    ///   stream while a pick is in flight and observe the server cancel it.
     struct Tracker {
         add: AtomicU32,
         prefill_complete: AtomicU32,
         free: AtomicU32,
         disagg: bool,
+        /// When true, `pick` mints `res-{n}` reservation ids.
+        mint_reservations: bool,
+        next_reservation: AtomicU32,
+        /// Booking ids passed to `on_request_complete` / `on_prefill_complete`.
+        freed: Mutex<Vec<String>>,
+        prefilled: Mutex<Vec<String>>,
+        /// When set, `pick` waits on this (never-notified) `Notify`, so it only
+        /// resolves by being dropped (cancelled).
+        block: Option<Arc<Notify>>,
+        /// Notified once `pick` has entered its blocking wait.
+        pick_started: Arc<Notify>,
+        /// Set when a blocked `pick` future is dropped (cancelled).
+        pick_cancelled: Arc<AtomicBool>,
     }
 
-    // Tracker is a mock EndpointPicker with 3 atomic counters, one per bookkeeping call. Each trait method just increments its counter.
     impl Tracker {
-        fn agg() -> Self {
+        fn new(disagg: bool) -> Self {
             Self {
                 add: 0.into(),
                 prefill_complete: 0.into(),
                 free: 0.into(),
-                disagg: false,
+                disagg,
+                mint_reservations: false,
+                next_reservation: 0.into(),
+                freed: Mutex::new(Vec::new()),
+                prefilled: Mutex::new(Vec::new()),
+                block: None,
+                pick_started: Arc::new(Notify::new()),
+                pick_cancelled: Arc::new(AtomicBool::new(false)),
             }
         }
+        fn agg() -> Self {
+            Self::new(false)
+        }
         fn disagg() -> Self {
-            Self {
-                add: 0.into(),
-                prefill_complete: 0.into(),
-                free: 0.into(),
-                disagg: true,
-            }
+            Self::new(true)
+        }
+        /// Mint a distinct `reservation_id` per `pick`, so bookings are keyed by
+        /// the picker's id rather than the request's `x-request-id`.
+        fn minting(mut self) -> Self {
+            self.mint_reservations = true;
+            self
+        }
+        /// Park `pick` on `block` until its future is dropped (cancelled).
+        fn blocking(mut self, block: Arc<Notify>) -> Self {
+            self.block = Some(block);
+            self
         }
     }
 
@@ -785,22 +1264,36 @@ mod tests {
     impl EndpointPicker for Tracker {
         async fn pick(&self, _: &RequestInfo, _: &[Endpoint]) -> Result<PickResult, PickError> {
             self.add.fetch_add(1, Ordering::SeqCst);
+            if let Some(block) = &self.block {
+                // Signal that the pick is in flight, then park until cancelled.
+                // The probe records the cancellation when this future is dropped.
+                let _probe = CancelProbe(self.pick_cancelled.clone());
+                self.pick_started.notify_one();
+                block.notified().await;
+            }
             let mode = if self.disagg {
                 "disaggregated"
             } else {
                 "aggregated"
             };
+            let reservation_id = self.mint_reservations.then(|| {
+                let n = self.next_reservation.fetch_add(1, Ordering::SeqCst);
+                format!("res-{n}")
+            });
             Ok(PickResult {
                 endpoint: "1.2.3.4:80".into(),
                 headers: vec![("x-dynamo-routing-mode".into(), mode.into())],
+                reservation_id,
                 ..Default::default()
             })
         }
-        async fn on_prefill_complete(&self, _: &str) {
+        async fn on_prefill_complete(&self, booking_id: &str) {
             self.prefill_complete.fetch_add(1, Ordering::SeqCst);
+            self.prefilled.lock().unwrap().push(booking_id.to_string());
         }
-        async fn on_request_complete(&self, _: &str) {
+        async fn on_request_complete(&self, booking_id: &str) {
             self.free.fetch_add(1, Ordering::SeqCst);
+            self.freed.lock().unwrap().push(booking_id.to_string());
         }
     }
 
@@ -825,13 +1318,19 @@ mod tests {
     }
 
     fn stream() -> Vec<ProcessingRequest> {
+        stream_with_request_id("r1")
+    }
+
+    /// A full request/response stream carrying an explicit `x-request-id`, so
+    /// tests can drive two streams that share the same client-controlled id.
+    fn stream_with_request_id(request_id: &str) -> Vec<ProcessingRequest> {
         vec![
             ProcessingRequest {
                 request: Some(ProcReq::RequestHeaders(HttpHeaders {
                     headers: Some(HeaderMap {
                         headers: vec![HeaderValue {
                             key: "x-request-id".into(),
-                            value: "r1".into(),
+                            value: request_id.into(),
                             raw_value: vec![],
                         }],
                     }),
@@ -863,6 +1362,34 @@ mod tests {
             ProcessingRequest {
                 request: Some(ProcReq::ResponseBody(HttpBody {
                     body: b"}".to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// Just the request headers + end-of-stream body, with no response phase, so
+    /// the picker's `pick` is invoked and left in flight (used to drive the
+    /// disconnect-cancellation path).
+    fn request_only_stream(request_id: &str) -> Vec<ProcessingRequest> {
+        vec![
+            ProcessingRequest {
+                request: Some(ProcReq::RequestHeaders(HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: vec![HeaderValue {
+                            key: "x-request-id".into(),
+                            value: request_id.into(),
+                            raw_value: vec![],
+                        }],
+                    }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::RequestBody(HttpBody {
+                    body: br#"{"model":"m","messages":[]}"#.to_vec(),
                     end_of_stream: true,
                 })),
                 ..Default::default()
@@ -934,6 +1461,15 @@ mod tests {
         for tracker in [Tracker::agg(), Tracker::disagg()] {
             let tracker = Arc::new(tracker);
             run(&mut connect(tracker.clone()).await).await;
+            // `on_prefill_complete` is dispatched off-path (a detached task) so it
+            // can't stall first-token forwarding, so wait for it to land.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tracker.prefill_complete.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("on_prefill_complete should fire");
             assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
         }
     }
@@ -954,5 +1490,106 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
         assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 0);
         assert_eq!(t.free.load(Ordering::SeqCst), 0);
+    }
+
+    /// Item 4 (queued disconnect / cancellation): when the ext-proc stream closes
+    /// while a `pick` is still in flight, the server's biased `select!` on
+    /// `tx.closed()` must drop the pick future (cancelling it) instead of
+    /// blocking on it, and it must not run the completion callback for a booking
+    /// that was never adopted (no leak).
+    #[tokio::test]
+    async fn test_queued_pick_is_cancelled_when_stream_closes() {
+        // `block` is never notified, so `pick` only resolves by being dropped.
+        let block = Arc::new(Notify::new());
+        let t = Arc::new(Tracker::agg().blocking(block));
+        let mut c = connect(t.clone()).await;
+
+        // Send headers + body(eos); the request stream then half-closes, and the
+        // server enters the pick and parks awaiting the (blocked) result.
+        let response = c
+            .process(tokio_stream::iter(request_only_stream("r1")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Wait until the pick is actually in flight before disconnecting.
+        tokio::time::timeout(Duration::from_secs(5), t.pick_started.notified())
+            .await
+            .expect("pick should start");
+
+        // Client goes away: dropping the response stream and the client tears down
+        // the gRPC call, which the biased `select!` observes as `tx.closed()`.
+        drop(response);
+        drop(c);
+
+        // The server must promptly cancel the in-flight pick (drop its future).
+        let cancelled = tokio::time::timeout(Duration::from_secs(5), async {
+            while !t.pick_cancelled.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            cancelled.is_ok(),
+            "server must cancel the in-flight pick on stream close (no hang)"
+        );
+
+        // No booking was adopted, so no lifecycle callback leaks.
+        assert_eq!(
+            t.free.load(Ordering::SeqCst),
+            0,
+            "a cancelled pick must not trigger on_request_complete"
+        );
+        assert_eq!(
+            t.prefill_complete.load(Ordering::SeqCst),
+            0,
+            "a cancelled pick must not trigger on_prefill_complete"
+        );
+    }
+
+    /// Item 6 (duplicate `x-request-id` isolation): two concurrent streams that
+    /// reuse the same client-controlled `x-request-id` must each free only their
+    /// own booking. Bookings are keyed by the EPP-minted `reservation_id` carried
+    /// on the per-stream context, so the picker sees two distinct booking ids
+    /// freed — never the shared `x-request-id`, and never one stream freeing the
+    /// other's reservation.
+    #[tokio::test]
+    async fn test_duplicate_request_id_streams_free_their_own_bookings() {
+        let t = Arc::new(Tracker::agg().minting());
+
+        // Run both streams concurrently, both carrying x-request-id "dup".
+        let (mut c1, mut c2) = tokio::join!(connect(t.clone()), connect(t.clone()));
+        tokio::join!(
+            run_stream(&mut c1, stream_with_request_id("dup")),
+            run_stream(&mut c2, stream_with_request_id("dup")),
+        );
+
+        let freed = t.freed.lock().unwrap().clone();
+        assert_eq!(freed.len(), 2, "each stream completes and frees once");
+        assert!(
+            freed.iter().all(|id| id != "dup"),
+            "bookings are freed by the minted reservation_id, not the shared x-request-id"
+        );
+        let unique: HashSet<&String> = freed.iter().collect();
+        assert_eq!(
+            unique.len(),
+            2,
+            "each stream frees its own distinct booking (no cross-free)"
+        );
+
+        // Prefill completion is likewise keyed per-stream: two distinct ids.
+        let prefilled = t.prefilled.lock().unwrap().clone();
+        assert_eq!(prefilled.len(), 2);
+        let unique_prefilled: HashSet<&String> = prefilled.iter().collect();
+        assert_eq!(unique_prefilled, unique);
+    }
+
+    /// A shed `PickError::Overloaded` maps to a retryable 503 (not a 4xx), so
+    /// clients back off and retry rather than treating the load-shed as their
+    /// own error.
+    #[test]
+    fn overloaded_pick_error_maps_to_503() {
+        let err = ExtProcError::from_pick_error(PickError::Overloaded);
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
     }
 }

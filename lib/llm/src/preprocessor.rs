@@ -24,14 +24,17 @@ use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
-use dynamo_renderer::OAIPromptFormatter;
+use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
 use dynamo_runtime::config::is_truthy;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use either::Either;
 use futures::Stream;
 use futures::stream::{self, StreamExt};
+use std::borrow::Cow;
 use std::time::Instant;
 
 use dynamo_runtime::dynamo_nvtx_range;
@@ -107,6 +110,110 @@ fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
         .into()
 }
 
+fn tool_content_part_as_user(
+    part: &ChatCompletionRequestToolMessageContentPart,
+) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
+    Cow::Owned(match part {
+        ChatCompletionRequestToolMessageContentPart::Text(part) => {
+            ChatCompletionRequestUserMessageContentPart::Text(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => {
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(part.clone())
+        }
+    })
+}
+
+enum MultimodalContentPart<'a> {
+    User(&'a ChatCompletionRequestUserMessageContentPart),
+    Tool(&'a ChatCompletionRequestToolMessageContentPart),
+}
+
+impl<'a> MultimodalContentPart<'a> {
+    fn as_user(&self) -> Cow<'a, ChatCompletionRequestUserMessageContentPart> {
+        match self {
+            Self::User(part) => Cow::Borrowed(part),
+            Self::Tool(part) => tool_content_part_as_user(part),
+        }
+    }
+
+    fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
+        match self {
+            Self::User(part) => match *part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => Some((
+                    "image_url",
+                    part.image_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => Some((
+                    "video_url",
+                    part.video_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => Some((
+                    "audio_url",
+                    part.audio_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                _ => None,
+            },
+            Self::Tool(part) => match *part {
+                ChatCompletionRequestToolMessageContentPart::ImageUrl(part) => Some((
+                    "image_url",
+                    part.image_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestToolMessageContentPart::VideoUrl(part) => Some((
+                    "video_url",
+                    part.video_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => Some((
+                    "audio_url",
+                    part.audio_url.as_ref().map(|media| media.url.clone()),
+                    part.uuid.clone(),
+                )),
+                _ => None,
+            },
+        }
+    }
+}
+
+fn multimodal_content_parts(
+    message: &ChatCompletionRequestMessage,
+) -> Option<impl Iterator<Item = MultimodalContentPart<'_>>> {
+    match message {
+        ChatCompletionRequestMessage::User(user) => match &user.content {
+            ChatCompletionRequestUserMessageContent::Array(parts) => {
+                Some(Either::Left(parts.iter().map(MultimodalContentPart::User)))
+            }
+            ChatCompletionRequestUserMessageContent::Text(_) => None,
+        },
+        ChatCompletionRequestMessage::Tool(tool) => match &tool.content {
+            ChatCompletionRequestToolMessageContent::Array(parts) => {
+                Some(Either::Right(parts.iter().map(MultimodalContentPart::Tool)))
+            }
+            ChatCompletionRequestToolMessageContent::Text(_) => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(feature = "mm-routing")]
+fn image_content_part_url(
+    content_part: &ChatCompletionRequestUserMessageContentPart,
+) -> Option<&str> {
+    let ChatCompletionRequestUserMessageContentPart::ImageUrl(part) = content_part else {
+        return None;
+    };
+    part.image_url.as_ref().map(|image| image.url.as_str())
+}
+
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
 /// `encoding_format=base64` spec: the raw little-endian byte
 /// representation of each `f32` is concatenated and the resulting byte
@@ -122,6 +229,7 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
+const DEFAULT_THINKING_MODE_RUNTIME_KEY: &str = "default_thinking_mode";
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -199,9 +307,7 @@ pub struct MmImageEntry {
 struct MediaFetchTask<'a> {
     modality: &'static str,
     slot_idx: usize,
-    #[cfg(feature = "mm-routing")]
-    source_url: &'a str,
-    content_part: &'a ChatCompletionRequestUserMessageContentPart,
+    content_part: Cow<'a, ChatCompletionRequestUserMessageContentPart>,
 }
 
 /// Per-request media content-part counts, carried to the metrics annotation.
@@ -571,6 +677,67 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn has_request_thinking_control(
+        chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        chat_template_args.is_some_and(|args| {
+            [
+                "thinking",
+                "enable_thinking",
+                "thinking_mode",
+                "reasoning_effort",
+            ]
+            .iter()
+            .any(|key| args.contains_key(*key))
+        })
+    }
+
+    fn apply_default_thinking_mode_from_runtime_config(
+        runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+        request: &mut NvCreateChatCompletionRequest,
+    ) {
+        if request.thinking.is_some()
+            || Self::has_request_thinking_control(request.chat_template_args.as_ref())
+        {
+            return;
+        }
+
+        let Some(default_mode) = runtime_config
+            .runtime_data
+            .get(DEFAULT_THINKING_MODE_RUNTIME_KEY)
+            .and_then(|value| value.as_str())
+        else {
+            return;
+        };
+
+        let enabled = match default_mode {
+            "enabled" => true,
+            "disabled" => false,
+            other => {
+                tracing::warn!(
+                    default_thinking_mode = other,
+                    "Ignoring invalid runtime_config default_thinking_mode; expected 'enabled' or 'disabled'"
+                );
+                return;
+            }
+        };
+
+        let args = request.chat_template_args.get_or_insert_with(HashMap::new);
+        args.insert("thinking".to_string(), serde_json::Value::Bool(enabled));
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(enabled),
+        );
+        args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String(if enabled { "enabled" } else { "disabled" }.to_string()),
+        );
+    }
+
+    fn apply_default_thinking_mode(&self, request: &mut NvCreateChatCompletionRequest) {
+        Self::apply_default_thinking_mode_from_runtime_config(&self.runtime_config, request);
+    }
+
     fn guided_output_requires_reasoning<R: OAIChatLikeRequest>(
         request: &R,
         reasoning_parser: Option<&str>,
@@ -627,7 +794,7 @@ impl OpenAIPreprocessor {
             Some("qwen3" | "glm45" | "nemotron_nano" | "nemotron3" | "nemotron_v3") => {
                 thinking_enabled != Some(false)
             }
-            Some("kimi_k25") => thinking_enabled != Some(false),
+            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => thinking_enabled != Some(false),
             Some("minimax_m2") => {
                 Self::deepseek_renderer_reasoning_enabled(chat_template_args, true)
             }
@@ -707,7 +874,9 @@ impl OpenAIPreprocessor {
                 }
                 None
             })
-            .or_else(|| matches!(reasoning_parser, Some("kimi_k25")).then_some(true));
+            .or_else(|| {
+                matches!(reasoning_parser, Some("kimi_k25" | "kimi_k3" | "kimi-k3")).then_some(true)
+            });
 
         let Some(normalized) = normalized else {
             return;
@@ -717,6 +886,38 @@ impl OpenAIPreprocessor {
         args.insert(
             "enable_thinking".to_string(),
             serde_json::Value::Bool(normalized),
+        );
+    }
+
+    /// Apply Moonshot's named-tool exception for Kimi K3.
+    ///
+    /// The public K3 API treats a specified function as incompatible with
+    /// thinking. Normalize that rule onto the request before prompt rendering
+    /// so every downstream consumer observes the same effective mode:
+    ///
+    /// - the K3 renderer omits current and preserved thinking channels,
+    /// - prompt-injected reasoning detection stays false,
+    /// - backend reasoning-parser kwargs carry the disabled state, and
+    /// - response postprocessing does not try to parse a reasoning stream.
+    fn normalize_kimi_k3_named_tool_choice(
+        request: &mut NvCreateChatCompletionRequest,
+        tool_call_parser: Option<&str>,
+    ) {
+        let uses_kimi_k3_parser =
+            tool_call_parser.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let is_named = matches!(
+            request.inner.tool_choice.as_ref(),
+            Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        if !uses_kimi_k3_parser || !is_named {
+            return;
+        }
+
+        let args = request.chat_template_args.get_or_insert_default();
+        args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+        args.insert(
+            "enable_thinking".to_string(),
+            serde_json::Value::Bool(false),
         );
     }
 
@@ -971,6 +1172,15 @@ impl OpenAIPreprocessor {
         self.tokenizer.encode(s)
     }
 
+    /// Encode a rendered prompt while preserving model-specific special-token
+    /// boundaries.
+    pub fn tokenize_rendered_prompt(&self, prompt: &RenderedPrompt) -> anyhow::Result<Encoding> {
+        match prompt.encode_segments() {
+            Some(segments) => self.tokenizer.encode_segments(&segments),
+            None => self.tokenize(prompt.as_str()),
+        }
+    }
+
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns the common completion request, a hashmap of annotations, and a boolean
     /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,
@@ -1034,13 +1244,13 @@ impl OpenAIPreprocessor {
         // end of the prompt, the model completion starts mid-reasoning.
         let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
             self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
-            self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
+            self.gather_tokens(request, formatted_prompt.as_ref(), tracker)
                 .await
                 .with_context(|| "Failed to gather tokens")?
         };
@@ -1050,7 +1260,7 @@ impl OpenAIPreprocessor {
             .gather_multi_modal_data_with_image_tokens(
                 request,
                 &mut builder,
-                formatted_prompt.as_deref(),
+                formatted_prompt.as_ref().map(RenderedPrompt::as_str),
                 &token_ids,
             )
             .await
@@ -1081,7 +1291,7 @@ impl OpenAIPreprocessor {
         let mut preprocessed = builder.build()?;
         if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
             self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
         ) {
             let extra_args = preprocessed
                 .extra_args
@@ -1360,6 +1570,19 @@ impl OpenAIPreprocessor {
         hidden_eos_token_ids.len() != before
     }
 
+    /// Rendering is driven by the request, so its failures are reported as 400 rather than
+    /// 500, matching vLLM. A misconfigured template can also fail here, for instance a
+    /// `chat_template` map that omits the `tool_use` key, so log the cause chain before it
+    /// is flattened into the client-facing message.
+    fn map_prompt_render_error(error: anyhow::Error) -> anyhow::Error {
+        tracing::debug!(?error, "Chat template rendering failed");
+        let message = match error.downcast_ref::<PromptRenderError>() {
+            Some(PromptRenderError::InvalidRequest(message)) => message.clone(),
+            None => format!("{error:#}"),
+        };
+        invalid_argument_error(message)
+    }
+
     pub fn apply_template<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -1370,7 +1593,7 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<RenderedPrompt>> {
         if let PromptInput::Text(_) = request.prompt_input_type()
             && let Some(TextInput::Single(_)) = request.extract_text()
         {
@@ -1380,14 +1603,18 @@ impl OpenAIPreprocessor {
 
             let formatted_prompt = if use_raw_prompt {
                 match request.raw_prompt() {
-                    Some(prompt) => prompt,
+                    Some(prompt) => RenderedPrompt::text(prompt),
                     None => {
                         tracing::warn!("Raw prompt requested but not available");
-                        self.formatter.render(request)?
+                        self.formatter
+                            .render_prompt(request)
+                            .map_err(Self::map_prompt_render_error)?
                     }
                 }
             } else {
-                self.formatter.render(request)?
+                self.formatter
+                    .render_prompt(request)
+                    .map_err(Self::map_prompt_render_error)?
             };
             Ok(Some(formatted_prompt))
         } else {
@@ -1508,7 +1735,7 @@ impl OpenAIPreprocessor {
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
         #[cfg(feature = "mm-routing")]
-        let mut url_passthrough_images: Vec<(u64, &str)> = Vec::new();
+        let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
             return Ok((Vec::new(), None));
@@ -1516,47 +1743,19 @@ impl OpenAIPreprocessor {
         let has_media_loader = self.media_loader.is_some();
 
         for message in messages.iter() {
-            let content_parts = match message {
-                ChatCompletionRequestMessage::User(u) => match &u.content {
-                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
-                    _ => continue,
-                },
-                _ => continue,
+            let Some(content_parts) = multimodal_content_parts(message) else {
+                continue;
             };
-            for content_part in content_parts.iter() {
-                let (type_str, url, uuid): (&'static str, Option<&url::Url>, Option<String>) =
-                    match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => (
-                            "image_url",
-                            part.image_url.as_ref().map(|media| &media.url),
-                            part.uuid.clone(),
-                        ),
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => {
-                            if part.uuid.is_some() {
-                                return Err(invalid_argument_error(
-                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                                ));
-                            }
-                            (
-                                "video_url",
-                                part.video_url.as_ref().map(|media| &media.url),
-                                None,
-                            )
-                        }
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
-                            if part.uuid.is_some() {
-                                return Err(invalid_argument_error(
-                                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                                ));
-                            }
-                            (
-                                "audio_url",
-                                part.audio_url.as_ref().map(|media| &media.url),
-                                None,
-                            )
-                        }
-                        _ => continue,
-                    };
+            for content_part in content_parts {
+                let Some((type_str, url, uuid)) = content_part.media_info() else {
+                    continue;
+                };
+
+                if type_str != "image_url" && uuid.is_some() {
+                    return Err(invalid_argument_error(
+                        "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                    ));
+                }
 
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
@@ -1585,18 +1784,16 @@ impl OpenAIPreprocessor {
                             fetch_tasks.push(MediaFetchTask {
                                 modality: type_str,
                                 slot_idx,
-                                #[cfg(feature = "mm-routing")]
-                                source_url: url.as_str(),
-                                content_part,
+                                content_part: content_part.as_user(),
                             });
                         } else {
                             #[cfg(feature = "mm-routing")]
                             if type_str == "image_url" {
                                 let mm_hash = Self::hash_image_url(url.as_str());
-                                url_passthrough_images.push((mm_hash, url.as_str()));
+                                url_passthrough_images.push((mm_hash, url.as_str().to_string()));
                             }
                         }
-                        slots.push(MultimodalData::Url(url.clone()));
+                        slots.push(MultimodalData::Url(url));
                     }
                     (None, Some(uuid)) => {
                         slots.push(MultimodalData::UuidOnly(uuid));
@@ -1615,7 +1812,7 @@ impl OpenAIPreprocessor {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
             let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
-                loader.fetch_and_decode_media_part(task.content_part, media_io_kwargs)
+                loader.fetch_and_decode_media_part(task.content_part.as_ref(), media_io_kwargs)
             }))
             .await;
 
@@ -1640,7 +1837,15 @@ impl OpenAIPreprocessor {
                         // shouldn't happen on the frontend.
                         let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
                             Some(h) => (h, "decoded_bytes"),
-                            None => (Self::hash_image_url(task.source_url), "url_fallback"),
+                            None => {
+                                let source_url = image_content_part_url(task.content_part.as_ref())
+                                    .ok_or_else(|| {
+                                        invalid_argument_error(
+                                            "image_url task must contain an image URL",
+                                        )
+                                    })?;
+                                (Self::hash_image_url(source_url), "url_fallback")
+                            }
                         };
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);
@@ -2145,7 +2350,7 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-        formatted_prompt: Option<&str>,
+        formatted_prompt: Option<&RenderedPrompt>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
@@ -2178,14 +2383,15 @@ impl OpenAIPreprocessor {
                             if let Some(f) = formatted_prompt
                                 && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
                             {
-                                annotations
-                                    .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
+                                annotations.insert(
+                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
+                                    f.as_str().to_string(),
+                                );
                             }
 
                             // Completions will use raw_prompt, no template.
-                            // Borrow either input — no allocation needed; the
-                            // tokenizer accepts `&str`.
-                            let prompt: &str = formatted_prompt.unwrap_or(raw_prompt.as_str());
+                            // K3 keeps control-token spans distinct from user text until
+                            // tokenization; all other renderers use the plain text path.
 
                             // If nvext.token_data is present, use the pre-computed tokens
                             // directly and skip tokenization.  This avoids redundant
@@ -2215,10 +2421,22 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self
+                                    .encode_prompt_with_timing(
+                                        formatted_prompt,
+                                        raw_prompt.as_str(),
+                                        tracker,
+                                    )
+                                    .await?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self
+                                    .encode_prompt_with_timing(
+                                        formatted_prompt,
+                                        raw_prompt.as_str(),
+                                        tracker,
+                                    )
+                                    .await?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -2284,6 +2502,41 @@ impl OpenAIPreprocessor {
         };
         let tokenizer = self.tokenizer.clone();
         let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        if let Some(t) = tracker {
+            t.record_tokenize_latency(encode_start.elapsed());
+        }
+        Ok(encoding)
+    }
+
+    async fn encode_prompt_with_timing(
+        &self,
+        formatted_prompt: Option<&RenderedPrompt>,
+        raw_prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let Some(prompt) = formatted_prompt
+            .filter(|prompt| prompt.segments().is_some())
+            .cloned()
+        else {
+            return self
+                .encode_with_timing(
+                    formatted_prompt
+                        .map(RenderedPrompt::as_str)
+                        .unwrap_or(raw_prompt),
+                    tracker,
+                )
+                .await;
+        };
+
+        let encode_start = Instant::now();
+        let tokenizer = self.tokenizer.clone();
+        let encoding = tokio::task::spawn_blocking(move || {
+            let segments = prompt
+                .encode_segments()
+                .expect("prompt was checked for rendered segments");
+            tokenizer.encode_segments(&segments)
+        })
+        .await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -2461,9 +2714,21 @@ impl OpenAIPreprocessor {
             .as_ref()
             .is_some_and(|tools| !tools.is_empty());
 
+        // K3's reasoning-only path still emits XTML response/message wrappers.
+        // vLLM strips those in its K3 reasoner when no tool parser is active;
+        // reuse the Rust K3 tool parser as the wrapper decoder so configuring
+        // only `--dyn-reasoning-parser kimi_k3` remains safe too.
+        let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
+            self.runtime_config
+                .reasoning_parser
+                .as_deref()
+                .filter(|parser| matches!(*parser, "kimi_k3" | "kimi-k3"))
+                .map(str::to_string)
+        });
+
         // Determine if we should apply jail (do this before moving request)
         let should_jail = Self::should_apply_tool_jail(
-            self.tool_call_parser.as_ref(),
+            effective_tool_call_parser.as_ref(),
             request.inner.tool_choice.as_ref(),
             has_tools,
         )?;
@@ -2487,7 +2752,7 @@ impl OpenAIPreprocessor {
         // Immediate mode, since those rely on guided-decoded JSON rather than the
         // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
         use crate::protocols::openai::chat_completions::tool_parser_v2;
-        let parser_name = self.tool_call_parser.as_deref();
+        let parser_name = effective_tool_call_parser.as_deref();
         let use_parsers_v2 = tool_parser_v2::enabled()
             && parser_name.is_some_and(tool_parser_v2::supports_family)
             && !uses_tool_call_structural_tag
@@ -2508,7 +2773,7 @@ impl OpenAIPreprocessor {
                 ))
             } else if should_jail {
                 Box::pin(Self::apply_tool_calling_jail(
-                    self.tool_call_parser.clone(),
+                    effective_tool_call_parser,
                     request.inner.tool_choice.clone(),
                     tool_definitions,
                     uses_tool_call_structural_tag,
@@ -2950,6 +3215,13 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
+        // K3 wraps every assistant response in XTML, even when the request has
+        // no tools. Keep its parser active so response/message wrappers never
+        // leak into OpenAI `content`.
+        if tool_call_parser.is_some_and(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3")) {
+            return Ok(true);
+        }
+
         match (tool_call_parser, tool_choice, has_tools) {
             // tool_choice=required/named work without parser (use Immediate jail mode)
             (None, Some(ChatCompletionToolChoiceOption::Required), true) => Ok(true),
@@ -3097,6 +3369,7 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - kimi_k3: `<|open|>` / `<|close|>` / `<|sep|>` XTML markers.
         // - mistral: `[THINK]` / `[/THINK]` reasoning markers.
         // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
         //   `<mm:think>` reasoning markers.
@@ -3109,6 +3382,8 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("harmony")
                 | Some("kimi_k2")
+                | Some("kimi_k3")
+                | Some("kimi-k3")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
                 | Some("minimax_m3_nom")
@@ -3120,6 +3395,8 @@ impl OpenAIPreprocessor {
                 | Some("gemma-4")
                 | Some("gpt_oss")
                 | Some("kimi_k25")
+                | Some("kimi_k3")
+                | Some("kimi-k3")
                 | Some("mistral")
                 | Some("minimax_m3")
                 | Some("minimax-m3")
@@ -3218,7 +3495,7 @@ impl OpenAIPreprocessor {
     }
 
     fn skips_structured_response_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
-        matches!(reasoning_parser, Some("qwen3"))
+        matches!(reasoning_parser, Some("qwen3" | "kimi_k3" | "kimi-k3"))
             || Self::skips_guided_json_when_prompt_injected(reasoning_parser)
     }
 
@@ -3232,6 +3509,7 @@ impl OpenAIPreprocessor {
 
         match reasoning_parser {
             Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
+            Some("kimi_k3") | Some("kimi-k3") => prompt.ends_with("<|open|>think<|sep|>"),
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -3242,7 +3520,7 @@ impl OpenAIPreprocessor {
     ) -> Option<bool> {
         let should_forward = matches!(
             reasoning_parser,
-            Some("minimax_m2" | "minimax_m3" | "minimax-m3")
+            Some("minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3")
         );
         if should_forward
             && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
@@ -3254,7 +3532,7 @@ impl OpenAIPreprocessor {
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
-    /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
+    /// For kimi_k25/K3: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
     ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
@@ -3272,7 +3550,7 @@ impl OpenAIPreprocessor {
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
         match reasoning_parser {
-            Some("kimi_k25") => {
+            Some("kimi_k25" | "kimi_k3" | "kimi-k3") => {
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
             parser if Self::is_nemotron_force_reasoning(parser) => {
@@ -3635,10 +3913,15 @@ impl
 
         // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
+        // Apply the deployment default before parser-specific normalization so
+        // it can override an implicit model default (for example Kimi K2.5),
+        // while explicit request controls still take precedence.
+        self.apply_default_thinking_mode(&mut request);
         Self::normalize_thinking_arg(
             &mut request,
             self.runtime_config.reasoning_parser.as_deref(),
         );
+        Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -4026,6 +4309,31 @@ mod tests {
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
+    #[test]
+    fn prompt_invalid_request_maps_to_invalid_argument() {
+        let error = PromptRenderError::invalid_request("unsupported model parameter").into();
+        let mapped = OpenAIPreprocessor::map_prompt_render_error(error);
+        let mapped = mapped
+            .downcast_ref::<DynamoError>()
+            .expect("prompt validation should map to a DynamoError");
+
+        assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
+        assert_eq!(mapped.message(), "unsupported model parameter");
+    }
+
+    #[test]
+    fn ordinary_prompt_error_maps_to_invalid_argument() {
+        let mapped = OpenAIPreprocessor::map_prompt_render_error(anyhow::anyhow!(
+            "template configuration failed"
+        ));
+        let mapped = mapped
+            .downcast_ref::<DynamoError>()
+            .expect("any prompt render failure should map to a DynamoError");
+
+        assert!(matches!(mapped.error_type(), ErrorType::InvalidArgument));
+        assert_eq!(mapped.message(), "template configuration failed");
+    }
+
     fn url_entry(u: &str) -> MultimodalData {
         MultimodalData::Url(url::Url::parse(u).unwrap())
     }
@@ -4068,6 +4376,49 @@ mod tests {
         assert_eq!(counts.image, 0);
         assert_eq!(counts.video, 0);
         assert_eq!(counts.audio, 0);
+    }
+
+    #[test]
+    fn tool_message_exposes_multimodal_content_parts() {
+        let message: ChatCompletionRequestMessage = serde_json::from_value(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_media",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,aGVsbG8="
+                    }
+                },
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": "https://example.com/clip.mp4"
+                    }
+                },
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": "https://example.com/audio.wav"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let parts: Vec<_> = multimodal_content_parts(&message).unwrap().collect();
+        assert!(matches!(
+            parts[0].as_user().as_ref(),
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+        ));
+        assert!(matches!(
+            parts[1].as_user().as_ref(),
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+        ));
+        assert!(matches!(
+            parts[2].as_user().as_ref(),
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
+        ));
     }
 
     #[cfg(feature = "mm-routing")]
@@ -4304,6 +4655,18 @@ mod tests {
                 "kimi_k25 reasoning only → required (`</think>` is special token id 163607)",
             ),
             (
+                Some("kimi_k3"),
+                Some("kimi_k3"),
+                true,
+                "kimi_k3 paired XTML parsers → required",
+            ),
+            (
+                Some("kimi-k3"),
+                Some("kimi-k3"),
+                true,
+                "kimi-k3 aliases → required",
+            ),
+            (
                 None,
                 Some("mistral"),
                 true,
@@ -4351,6 +4714,7 @@ mod tests {
         assert!(f(Some(true), Some("harmony"), None));
         assert!(f(Some(true), None, Some("gpt_oss")));
         assert!(f(Some(true), Some("kimi_k2"), None));
+        assert!(f(Some(true), Some("kimi_k3"), Some("kimi_k3")));
         assert!(f(Some(true), None, Some("mistral")));
         // false / unset → never (default path keeps the markers)
         assert!(!f(Some(false), Some("harmony"), None));
@@ -4358,6 +4722,22 @@ mod tests {
         // forced-true but parser doesn't need special tokens → fine
         assert!(!f(Some(true), Some("hermes"), None));
         assert!(!f(Some(true), None, None));
+    }
+
+    #[test]
+    fn test_kimi_k3_jail_always_unwraps_xtml_response_channels() {
+        let parser = "kimi_k3".to_string();
+        assert!(OpenAIPreprocessor::should_apply_tool_jail(Some(&parser), None, false).unwrap());
+
+        let alias = "kimi-k3".to_string();
+        assert!(
+            OpenAIPreprocessor::should_apply_tool_jail(
+                Some(&alias),
+                Some(&ChatCompletionToolChoiceOption::None),
+                true,
+            )
+            .unwrap()
+        );
     }
 
     /// Verifies which force-reasoning parsers use guided-output shape detection.
@@ -4431,6 +4811,18 @@ mod tests {
                 "Qwen-style templated <think> behavior remains",
             ),
             (
+                Some("kimi_k3"),
+                Some("...<|open|>think<|sep|>\n"),
+                true,
+                "Kimi K3 starts inside its XTML think channel",
+            ),
+            (
+                Some("kimi-k3"),
+                Some("...<think>\n"),
+                false,
+                "Kimi K3 must not use the generic think marker",
+            ),
+            (
                 Some("deepseek_v4"),
                 Some("...<think>\n"),
                 true,
@@ -4468,6 +4860,12 @@ mod tests {
                 Some("...<mm:think>\n"),
                 Some(false),
                 "MiniMax M3 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("kimi_k3"),
+                Some("...<|open|>think<|sep|>\n"),
+                Some(false),
+                "Kimi K3 guided decoding must start after its prompt-opened think channel",
             ),
             (
                 Some("deepseek_v4"),
@@ -4544,6 +4942,132 @@ mod tests {
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
+    }
+
+    fn chat_request_with_args(
+        chat_template_args: Option<HashMap<String, serde_json::Value>>,
+    ) -> NvCreateChatCompletionRequest {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap();
+        request.chat_template_args = chat_template_args;
+        request
+    }
+
+    fn runtime_config_with_default_thinking_mode(
+        mode: &str,
+    ) -> crate::local_model::runtime_config::ModelRuntimeConfig {
+        let mut runtime_config = crate::local_model::runtime_config::ModelRuntimeConfig::new();
+        runtime_config
+            .set_engine_specific(DEFAULT_THINKING_MODE_RUNTIME_KEY, mode)
+            .unwrap();
+        runtime_config
+    }
+
+    #[test]
+    fn test_default_thinking_mode_disabled_adds_template_args() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_enabled_adds_template_args() {
+        let runtime_config = runtime_config_with_default_thinking_mode("enabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_does_not_override_request() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "thinking_mode".to_string(),
+            serde_json::json!("enabled"),
+        )])));
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("enabled"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+    }
+
+    #[test]
+    fn test_default_thinking_mode_precedes_parser_implicit_default() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(None);
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+        OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some("kimi_k25"));
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            args.get("thinking_mode"),
+            Some(&serde_json::json!("disabled"))
+        );
+    }
+
+    #[test]
+    fn test_default_thinking_mode_does_not_override_reasoning_effort() {
+        let runtime_config = runtime_config_with_default_thinking_mode("disabled");
+        let mut request = chat_request_with_args(Some(HashMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("high"),
+        )])));
+
+        OpenAIPreprocessor::apply_default_thinking_mode_from_runtime_config(
+            &runtime_config,
+            &mut request,
+        );
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(
+            args.get("reasoning_effort"),
+            Some(&serde_json::json!("high"))
+        );
+        assert!(!args.contains_key("thinking"));
+        assert!(!args.contains_key("enable_thinking"));
+        assert!(!args.contains_key("thinking_mode"));
     }
 
     /// Verifies template reasoning controls are forwarded to a configured parser.
@@ -4790,6 +5314,8 @@ mod tests {
                 true,
             ),
             ("kimi_k25", serde_json::json!({"thinking": false}), false),
+            ("kimi_k3", serde_json::json!({}), true),
+            ("kimi-k3", serde_json::json!({"thinking": false}), false),
             ("minimax_m2", serde_json::json!({}), true),
             ("minimax_m2", serde_json::json!({"thinking": false}), false),
             ("mistral", serde_json::json!({}), false),
@@ -5095,6 +5621,93 @@ mod tests {
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
+    fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
+        let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+        match dynamo_renderer::PromptFormatter::from_parts(
+            template,
+            dynamo_renderer::ContextMixins::default(),
+            false,
+        )
+        .unwrap()
+        {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    fn assistant_only_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "assistant", "content": "prefill"}]
+        }))
+        .unwrap()
+    }
+
+    const REQUIRES_USER_TEMPLATE: &str = "\
+        {% set ns = namespace(has_user=false) %}\
+        {% for message in messages %}\
+            {% if message['role'] == 'user' %}{% set ns.has_user = true %}{% endif %}\
+        {% endfor %}\
+        {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
+        {{ messages[0]['content'] }}";
+
+    fn render_through_preprocessor(
+        formatter: &dyn OAIPromptFormatter,
+        request: &dyn OAIChatLikeRequest,
+    ) -> Result<RenderedPrompt> {
+        formatter
+            .render_prompt(request)
+            .map_err(OpenAIPreprocessor::map_prompt_render_error)
+    }
+
+    #[test]
+    fn test_assistant_only_request_accepted_when_template_accepts_it() {
+        let formatter = test_prompt_formatter(
+            "{% for message in messages %}{{ message['role'] }}:{{ message['content'] }}{% endfor %}",
+        );
+
+        let rendered =
+            render_through_preprocessor(formatter.as_ref(), &assistant_only_request()).unwrap();
+
+        assert_eq!(rendered.as_str(), "assistant:prefill");
+    }
+
+    #[test]
+    fn test_assistant_only_template_error_is_invalid_argument() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+
+        let error = render_through_preprocessor(formatter.as_ref(), &assistant_only_request())
+            .context("Failed to apply prompt template")
+            .unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DynamoError>())
+            .expect("template render error should be classified as a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_error
+                .message()
+                .contains("No user query found in messages.")
+        );
+    }
+
+    #[test]
+    fn test_restrictive_template_accepts_request_with_user_message() {
+        let formatter = test_prompt_formatter(REQUIRES_USER_TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(rendered.as_str(), "hello");
+    }
+
     #[test]
     fn test_kimi_thinking_normalization_keeps_template_and_gates_in_sync() {
         let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
@@ -5174,6 +5787,21 @@ mod tests {
         }
         assert_case(None, None, true, "omitted Kimi default");
 
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "model": "moonshotai/Kimi-K3"
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            assert_eq!(
+                dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
+                Some(true),
+                "{parser} should default to thinking mode",
+            );
+        }
+
         let mut conflicting_request: NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "messages": [{"role": "user", "content": "hello"}],
@@ -5197,6 +5825,88 @@ mod tests {
             }
         };
         assert_eq!(rendered, "<think>");
+    }
+
+    #[test]
+    fn test_named_kimi_k3_normalizes_every_reasoning_consumer_to_disabled() {
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "messages": [{"role": "user", "content": "Weather in Berlin?"}],
+                    "model": "moonshotai/Kimi-K3",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}}
+                            }
+                        }
+                    }],
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "get_weather"}
+                    },
+                    "reasoning_effort": "high",
+                    "chat_template_args": {
+                        "thinking": true,
+                        "enable_thinking": true
+                    }
+                }))
+                .unwrap();
+
+            request.normalize_reasoning_template_args().unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(&mut request, Some(parser));
+            OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, Some(parser));
+
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(false)));
+            assert_eq!(
+                args.get("enable_thinking"),
+                Some(&serde_json::Value::Bool(false))
+            );
+            assert_eq!(
+                args.get("reasoning_effort"),
+                Some(&serde_json::Value::String("high".to_string())),
+                "the public effort value is preserved while the named-call exception disables thinking"
+            );
+            assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some(parser),
+                Some(args)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_named_kimi_k3_override_is_scoped_to_k3_tool_parser() {
+        let request_json = serde_json::json!({
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "model": "test",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            },
+            "chat_template_args": {"thinking": true}
+        });
+
+        for parser in [None, Some("hermes"), Some("kimi_k2")] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json.clone()).unwrap();
+            OpenAIPreprocessor::normalize_kimi_k3_named_tool_choice(&mut request, parser);
+            assert_eq!(
+                dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref()),
+                Some(true),
+                "parser {parser:?} must retain its existing policy"
+            );
+        }
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
@@ -5300,6 +6010,18 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "kimi_k25 + empty args → enabled",
+            ),
+            (
+                Some("kimi_k3"),
+                Some(&thinking_false),
+                true,
+                "kimi_k3 + thinking=false → disabled",
+            ),
+            (
+                Some("kimi-k3"),
+                Some(&thinking_true),
+                false,
+                "kimi-k3 + thinking=true → enabled",
             ),
             // deepseek_r1 uses "thinking" bool or "thinking_mode" string
             (

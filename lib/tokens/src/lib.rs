@@ -149,6 +149,16 @@ pub fn compute_block_hash(block_bytes: &[u8], salt: SaltHash) -> BlockHash {
     compute_hash_v2(block_bytes, salt)
 }
 
+/// Canonical [`BlockHash`] construction for a token-only block.
+///
+/// Multimodal token sequences must first route through
+/// [`compute_block_bytes_with_mm`] so placeholder slots use their multimodal
+/// identities instead of their token IDs.
+#[inline]
+pub fn compute_block_hash_for_tokens(tokens: &[Token], salt: SaltHash) -> BlockHash {
+    compute_block_hash(cast_slice(tokens), salt)
+}
+
 /// Canonical [`SaltHash`] construction from a pre-canonicalized salt-payload byte
 /// buffer. Application-layer callers should use `dynamo_kv_hashing::Request::salt_hash`
 /// which canonicalizes `(salt, lora_name)` first; this function is the low-level path.
@@ -1064,7 +1074,7 @@ struct TokenBlockChunk {
 impl TokenBlockChunk {
     /// Creates a new chunk from [`Tokens`], calculating the [`BlockHash`].
     fn new(tokens: Tokens, salt_hash: SaltHash) -> Self {
-        let block_hash = compute_block_hash(cast_slice(&tokens), salt_hash);
+        let block_hash = compute_block_hash_for_tokens(&tokens, salt_hash);
         Self {
             tokens,
             salt_hash,
@@ -1074,7 +1084,7 @@ impl TokenBlockChunk {
 
     /// Creates a new chunk from a slice of `&[Token]`, calculating the [`BlockHash`].
     fn from_tokens(tokens: &[Token], salt_hash: SaltHash) -> Self {
-        let block_hash = compute_block_hash(cast_slice(tokens), salt_hash);
+        let block_hash = compute_block_hash_for_tokens(tokens, salt_hash);
         Self {
             tokens: tokens.into(), // Converts slice to owned Tokens
             salt_hash,
@@ -1901,6 +1911,19 @@ mod tests {
     const SEQ_HASH_5_8: SequenceHash = 4945711292740353085; // hash([SEQ_HASH_1_4, HASH_5_8], CHAIN_XXH3_SEED)
     const HASH_9_12: BlockHash = 483935686894639516; // hash([9,10,11,12], 1337)
     const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], CHAIN_XXH3_SEED)
+
+    #[test]
+    fn token_hash_helper_matches_canonical_byte_encoding() {
+        let tokens = [1u32, 2, 3, 4];
+        assert_eq!(
+            compute_block_hash_for_tokens(&tokens, TEST_SALT_HASH),
+            compute_block_hash(cast_slice(&tokens), TEST_SALT_HASH)
+        );
+        assert_eq!(
+            compute_block_hash_for_tokens(&tokens, TEST_SALT_HASH),
+            HASH_1_4
+        );
+    }
 
     impl PartialTokenBlock {
         /// Attempts to remove the last token from the block.

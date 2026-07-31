@@ -212,7 +212,7 @@ class TestRapidUnsupported:
         with caplog.at_level(logging.WARNING):
             asyncio.run(run_profile(dgdr, ops))
         assert "AIC does not support" in caplog.text
-        assert "Rust perf shim fallback" in caplog.text
+        assert "AIC core fallback" in caplog.text
 
 
 class TestThoroughDryRun:
