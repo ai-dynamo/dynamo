@@ -33,6 +33,13 @@ agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
 
 
+# Render the Home experience at the bare site URL. Without a root-level
+# landing page, Fern redirects the URL to the default version's first docs page.
+landing-page:
+  page: Home
+  path: ./pages/home/index.mdx
+  slug: /
+
 # Keep Home and the documentation tabs in the same versioned navigation.
 # Standalone versioning avoids rendering a product selector for one product.
 versions:
@@ -285,7 +292,7 @@ redirects:
   - source: "/dynamo/dev/resources/nightly-release-info"
     destination: "/dynamo/dev/reference/release-artifacts"
   - source: "/dynamo/dev/user-guides/dynosim/modeling"
-    destination: "/dynamo/dev/cli/operations/dynosim/simulation-model"
+    destination: "/dynamo/dev/cli/operations/simulation-with-dynosim/simulation-model"
   - source: "/dynamo/documentation/building-and-publishing"
     destination: "/dynamo/dev/contributing/documentation/building-and-publishing"
   - source: "/dynamo/documentation/style-guide"
@@ -297,7 +304,7 @@ redirects:
   - source: "/dynamo/getting-started/introduction"
     destination: "/dynamo/dev/kubernetes/getting-started/introduction"
   - source: "/dynamo/getting-started/kubernetes-deployment"
-    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
+    destination: "/dynamo/dev/kubernetes/model-deployment/overview"
   - source: "/dynamo/getting-started/local-installation"
     destination: "/dynamo/dev/cli/installation/install-dynamo"
   - source: "/dynamo/getting-started/quickstart"
@@ -349,7 +356,7 @@ redirects:
   - source: "/dynamo/kubernetes-deployment/deploy-models/managing-models-with-dynamo-model"
     destination: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamo-model"
   - source: "/dynamo/kubernetes-deployment/deploy-models/model-deployment-guide"
-    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
+    destination: "/dynamo/dev/kubernetes/model-deployment/overview"
   - source: "/dynamo/kubernetes-deployment/model-loading/model-caching"
     destination: "/dynamo/dev/kubernetes/model-deployment/model-caching"
   - source: "/dynamo/kubernetes-deployment/model-loading/model-express"
@@ -427,15 +434,15 @@ redirects:
   - source: "/dynamo/user-guides/disaggregated-serving/sizing-with-ai-configurator"
     destination: "/dynamo/dev/kubernetes/disaggregated-serving/size-with-ai-configurator"
   - source: "/dynamo/user-guides/dynosim"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/overview"
+    destination: "/dynamo/dev/kubernetes/operations/simulation-with-dynosim/overview"
   - source: "/dynamo/user-guides/dynosim/mocker"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/live-simulation-with-mocker"
+    destination: "/dynamo/dev/kubernetes/operations/simulation-with-dynosim/live-simulation-with-mocker"
   - source: "/dynamo/user-guides/dynosim/planner-benchmarking"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/planner-simulation-benchmarking"
+    destination: "/dynamo/dev/kubernetes/operations/simulation-with-dynosim/planner-simulation-benchmarking"
   - source: "/dynamo/user-guides/dynosim/runs"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/simulation-runs"
+    destination: "/dynamo/dev/kubernetes/operations/simulation-with-dynosim/simulation-runs"
   - source: "/dynamo/user-guides/dynosim/sweeps"
-    destination: "/dynamo/dev/kubernetes/operations/dynosim/simulation-sweeps"
+    destination: "/dynamo/dev/kubernetes/operations/simulation-with-dynosim/simulation-sweeps"
   - source: "/dynamo/user-guides/fastokens-tokenizer"
     destination: "/dynamo/dev/advanced-customizations/fastokens-tokenizer"
   - source: "/dynamo/user-guides/fault-tolerance"
@@ -520,6 +527,8 @@ redirects:
   - source: "/dynamo/index.html"
     destination: "/dynamo/"
   - source: "/dynamo/dev/index.html"
+    destination: "/dynamo/dev/"
+  - source: "/dynamo/dev/welcome"
     destination: "/dynamo/dev/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
@@ -640,9 +649,13 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/minikube-setup"
     destination: "/dynamo/dev/cli/installation/minikube-setup"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-deployment-guide"
-    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
+    destination: "/dynamo/dev/kubernetes/model-deployment/overview"
   - source: "/dynamo/dev/kubernetes/model-deployment/model-deployment-guide"
-    destination: "/dynamo/dev/kubernetes/model-deployment/introduction"
+    destination: "/dynamo/dev/kubernetes/model-deployment/overview"
+  - source: "/dynamo/dev/kubernetes/model-deployment/introduction"
+    destination: "/dynamo/dev/kubernetes/model-deployment/overview"
+  - source: "/dynamo/dev/cli/model-deployment/introduction"
+    destination: "/dynamo/dev/cli/model-deployment/overview"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model"
     destination: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamo-model"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dgdr-reference"
@@ -835,6 +848,8 @@ redirects:
     destination: "/dynamo/dev/diffusion/overview"
   - source: "/dynamo/dev/use-cases/diffusion/:slug*"
     destination: "/dynamo/dev/diffusion/overview/:slug*"
+  - source: "/dynamo/dev/parsing/introduction"
+    destination: "/dynamo/dev/parsing/overview"
   - source: "/dynamo/dev/other-features/parsing"
     destination: "/dynamo/dev/parsing/tool-call-parsing"
   - source: "/dynamo/dev/other-features/parsing/:slug*"
