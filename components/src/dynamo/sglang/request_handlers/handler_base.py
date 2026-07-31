@@ -885,8 +885,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
-        for path, handler in configured_routes:
-            runtime.register_engine_route(path, handler)
+        for path, configured_handler in configured_routes:
+            runtime.register_engine_route(path, configured_handler)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

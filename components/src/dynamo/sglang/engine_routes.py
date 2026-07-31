@@ -14,10 +14,21 @@ import threading
 import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    TypeAlias,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 _ROUTE_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-_TARGETS = frozenset({"engine", "tm"})
+EngineRouteTarget: TypeAlias = Literal["engine", "tm"]
+_TARGETS: frozenset[EngineRouteTarget] = frozenset({"engine", "tm"})
 
 
 @dataclass(frozen=True)
@@ -26,7 +37,7 @@ class EngineRouteDescriptor:
 
     path: str
     method: str
-    target: Literal["engine", "tm"] = "engine"
+    target: EngineRouteTarget = "engine"
 
 
 def _invalid_descriptor(descriptor: str, message: str) -> ValueError:
@@ -69,17 +80,18 @@ def parse_engine_route_descriptors(
                 descriptor, "expected at most one ':' target separator"
             )
 
-        route_and_method, separator, target = descriptor.rpartition(":")
+        route_and_method, separator, raw_target = descriptor.rpartition(":")
         if separator:
-            if not route_and_method or not target:
+            if not route_and_method or not raw_target:
                 raise _invalid_descriptor(
                     descriptor, "both the route and target are required"
                 )
-            if target not in _TARGETS:
+            if raw_target not in _TARGETS:
                 raise _invalid_descriptor(
                     descriptor,
-                    f"unknown target {target!r}; expected 'engine' or 'tm'",
+                    f"unknown target {raw_target!r}; expected 'engine' or 'tm'",
                 )
+            target = cast(EngineRouteTarget, raw_target)
         else:
             route_and_method = descriptor
             target = "engine"
@@ -251,18 +263,23 @@ class _TokenizerManagerCallPlan:
         )
 
     def prepare(self, body: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
-        if self.request_type is None:
-            kwargs = dict(body)
+        call_kwargs: dict[str, Any]
+        request_type = self.request_type
+        if request_type is None:
+            call_kwargs = dict(body)
             for parameter_name in self.http_parameters:
-                kwargs[parameter_name] = None
-            return [], kwargs
+                call_kwargs[parameter_name] = None
+            return [], call_kwargs
 
-        values = {
-            self.request_parameter: self.request_type(**body),
+        request_parameter = self.request_parameter
+        if request_parameter is None:
+            raise RuntimeError("typed request plan has no request parameter")
+        values: dict[str, Any] = {
+            request_parameter: request_type(**body),
             **{parameter_name: None for parameter_name in self.http_parameters},
         }
         args: list[Any] = []
-        kwargs: dict[str, Any] = {}
+        call_kwargs = {}
         for parameter in self.signature.parameters.values():
             if parameter.name not in values:
                 continue
@@ -270,8 +287,8 @@ class _TokenizerManagerCallPlan:
             if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
                 args.append(value)
             else:
-                kwargs[parameter.name] = value
-        return args, kwargs
+                call_kwargs[parameter.name] = value
+        return args, call_kwargs
 
 
 class _RunningLoopBridge:
@@ -281,7 +298,10 @@ class _RunningLoopBridge:
         self._loop = loop
 
     def run_until_complete(self, awaitable: Awaitable[Any]) -> Any:
-        return asyncio.run_coroutine_threadsafe(awaitable, self._loop).result()
+        async def await_result() -> Any:
+            return await awaitable
+
+        return asyncio.run_coroutine_threadsafe(await_result(), self._loop).result()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._loop, name)
@@ -458,6 +478,7 @@ class _ConfiguredEngineRoute:
                 and original_loop.is_running()
             )
             if bridge_required:
+                assert original_loop is not None
                 self._engine.loop = _RunningLoopBridge(original_loop)
             try:
                 return self._method(*args, **kwargs)
