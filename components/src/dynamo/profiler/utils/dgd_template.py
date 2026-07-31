@@ -30,8 +30,12 @@ def load_dgd_template(backend: str, mode: str) -> dict:
     if (backend, mode) not in _SUPPORTED_TEMPLATES:
         raise ValueError(f"Unsupported profiler DGD template: {backend}/{mode}")
 
-    resource = files("dynamo.profiler").joinpath(
-        "templates", "dgd", backend, f"{mode}.yaml"
+    resource = (
+        files("dynamo.profiler")
+        .joinpath("templates")
+        .joinpath("dgd")
+        .joinpath(backend)
+        .joinpath(f"{mode}.yaml")
     )
     config = yaml.safe_load(resource.read_text(encoding="utf-8"))
     if not isinstance(config, dict):

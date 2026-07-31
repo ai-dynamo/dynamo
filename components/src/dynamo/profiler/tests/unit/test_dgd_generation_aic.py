@@ -19,6 +19,7 @@ try:
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
     )
+    from dynamo.profiler.utils.dgd_template import load_dgd_template
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
@@ -485,6 +486,19 @@ class TestEnableVllmBenchmarkMode:
         }
         enable_vllm_benchmark_mode(cfg)
         assert _benchmark_mode(_component_map(cfg)["VllmWorker"]) == "agg"
+
+    def test_agg_template_sets_single_generic_worker(self):
+        cfg = load_dgd_template("vllm", "agg")
+
+        enable_vllm_benchmark_mode(cfg)
+
+        worker = next(
+            component
+            for component in cfg["spec"]["components"]
+            if component["type"] == "worker"
+        )
+        assert worker["name"] == "VllmDecodeWorker"
+        assert _benchmark_mode(worker) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an

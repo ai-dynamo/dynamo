@@ -11,7 +11,10 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: my-registry/sglang-runtime:my-tag
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/sglang-runtime:my-tag
           name: main
     replicas: 1
     type: frontend

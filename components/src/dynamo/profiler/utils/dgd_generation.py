@@ -204,11 +204,30 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
 
     Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
     overrides) the existing entry is replaced with the role-correct value.
+
+    A single generic ``type: worker`` component is aggregate even when its
+    planner-facing name is ``VllmDecodeWorker``.
     """
-    for component_name, mode in _vllm_worker_roles().items():
+    worker_roles = _vllm_worker_roles()
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        components = []
+    generic_workers = [
+        component
+        for component in components
+        if isinstance(component, dict)
+        and component.get("type") == "worker"
+        and component.get("name") in worker_roles
+    ]
+    aggregate_worker_name = (
+        generic_workers[0].get("name") if len(generic_workers) == 1 else None
+    )
+
+    for component_name, canonical_mode in worker_roles.items():
         component = get_component_dict(config_dict, component_name)
         if component is None:
             continue
+        mode = "agg" if component_name == aggregate_worker_name else canonical_mode
         main_container = get_main_container_dict(component)
         if main_container is None:
             continue

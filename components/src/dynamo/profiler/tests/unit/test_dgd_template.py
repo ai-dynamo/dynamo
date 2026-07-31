@@ -58,9 +58,10 @@ def _component_args(config: dict, component_name: str) -> list[str]:
     return _main_container(config, component_name).get("args", [])
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize("mode", ["agg", "disagg"])
-def test_vllm_frontend_has_hf_token_secret(mode: str) -> None:
-    config = load_dgd_template("vllm", mode)
+def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> None:
+    config = load_dgd_template(backend, mode)
 
     env_from = _main_container(config, "Frontend").get("envFrom", [])
     assert {"secretRef": {"name": "hf-token-secret"}} in env_from
