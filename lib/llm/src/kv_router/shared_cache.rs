@@ -17,6 +17,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
@@ -38,6 +39,7 @@ use dynamo_kv_router::{
 
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_MOONCAKE_INDEX_ENTRIES: usize = 1_000_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
@@ -99,6 +101,7 @@ pub struct HicacheSharedKvCache {
     group_states: Arc<DashMap<String, (u64, bool)>>,
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
+    last_layout: Arc<ArcSwapOption<SglangHicacheMooncakeConfig>>,
     cancellation_token: CancellationToken,
     frontend_kv_events_endpoint: Option<String>,
 }
@@ -126,6 +129,7 @@ impl HicacheSharedKvCache {
             group_states: Arc::new(DashMap::new()),
             last_sequence: Arc::new(AtomicU64::new(0)),
             has_sequence: Arc::new(AtomicBool::new(false)),
+            last_layout: Arc::new(ArcSwapOption::empty()),
             cancellation_token,
             frontend_kv_events_endpoint,
         }
@@ -140,6 +144,21 @@ impl HicacheSharedKvCache {
     pub fn shutdown(&self) {
         self.cancellation_token.cancel();
         self.clear();
+    }
+
+    fn clear_on_layout_change(&self, layout: &SglangHicacheMooncakeConfig) {
+        let last_layout = self.last_layout.load();
+        if last_layout
+            .as_ref()
+            .is_some_and(|previous| previous.has_same_layout(layout))
+        {
+            return;
+        }
+        if last_layout.is_some() {
+            self.clear();
+            tracing::warn!("SGLang Mooncake HiCache layout changed; cleared shared-cache state");
+        }
+        self.last_layout.store(Some(Arc::new(layout.clone())));
     }
 
     fn resolve_mooncake_config_and_endpoint(
@@ -167,6 +186,8 @@ impl HicacheSharedKvCache {
             return None;
         }
 
+        self.clear_on_layout_change(first);
+
         if let Some(endpoint) = &self.frontend_kv_events_endpoint {
             return Some((first.clone(), endpoint.clone()));
         }
@@ -191,6 +212,8 @@ impl HicacheSharedKvCache {
     }
 
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
+        // SGLang's ZmqEventPublisher increments this sequence once per published batch, so a
+        // non-consecutive value means one or more whole batches were missed.
         let has_previous = self.has_sequence.swap(true, Ordering::AcqRel);
         let previous = self.last_sequence.swap(sequence, Ordering::AcqRel);
         if has_previous && sequence == previous {
@@ -236,6 +259,8 @@ impl HicacheSharedKvCache {
                 _ => {}
             }
         }
+
+        self.clear_if_index_too_large(MAX_MOONCAKE_INDEX_ENTRIES);
     }
 
     fn clear(&self) {
@@ -243,6 +268,20 @@ impl HicacheSharedKvCache {
         self.group_states.clear();
         self.last_sequence.store(0, Ordering::Release);
         self.has_sequence.store(false, Ordering::Release);
+    }
+
+    fn clear_if_index_too_large(&self, max_entries: usize) {
+        let present_keys = self.present_keys.len();
+        let group_states = self.group_states.len();
+        if present_keys.saturating_add(group_states) > max_entries {
+            self.clear();
+            tracing::warn!(
+                present_keys,
+                group_states,
+                max_entries,
+                "Mooncake KV event index exceeded its size limit; cleared shared-cache state"
+            );
+        }
     }
 
     fn record_subscriber_error(&self) {
@@ -262,6 +301,7 @@ impl HicacheSharedKvCache {
                     _ = cancellation_token.cancelled() => return,
                     result = self.runtime_configs.changed() => {
                         if result.is_err() {
+                            self.clear();
                             return;
                         }
                     }
@@ -287,6 +327,7 @@ impl HicacheSharedKvCache {
                     _ = cancellation_token.cancelled() => return,
                     result = self.runtime_configs.changed() => {
                         if result.is_err() {
+                            self.clear();
                             return;
                         }
                         let next_endpoint = self.kv_events_endpoint();
@@ -799,6 +840,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_layout_change_clears_cached_hits() {
+        let config = mooncake_config();
+        let (runtime_configs, tx) = runtime_watch_with_config_and_sender(config.clone());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        let hash = logical_page_hashes(&[1, 2, 3, 4], config.page_size, config.is_eagle)
+            .pop()
+            .unwrap();
+        let group_id = sglang_group_id(&hash, &config);
+        cache.apply_batch(
+            1,
+            expand_actual_query_keys(&hash, &config)
+                .into_iter()
+                .map(|object_key| MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(object_key),
+                    tenant_id: "default".to_string(),
+                    group_id: Some(group_id.clone()),
+                })
+                .collect(),
+        );
+        assert_eq!(
+            cache
+                .check_blocks(&[1, 2, 3, 4], config.page_size, None)
+                .await
+                .unwrap()
+                .total_hits,
+            1
+        );
+
+        let mut new_layout = config;
+        new_layout.tp_size = 2;
+        let mut runtime_config = ModelRuntimeConfig::new();
+        runtime_config
+            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, new_layout)
+            .unwrap();
+        tx.send(HashMap::from([(1, runtime_config)])).unwrap();
+
+        assert_eq!(
+            cache
+                .check_blocks(&[1, 2, 3, 4], 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            0
+        );
+        assert!(cache.present_keys.is_empty());
+        assert!(cache.group_states.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_check_blocks_uses_mooncake_events() {
         let hash0 = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
         let hash1 = "4ebfa8a1f3c341517621838c6e1b9aa350307e3f00b3cbd1a07ef740f54396d6".to_string();
@@ -960,6 +1051,25 @@ mod tests {
         assert!(cache.present_keys.contains("key-0"));
     }
 
+    #[test]
+    fn test_index_size_limit_clears_shared_cache_state() {
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
+        cache.apply_batch(
+            1,
+            vec![MooncakeObjectEvent {
+                event_type: "stored".to_string(),
+                object_key: Some("key-0".to_string()),
+                tenant_id: "default".to_string(),
+                group_id: Some("group-0".to_string()),
+            }],
+        );
+
+        cache.clear_if_index_too_large(1);
+
+        assert!(cache.present_keys.is_empty());
+        assert!(cache.group_states.is_empty());
+    }
+
     #[tokio::test]
     async fn test_subscriber_retries_failed_connection_until_cancelled() {
         let mut config = mooncake_config();
@@ -976,6 +1086,30 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_clears_state_when_runtime_config_watch_closes() {
+        let (tx, runtime_configs) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let cache = HicacheSharedKvCache::new(runtime_configs);
+        cache.apply_batch(
+            1,
+            vec![MooncakeObjectEvent {
+                event_type: "stored".to_string(),
+                object_key: Some("key-0".to_string()),
+                tenant_id: "default".to_string(),
+                group_id: None,
+            }],
+        );
+        let task = tokio::spawn(cache.clone().run_subscriber(CancellationToken::new()));
+
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(cache.present_keys.is_empty());
     }
 
     #[test]
