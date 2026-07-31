@@ -2651,6 +2651,7 @@ name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "dashmap",
  "ddsketchy",
@@ -2872,6 +2873,26 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-sglang-mocker"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-sglang-sidecar",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

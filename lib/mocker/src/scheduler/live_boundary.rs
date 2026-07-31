@@ -475,6 +475,11 @@ impl LiveEffectsPublisher {
         .await
     }
 
+    fn publish_live_metrics<C: LiveBoundaryCore>(&self, core: &C) {
+        self.record(PublishedEffect::Metrics);
+        let _ = self.metrics_tx.send(core.live_metrics());
+    }
+
     async fn apply_command_inner<C: LiveBoundaryCore>(
         &self,
         core: &mut C,
@@ -760,6 +765,13 @@ pub(crate) async fn wait_for_live_pass_boundary<C: LiveBoundaryCore>(
                     .await;
                 if discard_pending_output || outcome != Some(SchedulerCommandResult::Noop) {
                     pending.suppress_request_outputs(request_id);
+                }
+                if outcome == Some(SchedulerCommandResult::Applied) && core.live_is_empty() {
+                    // Cancellation updates occupancy immediately, but the
+                    // modeled pass may still own another request's output or
+                    // other pass-end effects. Publish current metrics without
+                    // ending that pass before its deadline.
+                    publisher.publish_live_metrics(core);
                 }
             }
             _ = &mut internal_deadline, if internal_deadline_ms.is_some() => {
