@@ -115,11 +115,17 @@ article:has(.dynamo-welcome) > header::before {
   border: 1px solid rgba(118, 185, 0, 0.4);
   border-radius: 24px;
   background: #f3fbdc
-    url("https://avatars.githubusercontent.com/u/201626793?s=200&v=4") center /
+    url("/dynamo/assets/img/dynamo-logo.svg") center /
     cover no-repeat;
   box-shadow:
     0 18px 42px rgba(54, 86, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.dark article:has(.dynamo-welcome) > header::before {
+  border-color: rgba(118, 185, 0, 0.4);
+  background-color: #0c0d0b;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
 }
 
 article:has(.dynamo-welcome) > header .fern-breadcrumb {
