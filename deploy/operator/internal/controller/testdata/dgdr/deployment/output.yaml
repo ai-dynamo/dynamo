@@ -15,6 +15,7 @@ spec:
             - image: $ignore
               name: main
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: frontend
     - name: decode
       podTemplate:
@@ -42,6 +43,7 @@ spec:
               name: main
               workingDir: /workspace
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: decode
     - name: prefill
       podTemplate:
@@ -69,6 +71,7 @@ spec:
               name: main
               workingDir: /workspace
       replicas: 1
+      runtimeVersionOverride: 1.4.0
       type: prefill
 status:
   $ignore: true
@@ -110,6 +113,7 @@ spec:
           name: main
           workingDir: /workspace
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: decode
 status:
   $ignore: true
@@ -554,6 +558,7 @@ spec:
         - image: $ignore
           name: main
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: frontend
 status:
   $ignore: true
@@ -595,6 +600,7 @@ spec:
           name: main
           workingDir: /workspace
   replicas: 1
+  runtimeVersionOverride: 1.4.0
   type: prefill
 status:
   $ignore: true

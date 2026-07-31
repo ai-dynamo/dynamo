@@ -6,7 +6,7 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 **Before using these utilities, you must first set up Dynamo Kubernetes Platform following the main installation guide:**
 
-👉 **[Follow the Dynamo Kubernetes Platform installation guide](../../docs/fern/kubernetes/installation-guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Kubernetes Platform installation guide](../../docs/fern/pages/kubernetes/installation/install-dynamo.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
@@ -116,15 +116,21 @@ kubectl cp $NAMESPACE/pvc-access-pod:/data/results/benchmark-name ./benchmarks/r
 # View the generated DGD configuration from profiling
 kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
 
-# View the planner profiling data (JSON format)
-kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
+# List generated planner profiling data ConfigMaps
+kubectl get configmap -n $NAMESPACE -l dgdr.nvidia.com/name=<dgdr-name>
 ```
 
 > **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is automatically stored in ConfigMaps:
 > - `dgdr-output-<dgdr-name>`: Contains the generated DynamoGraphDeployment YAML
-> - `planner-profile-data`: Contains profiling performance data in JSON format for the planner
+> - `planner-profile-data-XXXX`: Contains profiling performance data in JSON format for the planner, with a generated suffix. It is created only for thorough sweeping when profile data is needed.
 >
 > The planner component reads this data directly from the mounted ConfigMap, so no PVC is needed.
+
+Creating `dynamo-pvc` does not automatically persist profiling artifacts. To
+capture plots, logs, and raw data, replace the profiling Job's
+`profiling-output` volume with that claim through
+`spec.overrides.profilingJob`; see the
+[Profiler Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#accessing-profiling-artifacts).
 
 #### Cleanup Access Pod
 
@@ -144,8 +150,8 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 #### Next Steps
 
 For complete benchmarking and profiling workflows:
-- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/fern/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler-guide.md](../../docs/fern/components/profiler/profiler-guide.md) for optimizing configurations before deployment
+- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md) for comparing DynamoGraphDeployments and external endpoints
+- **Pre-Deployment Profiling**: See [docs/components/profiler/profiler-guide.md](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) for optimizing configurations before deployment
 
 ## Notes
 
