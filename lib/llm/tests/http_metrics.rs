@@ -899,4 +899,99 @@ mod integration_tests {
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     }
+
+    /// Same regression as the model_card.rs unit tests, through the real
+    /// attach() -> etcd -> ModelWatcher discovery path.
+    #[tokio::test]
+    #[ignore = "Requires etcd and distributed runtime"]
+    async fn test_attach_publishes_directory_source_path_not_custom_name() {
+        let model_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/TinyLlama_v1.1");
+        let canonical_dir = std::fs::canonicalize(&model_dir).unwrap();
+
+        let runtime = dynamo_runtime::Runtime::from_settings().unwrap();
+        let distributed_runtime = DistributedRuntime::from_settings(runtime.clone())
+            .await
+            .unwrap();
+
+        let mut local_model = LocalModelBuilder::default()
+            .model_path(model_dir)
+            .model_name(Some("test-custom-name-e2e".to_string()))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(local_model.display_name(), "test-custom-name-e2e");
+
+        let service = HttpService::builder()
+            .port(0)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let model_watcher = ModelWatcher::new(
+            distributed_runtime.clone(),
+            service.state().manager_clone(),
+            dynamo_llm::entrypoint::RouterConfig::default(),
+            0,    // migration_limit
+            None, // migration_max_seq_len
+            None,
+            None,
+            service.state().metrics_clone(),
+        );
+        let discovery = distributed_runtime.discovery();
+        let discovery_stream = discovery
+            .list_and_watch(
+                DiscoveryQuery::AllModels,
+                Some(distributed_runtime.primary_token()),
+            )
+            .await
+            .unwrap();
+        let _watcher_task = tokio::spawn(async move {
+            Arc::new(model_watcher)
+                .watch(discovery_stream, NamespaceFilter::Global)
+                .await;
+        });
+
+        let namespace = distributed_runtime
+            .namespace("test-source-path-namespace")
+            .unwrap();
+        let test_component = namespace.component("test-source-path-component").unwrap();
+        let test_endpoint = test_component.endpoint("test-source-path-endpoint");
+
+        // Real publish path: stores the MDC in etcd for discovery.
+        local_model
+            .attach(
+                &test_endpoint,
+                dynamo_llm::model_type::ModelType::Chat,
+                dynamo_llm::model_type::ModelInput::Text,
+                None,
+                Some(dynamo_llm::worker_type::WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Eventually consistent: poll until the watcher saves the card.
+        let manager = service.model_manager();
+        let discovered = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(card) = manager
+                    .get_model_cards()
+                    .into_iter()
+                    .find(|c| c.display_name == "test-custom-name-e2e")
+                {
+                    return card;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("model was not discovered via etcd within 10s");
+
+        assert_eq!(
+            discovered.source_path(),
+            canonical_dir.display().to_string(),
+            "custom --model-name must not leak into source_path"
+        );
+    }
 }

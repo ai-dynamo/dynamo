@@ -383,8 +383,7 @@ impl LocalModelBuilder {
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
         } else {
-            // Local snapshot with a custom display name must still record the
-            // directory as the metadata/weight source, not display_name().
+            // Custom display names must not replace source_path.
             card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
@@ -641,13 +640,9 @@ impl LocalModel {
                 .context("move_to_self_host")?;
         }
 
-        // Publish honest file:// URIs for whatever this worker actually has
-        // on disk. The consuming side (ModelDeploymentCard::download_config /
-        // checked_file_uri) already implements the local -> --model-path
-        // overlay -> hf:// fallback chain, so the worker does not need to
-        // guess here — guessing from source_path/display_name was the root
-        // cause of a custom --model-name being published as a bogus hf://
-        // repo id.
+        // Publish honest file:// URIs; checked_file_uri on the consumer
+        // side already handles the local -> --model-path overlay -> hf://
+        // fallback, so we don't need to guess here.
 
         // Register the Model Deployment Card via discovery interface
         register_model_card(endpoint, &self.card).await?;
@@ -878,10 +873,8 @@ mod metadata_publish_tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
     }
 
-    /// Regression test: a local model dir plus a custom `--model-name` must
-    /// keep the directory as `source_path`. Before the fix, `source_path()`
-    /// fell back to the custom display name, and `attach()` published
-    /// `hf://<custom-name>/...` URIs pointing at a nonexistent HF repo.
+    /// Custom --model-name must not replace source_path (regression:
+    /// attach() published hf://<custom-name>/... as a result).
     #[tokio::test]
     async fn build_local_model_custom_name_keeps_directory_source_path() {
         let model_dir = sample_model_dir();
