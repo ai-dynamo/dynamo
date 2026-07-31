@@ -110,10 +110,18 @@ ENV CUDARC_CUDA_VERSION=13010
 #
 # Gated at runtime by DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs:9-14); with the env
 # var unset this layer costs one 150 KB wheel and nothing else.
+# NOTE: `nvidia` and `nvidia.cu13` are NAMESPACE packages (no __init__.py), so
+# nvidia.cu13.__file__ is None and dirname(__file__) raises TypeError. Locate the .so by
+# globbing site-packages instead of importing - immune to namespace-package semantics and
+# to any other `nvidia` distribution on the path shadowing it.
 RUN pip install --break-system-packages --no-cache-dir "nvidia-nvtx==13.3.29" \
- && NVTX_LIB=$(python3 -c "import nvidia.cu13, os; print(os.path.join(os.path.dirname(nvidia.cu13.__file__), 'lib'))") \
- && test -f "${NVTX_LIB}/libnvtx3interop.so.1" \
- && ln -sf "${NVTX_LIB}/libnvtx3interop.so.1" /usr/local/lib/libnvToolsExt.so.1 \
+ && NVTX_SO=$(python3 -c "import sysconfig,glob,os; \
+      roots=[sysconfig.get_paths()['purelib'], sysconfig.get_paths()['platlib']]; \
+      hits=[h for r in roots for h in sorted(glob.glob(os.path.join(r,'nvidia','**','libnvtx3interop.so*'),recursive=True))]; \
+      print(hits[0] if hits else '')") \
+ && { [ -n "${NVTX_SO}" ] || NVTX_SO=$(find / -xdev -name 'libnvtx3interop.so*' 2>/dev/null | head -1); } \
+ && test -f "${NVTX_SO}" \
+ && ln -sf "${NVTX_SO}" /usr/local/lib/libnvToolsExt.so.1 \
  && ln -sf /usr/local/lib/libnvToolsExt.so.1 /usr/local/lib/libnvToolsExt.so \
  && ldconfig \
  && ldconfig -p | grep -q nvToolsExt \
