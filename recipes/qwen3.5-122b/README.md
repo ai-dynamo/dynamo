@@ -127,14 +127,19 @@ See [perf/README.md](perf/README.md) — mooncake agentic trace replay for both 
 
 ## Performance results
 
-Measured on H200 against the **real** 15% agentic mooncake trace (3,541 requests, block
-512, closed-loop concurrency 8; SLA = P50 TTFT < 5 s **and** ≥ 50 output tok/s/user).
-Headline metric is system output tok/s per GPU.
+Measured on H200 against the **real** agentic mooncake trace (block 512, closed-loop;
+SLA = P50 TTFT < 5 s **and** ≥ 50 output tok/s/user). Headline metric is system output
+tok/s per GPU at each profile's SLA knee. Aggregated row: 3,541-request trace at
+concurrency 8. Disaggregated row: 1,500-request trace at its knee (concurrency 16) with
+the enlarged KV pool (`--gpu-memory-utilization 0.95`), which roughly doubles the paged
+KV pool on this weights-heavy model, lifts sustained prefix-cache hit from ~25% to ~54%,
+and moves the SLA knee from c12 (~212 tok/s/GPU) to c16 (~254). At lower load the same
+profile serves sub-second TTFT (e.g. ~189 tok/s/GPU, P50 TTFT 0.5 s at concurrency 8).
 
 | Recipe                       | GPUs | tok/s/GPU @ SLA | user tok/s (P50) | TTFT (P50) |
 | ---------------------------- | ---- | --------------- | ---------------- | ---------- |
 | Aggregated TP1 + MTP (kv)    | 2    | ~380            | 139              | 0.72 s     |
-| Disaggregated 1P2D (kv)      | 3    | ~184            | 87               | 0.94 s     |
+| Disaggregated 1P2D (kv)      | 3    | ~254            | 63               | 4.7 s      |
 
 KV-aware routing beats `round_robin` by ~19–22% output tok/s (and ~2.5x lower TTFT) on
 both profiles, by landing each request on the worker that already holds its ~57k-token

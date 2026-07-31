@@ -102,8 +102,8 @@ spec:
                 - --enable-prefix-caching
                 - --block-size=64
                 - --max-num-seqs=32
-                - --max-num-batched-tokens=16384
-                - --gpu-memory-utilization=0.9
+                - --max-num-batched-tokens=32768
+                - --gpu-memory-utilization=0.95
                 - --disaggregation-mode=prefill
                 - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
                 - --kv-events-config={"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}
@@ -223,11 +223,12 @@ spec:
                 - --enable-prefix-caching
                 - --block-size=64
                 # Larger decode batch than prefill: spends 1P2D's interactivity
-                # surplus for throughput — the best no-MTP disagg point measured
-                # on the real mooncake trace (~1,112 tok/s/GPU at the SLA knee).
+                # surplus for throughput. With the enlarged KV pool (util 0.95)
+                # this profile measures ~254 tok/s/GPU at its SLA knee (c16) on
+                # the real mooncake trace.
                 - --max-num-seqs=128
                 - --max-num-batched-tokens=16384
-                - --gpu-memory-utilization=0.9
+                - --gpu-memory-utilization=0.95
                 - --disaggregation-mode=decode
                 - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
               command:
