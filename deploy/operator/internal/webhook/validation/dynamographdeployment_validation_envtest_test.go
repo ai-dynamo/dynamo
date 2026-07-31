@@ -38,10 +38,10 @@ import (
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
-	dgdAdmissionPowerAnnotation = "dynamo.nvidia.com/gpu-power-limit"
-	dgdAdmissionPowerImmutable  = "dynamo.nvidia.com/gpu-power-limit is immutable; delete and recreate the DynamoGraphDeployment to change it"
-	dgdAdmissionGPUImmutable    = "the effective main-container nvidia.com/gpu count is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
-	dgdAdmissionNodesImmutable  = "multinode.nodeCount is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
+	dgdAdmissionPowerAnnotation = consts.KubeAnnotationGPUPowerLimit
+	dgdAdmissionPowerImmutable  = "is immutable; delete and recreate the DynamoGraphDeployment to change it"
+	dgdAdmissionGPUImmutable    = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
+	dgdAdmissionNodesImmutable  = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
 )
 
 const sglangBackendFramework = "sglang"
@@ -448,7 +448,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, betaDGDForAdmission(nil)),
 		},
 		{
-			name: "v1beta1 pod template supports large container counts within CEL cost bound",
+			name: "v1beta1 pod template container counts are not artificially bounded",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				podTemplate := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
@@ -518,25 +518,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 power annotation change is rejected by CEL",
+			name: "v1beta1 power annotation change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
+			},
 		},
 		{
-			name:          "v1beta1 power annotation addition is rejected by CEL",
-			oldDeployment: betaDGDForAdmission(nil),
+			name: "v1beta1 power annotation addition is rejected by the webhook",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, dgdAdmissionPowerAnnotation)
+			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300": ` + dgdAdmissionPowerImmutable,
+			},
 		},
 		{
-			name: "v1beta1 power annotation removal is rejected by CEL",
+			name: "v1beta1 power annotation removal is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
@@ -544,17 +551,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, dgdAdmissionPowerAnnotation)
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionPowerImmutable,
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: null: " + dgdAdmissionPowerImmutable,
+			},
 		},
 		{
-			name: "v1beta1 effective GPU change is rejected by CEL",
+			name: "v1beta1 effective GPU change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "2", 2)
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionGPUImmutable,
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
+			},
 		},
 		{
 			name: "v1beta1 shadow request change is allowed when GPU limit is unchanged",
@@ -569,14 +580,16 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 power node count change is rejected by CEL",
+			name: "v1beta1 power node count change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 3)
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: " + dgdAdmissionNodesImmutable,
+			wantWebhookErrs: []string{
+				"spec.components[1].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
+			},
 		},
 		{
 			name: "v1beta1 unrelated power component update reaches webhook",
@@ -600,34 +613,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 power annotation change is rejected by CEL",
+			name: "v1alpha1 power annotation change is rejected by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
-			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionPowerImmutable,
+			wantWebhookErrs: []string{
+				`spec.services[worker].extraPodMetadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
+			},
 		},
 		{
-			name: "v1alpha1 effective GPU change is rejected by CEL",
+			name: "v1alpha1 effective GPU change is rejected by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "2", 2)
 			}),
-			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionGPUImmutable,
+			wantWebhookErrs: []string{
+				`spec.services[worker].resources.limits.gpu: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
+			},
 		},
 		{
-			name: "v1alpha1 power node count change is rejected by CEL",
+			name: "v1alpha1 power node count change is rejected by the webhook",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 3)
 			}),
-			wantCELErr: "spec.services[worker]: Invalid value: " + dgdAdmissionNodesImmutable,
+			wantWebhookErrs: []string{
+				"spec.services[worker].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
+			},
 		},
 		{
 			name: "v1alpha1 unrelated power service update reaches webhook",

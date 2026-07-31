@@ -70,6 +70,12 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathwayRequirement string
 }
 
+const (
+	dgdPowerLimitImmutableDetail = "is immutable; delete and recreate the DynamoGraphDeployment to change it"
+	dgdGPUCountImmutableDetail   = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
+	dgdNodeCountImmutableDetail  = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
+)
+
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
 // ctx and deployment must not be nil.
 func (v *DynamoGraphDeploymentValidator) Validate(
@@ -561,6 +567,49 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			canModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
+
+		// Enforce DGD-owned power inputs against the request's source-version fields.
+		if !v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
+			continue
+		}
+		componentPath := componentsPath.Index(i)
+		newPowerLimit, newHasPowerLimit := dgdPowerLimitV1Beta1(newComponent)
+		oldPowerLimit, oldHasPowerLimit := dgdPowerLimitV1Beta1(oldComponent)
+
+		// Reject transitions into, out of, or within the power-annotation contract.
+		if newHasPowerLimit != oldHasPowerLimit ||
+			(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+			var invalidValue any
+			if newHasPowerLimit {
+				invalidValue = newPowerLimit
+			}
+			allErrs = append(allErrs, field.Invalid(
+				componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+				invalidValue,
+				dgdPowerLimitImmutableDetail,
+			))
+		}
+		if !oldHasPowerLimit {
+			continue
+		}
+
+		// Keep the Planner's remaining cached per-replica power inputs stable.
+		newGPUInput := effectiveDGDGPUInputV1Beta1(newComponent, componentPath)
+		oldGPUInput := effectiveDGDGPUInputV1Beta1(oldComponent, componentPath)
+		if !newGPUInput.equal(oldGPUInput) {
+			allErrs = append(allErrs, field.Invalid(
+				newGPUInput.path,
+				newGPUInput.invalidValue(),
+				dgdGPUCountImmutableDetail,
+			))
+		}
+		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
+			allErrs = append(allErrs, field.Invalid(
+				componentPath.Child("multinode", "nodeCount"),
+				newComponent.GetNumberOfNodes(),
+				dgdNodeCountImmutableDetail,
+			))
+		}
 	}
 
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
