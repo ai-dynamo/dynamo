@@ -115,11 +115,17 @@ article:has(.dynamo-welcome) > header::before {
   border: 1px solid rgba(118, 185, 0, 0.4);
   border-radius: 24px;
   background: #f3fbdc
-    url("https://avatars.githubusercontent.com/u/201626793?s=200&v=4") center /
+    url("/dynamo/assets/img/dynamo-logo.svg") center /
     cover no-repeat;
   box-shadow:
     0 18px 42px rgba(54, 86, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.dark article:has(.dynamo-welcome) > header::before {
+  border-color: rgba(118, 185, 0, 0.4);
+  background-color: #0c0d0b;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
 }
 
 article:has(.dynamo-welcome) > header .fern-breadcrumb {
@@ -222,12 +228,19 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   border: 0;
 }
 
+.dynamo-welcome__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 1.35rem;
+}
+
 .dynamo-welcome__cta {
   display: inline-flex;
   align-items: center;
   gap: 0.65rem;
   min-height: 3.15rem;
-  margin-top: 1.35rem;
   padding: 0.82rem 1.2rem 0.82rem 1.4rem;
   border: 1px solid #68a400;
   border-radius: 999px;
@@ -271,6 +284,22 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   stroke-linecap: round;
   stroke-linejoin: round;
   transition: transform 160ms ease;
+}
+
+.dynamo-welcome__cta--secondary {
+  border-color: color-mix(in srgb, var(--grayscale-a12) 16%, transparent);
+  background: var(--grayscale-a1);
+  color: var(--grayscale-a12) !important;
+  box-shadow: none;
+}
+
+.dynamo-welcome__cta--secondary:hover {
+  border-color: rgba(118, 185, 0, 0.55);
+  background: color-mix(in srgb, var(--grayscale-a2) 84%, rgba(118, 185, 0, 0.12));
+}
+
+.dynamo-welcome__cta--secondary svg {
+  stroke: currentColor;
 }
 
 .dynamo-welcome__cta:hover svg {
@@ -526,10 +555,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
 
 .dynamo-welcome__notification--slack .dynamo-welcome__notification-icon {
   background: #4a154b;
-}
-
-.dynamo-welcome__notification--wechat .dynamo-welcome__notification-icon {
-  background: #07c160;
 }
 
 .dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
@@ -2078,13 +2103,9 @@ article:has(.dynamo-community-page) {
 
 .dynamo-community-app--discussions { background: #6e40c9; }
 
-.dynamo-community-app--discord { background: #5865f2; }
-
 .dynamo-community-app--slack { background: #4a154b; }
 
 .dynamo-community-app--youtube { background: #ff0033; }
-
-.dynamo-community-app--calendar { background: #4978d0; }
 
 .dynamo-community-contribute { display: grid; grid-template-columns: minmax(0,1fr) minmax(240px,.7fr); gap: 2rem; margin-top: 3.5rem; padding: 2rem 0; border-top: 1px solid var(--dynamo-community-rule); }
 

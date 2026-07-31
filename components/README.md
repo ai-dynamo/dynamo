@@ -25,9 +25,9 @@ This directory contains the core components that make up the Dynamo inference fr
 
 Dynamo supports multiple inference engines, each with their own deployment configurations and capabilities:
 
-- **[vLLM](../docs/fern/backends/vllm/README.md)** - Full-featured vLLM integration with disaggregated serving, KV-aware routing, SLA-based planning, native KV cache events, and NIXL-based transfer mechanisms
-- **[SGLang](../docs/fern/backends/sglang/README.md)** - SGLang engine integration with ZMQ-based communication, supporting disaggregated serving and KV-aware routing
-- **[TensorRT-LLM](../docs/fern/backends/trtllm/README.md)** - TensorRT-LLM integration with disaggregated serving capabilities and TensorRT acceleration
+- **[vLLM](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md)** - Full-featured vLLM integration with disaggregated serving, KV-aware routing, SLA-based planning, native KV cache events, and NIXL-based transfer mechanisms
+- **[SGLang](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/overview.md)** - SGLang engine integration with ZMQ-based communication, supporting disaggregated serving and KV-aware routing
+- **[TensorRT-LLM](../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md)** - TensorRT-LLM integration with disaggregated serving capabilities and TensorRT acceleration
 
 Each engine provides launch and deploy scripts for different deployment patterns in the [examples](../examples/backends/) folder.
 
