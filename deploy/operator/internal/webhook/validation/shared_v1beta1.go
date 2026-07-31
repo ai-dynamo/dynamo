@@ -22,10 +22,12 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -362,6 +364,46 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Multinode,
 			"cannot change node topology between single-node and multi-node after creation",
 		))
+	}
+
+	// Enforce DGD-owned power inputs after conversion to the canonical v1beta1 representation.
+	if ownerKind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind() {
+		newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
+		oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
+
+		// Reject transitions into, out of, or within the power-annotation contract.
+		if newHasPowerLimit != oldHasPowerLimit ||
+			(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+			var invalidValue any
+			if newHasPowerLimit {
+				invalidValue = newPowerLimit
+			}
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+				invalidValue,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+
+		if oldHasPowerLimit {
+			// Keep the Planner's remaining cached per-replica power inputs stable.
+			newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
+			oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
+			if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
+				allErrs = append(allErrs, field.Invalid(
+					newNumberOfGPUs.path,
+					newNumberOfGPUs.invalidValue(),
+					apivalidation.FieldImmutableErrorMsg,
+				))
+			}
+			if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
+				allErrs = append(allErrs, field.Invalid(
+					fldPath.Child("multinode", "nodeCount"),
+					newComponent.GetNumberOfNodes(),
+					apivalidation.FieldImmutableErrorMsg,
+				))
+			}
+		}
 	}
 
 	topologyPath := fldPath.Child("topologyConstraint")

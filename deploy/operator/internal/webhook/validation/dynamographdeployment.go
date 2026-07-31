@@ -32,7 +32,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -575,46 +574,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			canModifyReplicas,
 			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
-
-		// Enforce DGD-owned power inputs after conversion to the canonical v1beta1 representation.
-		componentPath := componentsPath.Index(i)
-		newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
-		oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
-
-		// Reject transitions into, out of, or within the power-annotation contract.
-		if newHasPowerLimit != oldHasPowerLimit ||
-			(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
-			var invalidValue any
-			if newHasPowerLimit {
-				invalidValue = newPowerLimit
-			}
-			allErrs = append(allErrs, field.Invalid(
-				componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
-				invalidValue,
-				apivalidation.FieldImmutableErrorMsg,
-			))
-		}
-		if !oldHasPowerLimit {
-			continue
-		}
-
-		// Keep the Planner's remaining cached per-replica power inputs stable.
-		newGPUInput := effectiveDGDGPUInput(newComponent, componentPath)
-		oldGPUInput := effectiveDGDGPUInput(oldComponent, componentPath)
-		if !newGPUInput.equal(oldGPUInput) {
-			allErrs = append(allErrs, field.Invalid(
-				newGPUInput.path,
-				newGPUInput.invalidValue(),
-				apivalidation.FieldImmutableErrorMsg,
-			))
-		}
-		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
-			allErrs = append(allErrs, field.Invalid(
-				componentPath.Child("multinode", "nodeCount"),
-				newComponent.GetNumberOfNodes(),
-				apivalidation.FieldImmutableErrorMsg,
-			))
-		}
 	}
 
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
