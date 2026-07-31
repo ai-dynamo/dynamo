@@ -330,6 +330,7 @@ mod tests {
             enabled: true,
             output_path: path.display().to_string(),
             mode: FpmTraceMode::Full,
+            sample_ratio: None,
             sample_interval_ms: 100,
             jsonl_gz_roll_bytes: 1024 * 1024,
             max_segments: 4,

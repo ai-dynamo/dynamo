@@ -141,7 +141,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="OTEL_TRACES_SAMPLE_RATIO" type="number">
-  Head-sampling ratio in `[0.0, 1.0]`. Unset exports every trace. For example, `0.01` retains approximately one percent of traces.
+  Head-sampling ratio in `[0.0, 1.0]`. Unset exports every trace. For example, `0.01` retains approximately one percent of traces. The same ratio applies to runtime spans, request-trace records before they fan out to file, standard error, NATS, S3, or the OTLP log sink, and forward-pass metric trace files.
 </ParamField>
 
 <ParamField path="OTEL_SERVICE_NAME" type="string" default="dynamo">

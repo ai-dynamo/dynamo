@@ -252,7 +252,7 @@ fn parse_trace_sample_ratio(value: Option<&str>) -> Option<f64> {
     }
 }
 
-fn trace_sample_ratio_from_env() -> Option<f64> {
+pub fn trace_sample_ratio_from_env() -> Option<f64> {
     parse_trace_sample_ratio(
         std::env::var(env_logging::otlp::OTEL_TRACES_SAMPLE_RATIO)
             .ok()

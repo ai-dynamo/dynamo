@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
+use xxhash_rust::xxh3::xxh3_64;
 
 use dynamo_runtime::utils::GracefulTaskGuard;
 
@@ -260,9 +261,18 @@ pub(super) async fn spawn_worker(
         // Keeping the owner alive keeps this producer discoverable in the
         // registry until its writer has finished closing.
         match policy.mode {
-            FpmTraceMode::Full => run_full(receiver, writer, owner.clone()).await,
+            FpmTraceMode::Full => {
+                run_full(receiver, writer, owner.clone(), policy.sample_ratio).await
+            }
             FpmTraceMode::Sampled => {
-                run_sampled(receiver, writer, owner.clone(), policy.sample_interval_ms).await
+                run_sampled(
+                    receiver,
+                    writer,
+                    owner.clone(),
+                    policy.sample_ratio,
+                    policy.sample_interval_ms,
+                )
+                .await
             }
         }
     });
@@ -278,13 +288,38 @@ impl Drop for MarkClosedOnDrop {
     }
 }
 
-async fn send_decoded(writer: &JsonlGzipWriter<FpmTraceRecord>, event: FpmTraceEvent) {
+fn should_sample(key: &FpmKey, counter_id: i64, sample_ratio: Option<f64>) -> bool {
+    let Some(ratio) = sample_ratio else {
+        return true;
+    };
+    if ratio <= 0.0 {
+        return false;
+    }
+    if ratio >= 1.0 {
+        return true;
+    }
+
+    let (source, worker_id, dp_rank) = key;
+    let key = format!(
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{counter_id}",
+        source.namespace, source.component, source.producer_id, worker_id, dp_rank,
+    );
+    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
+    xxh3_64(key.as_bytes()) < threshold
+}
+
+async fn send_decoded(
+    writer: &JsonlGzipWriter<FpmTraceRecord>,
+    event: FpmTraceEvent,
+    sample_ratio: Option<f64>,
+) {
     match decode_event(event, FpmTraceMode::Full) {
-        Ok((_, _, record)) => {
+        Ok((key, counter_id, record)) if should_sample(&key, counter_id, sample_ratio) => {
             if writer.send(record).await.is_err() {
                 tracing::warn!("FPM trace writer closed; dropping record");
             }
         }
+        Ok(_) => {}
         Err(error) => tracing::warn!(%error, "FPM trace dropped malformed payload"),
     }
 }
@@ -315,6 +350,7 @@ async fn run_full(
     mut receiver: broadcast::Receiver<FpmTraceEvent>,
     writer: JsonlGzipWriter<FpmTraceRecord>,
     owner: Arc<FpmTraceInner>,
+    sample_ratio: Option<f64>,
 ) {
     loop {
         tokio::select! {
@@ -326,7 +362,7 @@ async fn run_full(
                 owner.stop_accepting().await;
                 loop {
                     match receiver.try_recv() {
-                        Ok(event) => send_decoded(&writer, event).await,
+                        Ok(event) => send_decoded(&writer, event, sample_ratio).await,
                         Err(broadcast::error::TryRecvError::Lagged(dropped)) => {
                             report_lag(&owner, dropped, true);
                         }
@@ -344,7 +380,7 @@ async fn run_full(
             }
             message = receiver.recv() => {
                 match message {
-                    Ok(event) => send_decoded(&writer, event).await,
+                    Ok(event) => send_decoded(&writer, event, sample_ratio).await,
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         report_lag(&owner, dropped, false);
                     }
@@ -387,10 +423,13 @@ async fn flush_latest(
     writer: &JsonlGzipWriter<FpmTraceRecord>,
     latest: &mut BTreeMap<FpmKey, PendingSample>,
     last_emitted: &mut BTreeMap<FpmKey, i64>,
+    sample_ratio: Option<f64>,
 ) {
     for (key, pending) in std::mem::take(latest) {
         let counter_id = pending.counter_id;
-        if writer.send(pending.record).await.is_err() {
+        if should_sample(&key, counter_id, sample_ratio)
+            && writer.send(pending.record).await.is_err()
+        {
             tracing::warn!("FPM trace writer closed; dropping sampled record");
             break;
         }
@@ -402,6 +441,7 @@ async fn run_sampled(
     mut receiver: broadcast::Receiver<FpmTraceEvent>,
     writer: JsonlGzipWriter<FpmTraceRecord>,
     owner: Arc<FpmTraceInner>,
+    sample_ratio: Option<f64>,
     sample_interval_ms: u64,
 ) {
     let interval = Duration::from_millis(sample_interval_ms.max(1));
@@ -427,7 +467,7 @@ async fn run_sampled(
                         ) => break,
                     }
                 }
-                flush_latest(&writer, &mut latest, &mut last_emitted).await;
+                flush_latest(&writer, &mut latest, &mut last_emitted, sample_ratio).await;
                 if let Err(error) = writer.close().await {
                     tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                 }
@@ -435,7 +475,7 @@ async fn run_sampled(
                 return;
             }
             _ = flush_tick.tick() => {
-                flush_latest(&writer, &mut latest, &mut last_emitted).await;
+                flush_latest(&writer, &mut latest, &mut last_emitted, sample_ratio).await;
             }
             message = receiver.recv() => {
                 match message {
@@ -445,7 +485,7 @@ async fn run_sampled(
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         owner.stop_accepting().await;
-                        flush_latest(&writer, &mut latest, &mut last_emitted).await;
+                        flush_latest(&writer, &mut latest, &mut last_emitted, sample_ratio).await;
                         if let Err(error) = writer.close().await {
                             tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                         }
@@ -680,6 +720,24 @@ mod tests {
     }
 
     #[test]
+    fn sample_ratio_is_stable_per_source_worker_rank_and_counter() {
+        let key = key("worker-a", 0);
+
+        assert!(!should_sample(&key, 1, Some(0.0)));
+        assert!(should_sample(&key, 1, Some(1.0)));
+        assert_eq!(
+            should_sample(&key, 7, Some(0.5)),
+            should_sample(&key, 7, Some(0.5))
+        );
+
+        let decisions = (0..256)
+            .map(|counter_id| should_sample(&key, counter_id, Some(0.5)))
+            .collect::<Vec<_>>();
+        assert!(decisions.iter().any(|decision| *decision));
+        assert!(decisions.iter().any(|decision| !*decision));
+    }
+
+    #[test]
     fn malformed_payload_is_rejected() {
         let malformed = FpmTraceEvent {
             observed_at_unix_ms: 1,
@@ -729,7 +787,7 @@ mod tests {
         let (sender, receiver) = broadcast::channel(8);
         let shutdown = CancellationToken::new();
         let owner = owner(sender.clone(), shutdown.clone());
-        let task = tokio::spawn(run_full(receiver, writer, owner));
+        let task = tokio::spawn(run_full(receiver, writer, owner, None));
 
         sender
             .send(event_with_wall_time("worker-a", 0, 1, 0.01))
@@ -757,6 +815,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn full_mode_drops_records_when_sample_ratio_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sampled-out-trace");
+        let writer = test_writer(&path).await;
+        let (sender, receiver) = broadcast::channel(8);
+        let shutdown = CancellationToken::new();
+        let owner = owner(sender.clone(), shutdown.clone());
+        let task = tokio::spawn(run_full(receiver, writer, owner, Some(0.0)));
+
+        sender.send(event("worker-a", 0, 1)).unwrap();
+        shutdown.cancel();
+        task.await.unwrap();
+
+        assert!(!segment_path(&path, 0).exists());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn sampled_mode_is_per_rank_suppresses_unchanged_and_flushes_dirty_shutdown() {
         let dir = tempfile::tempdir().unwrap();
@@ -765,7 +840,7 @@ mod tests {
         let (sender, receiver) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
         let owner = owner(sender.clone(), shutdown.clone());
-        let task = tokio::spawn(run_sampled(receiver, writer, owner, 100));
+        let task = tokio::spawn(run_sampled(receiver, writer, owner, None, 100));
 
         sender.send(event("worker-a", 0, 1)).unwrap();
         sender.send(event("worker-a", 0, 2)).unwrap();

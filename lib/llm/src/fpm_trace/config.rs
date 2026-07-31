@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use dynamo_runtime::config::environment_names::llm::fpm_trace as env_fpm_trace;
 use dynamo_runtime::config::parse_bool;
+use dynamo_runtime::logging::trace_sample_ratio_from_env;
 
 pub const DEFAULT_OUTPUT_PATH: &str = "/tmp/dynamo-fpm";
 pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
@@ -27,6 +28,7 @@ pub struct FpmTracePolicy {
     pub enabled: bool,
     pub output_path: String,
     pub mode: FpmTraceMode,
+    pub sample_ratio: Option<f64>,
     pub sample_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub max_segments: usize,
@@ -40,6 +42,7 @@ impl Default for FpmTracePolicy {
             enabled: false,
             output_path: DEFAULT_OUTPUT_PATH.to_string(),
             mode: FpmTraceMode::Sampled,
+            sample_ratio: None,
             sample_interval_ms: DEFAULT_SAMPLE_INTERVAL_MS,
             jsonl_gz_roll_bytes: DEFAULT_JSONL_GZ_ROLL_BYTES,
             max_segments: DEFAULT_MAX_SEGMENTS,
@@ -84,6 +87,7 @@ fn load_enabled_policy() -> anyhow::Result<FpmTracePolicy> {
         enabled: true,
         output_path,
         mode,
+        sample_ratio: trace_sample_ratio_from_env(),
         sample_interval_ms: positive_integer_from_env(
             env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS,
             DEFAULT_SAMPLE_INTERVAL_MS,
@@ -130,6 +134,8 @@ pub fn is_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
+
     use super::*;
 
     #[test]
@@ -143,12 +149,14 @@ mod tests {
                 (env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS, None),
                 (env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES, None),
                 (env_fpm_trace::DYN_FPM_MAX_SEGMENTS, None),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, None),
             ],
             || {
                 let policy = load_from_env();
                 assert!(!policy.enabled);
                 assert_eq!(policy.output_path, DEFAULT_OUTPUT_PATH);
                 assert_eq!(policy.mode, FpmTraceMode::Sampled);
+                assert_eq!(policy.sample_ratio, None);
                 assert_eq!(policy.sample_interval_ms, DEFAULT_SAMPLE_INTERVAL_MS);
                 assert_eq!(policy.jsonl_gz_roll_bytes, DEFAULT_JSONL_GZ_ROLL_BYTES);
                 assert_eq!(policy.max_segments, DEFAULT_MAX_SEGMENTS);
@@ -167,12 +175,14 @@ mod tests {
                 (env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS, Some("250")),
                 (env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES, Some("4096")),
                 (env_fpm_trace::DYN_FPM_MAX_SEGMENTS, Some("7")),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, Some("0.25")),
             ],
             || {
                 let policy = load_from_env();
                 assert!(policy.enabled);
                 assert_eq!(policy.output_path, "/var/log/fpm");
                 assert_eq!(policy.mode, FpmTraceMode::Full);
+                assert_eq!(policy.sample_ratio, Some(0.25));
                 assert_eq!(policy.sample_interval_ms, 250);
                 assert_eq!(policy.jsonl_gz_roll_bytes, 4096);
                 assert_eq!(policy.max_segments, 7);
@@ -190,6 +200,7 @@ mod tests {
                 (env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS, Some("0")),
                 (env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES, Some("bad")),
                 (env_fpm_trace::DYN_FPM_MAX_SEGMENTS, Some("0")),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, None),
             ],
             || {
                 let policy = load_from_env();
@@ -221,6 +232,7 @@ mod tests {
                 (env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS, None),
                 (env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES, None),
                 (env_fpm_trace::DYN_FPM_MAX_SEGMENTS, None),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, None),
             ];
             let (_, value) = vars
                 .iter_mut()
