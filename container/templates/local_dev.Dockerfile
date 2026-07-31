@@ -81,10 +81,32 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
-RUN mkdir -p /home/$USERNAME/.cache/ \
-    && mkdir -p /home/$USERNAME/.cache/pre-commit \
-    && chmod g+w /home/$USERNAME/.cache/ \
-    && chmod g+w /home/$USERNAME/.cache/pre-commit
+# Framework runtime bases bake their own uv cache location into the image env
+# (vllm/vllm-openai sets UV_CACHE_DIR=/opt/uv/cache), and its entries are root-owned
+# 0755. That works while the image runs as root, but this stage remaps to a non-root
+# user, so afterwards every uv call dies with:
+#   error: Failed to initialize cache at `/opt/uv/cache`
+#   Caused by: failed to open file `/opt/uv/cache/sdists-v9/.git`: Permission denied
+# which breaks the two commands the dev docs tell you to run (`maturin develop --uv`
+# and `uv pip install --no-deps -e /workspace`).
+#
+# Point the cache at the user's own cache dir — the same /home/dynamo/.cache/uv path
+# the runtime, frontend and planner stages already use. `chmod -R g+w /opt/uv/cache`
+# would also work but copies a ~780MB tree into a new layer, which the permissions
+# memo above rules out.
+ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv
+
+# `usermod -u` above re-chowns only files owned by the OLD uid, so anything under
+# /home/$USERNAME that the base image left root-owned survives the remap — and `chmod`
+# on it then fails with EPERM because we are no longer root. The trtllm dev image ships
+# /home/dynamo/.cache/uv exactly this way. Group-write is what we actually need, so set
+# it where we own the directory and assert the result either way.
+RUN set -eux; \
+    for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit /home/$USERNAME/.cache/uv; do \
+        mkdir -p "$d"; \
+        if [ "$(stat -c %u "$d")" = "$(id -u)" ]; then chmod g+w "$d"; fi; \
+        test -w "$d"; \
+    done
 
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
