@@ -224,7 +224,9 @@ func effectiveDGDGPUInput(
 		return dgdGPUInput{path: containersPath}
 	}
 
-	// Resolve the main container's limit before its request, matching Pod scheduling semantics.
+	// The Planner reads this scalar value from the source DGD. Operator-generated DRA claims derive
+	// their device count from the same value later, so DRA adds no separate power input here. Read
+	// the limit before the request, as both consumers do.
 	resourceName := corev1.ResourceName(consts.KubeResourceGPUNvidia)
 	for i := range component.PodTemplate.Spec.Containers {
 		container := &component.PodTemplate.Spec.Containers[i]

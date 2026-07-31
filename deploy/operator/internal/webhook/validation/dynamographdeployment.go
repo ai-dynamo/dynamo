@@ -32,6 +32,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -69,12 +70,6 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 }
-
-const (
-	dgdPowerLimitImmutableDetail = "is immutable; delete and recreate the DynamoGraphDeployment to change it"
-	dgdGPUCountImmutableDetail   = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
-	dgdNodeCountImmutableDetail  = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
-)
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
 // ctx and deployment must not be nil.
@@ -583,7 +578,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			allErrs = append(allErrs, field.Invalid(
 				componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
 				invalidValue,
-				dgdPowerLimitImmutableDetail,
+				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
 		if !oldHasPowerLimit {
@@ -597,14 +592,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			allErrs = append(allErrs, field.Invalid(
 				newGPUInput.path,
 				newGPUInput.invalidValue(),
-				dgdGPUCountImmutableDetail,
+				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
 		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
 			allErrs = append(allErrs, field.Invalid(
 				componentPath.Child("multinode", "nodeCount"),
 				newComponent.GetNumberOfNodes(),
-				dgdNodeCountImmutableDetail,
+				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
 	}

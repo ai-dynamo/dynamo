@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
@@ -38,10 +39,6 @@ import (
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
-	dgdAdmissionPowerAnnotation = consts.KubeAnnotationGPUPowerLimit
-	dgdAdmissionPowerImmutable  = "is immutable; delete and recreate the DynamoGraphDeployment to change it"
-	dgdAdmissionGPUImmutable    = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
-	dgdAdmissionNodesImmutable  = "is immutable for a power-annotated component; delete and recreate the DynamoGraphDeployment to change it"
 )
 
 const sglangBackendFramework = "sglang"
@@ -526,20 +523,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
 			name: "v1beta1 power annotation addition is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
-				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, dgdAdmissionPowerAnnotation)
+				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300": ` + dgdAdmissionPowerImmutable,
+				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "300": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -549,10 +546,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
-				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, dgdAdmissionPowerAnnotation)
+				delete(betaWorkerComponent(dgd).PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: null: " + dgdAdmissionPowerImmutable,
+				"spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: null: " + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -564,7 +561,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "2", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[1].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
+				`spec.components[1].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -588,7 +585,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 3)
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[1].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
+				"spec.components[1].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -621,7 +618,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + dgdAdmissionPowerImmutable,
+				`spec.components[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -633,7 +630,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "300", "2", 2)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[0].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + dgdAdmissionGPUImmutable,
+				`spec.components[0].podTemplate.spec.containers[0].resources.limits[nvidia.com/gpu]: Invalid value: "2": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -645,7 +642,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 3)
 			}),
 			wantWebhookErrs: []string{
-				"spec.components[0].multinode.nodeCount: Invalid value: 3: " + dgdAdmissionNodesImmutable,
+				"spec.components[0].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 		{
@@ -2173,7 +2170,7 @@ func setBetaWorkerPowerInputs(
 ) {
 	worker := betaWorkerComponent(dgd)
 	worker.PodTemplate.Annotations = map[string]string{
-		dgdAdmissionPowerAnnotation: watts,
+		consts.KubeAnnotationGPUPowerLimit: watts,
 	}
 	worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse(gpus),
@@ -2189,7 +2186,7 @@ func setAlphaWorkerPowerInputs(
 ) {
 	worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 	worker.ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
-		Annotations: map[string]string{dgdAdmissionPowerAnnotation: watts},
+		Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: watts},
 	}
 	worker.Resources = &nvidiacomv1alpha1.Resources{
 		Limits: &nvidiacomv1alpha1.ResourceItem{GPU: gpus},
