@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "tracking_hash"
 harness = false
+
+[[bench]]
+name = "worker_selection"
+harness = false
