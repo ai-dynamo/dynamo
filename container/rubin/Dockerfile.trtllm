@@ -79,7 +79,7 @@ WORKDIR /opt/dynamo
 ENV CUDARC_CUDA_VERSION=13010
 
 RUN cd lib/bindings/python \
- && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist \
+ && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,nvtx" --out /opt/dynamo/dist \
  && cd /opt/dynamo && uv build --wheel --out-dir /opt/dynamo/dist
 RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo_runtime*.whl \
  && pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo-*.whl \
