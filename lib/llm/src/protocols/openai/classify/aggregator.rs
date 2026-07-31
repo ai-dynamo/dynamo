@@ -31,6 +31,7 @@ impl StreamAggregable for NvCreateClassifyResponse {
         self.data.extend(next.data);
         self.usage.prompt_tokens += next.usage.prompt_tokens;
         self.usage.total_tokens += next.usage.total_tokens;
+        self.usage.completion_tokens += next.usage.completion_tokens;
     }
 }
 
@@ -77,6 +78,7 @@ mod tests {
             usage: super::super::ClassificationUsage {
                 prompt_tokens,
                 total_tokens: prompt_tokens,
+                completion_tokens: 0,
             },
         };
         Annotated::from_data(response)
@@ -118,6 +120,7 @@ mod tests {
         assert_eq!(response.data[0].index, 0);
         assert_eq!(response.data[1].index, 1);
         assert_eq!(response.usage.total_tokens, 10);
+        assert_eq!(response.usage.completion_tokens, 0);
     }
 
     #[tokio::test]

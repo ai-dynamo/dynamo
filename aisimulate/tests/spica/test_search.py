@@ -18,7 +18,6 @@ from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
 from aisimulate.spica.sampler import Suggestion
 from aisimulate.spica.search import run_smart_search
 from aisimulate.spica.search_space import BranchSpace
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
@@ -105,7 +104,6 @@ def _branch(parallel_config):
 
 
 def _stub(monkeypatch, branch):
-    monkeypatch.setattr(search_mod, "_load_memory_estimator", lambda: object())
     monkeypatch.setattr(
         search_mod, "enumerate_branches", lambda config, *, max_seq_len=None: [branch]
     )
@@ -154,21 +152,6 @@ def test_show_progress_is_forwarded_to_load_predictor_sweep(monkeypatch):
     )
 
     assert seen == [False]
-
-
-def test_kv_load_fails_before_starting_search_without_memory_estimator(monkeypatch):
-    def missing_estimator():
-        raise AicMemoryEstimatorUnavailableError("AIC 0.10 or newer is required")
-
-    monkeypatch.setattr(search_mod, "_load_memory_estimator", missing_estimator)
-    monkeypatch.setattr(
-        search_mod,
-        "enumerate_branches",
-        lambda *args, **kwargs: pytest.fail("search must not enumerate branches"),
-    )
-
-    with pytest.raises(AicMemoryEstimatorUnavailableError, match=r"0\.10"):
-        run_smart_search(_pareto_config(), show_progress=False)
 
 
 def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):
