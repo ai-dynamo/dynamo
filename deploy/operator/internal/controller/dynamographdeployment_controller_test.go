@@ -4775,23 +4775,21 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			}
 
 			fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
-			recorder := record.NewFakeRecorder(10)
-
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   fakeClient,
-				Recorder: recorder,
+				Client: fakeClient,
 				RuntimeConfig: &controller_common.RuntimeConfig{
 					Gate: features.Gates{Grove: tt.groveEnabled},
 				},
 			}
 
 			ctx := context.Background()
-			reconciler.propagateTopologyCondition(ctx, tt.dgd)
+			programResult := newWorkloadProgramResult(tt.dgd)
+			reconciler.propagateTopologyCondition(ctx, tt.dgd, &programResult)
 
 			var topoCond *metav1.Condition
-			for i := range tt.dgd.Status.Conditions {
-				if tt.dgd.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyLevelsAvailable {
-					topoCond = &tt.dgd.Status.Conditions[i]
+			for i := range programResult.Status.Conditions {
+				if programResult.Status.Conditions[i].Type == v1alpha1.ConditionTypeTopologyLevelsAvailable {
+					topoCond = &programResult.Status.Conditions[i]
 					break
 				}
 			}
@@ -4805,12 +4803,8 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			g.Expect(topoCond.Status).To(gomega.Equal(tt.wantStatus))
 			g.Expect(topoCond.Reason).To(gomega.Equal(tt.wantReason))
 
-			close(recorder.Events)
-			eventCount := 0
-			for range recorder.Events {
-				eventCount++
-			}
-			g.Expect(eventCount).To(gomega.Equal(tt.wantEventCount))
+			g.Expect(programResult.Events).To(gomega.HaveLen(tt.wantEventCount))
+			g.Expect(tt.dgd.Status.Conditions).To(gomega.BeEmpty(), "status projection must remain local until the outer status write")
 		})
 	}
 }

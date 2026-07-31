@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -107,13 +108,143 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 
 	t.Log("Create a status accumulator independent from request.DGD.Status")
 	result := newWorkloadProgramResult(dgd)
-	require.NotNil(t, result.Status)
 	result.Status.Checkpoints["decode"] = nvidiacomv1beta1.ComponentCheckpointStatus{}
 	result.Status.RollingUpdate.Phase = nvidiacomv1beta1.RollingUpdatePhaseCompleted
 
 	t.Log("Verify status accumulation does not mutate the request object")
 	assert.NotContains(t, dgd.Status.Checkpoints, "decode")
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+}
+
+func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) {
+	statusUpdateErr := errors.New("status update failed")
+	tests := []struct {
+		name      string
+		updateErr error
+		wantEvent bool
+	}{
+		{
+			name:      "successful status update flushes queued events",
+			wantEvent: true,
+		},
+		{
+			name:      "failed status update retains queued events without emitting them",
+			updateErr: statusUpdateErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build an authoritative status result with one queued transition event")
+			statusUpdated := false
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(
+						context.Context,
+						client.Client,
+						string,
+						client.Object,
+						...client.SubResourceUpdateOption,
+					) error {
+						statusUpdated = true
+						return tt.updateErr
+					},
+				}).
+				Build()
+			recorder := record.NewFakeRecorder(1)
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Recorder: recorder}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			result := newWorkloadProgramResult(dgd)
+			result.Eventf(corev1.EventTypeNormal, "Transition", "transition persisted")
+
+			t.Log("Persist status through the outer controller boundary")
+			err := reconciler.persistWorkloadProgramResult(context.Background(), dgd, result)
+
+			t.Log("Verify event publication is strictly ordered after successful status persistence")
+			require.True(t, statusUpdated)
+			if tt.updateErr != nil {
+				require.ErrorIs(t, err, tt.updateErr)
+				assert.Empty(t, recorder.Events)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantEvent {
+				assert.Len(t, recorder.Events, 1)
+			}
+		})
+	}
+}
+
+func TestWorkloadProgramResultOwnsReadyAndObservedGeneration(t *testing.T) {
+	t.Run("success installs Ready and advances observed generation", func(t *testing.T) {
+		t.Log("Build a successful workload observation")
+		result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{})
+		workloads := ReconcileResult{
+			State:   nvidiacomv1beta1.DGDStateSuccessful,
+			Reason:  "all_resources_are_ready",
+			Message: "All resources are ready",
+		}
+
+		t.Log("Apply the successful observation to authoritative program status")
+		result.applyReconcileResult(7, workloads)
+
+		t.Log("Verify the program owns overall state, Ready, and observed generation")
+		assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.Status.State)
+		assert.Equal(t, int64(7), result.Status.ObservedGeneration)
+		ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+		require.NotNil(t, ready)
+		assert.Equal(t, metav1.ConditionTrue, ready.Status)
+		assert.Equal(t, int64(7), ready.ObservedGeneration)
+	})
+
+	t.Run("active rolling update keeps an otherwise ready deployment pending", func(t *testing.T) {
+		t.Log("Build an otherwise successful workload observation during a rolling update")
+		result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{
+			Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &nvidiacomv1beta1.RollingUpdateStatus{
+					Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+				},
+			},
+		})
+		workloads := ReconcileResult{
+			State:   nvidiacomv1beta1.DGDStateSuccessful,
+			Reason:  "all_resources_are_ready",
+			Message: "All resources are ready",
+		}
+
+		t.Log("Apply the workload observation to authoritative program status")
+		result.applyReconcileResult(8, workloads)
+
+		t.Log("Verify rollout state owns overall readiness until the transition completes")
+		assert.Equal(t, nvidiacomv1beta1.DGDStatePending, result.Status.State)
+		assert.Equal(t, int64(8), result.Status.ObservedGeneration)
+		ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+		require.NotNil(t, ready)
+		assert.Equal(t, metav1.ConditionFalse, ready.Status)
+		assert.Equal(t, "rolling_update_in_progress", ready.Reason)
+		assert.Equal(t, int64(8), ready.ObservedGeneration)
+	})
+
+	t.Run("failure preserves the last successfully observed generation", func(t *testing.T) {
+		t.Log("Build status from the last successful generation")
+		result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{
+			Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 5},
+		})
+		reconcileErr := errors.New("workload failed")
+
+		t.Log("Install a failure for a newer generation")
+		result.Fail(6, reasonFailedToReconcileResources, reconcileErr)
+
+		t.Log("Verify only the Ready condition observes the failed attempt")
+		assert.Equal(t, int64(5), result.Status.ObservedGeneration)
+		assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+		ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+		require.NotNil(t, ready)
+		assert.Equal(t, metav1.ConditionFalse, ready.Status)
+		assert.Equal(t, int64(6), ready.ObservedGeneration)
+		assert.Equal(t, reconcileErr.Error(), ready.Message)
+	})
 }
 
 func TestGroveProgram_ReconcileWorkloadsAdapter(t *testing.T) {
@@ -214,10 +345,14 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify the error result preserves prior status without mutating request.DGD.Status")
+	t.Log("Verify the error result preserves prior fields and installs authoritative failure status")
 	require.ErrorIs(t, err, reconcileErr)
-	require.NotNil(t, result.Status)
-	assert.Equal(t, previous, *result.Status)
+	assert.Equal(t, previous.Components, result.Status.Components)
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
@@ -264,10 +399,14 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify failed primary mutation does not mutate request.DGD.Status")
+	t.Log("Verify failed primary mutation returns failure status without mutating request.DGD.Status")
 	require.ErrorIs(t, err, reconcileErr)
-	require.NotNil(t, result.Status)
-	assert.Equal(t, previous, *result.Status)
+	assert.Equal(t, previous.Components, result.Status.Components)
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
@@ -292,10 +431,105 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 
 	t.Log("Verify rollout status is returned on the later shared-input failure")
 	require.ErrorContains(t, err, "RBAC manager not initialized")
-	require.NotNil(t, result.Status)
 	require.NotNil(t, result.Status.RollingUpdate)
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, result.Status.RollingUpdate.Phase)
+	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+	require.Len(t, result.Events, 1)
+	assert.Equal(t, "RollingUpdateStarted", result.Events[0].Reason)
 	assert.Nil(t, dgd.Status.RollingUpdate)
+}
+
+func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
+	updateErr := errors.New("update failed")
+	tests := []struct {
+		name      string
+		updateErr error
+		wantEvent bool
+	}{
+		{
+			name:      "successful hash update emits warning",
+			wantEvent: true,
+		},
+		{
+			name:      "failed hash update does not emit warning",
+			updateErr: updateErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build an unsupported pathway with a changed worker specification")
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
+				},
+			})
+			dgd.Annotations = map[string]string{
+				commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+			}
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(
+						context.Context,
+						client.WithWatch,
+						client.Object,
+						...client.UpdateOption,
+					) error {
+						return tt.updateErr
+					},
+				}).
+				Build()
+			recorder := record.NewFakeRecorder(1)
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Recorder: recorder}
+
+			t.Log("Advance the unsupported pathway hash")
+			require.NoError(t, reconcileUnsupportedWorkerRollout(
+				context.Background(),
+				reconciler,
+				dgd,
+				true,
+			))
+
+			t.Log("Verify the warning reflects a successfully persisted primary mutation")
+			if tt.wantEvent {
+				assert.Len(t, recorder.Events, 1)
+				return
+			}
+			assert.Empty(t, recorder.Events)
+		})
+	}
+}
+
+func TestResolveProgramRestartStateQueuesSupersededTransition(t *testing.T) {
+	t.Log("Build an active rolling update that supersedes a new restart request")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Restart: &nvidiacomv1beta1.Restart{ID: "restart-1"},
+		},
+	}
+	result := newWorkloadProgramResult(dgd)
+	result.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{}
+
+	t.Log("Resolve restart state against the program-owned status accumulator")
+	restart := reconciler.resolveProgramRestartState(
+		context.Background(),
+		dgd,
+		&result.Status,
+		&result,
+	)
+	result.Status.Restart = restart.Status
+
+	t.Log("Verify status and its transition event remain coupled in the result")
+	require.NotNil(t, result.Status.Restart)
+	assert.Equal(t, nvidiacomv1beta1.RestartPhaseSuperseded, result.Status.Restart.Phase)
+	require.Len(t, result.Events, 1)
+	assert.Equal(t, "RestartSuperseded", result.Events[0].Reason)
+	assert.Empty(t, dgd.Status.Restart)
 }
 
 func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {

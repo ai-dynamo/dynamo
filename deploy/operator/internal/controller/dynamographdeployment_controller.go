@@ -74,6 +74,7 @@ type Message string
 const (
 	reasonFailedToInitializeWorkerHash Reason = "failed_to_initialize_worker_hash"
 	reasonFailedToMigrateWorkerHash    Reason = "failed_to_migrate_worker_hash"
+	reasonNoMultinodeOrchestrator      Reason = "no_multinode_orchestrator_available"
 	reasonFailedToReconcileResources   Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed          Reason = "rolling_update_failed"
 
@@ -132,67 +133,23 @@ type DynamoGraphDeploymentReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
 func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
-
-	reason := Reason("undefined")
-	message := Message("")
-	state := nvidiacomv1beta1.DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	defer func() {
-		// Skip status update if DGD is being deleted
-		if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
-			logger.Info("Reconciliation done - skipping status update for deleted resource")
-			return
-		}
-
-		if err != nil {
-			state = nvidiacomv1beta1.DGDStateFailed
-			message = Message(err.Error())
-			logger.Error(err, "Reconciliation failed")
-		}
-		dynamoDeployment.SetState(state)
-
-		readyStatus := metav1.ConditionFalse
-		if state == nvidiacomv1beta1.DGDStateSuccessful {
-			readyStatus = metav1.ConditionTrue
-		}
-
-		// Update Ready condition
-		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:    "Ready",
-			Status:  readyStatus,
-			Reason:  string(reason),
-			Message: string(message),
-		})
-
-		// Only set ObservedGeneration when reconciliation succeeded (no error),
-		// so it accurately reflects the last successfully processed generation.
-		if err == nil {
-			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
-		}
-		// Propagate topology condition from framework (e.g., Grove PCS) to DGD status
-		r.propagateTopologyCondition(ctx, dynamoDeployment)
-
-		updateErr := r.Status().Update(ctx, dynamoDeployment)
-		if updateErr != nil {
-			logger.Error(updateErr, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
-			// Set err to trigger requeue
-			if err == nil {
-				err = updateErr
-			}
-		}
-		logger.Info("Reconciliation done")
-	}()
-
 	// Handle finalizer
 	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
 	if err != nil {
 		logger.Error(err, "failed to handle the finalizer")
-		reason = "failed_to_handle_the_finalizer"
+		if dynamoDeployment.GetDeletionTimestamp().IsZero() {
+			programResult := newWorkloadProgramResult(dynamoDeployment)
+			programResult.Fail(dynamoDeployment.Generation, "failed_to_handle_the_finalizer", err)
+			if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+				logger.Error(statusErr, "unable to update status after finalizer failure")
+			}
+		}
 		return ctrl.Result{}, err
 	}
 	if deleted {
@@ -201,42 +158,37 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	program := r.selectWorkloadProgram(dynamoDeployment)
 	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
-		DGD:   dynamoDeployment,
-		Facts: resolvedFacts{},
+		DGD: dynamoDeployment,
 	})
 	result = programResult.Result
-	if programResult.Status != nil {
-		dynamoDeployment.Status = *programResult.Status
+	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
+		logger.Error(statusErr, "unable to persist workload program status")
+		return result, statusErr
 	}
-	if err = programErr; err != nil {
-		logger.Error(err, "failed to reconcile the workload program")
-		reason = reasonFailedToReconcileResources
-		if programReason, ok := workloadProgramFailureReason(err); ok {
-			reason = programReason
-		}
-		return result, err
+	if programErr != nil {
+		logger.Error(programErr, "failed to reconcile the workload program")
+		return result, programErr
 	}
 
-	state = dynamoDeployment.Status.State
-	reason = programResult.ReadyReason
-	message = programResult.ReadyMessage
-
-	// Override state based on rolling update status if a rolling update is in progress
-	if dynamoDeployment.Status.RollingUpdate != nil {
-		switch dynamoDeployment.Status.RollingUpdate.Phase {
-		case nvidiacomv1beta1.RollingUpdatePhaseCompleted:
-			// Keep the reconcileResult state (should be Ready if resources are ready)
-		case nvidiacomv1beta1.RollingUpdatePhasePending, nvidiacomv1beta1.RollingUpdatePhaseInProgress:
-			// Rolling update in progress - resources are being transitioned
-			if state != nvidiacomv1beta1.DGDStateFailed {
-				state = nvidiacomv1beta1.DGDStatePending
-				reason = "rolling_update_in_progress"
-				message = "Rolling update in progress"
-			}
-		}
-	}
-
+	logger.Info("Reconciliation done")
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	result workloadProgramResult,
+) error {
+	dgd.Status = result.Status
+	if err := r.Status().Update(ctx, dgd); err != nil {
+		return fmt.Errorf("update DynamoGraphDeployment status: %w", err)
+	}
+	if r.Recorder != nil {
+		for _, event := range result.Events {
+			r.Recorder.Event(dgd, event.Type, event.Reason, event.Message)
+		}
+	}
+	return nil
 }
 
 type Resource interface {
@@ -359,10 +311,21 @@ func (r *DynamoGraphDeploymentReconciler) resolveProgramRestartState(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
+	result *workloadProgramResult,
 ) programRestart {
 	statusView := dgd.DeepCopy()
 	statusView.Status = *status
 	restartStatus := r.computeRestartStatus(ctx, statusView)
+	if restartStatus != nil && restartStatus.Phase == nvidiacomv1beta1.RestartPhaseSuperseded &&
+		(status.Restart == nil || status.Restart.ObservedID != restartStatus.ObservedID ||
+			status.Restart.Phase != restartStatus.Phase) {
+		result.Eventf(
+			corev1.EventTypeWarning,
+			"RestartSuperseded",
+			"Restart %s superseded by rolling update",
+			restartStatus.ObservedID,
+		)
+	}
 	return programRestart{
 		State:  dynamo.DetermineRestartState(statusView, restartStatus),
 		Status: restartStatus,
@@ -466,10 +429,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	return updatedInProgress
 }
 
-// propagateTopologyCondition reads the PCS topology condition from Grove and maps it
-// to a TopologyLevelsAvailable condition on the DGD. This is a no-op when no
-// topology constraints are set or when the Grove pathway is not in use.
-func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+// propagateTopologyCondition reads the PCS topology condition from Grove and
+// accumulates the corresponding TopologyLevelsAvailable condition in result.
+// This is a no-op when no topology constraints are set or when the Grove
+// pathway is not in use.
+func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	result *workloadProgramResult,
+) {
 	if !dgd.HasAnyTopologyConstraint() || !r.isGrovePathway(dgd) {
 		return
 	}
@@ -514,10 +482,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			Reason:  reason,
 			Message: groveTopoCond.Message,
 		}
-		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
+		prev := meta.FindStatusCondition(result.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
 			logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
-			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+			result.Eventf(corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
 		}
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
@@ -529,7 +497,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 		}
 	}
 
-	dgd.AddStatusCondition(dynamoCond)
+	meta.SetStatusCondition(&result.Status.Conditions, dynamoCond)
 }
 
 func isRestartAlreadyProcessed(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -1413,8 +1381,6 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 	// Supersede restart if a rolling update is in progress
 	if r.isRollingUpdateInProgress(&dgd.Status) {
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "RestartSuperseded",
-			"Restart %s superseded by rolling update", dgd.Spec.Restart.ID)
 		return &nvidiacomv1beta1.RestartStatus{
 			ObservedID: dgd.Spec.Restart.ID,
 			Phase:      nvidiacomv1beta1.RestartPhaseSuperseded,

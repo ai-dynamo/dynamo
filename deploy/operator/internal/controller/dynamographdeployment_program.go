@@ -30,30 +30,30 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// resolvedFacts contains immutable observations resolved independently of the
-// selected workload program. It is intentionally empty until such a fact is
-// demonstrated; program-derived values remain typed locals.
-type resolvedFacts struct{}
-
 type workloadProgramRequest struct {
 	// DGD is the mutable primary object. Programs may mutate and directly
 	// persist non-status fields; status is returned through workloadProgramResult.
 	DGD *nvidiacomv1beta1.DynamoGraphDeployment
+}
 
-	Facts resolvedFacts
+type workloadProgramEvent struct {
+	Type    string
+	Reason  string
+	Message string
 }
 
 type workloadProgramResult struct {
 	ctrl.Result
-	Status       *nvidiacomv1beta1.DynamoGraphDeploymentStatus
-	ReadyReason  Reason
-	ReadyMessage Message
+	Status nvidiacomv1beta1.DynamoGraphDeploymentStatus
+	Events []workloadProgramEvent
 }
 
 type programInputs struct {
@@ -85,15 +85,88 @@ func newWorkloadProgramResult(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workloadProgramResult {
 	status := dgd.DeepCopy().Status
-	return workloadProgramResult{Status: &status}
+	return workloadProgramResult{Status: status}
 }
 
-func (r *workloadProgramResult) applyReconcileResult(result ReconcileResult) {
+func (r *workloadProgramResult) Eventf(
+	eventType string,
+	reason string,
+	format string,
+	args ...any,
+) {
+	r.Events = append(r.Events, workloadProgramEvent{
+		Type:    eventType,
+		Reason:  reason,
+		Message: fmt.Sprintf(format, args...),
+	})
+}
+
+func (r *workloadProgramResult) Fail(generation int64, reason Reason, err error) {
+	r.Status.State = nvidiacomv1beta1.DGDStateFailed
+	meta.SetStatusCondition(&r.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: generation,
+		Reason:             string(reason),
+		Message:            err.Error(),
+	})
+}
+
+func (r *workloadProgramResult) applyReconcileResult(
+	generation int64,
+	result ReconcileResult,
+) {
 	r.Status.State = result.State
 	r.Status.Components = result.ComponentStatus
 	r.Status.Restart = result.RestartStatus
-	r.ReadyReason = result.Reason
-	r.ReadyMessage = result.Message
+	if rollingUpdateInProgress(r.Status.RollingUpdate) {
+		r.Status.State = nvidiacomv1beta1.DGDStatePending
+	}
+	meta.SetStatusCondition(&r.Status.Conditions, readyCondition(generation, r.Status, result))
+	r.Status.ObservedGeneration = generation
+}
+
+func readyCondition(
+	generation int64,
+	status nvidiacomv1beta1.DynamoGraphDeploymentStatus,
+	workloads ReconcileResult,
+) metav1.Condition {
+	if rollingUpdateInProgress(status.RollingUpdate) {
+		return metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: generation,
+			Reason:             "rolling_update_in_progress",
+			Message:            "Rolling update in progress",
+		}
+	}
+
+	conditionStatus := metav1.ConditionFalse
+	if workloads.State == nvidiacomv1beta1.DGDStateSuccessful {
+		conditionStatus = metav1.ConditionTrue
+	}
+	return metav1.Condition{
+		Type:               "Ready",
+		Status:             conditionStatus,
+		ObservedGeneration: generation,
+		Reason:             string(workloads.Reason),
+		Message:            string(workloads.Message),
+	}
+}
+
+func rollingUpdateInProgress(status *nvidiacomv1beta1.RollingUpdateStatus) bool {
+	if status == nil {
+		return false
+	}
+	return status.Phase == nvidiacomv1beta1.RollingUpdatePhasePending ||
+		status.Phase == nvidiacomv1beta1.RollingUpdatePhaseInProgress
+}
+
+func rollingUpdatePhase(status *nvidiacomv1beta1.RollingUpdateStatus) nvidiacomv1beta1.RollingUpdatePhase {
+	if status == nil {
+		return nvidiacomv1beta1.RollingUpdatePhaseNone
+	}
+	return status.Phase
 }
 
 type workloadProgramFailure struct {
@@ -144,17 +217,29 @@ type componentProgram struct {
 func (p *componentProgram) Reconcile(
 	ctx context.Context,
 	req workloadProgramRequest,
-) (workloadProgramResult, error) {
-	programResult := newWorkloadProgramResult(req.DGD)
+) (programResult workloadProgramResult, retErr error) {
+	programResult = newWorkloadProgramResult(req.DGD)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		reason := reasonFailedToReconcileResources
+		if classified, ok := workloadProgramFailureReason(retErr); ok {
+			reason = classified
+		}
+		programResult.Fail(req.DGD.Generation, reason, retErr)
+	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 		"lwsEnabled", p.lwsEnabled,
 	)
 
-	if err := p.reconcileWorkerRollout(ctx, req.DGD, programResult.Status); err != nil {
+	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
+	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
 		return programResult, err
 	}
+	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	inputs, err := p.reconciler.reconcileProgramInputs(ctx, req.DGD)
 	if inputs.CheckpointStatuses != nil {
 		programResult.Status.Checkpoints = inputs.CheckpointStatuses
@@ -170,9 +255,10 @@ func (p *componentProgram) Reconcile(
 			"hasMultinode", inputs.HasMultinode,
 			"lwsEnabled", p.lwsEnabled,
 		)
-		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, programResult.Status)
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status, &programResult)
+	programResult.Status.Restart = restart.Status
 
 	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{
 		DGD:             req.DGD,
@@ -187,7 +273,7 @@ func (p *componentProgram) Reconcile(
 		return programResult, err
 	}
 
-	programResult.applyReconcileResult(result)
+	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }
 
@@ -327,6 +413,39 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 	return nil
 }
 
+func (p *componentProgram) recordRollingUpdateTransition(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	previous nvidiacomv1beta1.RollingUpdatePhase,
+	result *workloadProgramResult,
+) {
+	current := rollingUpdatePhase(result.Status.RollingUpdate)
+	switch {
+	case current == nvidiacomv1beta1.RollingUpdatePhasePending && previous != current:
+		desired, err := p.reconciler.desiredWorkerHashes(dgd)
+		if err != nil {
+			return
+		}
+		result.Eventf(
+			corev1.EventTypeNormal,
+			"RollingUpdateStarted",
+			"Starting rolling update to worker hash %s",
+			p.reconciler.activeWorkerHashForDCDGeneration(dgd, desired),
+		)
+	case current == nvidiacomv1beta1.RollingUpdatePhaseCompleted && previous != current:
+		currentHashes := p.reconciler.currentWorkerHashes(dgd)
+		workerHash := currentHashes.v2
+		if workerHash == "" {
+			workerHash = currentHashes.v1
+		}
+		result.Eventf(
+			corev1.EventTypeNormal,
+			"RollingUpdateCompleted",
+			"Rolling update completed, worker hash %s",
+			workerHash,
+		)
+	}
+}
+
 func reconcileUnsupportedWorkerRollout(
 	ctx context.Context,
 	r *DynamoGraphDeploymentReconciler,
@@ -358,18 +477,6 @@ func reconcileUnsupportedWorkerRollout(
 		return nil
 	}
 
-	logger.Info(
-		"Worker spec change detected but rolling update not supported for this pathway",
-		"isGrove", isGrove,
-		"hasMultinode", dgd.HasAnyMultinodeComponent(),
-	)
-	r.Recorder.Event(
-		dgd,
-		corev1.EventTypeWarning,
-		"RollingUpdateNotSupported",
-		"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
-	)
-
 	// Update the hash to prevent repeated warnings. If the unsupported path is
 	// processing a v2-only worker change, preserve the migrated v2-only state
 	// instead of resurrecting the downgrade-compatible v1 annotation for pod
@@ -377,13 +484,28 @@ func reconcileUnsupportedWorkerRollout(
 	hashes, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
 		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
 	}
 	r.setCurrentWorkerHashes(dgd, r.workerHashesForUnsupportedPathway(dgd, hashes))
 	if err := r.Update(ctx, dgd); err != nil {
 		// Preserve the existing best-effort behavior: the next reconciliation
 		// retries the metadata update and may emit another warning.
 		logger.Error(err, "Failed to update worker hash for unsupported pathway")
+		return nil
+	}
+
+	logger.Info(
+		"Worker spec change detected but rolling update not supported for this pathway",
+		"isGrove", isGrove,
+		"hasMultinode", dgd.HasAnyMultinodeComponent(),
+	)
+	if r.Recorder != nil {
+		r.Recorder.Event(
+			dgd,
+			corev1.EventTypeWarning,
+			"RollingUpdateNotSupported",
+			"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments",
+		)
 	}
 	return nil
 }
@@ -484,8 +606,18 @@ type groveProgram struct {
 func (p *groveProgram) Reconcile(
 	ctx context.Context,
 	req workloadProgramRequest,
-) (workloadProgramResult, error) {
-	programResult := newWorkloadProgramResult(req.DGD)
+) (programResult workloadProgramResult, retErr error) {
+	programResult = newWorkloadProgramResult(req.DGD)
+	defer func() {
+		if retErr != nil {
+			reason := reasonFailedToReconcileResources
+			if classified, ok := workloadProgramFailureReason(retErr); ok {
+				reason = classified
+			}
+			programResult.Fail(req.DGD.Generation, reason, retErr)
+		}
+		p.reconciler.propagateTopologyCondition(ctx, req.DGD, &programResult)
+	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
@@ -506,7 +638,8 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, err
 	}
-	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, programResult.Status)
+	restart := p.reconciler.resolveProgramRestartState(ctx, req.DGD, &programResult.Status, &programResult)
+	programResult.Status.Restart = restart.Status
 
 	result, err := p.reconcileWorkloads(ctx, workloadReconcileRequest{
 		DGD:             req.DGD,
@@ -514,14 +647,14 @@ func (p *groveProgram) Reconcile(
 		CheckpointInfos: inputs.CheckpointInfos,
 	})
 	if err != nil {
-		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 	result, err = p.reconciler.reconcileProgramResult(ctx, req.DGD, inputs, restart, result)
 	if err != nil {
 		return programResult, err
 	}
 
-	programResult.applyReconcileResult(result)
+	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
 }
 

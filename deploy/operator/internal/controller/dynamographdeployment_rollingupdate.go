@@ -533,9 +533,6 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedComponents = nil
 
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
-		"Starting rolling update to worker hash %s", newWorkerHash)
-
 	return nil // the workload program returns this status to the outer reconciler
 }
 
@@ -681,9 +678,6 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	}
 	sort.Strings(allWorkerComponents)
 	rollingUpdateStatus.UpdatedComponents = allWorkerComponents
-
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
-		"Rolling update completed, worker hash %s", newWorkerHash)
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
