@@ -28,16 +28,13 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > therefore unavailable in aggregated deployments of this image.
 >
 > Video is also skipped for model types whose preprocessing cannot accept
-> pre-decoded frames (the Qwen3-VL family); use a Qwen2-family vision model.
+> pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL
+> path, which has no decoder in this image. Use a Qwen2-family vision model.
 >
 > NVDEC requires a GPU with a video decode engine and a container granted the
 > `video` driver capability — see
-> [Video Decode GPU Requirements](video-decode-gpu-requirements.md). `file://`
-> sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
->
-> Video is additionally skipped for model types whose preprocessing cannot accept
-> pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL path,
-> which has no decoder in this image.
+> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> `file://` sources additionally require `DYN_MM_LOCAL_PATH` to permit local reads.
 
 ### Supported URL Formats
 
