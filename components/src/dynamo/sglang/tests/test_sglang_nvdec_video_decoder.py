@@ -90,6 +90,21 @@ def test_get_frames_as_tensor_returns_nhwc_uint8_cpu(decoder) -> None:
     assert out.device.type == "cpu"
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="pinned host memory requires CUDA"
+)
+def test_frames_are_pinned_on_cuda(decoder) -> None:
+    """Pinned memory is the performance contract of this return type.
+
+    It lets the downstream host-to-device copy overlap instead of staging through
+    a bounce buffer. The implementation degrades to unpinned rather than failing
+    a request, so without this assertion a regression would show up only as lost
+    throughput -- silently, and never in CI.
+    """
+    out = decoder.get_frames_as_tensor([0, 1, 2])
+    assert out.is_pinned(), "video frames must be returned in pinned host memory"
+
+
 def test_get_frames_as_tensor_returns_exactly_the_requested_frames(decoder) -> None:
     """Frame selection belongs to SGLang: return its indices, not a resample."""
     indices = [1, 17, 33, 49]

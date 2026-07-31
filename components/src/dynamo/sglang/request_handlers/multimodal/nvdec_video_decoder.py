@@ -62,6 +62,9 @@ except Exception:  # noqa: BLE001 - SGLang absent (unit tests) or interface move
     VideoDecoderWrapper = object  # type: ignore[assignment,misc]
     SGLANG_VIDEO_DECODER_AVAILABLE = False
 
+# Latched so the pinned-memory regression warning is emitted once, not per request.
+_PIN_MEMORY_WARNED = False
+
 
 class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
     """Random-access NVDEC decoder over in-memory video bytes.
@@ -167,11 +170,25 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         try:
             return tensor.pin_memory()
         except RuntimeError as exc:
-            # Pinning needs a usable accelerator and binds to the default one, so
-            # it can fail on a host whose accelerator is not CUDA. It is a
-            # transfer optimisation only -- returning the unpinned tensor keeps
-            # the request working rather than failing it for a perf feature.
-            logger.debug("pin_memory unavailable (%s); returning unpinned frames", exc)
+            # Pinned host memory is the point of this return type: it lets the
+            # downstream host-to-device copy run async instead of staging through
+            # a bounce buffer, and it is what the upstream decord branch does.
+            # Losing it is a real throughput regression, so say so loudly -- once,
+            # since this sits on the per-request path. The only expected cause is
+            # a host whose default accelerator is not CUDA (a non-CUDA dev box);
+            # on a deployed encode worker, which requires CUDA for NVDEC anyway,
+            # this should never fire. Serving unpinned still beats failing the
+            # request outright.
+            global _PIN_MEMORY_WARNED
+            if not _PIN_MEMORY_WARNED:
+                _PIN_MEMORY_WARNED = True
+                logger.warning(
+                    "pin_memory() failed (%s); serving video frames from unpinned "
+                    "host memory. Host-to-device transfer is slower than designed "
+                    "-- expect reduced encode throughput. This is not expected on "
+                    "a CUDA host.",
+                    exc,
+                )
             return tensor
 
     def __getitem__(self, idx):
