@@ -78,6 +78,47 @@ WORKDIR /opt/dynamo
 # Pin to the 13.1 API — forward-compatible with the 13.4 driver.
 ENV CUDARC_CUDA_VERSION=13010
 
+# NVTX v2 shim for cudarc (required by the `nvtx` feature below).
+#
+# THE PROBLEM. Two different NVTX APIs are in play:
+#   TRT-LLM  -> Python `nvtx` package  -> NVTX v3, HEADER-ONLY. Needs no shared library:
+#               the headers compile to inert stubs that bind to the profiler's injection
+#               library via NVTX_INJECTION64_PATH at first use. This is why TRT-LLM's
+#               markers (_enqueue_responses, handle_response, ...) show up in every nsys
+#               report with nothing installed.
+#   dynamo   -> cudarc 0.19.3 -> NVTX v2 C API (nvtxRangePushA, nvtxDomainCreateA, ...),
+#               which lives in libnvToolsExt.so. cudarc resolves it by DLOPEN, not
+#               DT_NEEDED (its default features include fallback-dynamic-loading, which
+#               build.rs turns into cfg dynamic-loading), looking only for the name
+#               "nvToolsExt" (src/nvtx/sys/mod.rs:923,938). If nothing loads, culib()
+#               calls panic_no_lib_found() (src/lib.rs:181-183) - a hard panic, and a Rust
+#               panic across the pyo3 boundary takes the decode worker down.
+#
+# CUDA 13 REMOVED libnvToolsExt.so entirely. The replacement is libnvtx3interop.so.1,
+# shipped by the `nvidia-nvtx` wheel (note: nvidia-nvtx-cu13 is only a deprecation stub
+# pointing here). Verified against nvidia_nvtx-13.3.29 manylinux2014_aarch64: it exports
+# the full v2 surface cudarc binds - nvtxRangePushA, nvtxRangePop, nvtxDomainCreateA,
+# nvtxRangeStartEx, nvtxNameOsThreadA, nvtxDomainRangePushEx, 105 nvtx* symbols in total.
+# So the ABI is there; only the FILENAME differs. Symlinking it under the name cudarc
+# dlopens is enough. Both .so and .so.1 forms are created because cudarc derives several
+# candidate names from DLL_PREFIX/DLL_SUFFIX plus version suffixes.
+#
+# THIS IS A WORKAROUND, NOT A SUPPORTED CONFIGURATION. NVIDIA renamed the library
+# deliberately; nothing guarantees the shim keeps this ABI. The clean fix is to move
+# dynamo off cudarc's v2 binding onto NVTX v3, exactly as TRT-LLM already does - then no
+# runtime library is needed at all. Revisit on the next dynamo/cudarc bump.
+#
+# Gated at runtime by DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs:9-14); with the env
+# var unset this layer costs one 150 KB wheel and nothing else.
+RUN pip install --break-system-packages --no-cache-dir "nvidia-nvtx==13.3.29" \
+ && NVTX_LIB=$(python3 -c "import nvidia.cu13, os; print(os.path.join(os.path.dirname(nvidia.cu13.__file__), 'lib'))") \
+ && test -f "${NVTX_LIB}/libnvtx3interop.so.1" \
+ && ln -sf "${NVTX_LIB}/libnvtx3interop.so.1" /usr/local/lib/libnvToolsExt.so.1 \
+ && ln -sf /usr/local/lib/libnvToolsExt.so.1 /usr/local/lib/libnvToolsExt.so \
+ && ldconfig \
+ && ldconfig -p | grep -q nvToolsExt \
+ && echo "libnvToolsExt shim OK -> $(readlink -f /usr/local/lib/libnvToolsExt.so.1)"
+
 RUN cd lib/bindings/python \
  && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,nvtx" --out /opt/dynamo/dist \
  && cd /opt/dynamo && uv build --wheel --out-dir /opt/dynamo/dist
