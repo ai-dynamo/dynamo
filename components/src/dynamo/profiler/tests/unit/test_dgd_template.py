@@ -41,18 +41,29 @@ def test_profiler_blueprints_are_private_and_component_shaped(
     assert all(component.get("type") for component in components)
 
 
-def _component_args(config: dict, component_name: str) -> list[str]:
+def _main_container(config: dict, component_name: str) -> dict:
     component = next(
         component
         for component in config["spec"]["components"]
         if component["name"] == component_name
     )
-    main = next(
+    return next(
         container
         for container in component["podTemplate"]["spec"]["containers"]
         if container["name"] == "main"
     )
-    return main.get("args", [])
+
+
+def _component_args(config: dict, component_name: str) -> list[str]:
+    return _main_container(config, component_name).get("args", [])
+
+
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_vllm_frontend_has_hf_token_secret(mode: str) -> None:
+    config = load_dgd_template("vllm", mode)
+
+    env_from = _main_container(config, "Frontend").get("envFrom", [])
+    assert {"secretRef": {"name": "hf-token-secret"}} in env_from
 
 
 def test_vllm_decode_blueprint_does_not_enable_kv_transfer() -> None:
