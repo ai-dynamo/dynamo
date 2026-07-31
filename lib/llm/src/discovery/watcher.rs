@@ -2208,7 +2208,7 @@ mod tests {
     #[test]
     fn endpoint_liveness_considers_all_models() {
         // This is the discovery snapshot after the last adapter card was removed: its base
-        // model remains on the same worker endpoint and must keep its HiCache subscriber.
+        // model remains on the same worker endpoint, so the endpoint is still live.
         let cards = vec![(
             test_endpoint_id("generate"),
             ModelDeploymentCard::with_name_only("base-model"),
