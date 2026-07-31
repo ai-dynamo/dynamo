@@ -304,7 +304,7 @@ impl DefaultWorkerSelector {
 
     fn score_worker<C: WorkerConfigLike>(
         &self,
-        workers: &HashMap<WorkerId, C>,
+        config: &C,
         request: &SchedulingRequest,
         worker: WorkerWithDpRank,
         block_size: u32,
@@ -319,9 +319,6 @@ impl DefaultWorkerSelector {
             weights,
             "Formula",
         );
-        let Some(config) = workers.get(&worker.worker_id) else {
-            return base_score;
-        };
         match request
             .routing_constraints
             .preferred_taint_multiplier(config.taints())
@@ -353,9 +350,9 @@ impl DefaultWorkerSelector {
             } else {
                 0
             };
-        let get_score = |worker| {
+        let get_score = |worker, config: &C| {
             self.score_worker(
-                workers,
+                config,
                 request,
                 worker,
                 block_size,
@@ -373,12 +370,13 @@ impl DefaultWorkerSelector {
             candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
 
             let mut rng = rng.lock();
+            let get_candidate_score = |worker| get_score(worker, &workers[&worker.worker_id]);
             if temperature == 0.0 {
                 let mut best_worker = None;
                 let mut best_logit = f64::INFINITY;
                 let mut tie_count = 0usize;
                 for worker in candidates {
-                    let score = get_score(worker);
+                    let score = get_candidate_score(worker);
                     if score < best_logit {
                         best_worker = Some(worker);
                         best_logit = score;
@@ -401,7 +399,7 @@ impl DefaultWorkerSelector {
 
             let entries = candidates
                 .into_iter()
-                .map(|worker| (worker, get_score(worker)))
+                .map(|worker| (worker, get_candidate_score(worker)))
                 .collect();
             softmax_sample_entries(entries, temperature, rng.f64())
         });
@@ -411,8 +409,8 @@ impl DefaultWorkerSelector {
                 let mut best_worker = None;
                 let mut best_logit = f64::INFINITY;
                 let mut tie_count = 0usize;
-                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    let score = get_score(worker);
+                eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+                    let score = get_score(worker, config);
                     if score < best_logit {
                         best_worker = Some(worker);
                         best_logit = score;
@@ -436,8 +434,8 @@ impl DefaultWorkerSelector {
             }
 
             let mut worker_logits = FxHashMap::default();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                worker_logits.insert(worker, get_score(worker));
+            eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+                worker_logits.insert(worker, get_score(worker, config));
             });
             softmax_sample(&worker_logits, temperature)
         };
