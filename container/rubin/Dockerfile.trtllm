@@ -110,6 +110,18 @@ ENV CUDARC_CUDA_VERSION=13010
 #
 # Gated at runtime by DYN_ENABLE_RUST_NVTX (lib/runtime/src/nvtx.rs:9-14); with the env
 # var unset this layer costs one 150 KB wheel and nothing else.
+#
+# TWO BUILD-ONLY GOTCHAS, both hit and fixed here:
+#  1. `ldconfig` exits NON-ZERO on this base over a pre-existing, unrelated HPC-X file
+#     (/opt/hpcx/nccl_spectrum-x_plugin/lib/libdoca_gpunetio_host.so.0 "is not a symbolic
+#     link"). That is not our problem and must not fail the build -> `{ ldconfig || true; }`.
+#  2. Verification is a real dlopen via ctypes, NOT `ldconfig -p | grep`. dlopen-by-soname
+#     is exactly the call cudarc makes (Lib::new on the candidate names), so this tests the
+#     thing that actually has to work, and it does not depend on the ldconfig cache having
+#     been rebuilt. Symbols are probed too, so an ABI-stripped shim also fails here.
+# The symlinks are placed in BOTH /usr/local/lib and /usr/lib: if the ldconfig cache update
+# is incomplete, dlopen falls back to the trusted default path, which includes /usr/lib but
+# not necessarily /usr/local/lib.
 # NOTE: `nvidia` and `nvidia.cu13` are NAMESPACE packages (no __init__.py), so
 # nvidia.cu13.__file__ is None and dirname(__file__) raises TypeError. Locate the .so by
 # globbing site-packages instead of importing - immune to namespace-package semantics and
@@ -123,9 +135,12 @@ RUN pip install --break-system-packages --no-cache-dir "nvidia-nvtx==13.3.29" \
  && test -f "${NVTX_SO}" \
  && ln -sf "${NVTX_SO}" /usr/local/lib/libnvToolsExt.so.1 \
  && ln -sf /usr/local/lib/libnvToolsExt.so.1 /usr/local/lib/libnvToolsExt.so \
- && ldconfig \
- && ldconfig -p | grep -q nvToolsExt \
- && echo "libnvToolsExt shim OK -> $(readlink -f /usr/local/lib/libnvToolsExt.so.1)"
+ && ln -sf "${NVTX_SO}" /usr/lib/libnvToolsExt.so.1 \
+ && ln -sf /usr/lib/libnvToolsExt.so.1 /usr/lib/libnvToolsExt.so \
+ && { ldconfig || true; } \
+ && python3 -c "import ctypes; h=ctypes.CDLL('libnvToolsExt.so.1'); \
+      [getattr(h,s) for s in ('nvtxRangePushA','nvtxRangePop','nvtxDomainCreateA','nvtxNameOsThreadA')]; \
+      print('libnvToolsExt shim OK - dlopen + v2 symbols resolved')"
 
 RUN cd lib/bindings/python \
  && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,nvtx" --out /opt/dynamo/dist \
