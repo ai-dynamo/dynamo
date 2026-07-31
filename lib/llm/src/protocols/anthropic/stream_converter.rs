@@ -1061,7 +1061,10 @@ mod tests {
         let usage_obj = value
             .get("usage")
             .expect("content_block_delta must carry usage");
-        assert_eq!(usage_obj.get("input_tokens").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(
+            usage_obj.get("input_tokens").and_then(|v| v.as_u64()),
+            Some(7)
+        );
         assert_eq!(
             usage_obj.get("output_tokens").and_then(|v| v.as_u64()),
             Some(3)
