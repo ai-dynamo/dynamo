@@ -305,6 +305,11 @@ impl AnthropicStreamConverter {
                         &choice.delta.content,
                         Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
                     )
+                    || choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|tool_calls| !tool_calls.is_empty())
             });
             if produced_output {
                 self.usage.output_tokens += 1;
