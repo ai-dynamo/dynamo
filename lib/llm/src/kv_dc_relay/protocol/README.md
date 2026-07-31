@@ -22,7 +22,7 @@ The `KvEventRelay` service has five methods:
 | --- | --- |
 | `GetRelayInfo` | One `RelayInfo` with the protocol version and typed Relay identity. |
 | `WatchKvPoolCatalog` | A stream of revisioned, complete `KvPoolCatalogSnapshot` values. |
-| `SubscribeKvPool` | An initial CBI1 snapshot followed by contiguous deltas and heartbeats for one exact `KvPoolId`. |
+| `SubscribeKvPool` | An initial CBI1 snapshot followed by contiguous deltas and heartbeats for one exact `ProducerIdentity`. |
 | `SubscribeServingReadiness` | A stream of complete readiness projections for all current model registrations. |
 | `SubscribeKvPoolLoad` | A stream of complete load windows for all active pools. |
 
@@ -83,8 +83,10 @@ consumer replaces its local catalog with the first snapshot on the new stream.
 
 ## Pool Filter Stream
 
-`SubscribeKvPool` selects one exact `KvPoolId`. The server lazily initializes that pool's
-publication hub on the first subscription. Each client receives:
+`SubscribeKvPool` selects one exact `ProducerIdentity` obtained from the catalog. The Relay checks
+that identity before and after lazy publication-hub initialization. An absent pool returns
+`NOT_FOUND`; a replacement generation returns `FAILED_PRECONDITION` without initializing the
+replacement pool's hub for the stale request. Each client receives:
 
 1. One or more `FILTER_UPDATE_KIND_SNAPSHOT_CHUNK` frames covering the complete CKF.
 2. `FILTER_UPDATE_KIND_DELTA` frames with contiguous `base_sequence -> sequence` transitions.

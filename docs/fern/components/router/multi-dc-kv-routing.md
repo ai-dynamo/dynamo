@@ -93,7 +93,7 @@ contract marker, and every response carries protocol version `1` and a typed Rel
 | --- | --- |
 | `GetRelayInfo` | Returns the protocol version and current `RelayIdentity`. |
 | `WatchKvPoolCatalog` | Sends the current revisioned catalog snapshot, then a new complete snapshot after each observed catalog change. |
-| `SubscribeKvPool` | Selects one exact `PoolId`; sends an initial chunked CKF snapshot, contiguous deltas, and application heartbeats. |
+| `SubscribeKvPool` | Selects one exact `ProducerIdentity` from the catalog; sends an initial chunked CKF snapshot, contiguous deltas, and application heartbeats. |
 | `SubscribeServingReadiness` | Sends the current readiness projection, updates on revision changes, and repeats it on heartbeats. |
 | `SubscribeKvPoolLoad` | Sends the current complete load window, then complete windows for all active pools. |
 
@@ -101,6 +101,11 @@ Each streaming request includes a non-empty subscriber ID of at most 128 bytes. 
 are finite for every stream type. Pool subscriber queues have independent message and byte limits;
 a client that falls behind receives `RESOURCE_EXHAUSTED` and must resubscribe. Load stream lag uses
 the same resubscribe boundary. Reconnecting one stream does not reset the others.
+
+A pool subscription carries the complete `ProducerIdentity` from a catalog snapshot. An absent
+pool returns `NOT_FOUND`. If that pool now has a different producer generation, the Relay returns
+`FAILED_PRECONDITION` without initializing the replacement generation's publication hub. Refresh
+the catalog before retrying either response.
 
 ## CKF Publication
 

@@ -886,6 +886,7 @@ impl PoolRegistry {
     pub(super) async fn subscribe_pool(
         self: &Arc<Self>,
         pool_id: PoolId,
+        identity_matches: impl Fn(ProducerIdentity) -> bool + Send,
     ) -> Result<PublicationHubSubscription, PublicationHubError> {
         let (identity, actor, generation_cancel, hub_slot) = {
             let state = self.state.lock();
@@ -901,6 +902,9 @@ impl PoolRegistry {
                 entry.hub.clone(),
             )
         };
+        if !identity_matches(identity) {
+            return Err(PublicationHubError::ProducerMismatch(pool_id));
+        }
         let weak = Arc::downgrade(self);
         let terminal_failure: TerminalFailure = Arc::new(move |reason| {
             let Some(registry) = weak.upgrade() else {
@@ -923,17 +927,23 @@ impl PoolRegistry {
                 terminal_failure,
             )
             .await?;
-        let state = self.state.lock();
-        let entry = state
-            .pools
-            .get(&pool_id)
-            .filter(|entry| {
-                entry.state == PoolEntryState::Active
-                    && entry.identity == identity
-                    && Arc::ptr_eq(&entry.hub, &hub_slot)
-            })
-            .ok_or(PublicationHubError::UnknownPool(pool_id))?;
-        debug_assert_eq!(entry.layout_generation, identity.layout_generation());
+        let (current_identity, same_hub) = {
+            let state = self.state.lock();
+            let entry = state
+                .pools
+                .get(&pool_id)
+                .filter(|entry| entry.state == PoolEntryState::Active)
+                .ok_or(PublicationHubError::UnknownPool(pool_id))?;
+            (entry.identity, Arc::ptr_eq(&entry.hub, &hub_slot))
+        };
+        if !identity_matches(current_identity) {
+            return Err(PublicationHubError::ProducerMismatch(pool_id));
+        }
+        if current_identity != identity || !same_hub {
+            return Err(PublicationHubError::Unavailable(
+                "pool publication generation changed".to_string(),
+            ));
+        }
         hub.subscribe()
     }
 
@@ -1350,6 +1360,16 @@ mod tests {
         };
         result.unwrap();
         assert!(registry.remove(pool_id, layout_generation).await);
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    async fn subscribe(
+        registry: &Arc<PoolRegistry>,
+        expected: ProducerIdentity,
+    ) -> Result<PublicationHubSubscription, PublicationHubError> {
+        registry
+            .subscribe_pool(expected.pool_id(), move |actual| actual == expected)
+            .await
     }
 
     #[tokio::test]
@@ -1885,7 +1905,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(registry.hub_phase_count("vacant").await, 1);
-        let subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        let subscription = subscribe(&registry, attachment.handle.identity())
+            .await
+            .unwrap();
         assert_eq!(
             subscription.snapshot().identity(),
             attachment.handle.identity()
@@ -1898,18 +1920,53 @@ mod tests {
 
     #[cfg(feature = "kv-dc-relay-wan")]
     #[tokio::test]
+    async fn stale_producer_does_not_initialize_replacement_hub() {
+        let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
+        let first = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let stale_producer = first.handle.identity();
+        registry.detach(first).await.unwrap();
+
+        let replacement = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let current_producer = replacement.handle.identity();
+        assert_ne!(stale_producer, current_producer);
+
+        let error = match subscribe(&registry, stale_producer).await {
+            Ok(_) => panic!("stale producer subscription must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error, PublicationHubError::ProducerMismatch(pool(1)));
+        assert_eq!(registry.hub_phase_count("vacant").await, 1);
+        assert_eq!(registry.hub_phase_count("initializing").await, 0);
+        assert_eq!(registry.hub_phase_count("ready").await, 0);
+
+        let subscription = subscribe(&registry, current_producer).await.unwrap();
+        assert_eq!(subscription.snapshot().identity(), current_producer);
+        assert_eq!(registry.hub_phase_count("ready").await, 1);
+
+        drop(subscription);
+        registry.detach(replacement).await.unwrap();
+    }
+
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
     async fn concurrent_first_subscribers_share_one_hub() {
         let registry = Arc::new(PoolRegistry::new(relay_identity(), config()));
         let attachment = registry
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
             .unwrap();
+        let expected = attachment.handle.identity();
         let mut subscribers = Vec::new();
         for _ in 0..8 {
             let registry = registry.clone();
             subscribers.push(tokio::spawn(async move {
-                registry
-                    .subscribe_pool(pool(1))
+                subscribe(&registry, expected)
                     .await
                     .map(|subscription| subscription.snapshot().identity())
             }));
@@ -1944,10 +2001,11 @@ mod tests {
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
             .unwrap();
+        let expected = attachment.handle.identity();
 
         let first = tokio::spawn({
             let registry = registry.clone();
-            async move { registry.subscribe_pool(pool(1)).await }
+            async move { subscribe(&registry, expected).await }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
             while registry.hub_phase_count("initializing").await == 0 {
@@ -1961,7 +2019,7 @@ mod tests {
         gate.add_permits(1);
 
         let subscription =
-            tokio::time::timeout(Duration::from_secs(1), registry.subscribe_pool(pool(1)))
+            tokio::time::timeout(Duration::from_secs(1), subscribe(&registry, expected))
                 .await
                 .expect("next subscriber must observe completed initialization")
                 .unwrap();
@@ -1993,9 +2051,10 @@ mod tests {
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
             .unwrap();
+        let expected = attachment.handle.identity();
         let subscriber = tokio::spawn({
             let registry = registry.clone();
-            async move { registry.subscribe_pool(pool(1)).await }
+            async move { subscribe(&registry, expected).await }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
             while registry.hub_phase_count("initializing").await == 0 {
@@ -2034,8 +2093,10 @@ mod tests {
             .attach(request(pool(2), "slow.router.generate", "llama"))
             .await
             .unwrap();
+        let first_producer = first.handle.identity();
+        let second_producer = second.handle.identity();
 
-        let first_subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        let first_subscription = subscribe(&registry, first_producer).await.unwrap();
         drop(first_subscription);
         assert_eq!(
             registry.publication_metrics(),
@@ -2048,9 +2109,8 @@ mod tests {
             }
         );
 
-        let same_pool_subscription = registry.subscribe_pool(pool(1)).await.unwrap();
-        let error = registry
-            .subscribe_pool(pool(2))
+        let same_pool_subscription = subscribe(&registry, first_producer).await.unwrap();
+        let error = subscribe(&registry, second_producer)
             .await
             .err()
             .expect("second pool must hit the initialized hub limit");
@@ -2062,7 +2122,7 @@ mod tests {
         drop(same_pool_subscription);
 
         registry.detach(first).await.unwrap();
-        let second_subscription = registry.subscribe_pool(pool(2)).await.unwrap();
+        let second_subscription = subscribe(&registry, second_producer).await.unwrap();
         assert_eq!(
             second_subscription.snapshot().identity(),
             second.handle.identity()
@@ -2234,7 +2294,9 @@ mod tests {
             .attach(request(pool(1), "fast.router.generate", "llama"))
             .await
             .unwrap();
-        let _subscription = registry.subscribe_pool(pool(1)).await.unwrap();
+        let _subscription = subscribe(&registry, attachment.handle.identity())
+            .await
+            .unwrap();
 
         attachment.handle.shutdown().await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {

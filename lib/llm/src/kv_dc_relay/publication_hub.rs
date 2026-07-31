@@ -127,6 +127,8 @@ pub(crate) struct PublicationHubHealth {
 pub(crate) enum PublicationHubError {
     #[error("unknown or inactive pool {0}")]
     UnknownPool(PoolId),
+    #[error("active producer identity for pool {0} does not match the subscription request")]
+    ProducerMismatch(PoolId),
     #[error("publication hub is unavailable: {0}")]
     Unavailable(String),
     #[error("pool {pool_id} reached its subscriber limit {limit}")]

@@ -168,7 +168,7 @@ message KvPoolCatalogUpdate
 message SubscribeKvPoolRequest
 {
   string subscriber_id = 1;
-  KvPoolId pool_id = 2;
+  ProducerIdentity expected_producer = 2;
   fixed32 contract_marker = 127;
 }
 

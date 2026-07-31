@@ -61,8 +61,9 @@ impl WanPublicationSource {
     pub(crate) async fn subscribe_pool(
         &self,
         pool_id: PoolId,
+        identity_matches: impl Fn(ProducerIdentity) -> bool + Send,
     ) -> Result<PublicationHubSubscription, PublicationHubError> {
-        self.pools.subscribe_pool(pool_id).await
+        self.pools.subscribe_pool(pool_id, identity_matches).await
     }
 
     pub(crate) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {

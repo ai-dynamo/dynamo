@@ -129,10 +129,9 @@ impl KvEventRelayService {
 
     #[allow(clippy::result_large_err)]
     fn acquire_stream_permit(&self, stream: StreamKind) -> Result<OwnedSemaphorePermit, Status> {
-        self.limits.acquire(stream).map_err(|status| {
+        self.limits.acquire(stream).inspect_err(|_| {
             self.metrics
                 .subscriber_limit_rejected(stream, SubscriberLimitScope::Total);
-            status
         })
     }
 }
@@ -200,14 +199,24 @@ impl proto::KvEventRelay for KvEventRelayService {
         let request = request.into_inner();
         require_contract(request.contract_marker)?;
         let subscriber_id = validate_subscriber_id(request.subscriber_id)?;
-        let wire_pool_id = request
-            .pool_id
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("SubscribeKvPool requires pool_id"))?;
+        let expected_producer = request.expected_producer.ok_or_else(|| {
+            Status::invalid_argument("SubscribeKvPool requires expected_producer")
+        })?;
+        proto::validate_producer_identity(&expected_producer)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let wire_pool_id = expected_producer.pool_id.as_ref().ok_or_else(|| {
+            Status::invalid_argument("SubscribeKvPool expected_producer requires pool_id")
+        })?;
         let pool_id = pool_id_from_wire(wire_pool_id)
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let permit = self.acquire_stream_permit(StreamKind::Pool)?;
-        let subscription = match self.source.subscribe_pool(pool_id).await {
+        let subscription = match self
+            .source
+            .subscribe_pool(pool_id, move |actual| {
+                producer_to_wire(actual) == expected_producer
+            })
+            .await
+        {
             Ok(subscription) => subscription,
             Err(error @ PublicationHubError::SubscriberLimit { .. }) => {
                 self.metrics
@@ -586,6 +595,10 @@ mod tests {
         assert_eq!(
             publication_status(PublicationHubError::UnknownPool(pool_id)).code(),
             tonic::Code::NotFound
+        );
+        assert_eq!(
+            publication_status(PublicationHubError::ProducerMismatch(pool_id)).code(),
+            tonic::Code::FailedPrecondition
         );
         assert_eq!(
             publication_status(PublicationHubError::SubscriberLagged(pool_id)).code(),
