@@ -47,23 +47,6 @@ type clusterTopologyInfo struct {
 	domains     []string
 }
 
-type dgdGPUInput struct {
-	value   string
-	present bool
-	path    *field.Path
-}
-
-func (input dgdGPUInput) equal(other dgdGPUInput) bool {
-	return input.present == other.present && (!input.present || input.value == other.value)
-}
-
-func (input dgdGPUInput) invalidValue() any {
-	if !input.present {
-		return nil
-	}
-	return input.value
-}
-
 // invalidDynamoGraphDeploymentError converts allErrs for dgd into an API error.
 // dgd must not be nil.
 func invalidDynamoGraphDeploymentError(
@@ -236,13 +219,32 @@ func dgdDRAPath(
 	return nil
 }
 
-func effectiveDGDGPUInput(
+// effectiveNumberOfGPUs captures the effective scalar GPU count and its source field.
+type effectiveNumberOfGPUs struct {
+	value   string
+	present bool
+	path    *field.Path
+}
+
+func (input effectiveNumberOfGPUs) equal(other effectiveNumberOfGPUs) bool {
+	return input.present == other.present && (!input.present || input.value == other.value)
+}
+
+func (input effectiveNumberOfGPUs) invalidValue() any {
+	if !input.present {
+		return nil
+	}
+	return input.value
+}
+
+// effectiveNumberOfGPUsV1Beta1 returns the main container's scalar GPU count, preferring limits to requests.
+func effectiveNumberOfGPUsV1Beta1(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-) dgdGPUInput {
+) effectiveNumberOfGPUs {
 	containersPath := fldPath.Child("podTemplate", "spec", "containers")
 	if component.PodTemplate == nil {
-		return dgdGPUInput{path: containersPath}
+		return effectiveNumberOfGPUs{path: containersPath}
 	}
 
 	// Phase-1 power admission rejects DRA-backed components, matching the Planner's scalar-only
@@ -256,22 +258,22 @@ func effectiveDGDGPUInput(
 
 		resourcesPath := containersPath.Index(i).Child("resources")
 		if quantity, exists := container.Resources.Limits[resourceName]; exists {
-			return dgdGPUInput{
+			return effectiveNumberOfGPUs{
 				value:   quantity.String(),
 				present: true,
 				path:    resourcesPath.Child("limits").Key(consts.KubeResourceGPUNvidia),
 			}
 		}
 		if quantity, exists := container.Resources.Requests[resourceName]; exists {
-			return dgdGPUInput{
+			return effectiveNumberOfGPUs{
 				value:   quantity.String(),
 				present: true,
 				path:    resourcesPath.Child("requests").Key(consts.KubeResourceGPUNvidia),
 			}
 		}
-		return dgdGPUInput{path: resourcesPath}
+		return effectiveNumberOfGPUs{path: resourcesPath}
 	}
-	return dgdGPUInput{path: containersPath}
+	return effectiveNumberOfGPUs{path: containersPath}
 }
 
 func sortedComponentNames(
