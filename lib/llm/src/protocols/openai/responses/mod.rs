@@ -6,10 +6,10 @@ pub mod stream_converter;
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
-    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
-    Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    AssistantRole, CreateResponse, FunctionCallOutput, FunctionToolCall, IncludeEnum,
+    IncompleteDetails, InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
+    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
     Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
     TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
@@ -37,25 +37,13 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
-/// Request body for `POST /v1/responses`. Uses a plain
-/// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
-/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`,
-/// not by a custom pre-parse JSON patcher.
-/// An earlier iteration of this type carried a hand-written `impl Deserialize`
-/// that walked `serde_json::Value` to inject synthetic defaults for missing
-/// `id` / `status` / `annotations`; that was replaced by typed ownership for
-/// correctness and to avoid the double-deserialize cost.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+/// Request body for `POST /v1/responses`.
+#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.).
     ///
-    /// `CreateResponse` and its `input` chain (`InputParam`, `InputItem`,
-    /// `Item`, `MessageItem`, `InputOutputMessage`, `InputOutputMessageContent`,
-    /// `InputOutputTextContent`) are Dynamo-owned in `dynamo-protocols`. They
-    /// mirror upstream async-openai but accept the relaxed shapes real clients
-    /// emit (optional `id` / `status` / `content` on assistant messages,
-    /// optional `annotations` on `output_text` parts). See
-    /// `dynamo_protocols::types::responses` for the full rationale.
+    /// `CreateResponse` and its input chain are Dynamo-owned in
+    /// `dynamo-protocols` and mirror upstream async-openai's types.
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::CreateResponse,
@@ -63,6 +51,98 @@ pub struct NvCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+}
+
+#[derive(Deserialize)]
+struct NvCreateResponseWire {
+    #[serde(flatten)]
+    inner: CreateResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nvext: Option<NvExt>,
+}
+
+impl<'de> Deserialize<'de> for NvCreateResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        normalize_codex_agent_messages(&mut value).map_err(serde::de::Error::custom)?;
+        let wire = NvCreateResponseWire::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            inner: wire.inner,
+            nvext: wire.nvext,
+        })
+    }
+}
+
+/// Convert Codex's task envelope into a standard input message.
+fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), String> {
+    let Some(items) = body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+
+    for item in items {
+        let Some(message) = item.as_object() else {
+            continue;
+        };
+        if message.get("type").and_then(serde_json::Value::as_str) != Some("agent_message") {
+            continue;
+        }
+
+        let author = message
+            .get("author")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown agent");
+        let recipient = message
+            .get("recipient")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown recipient");
+        let content = message
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .map(
+                        |part| match part.get("type").and_then(serde_json::Value::as_str) {
+                            Some("input_text") => part
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    "Codex agent_message input_text missing text".to_string()
+                                }),
+                            Some("encrypted_content") => {
+                                Err("Codex agent_message with encrypted content is unsupported"
+                                    .to_string())
+                            }
+                            Some(kind) => Err(format!(
+                                "Codex agent_message contains unsupported content type {kind}"
+                            )),
+                            None => Err("Codex agent_message content missing type discriminator"
+                                .to_string()),
+                        },
+                    )
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|parts| parts.join("\n"))
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        *item = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!("Message from {author} to {recipient}:\n{content}"),
+            }],
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -3029,6 +3109,52 @@ thinking
             }
             other => panic!("expected MessageItem::Output, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_nvcreate_response_normalizes_codex_agent_message() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": [
+                    {"type": "input_text", "text": "First."},
+                    {"type": "input_text", "text": "Second."},
+                ],
+            }],
+        });
+
+        let req: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let [ChatCompletionRequestMessage::User(message)] = &chat_req.inner.messages[..] else {
+            panic!("expected one user message");
+        };
+        assert_eq!(
+            message.content,
+            ChatCompletionRequestUserMessageContent::Text(
+                "Message from /root to /root/dynamo_subagent_smoke:\nFirst.\nSecond.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_nvcreate_response_rejects_encrypted_codex_agent_message() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "content": [{"type": "encrypted_content", "encrypted_content": "AB=="}],
+            }],
+        });
+
+        let error = serde_json::from_value::<NvCreateResponse>(body).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("encrypted content is unsupported")
+        );
     }
 
     #[test]
