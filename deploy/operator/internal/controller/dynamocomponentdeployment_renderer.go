@@ -51,20 +51,20 @@ const dcdWorkloadRoleLabel = "role"
 // workload programs can reuse this unit without constructing a
 // DynamoComponentDeploymentReconciler.
 type dcdWorkloadRenderer struct {
-	client.Client
+	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
 	dockerSecretRetriever dockerSecretRetriever
 }
 
 func newDCDWorkloadRenderer(
-	kubeClient client.Client,
+	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever dockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
-		Client:                kubeClient,
+		reader:                reader,
 		config:                config,
 		runtimeConfig:         runtimeConfig,
 		dockerSecretRetriever: dockerSecretRetriever,
@@ -188,7 +188,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if checkpointConfig := dynamo.GetCheckpoint(component); r.runtimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
 		info, err := checkpoint.ResolveCheckpointForService(
 			ctx,
-			r.Client,
+			r.reader,
 			dcd.Namespace,
 			dynamo.ToAlphaCheckpointConfig(checkpointConfig),
 			r.runtimeConfig.Gate,
@@ -208,9 +208,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}
 		checkpointInfo = info
-		if err := checkpoint.EnsureStoragePVC(ctx, r.Client, dcd.Namespace, r.config.Checkpoint.Storage); err != nil {
-			return nil, errors.Wrap(err, "failed to ensure checkpoint storage PVC")
-		}
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(
@@ -232,7 +229,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
 			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 				ctx,
-				r.Client,
+				r.reader,
 				dcd.Namespace,
 				podSpec,
 				checkpointInfo,
@@ -272,7 +269,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{
+		err = r.reader.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{
 			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
@@ -400,12 +397,12 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	componentType string,
 ) (bool, error) {
-	if dcd == nil || r == nil || r.Client == nil {
+	if dcd == nil || r == nil || r.reader == nil {
 		return false, nil
 	}
 
 	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, deployment); err == nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, deployment); err == nil {
 		if hasLegacyWorkerSelector(deployment.Spec.Template.Labels, componentType) {
 			return true, nil
 		}
@@ -416,7 +413,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
 		lwsName := leaderWorkerSetName(dcd)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
+		if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
 			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
 			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
 				return true, nil
@@ -431,7 +428,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 
 	serviceName := dynamo.NormalizeKubeResourceName(dcd.Name)
 	service := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dcd.Namespace}, service); err == nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dcd.Namespace}, service); err == nil {
 		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil
 	} else if !k8serrors.IsNotFound(err) {
 		return false, fmt.Errorf("failed to get service %s/%s: %w", dcd.Namespace, serviceName, err)

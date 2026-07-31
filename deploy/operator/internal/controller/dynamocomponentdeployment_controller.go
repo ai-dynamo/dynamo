@@ -181,6 +181,15 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}
 
+	checkpointStorageReconciler := newDCDCheckpointStorageReconciler(
+		r.Client,
+		r.Config.Checkpoint.Storage,
+		r.RuntimeConfig.Gate,
+	)
+	if err = checkpointStorageReconciler.Reconcile(ctx, dynamoComponentDeployment); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile checkpoint storage: %w", err)
+	}
+
 	// Create the appropriate workload resource based on deployment type
 	var componentReconcileResult ComponentReconcileResult
 	if r.RuntimeConfig.Gate.Enabled(features.LWS) && dynamoComponentDeployment.IsMultinode() {
