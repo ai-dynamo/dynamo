@@ -24,6 +24,7 @@ entry-point group.
 from __future__ import annotations
 
 import logging
+import math
 import multiprocessing as mp
 import time
 import uuid
@@ -33,7 +34,9 @@ from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
+from enum import Enum
 from multiprocessing.util import Finalize
+from numbers import Real
 from typing import Any
 
 from tqdm import tqdm
@@ -54,10 +57,12 @@ from .kv_estimate import resolve_backend_version
 from .kv_load import InfeasibleKVCapacity, resolve_kv_load
 from .replay import (
     REPLAY_SPEC_API_VERSION,
+    ReplayReport,
     ReplaySpec,
     Runner,
     RunnerFactory,
     canonical_json,
+    validate_json_value,
 )
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
@@ -85,10 +90,13 @@ class _PreparedCandidate:
 
 
 _ADAPTER_PARAM_PREFIX = "adapter::"
+_ADAPTER_PARAM_SEPARATOR = "::"
 
 
 def _adapter_param(adapter_name: str, local_name: str) -> str:
-    return f"{_ADAPTER_PARAM_PREFIX}{adapter_name}::{local_name}"
+    return (
+        f"{_ADAPTER_PARAM_PREFIX}{adapter_name}{_ADAPTER_PARAM_SEPARATOR}{local_name}"
+    )
 
 
 def _adapter_selection(
@@ -96,7 +104,7 @@ def _adapter_selection(
 ) -> dict[str, Any]:
     prefix = _adapter_param(adapter_name, "")
     return {
-        key.removeprefix(prefix): value
+        key.removeprefix(prefix): deepcopy(value)
         for key, value in selection.items()
         if key.startswith(prefix)
     }
@@ -108,6 +116,14 @@ def _prepare_adapters(
     injected: Mapping[str, SimulationAdapter] | None,
     show_progress: bool,
 ) -> tuple[dict[str, SimulationAdapter], dict[str, AdapterSearchPlan]]:
+    invalid_names = [
+        name for name in config.adapters if _ADAPTER_PARAM_SEPARATOR in name
+    ]
+    if invalid_names:
+        raise ValueError(
+            f"adapter names cannot contain reserved separator "
+            f"{_ADAPTER_PARAM_SEPARATOR!r}: {invalid_names}"
+        )
     adapters = resolve_adapters(config.adapters, injected=injected)
     base_context = SweepContext(
         core_search_space=config.search_space.model_dump(mode="json"),
@@ -127,7 +143,9 @@ def _prepare_adapters(
             deepcopy(config.adapters[name].search_space), context
         )
         _validate_search_plan(name, plan)
-        plans[name] = plan
+        # The adapter owns the object it returned and may reuse internal buffers
+        # later. Take a complete core-owned snapshot at the ABI boundary.
+        plans[name] = deepcopy(plan)
     configured_modes = set(config.search_space.deployment_mode)
     for name, plan in plans.items():
         unknown = (
@@ -149,16 +167,81 @@ def _validate_search_plan(name: str, plan: Any) -> None:
         )
     if not isinstance(plan.fragment, SearchSpaceFragment):
         raise TypeError(f"adapter {name!r} returned an invalid SearchSpaceFragment")
-    if not all(
-        isinstance(hook, RuntimeHookSpec) for hook in plan.potential_runtime_hooks
-    ):
-        raise TypeError(f"adapter {name!r} returned an invalid potential runtime hook")
     try:
+        if type(plan.diagnostics) is not dict:
+            raise TypeError("search diagnostics must be a dictionary")
+        if type(plan.potential_runtime_hooks) is not tuple:
+            raise TypeError("potential_runtime_hooks must be a tuple")
+        _validate_search_fragment(plan.fragment)
+        validate_json_value(plan.state, path=f"adapter {name!r} search plan state")
+        validate_json_value(
+            plan.diagnostics, path=f"adapter {name!r} search diagnostics"
+        )
+        for index, hook in enumerate(plan.potential_runtime_hooks):
+            _validate_runtime_hook(
+                hook,
+                path=f"adapter {name!r} potential hook {index}",
+            )
         canonical_json(plan)
     except (TypeError, ValueError) as exc:
         raise TypeError(
-            f"adapter {name!r} returned a non-JSON search plan: {exc}"
+            f"adapter {name!r} returned an invalid/non-JSON search plan: {exc}"
         ) from exc
+
+
+def _validate_search_fragment(fragment: SearchSpaceFragment) -> None:
+    if type(fragment.choices_by_branch) is not dict:
+        raise TypeError("choices_by_branch must be a dictionary")
+    for branch, parameters in fragment.choices_by_branch.items():
+        if type(branch) is not str or not branch:
+            raise TypeError("categorical branch names must be non-empty strings")
+        if type(parameters) is not dict:
+            raise TypeError(f"categorical branch {branch!r} must be a dictionary")
+        for parameter, values in parameters.items():
+            if type(parameter) is not str or not parameter:
+                raise TypeError("categorical parameter names must be non-empty strings")
+            if type(values) is not list:
+                raise TypeError(
+                    f"categorical parameter {parameter!r} choices must be a list"
+                )
+            validate_json_value(
+                values, path=f"categorical parameter {parameter!r} choices"
+            )
+
+    if type(fragment.float_ranges_by_branch) is not dict:
+        raise TypeError("float_ranges_by_branch must be a dictionary")
+    for branch, parameters in fragment.float_ranges_by_branch.items():
+        if type(branch) is not str or not branch:
+            raise TypeError("continuous branch names must be non-empty strings")
+        if type(parameters) is not dict:
+            raise TypeError(f"continuous branch {branch!r} must be a dictionary")
+        for parameter, bounds in parameters.items():
+            if type(parameter) is not str or not parameter:
+                raise TypeError("continuous parameter names must be non-empty strings")
+            if type(bounds) is not tuple or len(bounds) != 2:
+                raise TypeError(
+                    f"continuous parameter {parameter!r} bounds must be a pair"
+                )
+            if any(type(bound) not in (int, float) for bound in bounds) or not all(
+                math.isfinite(float(bound)) for bound in bounds
+            ):
+                raise ValueError(
+                    f"continuous parameter {parameter!r} bounds must be finite numbers"
+                )
+
+
+def _validate_runtime_hook(hook: Any, *, path: str) -> None:
+    if not isinstance(hook, RuntimeHookSpec):
+        raise TypeError(f"{path} must be a RuntimeHookSpec")
+    if type(hook.provider) is not str or not hook.provider:
+        raise TypeError(f"{path} provider must be a non-empty string")
+    if type(hook.kind) is not str or not hook.kind:
+        raise TypeError(f"{path} kind must be a non-empty string")
+    if type(hook.api_version) is not int or hook.api_version < 1:
+        raise TypeError(f"{path} api_version must be a positive integer")
+    if type(hook.config) is not dict:
+        raise TypeError(f"{path} config must be a dictionary")
+    validate_json_value(hook.config, path=f"{path} config")
 
 
 def _validate_adapter_replay_spec(name: str, spec: Any) -> None:
@@ -166,13 +249,21 @@ def _validate_adapter_replay_spec(name: str, spec: Any) -> None:
         raise TypeError(
             f"adapter {name!r} materialize_replay must return AdapterReplaySpec"
         )
-    if not all(isinstance(hook, RuntimeHookSpec) for hook in spec.runtime_hooks):
-        raise TypeError(f"adapter {name!r} returned an invalid runtime hook")
     try:
+        if type(spec.config) is not dict:
+            raise TypeError("replay config must be a dictionary")
+        if type(spec.runtime_hooks) is not tuple:
+            raise TypeError("runtime_hooks must be a tuple")
+        validate_json_value(spec.config, path=f"adapter {name!r} replay config")
+        for index, hook in enumerate(spec.runtime_hooks):
+            _validate_runtime_hook(
+                hook,
+                path=f"adapter {name!r} runtime hook {index}",
+            )
         canonical_json(spec)
     except (TypeError, ValueError) as exc:
         raise TypeError(
-            f"adapter {name!r} returned a non-JSON replay spec: {exc}"
+            f"adapter {name!r} returned an invalid/non-JSON replay spec: {exc}"
         ) from exc
 
 
@@ -199,6 +290,11 @@ def _merge_adapter_spaces(
                     f"continuous: {sorted(overlap)}"
                 )
             for local_name, values in local_choices.items():
+                if _ADAPTER_PARAM_SEPARATOR in local_name:
+                    raise ValueError(
+                        f"adapter {name!r} search parameter {local_name!r} contains "
+                        f"reserved separator {_ADAPTER_PARAM_SEPARATOR!r}"
+                    )
                 if not values:
                     raise ValueError(
                         f"adapter {name!r} search parameter {local_name!r} "
@@ -206,6 +302,11 @@ def _merge_adapter_spaces(
                     )
                 choices[_adapter_param(name, local_name)] = list(values)
             for local_name, bounds in local_ranges.items():
+                if _ADAPTER_PARAM_SEPARATOR in local_name:
+                    raise ValueError(
+                        f"adapter {name!r} search parameter {local_name!r} contains "
+                        f"reserved separator {_ADAPTER_PARAM_SEPARATOR!r}"
+                    )
                 low, high = bounds
                 if low >= high:
                     raise ValueError(
@@ -220,21 +321,37 @@ def _merge_adapter_spaces(
 def _freeze(value: Any) -> Any:
     """Convert a nested suggestion/context value into a stable hashable key."""
     if is_dataclass(value) and not isinstance(value, type):
-        return _freeze(asdict(value))
+        return ("dataclass", type(value).__qualname__, _freeze(asdict(value)))
+    if isinstance(value, Enum):
+        return ("enum", type(value).__qualname__, _freeze(value.value))
     if isinstance(value, dict):
-        return tuple(
-            (str(key), _freeze(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        return (
+            "dict",
+            tuple(
+                (_freeze(key), _freeze(item))
+                for key, item in sorted(value.items(), key=lambda pair: repr(pair[0]))
+            ),
         )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return tuple(sorted((_freeze(item) for item in value), key=repr))
+    if isinstance(value, list):
+        return ("list", tuple(_freeze(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_freeze(item) for item in value))
+    if isinstance(value, set):
+        return ("set", tuple(sorted((_freeze(item) for item in value), key=repr)))
+    if isinstance(value, frozenset):
+        return (
+            "frozenset",
+            tuple(sorted((_freeze(item) for item in value), key=repr)),
+        )
+    if value is None:
+        return ("none",)
+    if type(value) in (str, int, float, bool):
+        return (type(value).__name__, value)
     try:
         hash(value)
     except TypeError:
-        return repr(value)
-    return value
+        return ("repr", type(value).__qualname__, repr(value))
+    return ("hashable", type(value).__qualname__, value)
 
 
 def _suggestion_cache_key(suggestion: Suggestion, context: Any) -> Any:
@@ -305,7 +422,10 @@ def _materialize_one(
                 candidate_context,
             )
             _validate_adapter_replay_spec(name, adapter_spec)
-            adapter_specs[name] = adapter_spec
+            # Frozen dataclasses do not freeze nested JSON containers. Snapshot
+            # the return value so an adapter can safely reuse an output buffer
+            # without mutating candidates already prepared in this round.
+            adapter_specs[name] = deepcopy(adapter_spec)
         replay_spec = ReplaySpec(
             backend_deployment=backend_deployment,
             workload=config.workload.model_dump(mode="json"),
@@ -317,7 +437,7 @@ def _materialize_one(
         runner_factory.capabilities().require_compatible(replay_spec)
         if adapter_specs:
             sample["adapters"] = {
-                name: adapter_spec.config
+                name: deepcopy(adapter_spec.config)
                 for name, adapter_spec in adapter_specs.items()
             }
     except InfeasibleKVCapacity as exc:
@@ -341,7 +461,27 @@ def _materialize_one(
 def _run_replay(spec: ReplaySpec, runner: Runner) -> _ReplayResult:
     """Worker-only boundary: run one fully materialized replay specification."""
     try:
-        return runner.run(spec).metrics, "replayed", ""
+        report = runner.run(spec)
+        if not isinstance(report, ReplayReport):
+            raise TypeError(
+                f"runner.run must return ReplayReport, got {type(report).__name__}"
+            )
+        if type(report.metrics) is not dict:
+            raise TypeError("runner report metrics must be a dictionary")
+        if type(report.metadata) is not dict:
+            raise TypeError("runner report metadata must be a dictionary")
+        metrics: dict[str, float] = {}
+        for name, value in report.metrics.items():
+            if type(name) is not str:
+                raise TypeError(f"runner metric names must be strings, got {name!r}")
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise TypeError(f"runner metric {name!r} must be a real number")
+            normalized = float(value)
+            if not math.isfinite(normalized):
+                raise ValueError(f"runner metric {name!r} must be finite")
+            metrics[name] = normalized
+        validate_json_value(report.metadata, path="runner report metadata")
+        return metrics, "replayed", ""
     except Exception as exc:  # one candidate failing must not abort the sweep
         logger.exception("Spica candidate replay failed")
         return None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
@@ -452,6 +592,14 @@ def run_smart_search(
     goal = config.goal
     capabilities = runner_factory.capabilities()
     capabilities.require_replay_spec_version(REPLAY_SPEC_API_VERSION)
+
+    # Preserve the legacy preflight order: reject an impossible backend/topology
+    # search before adapters perform any potentially expensive preparation.
+    branches = enumerate_branches(
+        config,
+        max_seq_len=config.search_space.context_length,
+        runner_capabilities=capabilities,
+    )
     resolved_adapters, adapter_plans = _prepare_adapters(
         config, injected=adapters, show_progress=show_progress
     )
@@ -471,11 +619,6 @@ def run_smart_search(
                 f"unsupported runtime hook(s): {labels}"
             )
 
-    branches = enumerate_branches(
-        config,
-        max_seq_len=config.search_space.context_length,
-        runner_capabilities=capabilities,
-    )
     branches = _merge_adapter_spaces(branches, adapter_plans)
 
     sweep = config.sweep
@@ -555,7 +698,15 @@ def run_smart_search(
     def _pool_lifecycle():
         try:
             yield
-        finally:
+        except BaseException:
+            # Do not wait forever for an unrelated hung replay when orchestration,
+            # scoring, observation, or cancellation aborts the sweep.
+            _terminate_pool(pool_box[0])
+            pool_box[0] = None
+            if sequential_runner is not None:
+                sequential_runner.close()
+            raise
+        else:
             # A completed sweep shuts workers down normally so their Runner
             # finalizers execute.  Only the timeout-recovery path above sends a
             # terminate signal, where cleanup is necessarily best-effort.

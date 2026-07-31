@@ -11,9 +11,9 @@ from enum import Enum
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from tqdm import tqdm  # type: ignore[import-untyped]
 
 from aisimulate.spica.adapter import (
-    API_VERSION,
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
@@ -58,6 +58,8 @@ _PREDICTOR_KEYS = frozenset(
         "kalman_min_points",
     }
 )
+_ADAPTER_API_VERSION = 1
+_PLANNER_HOOK_API_VERSION = 1
 _PLANNER_PASSTHROUGH = (
     "enable_throughput_scaling",
     "enable_load_scaling",
@@ -78,7 +80,7 @@ _PLANNER_PASSTHROUGH = (
 _HOOK = RuntimeHookSpec(
     provider="dynamo.planner",
     kind="scaling_policy",
-    api_version=API_VERSION,
+    api_version=_PLANNER_HOOK_API_VERSION,
 )
 
 
@@ -246,7 +248,9 @@ class DynamoPlannerSimulationAdapter:
     """Planner search-space preparation and replay-spec materialization."""
 
     name = "dynamo.planner"
-    api_version = API_VERSION
+    # Provider-owned constant: importing the consumer's current API_VERSION would
+    # let an older wheel accidentally self-certify against a newer core package.
+    api_version = _ADAPTER_API_VERSION
 
     def generate_search_space(
         self,
@@ -262,6 +266,19 @@ class DynamoPlannerSimulationAdapter:
             optimization_target=optimization_target,
             sla=sla,
         )
+        if dropped and context.show_progress:
+            if optimization_target != "sla":
+                target = str(_plain(context.goal.get("target", "throughput")))
+                tqdm.write(
+                    f"smart-sweep: dropped {len(dropped)} throughput-scaling "
+                    f"policy option(s) for target={target} (needs SLA): {dropped}"
+                )
+            else:
+                tqdm.write(
+                    f"smart-sweep: dropped {len(dropped)} planner-scaling policy "
+                    f"option(s) for e2e-only SLA (planner needs ttft_ms+itl_ms): "
+                    f"{dropped}"
+                )
         if not kept:
             if optimization_target != "sla":
                 raise ValueError(

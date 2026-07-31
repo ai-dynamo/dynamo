@@ -11,7 +11,6 @@ from copy import deepcopy
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aisimulate.spica.adapter import (
-    API_VERSION,
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
@@ -21,6 +20,8 @@ from aisimulate.spica.adapter import (
     SweepContext,
 )
 
+_ADAPTER_API_VERSION = 1
+_ROUTER_HOOK_API_VERSION = 1
 _MODES = frozenset({"kv_router", "round_robin"})
 _OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
 _PREFILL_LOAD_SCALES = frozenset({0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0})
@@ -28,7 +29,7 @@ _TEMPERATURES = frozenset({0.0, 0.2, 0.5, 1.0})
 _HOOK = RuntimeHookSpec(
     provider="dynamo.router",
     kind="placement_policy",
-    api_version=API_VERSION,
+    api_version=_ROUTER_HOOK_API_VERSION,
 )
 
 
@@ -117,7 +118,8 @@ class DynamoRouterSimulationAdapter:
     """Router search-space preparation and replay-spec materialization."""
 
     name = "dynamo.router"
-    api_version = API_VERSION
+    # Keep the implemented provider ABI independent from the installed consumer.
+    api_version = _ADAPTER_API_VERSION
 
     def generate_search_space(
         self,

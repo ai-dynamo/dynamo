@@ -30,10 +30,10 @@ Router adapters and the transitional Dynamo replay runner.
 ```mermaid
 flowchart TD
     A["Validate SmartSearchConfig"] --> B["Preflight Runner ReplaySpec ABI"]
-    B --> C["Resolve only configured adapters"]
-    C --> D["Adapters generate namespaced search-space fragments"]
-    D --> E["Preflight runtime hooks and backend capabilities"]
-    E --> F["Enumerate backend and parallel branches"]
+    B --> C["Preflight backend capabilities and enumerate branches"]
+    C --> D["Resolve only configured adapters"]
+    D --> E["Adapters generate namespaced search-space fragments"]
+    E --> F["Preflight runtime hooks"]
     F --> G["Ask sampler for suggestions"]
     G --> H["Main process unrolls backend candidate"]
     H --> I["Main process materializes adapter configs and runtime hooks"]
@@ -89,8 +89,10 @@ Spica preserves the existing barrier-round behavior:
 - A timed-out worker pool is terminated and replaced. Gracefully stopped runners receive `close()`;
   a force-terminated process cannot guarantee cleanup callbacks.
 
-The cache remains keyed by the raw suggestion and prepared search context in this refactor. This
-preserves the existing optimizer trajectory while `ReplaySpec` becomes the execution boundary.
+The cache remains keyed by the raw suggestion and prepared search context in this refactor. Search
+domains, scoring, and replay results retain their existing behavior while `ReplaySpec` becomes the
+execution boundary. Adapter namespacing and parameter registration order can change Vizier's exact
+finite-round suggestion sequence, so parity does not require an identical optimizer trajectory.
 
 ## Replay Refactor Coordination
 

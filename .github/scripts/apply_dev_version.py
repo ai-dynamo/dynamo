@@ -8,7 +8,7 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - [project].version in every Dynamo pyproject.toml (PEP 440 form)
   - [package].version / [workspace.package].version in every Cargo.toml
     (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
-  - The `ai-dynamo-runtime==1.1.0` pin in the root pyproject
+  - The `ai-dynamo-runtime==1.1.0` and `aisimulate==0.1.0` pins in the root pyproject
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
@@ -25,6 +25,7 @@ PYPROJECT_TARGETS = [
     "lib/bindings/python/pyproject.toml",
     "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",
+    "aisimulate/pyproject.toml",
 ]
 
 # Sub-crate Cargo files with an EXPLICIT [package].version (not workspace-inherited).
@@ -52,6 +53,7 @@ VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILIN
 
 # Root pyproject cross-ref to the runtime wheel.
 PY_RUNTIME_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([^"]+)(")')
+PY_AISIMULATE_PIN_RE = re.compile(r'("aisimulate==)([^"]+)(")')
 
 
 def pep440(suffix: str, base: str) -> str:
@@ -93,6 +95,10 @@ def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
 
     if is_root:
         text = PY_RUNTIME_PIN_RE.sub(
+            lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
+            text,
+        )
+        text = PY_AISIMULATE_PIN_RE.sub(
             lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
             text,
         )

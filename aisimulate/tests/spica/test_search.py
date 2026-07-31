@@ -11,7 +11,12 @@ import aisimulate.spica.search as search_mod
 from aisimulate.spica.config import OptimizationGoal, SmartSearchConfig
 from aisimulate.spica.kv_load import KVLoadResolution
 from aisimulate.spica.parallel_enum import ParallelShape, ReplicaParallelConfig
-from aisimulate.spica.replay import ReplayReport, ReplaySpec, RunnerCapabilities
+from aisimulate.spica.replay import (
+    BackendDeploymentSpec,
+    ReplayReport,
+    ReplaySpec,
+    RunnerCapabilities,
+)
 from aisimulate.spica.sampler import Suggestion
 from aisimulate.spica.search import run_smart_search
 from aisimulate.spica.search_space import BranchSpace
@@ -178,6 +183,7 @@ def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):
         def __init__(self, *, initializer, initargs, **kwargs):
             self._processes = {}
             self.shutdown_called = False
+            self.shutdown_waits = []
             self.shutdown_wait = None
             initializer(*initargs)
             pools.append(self)
@@ -187,6 +193,7 @@ def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):
 
         def shutdown(self, *, wait, cancel_futures):
             self.shutdown_called = True
+            self.shutdown_waits.append(wait)
             self.shutdown_wait = wait
 
     def fake_wait(pending, *, timeout, return_when):
@@ -207,6 +214,7 @@ def test_parallel_batch_uses_worker_sized_timeout_waves(monkeypatch):
     assert wave_sizes == [2, 1]
     assert len(pools) == 1
     assert pools[0].shutdown_called
+    assert pools[0].shutdown_waits == [True]
     assert pools[0].shutdown_wait is True
 
 
@@ -276,6 +284,7 @@ def test_broken_worker_pool_is_friendly_and_always_cleaned_up(monkeypatch):
         def __init__(self, *, initializer, initargs, **kwargs):
             self._processes = {}
             self.shutdown_called = False
+            self.shutdown_waits = []
             initializer(*initargs)
             pools.append(self)
 
@@ -284,6 +293,7 @@ def test_broken_worker_pool_is_friendly_and_always_cleaned_up(monkeypatch):
 
         def shutdown(self, *, wait, cancel_futures):
             self.shutdown_called = True
+            self.shutdown_waits.append(wait)
 
     monkeypatch.setattr(search_mod, "ProcessPoolExecutor", FakeProcessPool)
     monkeypatch.setattr(
@@ -299,6 +309,7 @@ def test_broken_worker_pool_is_friendly_and_always_cleaned_up(monkeypatch):
         )
 
     assert pools[0].shutdown_called
+    assert pools[0].shutdown_waits == [False]
 
 
 def test_over_budget_candidates_are_observed_infeasible(monkeypatch):
@@ -348,6 +359,58 @@ def test_runner_failure_is_observed_infeasible(monkeypatch):
 
     assert candidates == []
     assert all(item[0] == "infeasible" for item in sampler_seen["sampler"].scored)
+
+
+@pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), True, "1"])
+def test_runner_report_rejects_non_finite_or_non_numeric_metrics(invalid_metric):
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="agg",
+            backend="vllm",
+            backend_version="test",
+        ),
+        workload={},
+        goal={},
+    )
+
+    class InvalidRunner:
+        def run(self, replay_spec):
+            assert replay_spec is spec
+            return ReplayReport(metrics={"objective": invalid_metric})
+
+    metrics, outcome, reason = search_mod._run_replay(spec, InvalidRunner())
+
+    assert metrics is None
+    assert outcome == "failed"
+    assert "runner metric" in reason
+
+
+def test_runner_report_requires_replay_report_and_strict_json_metadata():
+    spec = ReplaySpec(
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="agg",
+            backend="vllm",
+            backend_version="test",
+        ),
+        workload={},
+        goal={},
+    )
+
+    class WrongTypeRunner:
+        def run(self, replay_spec):
+            return {"output_throughput_tok_s": 1.0}
+
+    class InvalidMetadataRunner:
+        def run(self, replay_spec):
+            return ReplayReport(
+                metrics={"output_throughput_tok_s": 1.0},
+                metadata={"not_json": (1, 2)},
+            )
+
+    assert search_mod._run_replay(spec, WrongTypeRunner())[1] == "failed"
+    result = search_mod._run_replay(spec, InvalidMetadataRunner())
+    assert result[1] == "failed"
+    assert "metadata" in result[2]
 
 
 def test_goodput_goal_fails_closed_when_runner_omits_metric(monkeypatch):
@@ -546,6 +609,31 @@ def test_duplicate_full_samples_use_cache_and_are_replaced(monkeypatch):
         768,
     }
     assert len(seen["sampler"].scored) == 5
+
+
+def test_cache_identity_preserves_distinct_json_scalar_types():
+    parallel = _pc()
+    boolean = Suggestion(
+        selection={"adapter::example::choice": True},
+        parallel_config=parallel,
+        handle=None,
+    )
+    integer = Suggestion(
+        selection={"adapter::example::choice": 1},
+        parallel_config=parallel,
+        handle=None,
+    )
+    floating = Suggestion(
+        selection={"adapter::example::choice": 1.0},
+        parallel_config=parallel,
+        handle=None,
+    )
+
+    keys = {
+        search_mod._suggestion_cache_key(suggestion, ("same-context",))
+        for suggestion in (boolean, integer, floating)
+    }
+    assert len(keys) == 3
 
 
 def test_projection_stall_only_stops_current_branch(monkeypatch):

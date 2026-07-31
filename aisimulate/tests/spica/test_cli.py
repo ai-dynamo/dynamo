@@ -99,3 +99,48 @@ def test_cli_requires_an_injected_replay_runtime(monkeypatch, tmp_path, capsys):
     error = capsys.readouterr().err
     assert "no default replay runtime" in error
     assert "run_smart_search(config, runner_factory=...)" in error
+
+
+def test_runner_wrapper_preserves_no_candidate_exit(capsys):
+    config = spica.SmartSearchConfig(
+        search_space={"model_name": "model", "hardware_sku": "h200_sxm"},
+        workload={
+            "isl": 128,
+            "osl": 16,
+            "request_rate": 1,
+            "num_request_ratio": 3,
+        },
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        cli.print_candidates_or_exit(config, [])
+
+    assert "no feasible candidate found" in capsys.readouterr().err
+
+
+def test_runner_wrapper_preserves_pareto_objectives_and_concurrency(capsys):
+    config = spica.SmartSearchConfig(
+        search_space={"model_name": "model", "hardware_sku": "h200_sxm"},
+        workload={
+            "isl": 128,
+            "osl": 16,
+            "kv_load_ratio": [0.0, 1.0],
+            "num_request_ratio": 3,
+        },
+        goal={"target": "pareto"},
+    )
+    candidate = spica.Candidate(
+        config={"concurrency": 8},
+        used_gpus=4,
+        score=12.0,
+        metrics={"output_throughput_tok_s": 48.0},
+        objectives={"throughput_per_gpu": 12.0, "throughput_per_user": 6.0},
+    )
+
+    cli.print_candidates_or_exit(config, [candidate])
+
+    output = capsys.readouterr().out
+    assert "pareto front (1 non-dominated)" in output
+    assert "throughput_per_gpu=12" in output
+    assert "throughput_per_user=6" in output
+    assert "concurrency=8" in output

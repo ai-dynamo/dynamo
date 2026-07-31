@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
 pytest.importorskip(
     "aisimulate.spica",
@@ -18,6 +20,7 @@ pytest.importorskip(
 )
 
 import dynamo.replay.simulation as simulation
+import examples.aisimulate.spica.tools.run_sweep as run_sweep_cli
 from aisimulate.spica.adapter import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.spica.replay import BackendDeploymentSpec, ReplaySpec
 
@@ -175,6 +178,8 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["output_tokens"] == 128
     assert seen["request_count"] == 320
     assert seen["replay_concurrency"] == 32
+    # Replay requires exactly one load controller. Closed-loop mode uses only
+    # replay_concurrency; an arrival interval would make the request ambiguous.
     assert seen["arrival_interval_ms"] is None
     assert seen["num_prefill_workers"] == 2
     assert seen["num_decode_workers"] == 4
@@ -220,6 +225,67 @@ def test_factory_preserves_trtllm_disagg_gate() -> None:
 
     assert capabilities.supports_backend_topology("trtllm", "agg")
     assert not capabilities.supports_backend_topology("trtllm", "disagg")
+
+
+def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
+    seen = {}
+
+    class SentinelCapabilities:
+        def __init__(
+            self,
+            replay_spec_api_version=999,
+            supported_backend_topologies=(),
+            supported_hooks=(),
+        ):
+            seen["version"] = replay_spec_api_version
+            self.replay_spec_api_version = replay_spec_api_version
+            self.supported_backend_topologies = supported_backend_topologies
+            self.supported_hooks = supported_hooks
+
+    monkeypatch.setattr(simulation, "RunnerCapabilities", SentinelCapabilities)
+
+    simulation.DynamoReplayRunnerFactory().capabilities()
+
+    assert simulation._REPLAY_SPEC_API_VERSION == 1
+    assert seen["version"] == 1
+
+
+def test_dynamo_sweep_cli_formats_adapter_validation_errors(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    class AdapterSchema(BaseModel):
+        interval: int
+
+    with pytest.raises(ValidationError) as caught:
+        AdapterSchema.model_validate({"interval": "invalid"})
+
+    config_path = tmp_path / "sweep.yaml"
+    config_path.write_text(
+        "search_space:\n"
+        "  model_name: example/model\n"
+        "  hardware_sku: h200_sxm\n"
+        "workload:\n"
+        "  isl: 128\n"
+        "  osl: 16\n"
+        "  request_rate: 1\n"
+        "  num_request_ratio: 3\n"
+    )
+
+    def reject_adapter(*args, **kwargs):
+        del args, kwargs
+        raise caught.value
+
+    monkeypatch.setattr(run_sweep_cli, "run_smart_search", reject_adapter)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_sweep.py", "--config", str(config_path)],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        run_sweep_cli.main()
+
+    assert "invalid adapter search space" in capsys.readouterr().err
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:

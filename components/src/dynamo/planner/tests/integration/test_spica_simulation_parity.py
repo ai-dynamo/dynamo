@@ -64,9 +64,19 @@ def _config(*, scaling_policy: list[str], **sweep_overrides) -> SmartSearchConfi
                     "load_sensitivity": ["default"],
                     "load_predictor_candidates": ["constant_last"],
                 }
-            }
+            },
+            "dynamo.router": {
+                "search_space": {
+                    "mode": ["kv_router"],
+                    "overlap_score_credit": [0.5],
+                    "prefill_load_scale": [1.0],
+                    "temperature": [0.0],
+                }
+            },
         },
-        workload={"trace_path": TRACE},
+        # Slow the final trace arrival enough to cross load_180_5's first
+        # adjustment interval, so the composed gate executes a Planner tick.
+        workload={"trace_path": TRACE, "arrival_speedup_ratio": 0.5},
         sweep=sweep,
         goal={
             "target": "goodput_per_gpu",
@@ -201,9 +211,26 @@ def test_real_spawned_smart_search_returns_ranked_candidates() -> None:
     assert best.metrics["goodput_output_throughput_tok_s"] > 0.0
     assert best.metrics["gpu_hours"] > 0.0
     assert best.used_gpus <= 256
+    assert best.config["adapters"]["dynamo.router"] == {
+        "mode": "kv_router",
+        "overlap_score_credit": 0.5,
+        "prefill_load_scale": 1.0,
+        "router_temperature": 0.0,
+    }
     avg_gpu = best.metrics["gpu_hours"] / (best.metrics["duration_ms"] / 3_600_000.0)
     assert best.score == pytest.approx(
         best.metrics["goodput_output_throughput_tok_s"] / avg_gpu
+    )
+    composed = [
+        candidate
+        for candidate in candidates
+        if candidate.config["adapters"]["dynamo.planner"].get("enable_load_scaling")
+    ]
+    assert composed, "Planner-enabled + Router replay must produce a candidate"
+    assert all(
+        candidate.config["adapters"]["dynamo.router"]["mode"] == "kv_router"
+        and candidate.metrics["planner_total_ticks"] >= 1
+        for candidate in composed
     )
 
 

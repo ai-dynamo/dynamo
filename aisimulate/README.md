@@ -44,7 +44,9 @@ candidates = run_smart_search(
 )
 ```
 
-The standalone module validates configuration but intentionally has no implicit replay runtime.
+The standalone module validates the backend-neutral core schema but intentionally has no implicit
+replay runtime. Adapter-owned search spaces are validated when the selected adapters are resolved
+by `run_smart_search`.
 KVBM sweep fields have been removed; native G2 is their replacement.
 
 Read the [Spica documentation](../docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md)

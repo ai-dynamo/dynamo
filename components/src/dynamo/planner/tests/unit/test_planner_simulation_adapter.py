@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 pytest.importorskip(
@@ -14,6 +16,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+import dynamo.planner.simulation.adapter as planner_adapter_module
 from aisimulate.spica.adapter import CandidateContext, SweepContext
 from aisimulate.spica.replay import BackendDeploymentSpec
 from dynamo.planner.simulation import create_adapter
@@ -169,9 +172,79 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
     assert replay_spec.runtime_hooks[0].config == {"planner_config": expected}
 
 
+def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:
+    adapter = create_adapter()
+    plan = adapter.generate_search_space(
+        {
+            "scaling_policy": ["load_180_5"],
+            "fpm_sampling": ["default"],
+            "load_sensitivity": ["default"],
+        },
+        SweepContext(
+            core_search_space={
+                "deployment_mode": ["disagg"],
+                "gpu_budget": 32,
+            },
+            workload={"trace_path": "trace.jsonl"},
+            goal={"target": "throughput"},
+            show_progress=False,
+        ),
+    )
+    context = CandidateContext(
+        sample={
+            "deployment_mode": "disagg",
+            "gpu_budget": 32,
+            "prefill_tp": 2,
+            "prefill_attention_dp": 2,
+            "decode_tp": 4,
+            "decode_attention_dp": 2,
+        },
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="disagg",
+            backend="vllm",
+            backend_version="0.11.0",
+        ),
+    )
+
+    replay_spec = adapter.materialize_replay(
+        plan,
+        {
+            "scaling_policy": "load_180_5",
+            "fpm_sampling": "default",
+            "load_sensitivity": "default",
+        },
+        context,
+    )
+
+    assert replay_spec.config["mode"] == "disagg"
+    assert replay_spec.config["prefill_engine_num_gpu"] == 4
+    assert replay_spec.config["decode_engine_num_gpu"] == 8
+
+
 def test_load_predictor_diagnostics_are_strict_json() -> None:
     state = LoadPredictorResult(
         losses={180: {"constant_last": float("inf")}}
     ).to_state()
 
     assert state["losses"] == {"180": {"constant_last": None}}
+
+
+def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
+    adapter = create_adapter()
+
+    assert planner_adapter_module._ADAPTER_API_VERSION == 1
+    assert planner_adapter_module._PLANNER_HOOK_API_VERSION == 1
+    assert adapter.api_version == planner_adapter_module._ADAPTER_API_VERSION
+
+
+def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
+    messages = []
+    monkeypatch.setattr(planner_adapter_module.tqdm, "write", messages.append)
+
+    create_adapter().generate_search_space(
+        {"scaling_policy": ["disabled", "throughput_180_5"]},
+        replace(_sweep_context(target="throughput"), show_progress=True),
+    )
+
+    assert len(messages) == 1
+    assert "dropped 1 throughput-scaling policy" in messages[0]

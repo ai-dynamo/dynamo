@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import argparse
 
-from aisimulate.spica import SmartSearchConfig, run_smart_search
+from pydantic import ValidationError
+
+from aisimulate.spica import run_smart_search
+from aisimulate.spica.__main__ import (
+    load_config_or_parser_error,
+    print_candidates_or_exit,
+)
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
 
@@ -16,13 +22,15 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    config = SmartSearchConfig.from_yaml(args.config)
-    candidates = run_smart_search(
-        config,
-        runner_factory=DynamoReplayRunnerFactory(),
-    )
-    for index, candidate in enumerate(candidates):
-        print(f"{index}: score={candidate.score} used_gpus={candidate.used_gpus}")
+    config = load_config_or_parser_error(parser, args.config)
+    try:
+        candidates = run_smart_search(
+            config,
+            runner_factory=DynamoReplayRunnerFactory(),
+        )
+    except ValidationError as exc:
+        parser.error(f"invalid adapter search space in {args.config}: {exc}")
+    print_candidates_or_exit(config, candidates)
 
 
 if __name__ == "__main__":

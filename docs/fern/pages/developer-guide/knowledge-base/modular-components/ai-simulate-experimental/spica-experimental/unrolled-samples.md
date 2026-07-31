@@ -124,6 +124,7 @@ adapters:
 ## Serialization
 
 `canonical_json` converts replay dataclasses, Pydantic models, enumerations, mappings, and sequences
-to deterministic strict JSON. It sorts mapping keys and rejects non-finite values. The current
-search cache intentionally remains keyed by the raw suggestion to preserve the pre-refactor
-optimizer trajectory.
+to deterministic strict JSON. It sorts mapping keys and rejects non-finite values. The search cache
+keys each result by the raw suggestion and prepared search context, so exact repeated suggestions
+reuse a result. Adapter namespacing and parameter registration order can change Vizier's exact
+finite-round suggestion sequence.

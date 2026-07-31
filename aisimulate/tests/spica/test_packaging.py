@@ -112,6 +112,21 @@ def test_ai_dynamo_simulation_extra_installs_adapter_runtime_dependencies():
     )
 
 
+def test_release_stages_the_aisimulate_wheel_used_by_simulation_extra():
+    repository_root = Path(__file__).resolve().parents[3]
+    wheel_builder = (
+        repository_root / "container/templates/wheel_builder.Dockerfile"
+    ).read_text()
+    release_workflow = (repository_root / ".github/workflows/release.yml").read_text()
+
+    assert "uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/aisimulate" in (
+        wheel_builder
+    )
+    assert '{% if target == "planner" %}\n# AI Simulate' not in wheel_builder
+    assert "aisimulate-*py3-none-any.whl" in release_workflow
+    assert "Expected exactly one aisimulate wheel" in release_workflow
+
+
 def test_profiler_does_not_publish_or_reexport_spica():
     assert importlib.util.find_spec("dynamo.profiler.spica") is None
     subprocess.run(

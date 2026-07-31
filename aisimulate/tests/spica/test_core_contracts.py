@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import math
 import pickle
+from dataclasses import dataclass
+from enum import Enum
 
 import pytest
 
@@ -29,6 +31,7 @@ from aisimulate.spica.replay import (
     ReplaySpec,
     RunnerCapabilities,
     canonical_json,
+    validate_json_value,
 )
 
 
@@ -125,6 +128,22 @@ def test_canonical_json_is_stable_and_strict():
         canonical_json({1: "not allowed"})
     with pytest.raises(TypeError, match="not supported"):
         canonical_json(object())
+
+
+def test_adapter_payload_json_validation_does_not_normalize_python_objects():
+    @dataclass
+    class PythonObject:
+        value: int
+
+    class StringEnum(str, Enum):
+        VALUE = "value"
+
+    validate_json_value({"nested": [None, True, 1, 1.0, "value"]})
+    for value in (PythonObject(1), StringEnum.VALUE, (1, 2)):
+        with pytest.raises(TypeError, match="non-JSON value"):
+            validate_json_value({"nested": value})
+    with pytest.raises(ValueError, match="finite JSON numbers"):
+        validate_json_value({"nested": math.inf})
 
 
 def test_replay_spec_collects_runtime_hooks_in_adapter_order():

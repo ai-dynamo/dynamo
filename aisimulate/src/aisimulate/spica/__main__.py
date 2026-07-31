@@ -6,11 +6,60 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from collections.abc import Sequence
 
 import yaml
 from pydantic import ValidationError
 
-from .config import SmartSearchConfig
+from .config import Candidate, SmartSearchConfig
+
+
+def load_config_or_parser_error(
+    parser: argparse.ArgumentParser, path: str
+) -> SmartSearchConfig:
+    """Load a sweep config with the legacy CLI's concise error messages."""
+
+    try:
+        return SmartSearchConfig.from_yaml(path)
+    except OSError as exc:  # missing file, a directory, unreadable, etc.
+        parser.error(f"could not read config {path}: {exc}")
+    except yaml.YAMLError as exc:
+        parser.error(f"malformed YAML in {path}: {exc}")
+    except ValidationError as exc:
+        parser.error(f"invalid config {path}: {exc}")
+
+
+def print_candidates_or_exit(
+    config: SmartSearchConfig, candidates: Sequence[Candidate]
+) -> None:
+    """Preserve the legacy CLI result and no-candidate behavior for wrappers."""
+
+    if not candidates:
+        print(
+            "no feasible candidate found "
+            "(check backends / SLA / gpu_budget / replay errors)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if config.goal.is_pareto:
+        print(f"pareto front ({len(candidates)} non-dominated):")
+        for index, candidate in enumerate(candidates):
+            objectives = ", ".join(
+                f"{key}={value:.4g}"
+                for key, value in (candidate.objectives or {}).items()
+            )
+            concurrency = candidate.config.get("concurrency")
+            concrete_load = (
+                f" concurrency={concurrency}" if concurrency is not None else ""
+            )
+            print(
+                f"{index}: {objectives}{concrete_load} "
+                f"used_gpus={candidate.used_gpus}"
+            )
+        return
+    for index, candidate in enumerate(candidates):
+        print(f"{index}: score={candidate.score} used_gpus={candidate.used_gpus}")
 
 
 def main() -> None:
@@ -26,14 +75,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    try:
-        config = SmartSearchConfig.from_yaml(args.config)
-    except OSError as exc:  # missing file, a directory, unreadable, etc.
-        parser.error(f"could not read config {args.config}: {exc}")
-    except yaml.YAMLError as exc:
-        parser.error(f"malformed YAML in {args.config}: {exc}")
-    except ValidationError as exc:
-        parser.error(f"invalid config {args.config}: {exc}")
+    config = load_config_or_parser_error(parser, args.config)
 
     del config
     parser.error(

@@ -37,6 +37,7 @@ _ROUTER_HOOK = HookCapability(
     kind="placement_policy",
     api_version=1,
 )
+_REPLAY_SPEC_API_VERSION = 1
 _SUPPORTED_BACKEND_TOPOLOGIES = (
     ("vllm", "agg"),
     ("vllm", "disagg"),
@@ -57,6 +58,9 @@ class DynamoReplayRunnerFactory:
         """Advertise the backend/topology and Dynamo hook support."""
 
         return RunnerCapabilities(
+            # Runner-owned constant: do not inherit the consumer package's default,
+            # otherwise an old Dynamo wheel can self-certify against a newer spec.
+            replay_spec_api_version=_REPLAY_SPEC_API_VERSION,
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
         )

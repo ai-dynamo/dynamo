@@ -767,6 +767,7 @@ jobs:
             | tar -x -C "${STAGE}/amd64" \
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
+                'opt/dynamo/wheelhouse/aisimulate-*py3-none-any.whl' \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
 
@@ -811,13 +812,20 @@ jobs:
 
           # Catches UTC-midnight drift between the build-time version stamp and
           # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          # aisimulate follows its own package version, but must be staged alongside
+          # the ai-dynamo[simulation] wheel that depends on it.
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          AISIMULATE_WHEELS=("${UPLOAD_DIR}"/aisimulate-*-py3-none-any.whl)
           shopt -u nullglob
 
           if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
             echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
+            exit 1
+          fi
+          if [ ${#AISIMULATE_WHEELS[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one aisimulate wheel in ${UPLOAD_DIR}, found ${#AISIMULATE_WHEELS[@]}"
             exit 1
           fi
 

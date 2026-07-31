@@ -84,6 +84,36 @@ class _MutatingAdapter(_Adapter):
         return super().materialize_replay(plan, selection, context)
 
 
+class _SharedOutputAdapter(_Adapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shared = {}
+
+    def generate_search_space(self, search_spec, context):
+        del search_spec, context
+        return AdapterSearchPlan(
+            fragment=SearchSpaceFragment(
+                choices_by_branch={"agg": {"mode": ["first", "second"]}}
+            ),
+            potential_runtime_hooks=(_HOOK,),
+        )
+
+    def materialize_replay(self, plan, selection, context):
+        del plan, context
+        self.shared["mode"] = selection["mode"]
+        return AdapterReplaySpec(
+            config=self.shared,
+            runtime_hooks=(
+                RuntimeHookSpec(
+                    provider=_HOOK.provider,
+                    kind=_HOOK.kind,
+                    api_version=_HOOK.api_version,
+                    config=self.shared,
+                ),
+            ),
+        )
+
+
 class _Sampler:
     def __init__(self, branch, study_id, objectives=None):
         del study_id, objectives
@@ -112,6 +142,33 @@ class _Sampler:
 
     def observe_infeasible(self, suggestion, reason):
         pytest.fail(f"unexpected infeasible suggestion {suggestion}: {reason}")
+
+
+class _TwoCandidateSampler(_Sampler):
+    def __init__(self, branch, study_id, objectives=None):
+        del study_id, objectives
+        self.branch = branch
+        assert branch.knob_choices["adapter::test.feature::mode"] == [
+            "first",
+            "second",
+        ]
+
+    def suggest(self, count):
+        assert count == 2
+        return [
+            Suggestion(
+                selection={
+                    "deployment_mode": "agg",
+                    "backend": "vllm",
+                    "agg_max_num_batched_tokens": 8192,
+                    "agg_max_num_seqs": 256,
+                    "adapter::test.feature::mode": mode,
+                },
+                parallel_config=self.branch.parallel_configs[0],
+                handle=mode,
+            )
+            for mode in ("first", "second")
+        ]
 
 
 class _Runner:
@@ -216,6 +273,27 @@ def test_runner_hook_capability_is_checked_before_runner_creation(monkeypatch) -
     assert factory.created == 0
 
 
+def test_core_branch_preflight_runs_before_adapter_preparation(monkeypatch) -> None:
+    adapter = _Adapter()
+
+    def reject_branches(*args, **kwargs):
+        del args, kwargs
+        raise ValueError("no viable backend/topology branch")
+
+    monkeypatch.setattr(search_module, "enumerate_branches", reject_branches)
+
+    with pytest.raises(ValueError, match="no viable backend/topology branch"):
+        search_module.run_smart_search(
+            _config(),
+            runner_factory=_RunnerFactory(),
+            adapters={"test.feature": adapter},
+            sampler_factory=_Sampler,
+            show_progress=False,
+        )
+
+    assert adapter.generated == []
+
+
 def test_adapter_candidate_context_is_isolated_from_core_candidate(monkeypatch) -> None:
     _stub_branch(monkeypatch)
     factory = _RunnerFactory()
@@ -232,6 +310,33 @@ def test_adapter_candidate_context_is_isolated_from_core_candidate(monkeypatch) 
     assert spec.backend_deployment.backend == "vllm"
     assert spec.backend_deployment.agg_engine_args["max_num_seqs"] == 256
     assert candidates[0].config["backend"] == "vllm"
+
+
+def test_adapter_reused_output_buffer_is_isolated_per_candidate(monkeypatch) -> None:
+    _stub_branch(monkeypatch)
+    config_data = _config().model_dump(mode="python")
+    config_data["sweep"]["candidates_per_round"] = 2
+    config = SmartSearchConfig.model_validate(config_data)
+    factory = _RunnerFactory()
+
+    candidates = search_module.run_smart_search(
+        config,
+        runner_factory=factory,
+        adapters={"test.feature": _SharedOutputAdapter()},
+        sampler_factory=_TwoCandidateSampler,
+        show_progress=False,
+    )
+
+    replay_modes = [
+        spec.adapters["test.feature"].config["mode"] for spec in factory.runner.specs
+    ]
+    hook_modes = [spec.runtime_hooks[0].config["mode"] for spec in factory.runner.specs]
+    candidate_modes = [
+        candidate.config["adapters"]["test.feature"]["mode"] for candidate in candidates
+    ]
+    assert replay_modes == ["first", "second"]
+    assert hook_modes == ["first", "second"]
+    assert candidate_modes == ["first", "second"]
 
 
 def test_adapter_search_contexts_are_isolated() -> None:
@@ -285,4 +390,71 @@ def test_adapter_contract_rejects_non_json_values_before_worker_submission() -> 
         search_module._validate_search_plan(
             "test.feature",
             AdapterSearchPlan(state={"invalid": object()}),
+        )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        AdapterReplaySpec(config=[]),
+        AdapterReplaySpec(runtime_hooks=[]),
+        AdapterReplaySpec(
+            runtime_hooks=(RuntimeHookSpec(provider="", kind="policy", api_version=1),)
+        ),
+        AdapterReplaySpec(
+            runtime_hooks=(
+                RuntimeHookSpec(provider="test", kind="policy", api_version=True),
+            )
+        ),
+    ],
+)
+def test_adapter_replay_contract_rejects_invalid_field_shapes(spec) -> None:
+    with pytest.raises(TypeError, match="invalid/non-JSON replay spec"):
+        search_module._validate_adapter_replay_spec("test.feature", spec)
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        AdapterSearchPlan(diagnostics=[]),
+        AdapterSearchPlan(potential_runtime_hooks=[]),
+        AdapterSearchPlan(
+            fragment=SearchSpaceFragment(choices_by_branch={"agg": {"mode": (1,)}})
+        ),
+        AdapterSearchPlan(
+            fragment=SearchSpaceFragment(
+                float_ranges_by_branch={"agg": {"weight": (0.0, float("inf"))}}
+            )
+        ),
+    ],
+)
+def test_adapter_search_contract_rejects_invalid_field_shapes(plan) -> None:
+    with pytest.raises(TypeError, match="invalid/non-JSON search plan"):
+        search_module._validate_search_plan("test.feature", plan)
+
+
+def test_adapter_parameter_separator_collisions_are_rejected() -> None:
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(),
+        supported_backends={},
+        knob_choices={},
+    )
+    plan = AdapterSearchPlan(
+        fragment=SearchSpaceFragment(
+            choices_by_branch={"agg": {"ambiguous::parameter": [1]}}
+        )
+    )
+
+    with pytest.raises(ValueError, match="reserved separator"):
+        search_module._merge_adapter_spaces([branch], {"test.feature": plan})
+
+    config_data = _config().model_dump(mode="python")
+    config_data["adapters"] = {"ambiguous::adapter": {"search_space": {}}}
+    config = SmartSearchConfig.model_validate(config_data)
+    with pytest.raises(ValueError, match="adapter names.*reserved separator"):
+        search_module._prepare_adapters(
+            config,
+            injected={"ambiguous::adapter": _Adapter()},
+            show_progress=False,
         )

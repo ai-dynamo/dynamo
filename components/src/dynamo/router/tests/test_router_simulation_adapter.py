@@ -14,6 +14,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+import dynamo.router.simulation.adapter as router_adapter_module
 from aisimulate.spica.adapter import CandidateContext, SweepContext
 from aisimulate.spica.replay import BackendDeploymentSpec
 from dynamo.router.simulation import create_adapter
@@ -130,3 +131,11 @@ def test_kv_router_rejects_admission_pins_until_replay_supports_them() -> None:
             },
             _sweep_context(),
         )
+
+
+def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
+    adapter = create_adapter()
+
+    assert router_adapter_module._ADAPTER_API_VERSION == 1
+    assert router_adapter_module._ROUTER_HOOK_API_VERSION == 1
+    assert adapter.api_version == router_adapter_module._ADAPTER_API_VERSION

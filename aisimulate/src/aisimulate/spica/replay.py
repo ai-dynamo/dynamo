@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
@@ -190,6 +191,35 @@ def _jsonable(value: Any) -> JSONValue:
     raise TypeError(
         f"value of type {type(value).__name__} is not supported by replay JSON contracts"
     )
+
+
+def validate_json_value(value: Any, *, path: str = "value") -> None:
+    """Require an exact JSON value without silently normalizing Python objects.
+
+    ``canonical_json`` accepts the Spica contract dataclasses themselves and
+    converts them to JSON for cache keys and diagnostics. Adapter-owned payloads,
+    however, cross a process/package ABI and must already consist only of JSON
+    primitives, lists, and string-keyed dictionaries.
+    """
+
+    value_type = type(value)
+    if value is None or value_type in (str, int, bool):
+        return
+    if value_type is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must contain only finite JSON numbers")
+        return
+    if value_type is list:
+        for index, item in enumerate(value):
+            validate_json_value(item, path=f"{path}[{index}]")
+        return
+    if value_type is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} requires string mapping keys, got {key!r}")
+            validate_json_value(item, path=f"{path}[{key!r}]")
+        return
+    raise TypeError(f"{path} contains non-JSON value of type {value_type.__name__}")
 
 
 def canonical_json(value: Any) -> str:
