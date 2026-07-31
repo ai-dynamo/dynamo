@@ -2492,6 +2492,22 @@ class InstrumentedScheduler(AsyncScheduler):
             minimum_units=1,
         )
 
+    @classmethod
+    def _bench_decode_steady_kv_tokens(
+        cls, batch_size: int, total_kv_read_tokens: int
+    ) -> int:
+        """Coordinate the steady step actually measures for this point.
+
+        Mirrors the admission clamp in ``_bench_step_decode``: every request
+        is admitted at ``max(1, ctx - 1)`` tokens, so ctx=1 entries run one
+        token deeper than their nominal coordinate. Idempotent: coordinates
+        at or above ``2 * batch_size`` map to themselves.
+        """
+        context_lengths = cls._bench_decode_context_lengths(
+            total_kv_read_tokens, batch_size
+        )
+        return sum(max(1, ctx - 1) for ctx in context_lengths) + batch_size
+
     def _bench_decode_point_feasible(
         self, batch_size: int, total_kv_read_tokens: int
     ) -> bool:
@@ -2546,7 +2562,23 @@ class InstrumentedScheduler(AsyncScheduler):
             if value >= batch_size
         )
         presets.append(max_kv_read_tokens)
-        return sorted(set(presets))
+        # Normalize every preset to the coordinate its steady step actually
+        # measures before IDs and the grid digest are assigned. All presets
+        # below 2 * batch_size land on 2 * batch_size (their partitions only
+        # contain ctx 1 and 2 entries, which the admission clamp makes
+        # indistinguishable), so without deduplication the grid would carry
+        # duplicate rows at that coordinate and overweight it in the fit.
+        # Normalization never exceeds max_kv_read_tokens: a non-empty ladder
+        # always has max_kv_read_tokens >= 2 * batch_size because
+        # _bench_decode_point_feasible prices ctx=1 and ctx=2 identically
+        # (the max(ctx, 2) floor), so feasibility at batch_size implies
+        # feasibility at 2 * batch_size.
+        return sorted(
+            {
+                self._bench_decode_steady_kv_tokens(batch_size, value)
+                for value in presets
+            }
+        )
 
     # -- Request injection / cleanup ------------------------------------
 

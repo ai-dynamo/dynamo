@@ -1950,9 +1950,11 @@ def test_prefill_kv_read_ladder_is_uniformly_limited_with_endpoints():
 def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
     stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
 
+    # Presets 9 (all ctx=1) and 16 (mixed ctx 1/2) both measure at 18 after
+    # the admission clamp, so they normalize into a single steady coordinate;
+    # every preset at or above 2 * batch_size keeps its exact value.
     assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 9) == [
-        9,
-        16,
+        18,
         32,
         64,
         128,
@@ -1960,6 +1962,52 @@ def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
         512,
         999,
     ]
+
+
+def test_decode_kv_read_points_are_normalized_steady_coordinates():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    for batch_size in (1, 8, 24):
+        points = InstrumentedScheduler._bench_decode_kv_read_points(stub, batch_size)
+        assert points, f"batch_size={batch_size} produced an empty ladder"
+        assert len(points) == len(set(points))
+        assert points[0] == 2 * batch_size
+        assert all(
+            InstrumentedScheduler._bench_decode_steady_kv_tokens(batch_size, value)
+            == value
+            for value in points
+        ), "normalization must be idempotent: labels equal measured coordinates"
+
+
+def test_decode_kv_read_points_merge_colliding_sub_2b_presets():
+    # Non-power-of-two batch: presets 24 (all ctx=1) and 32 (8 ctx=2 +
+    # 16 ctx=1) both measure at 48, a coordinate absent from the raw preset
+    # ladder. They must collapse into one point instead of duplicating it.
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    assert InstrumentedScheduler._bench_decode_steady_kv_tokens(24, 24) == 48
+    assert InstrumentedScheduler._bench_decode_steady_kv_tokens(24, 32) == 48
+
+    points = InstrumentedScheduler._bench_decode_kv_read_points(stub, 24)
+    assert 48 in points
+    assert 24 not in points
+    assert 32 not in points
+    assert points.count(48) == 1
+
+
+def test_decode_kv_read_ladder_boundaries_at_model_len_floor():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    # max_model_len=4 bounds every request to ctx=2, so max_kv is exactly
+    # 2 * batch_size and the ladder collapses to that single steady point.
+    stub.max_model_len = 4
+    assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 4) == [8]
+
+    # Below the two-step floor (ctx=2 needs max(ctx, 2) + 2 slots) no point
+    # is feasible: the ladder must be empty rather than emit a normalized
+    # coordinate above the validated maximum.
+    stub.max_model_len = 3
+    assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 4) == []
 
 
 def test_decode_grid_uniformly_limits_batch_and_kv_axes():
