@@ -518,9 +518,11 @@ def _score_prepared(
             None,
             None,
             "failed",
-            "runner contract violation: goodput objective requires "
-            "goodput_output_throughput_tok_s; aggregate latency cannot be used "
-            "as a fallback",
+            (
+                "runner contract violation: goodput objective requires "
+                "goodput_output_throughput_tok_s; aggregate latency cannot be used "
+                "as a fallback"
+            ),
         )
     sample = prepared.sample
     if not is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):

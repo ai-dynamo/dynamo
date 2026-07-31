@@ -125,6 +125,8 @@ def test_release_stages_the_aisimulate_wheel_used_by_simulation_extra():
     assert '{% if target == "planner" %}\n# AI Simulate' not in wheel_builder
     assert "aisimulate-*py3-none-any.whl" in release_workflow
     assert "Expected exactly one aisimulate wheel" in release_workflow
+    assert 'metadata.get_all("Requires-Dist")' in release_workflow
+    assert "aisimulate wheel version" in release_workflow
 
 
 def test_profiler_does_not_publish_or_reexport_spica():

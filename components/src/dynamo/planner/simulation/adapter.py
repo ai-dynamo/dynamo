@@ -395,7 +395,11 @@ class DynamoPlannerSimulationAdapter:
             api_version=_HOOK.api_version,
             config={"planner_config": planner_config},
         )
-        return AdapterReplaySpec(config=planner_config, runtime_hooks=(hook,))
+        reported_config: dict[str, JSONValue] = {
+            "scaling_policy": deepcopy(scaling_entry),
+            **planner_config,
+        }
+        return AdapterReplaySpec(config=reported_config, runtime_hooks=(hook,))
 
 
 def _planner_config_payload(

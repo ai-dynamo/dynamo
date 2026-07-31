@@ -19,10 +19,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.replay.simulation as simulation
 import examples.aisimulate.spica.tools.run_sweep as run_sweep_cli
 from aisimulate.spica.adapter import AdapterReplaySpec, RuntimeHookSpec
 from aisimulate.spica.replay import BackendDeploymentSpec, ReplaySpec
+from dynamo.replay import simulation
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -218,6 +218,25 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
     assert seen["replay_concurrency"] is None
     assert seen["arrival_interval_ms"] == 50.0
     assert report.metrics == {"output_throughput_tok_s": 99.0}
+
+
+@pytest.mark.parametrize("request_rate", [0.0, -1.0])
+def test_synthetic_request_rate_must_be_positive(request_rate: float) -> None:
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_path": None,
+            "isl": 512,
+            "osl": 128,
+            "num_request_ratio": 10.0,
+            "concurrency": None,
+            "request_rate": request_rate,
+        },
+        goal={"target": "throughput"},
+    )
+
+    with pytest.raises(ValueError, match="positive request_rate"):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
 def test_factory_preserves_trtllm_disagg_gate() -> None:

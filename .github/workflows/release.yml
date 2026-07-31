@@ -829,6 +829,65 @@ jobs:
             exit 1
           fi
 
+          python3 - "${AISIMULATE_WHEELS[0]}" "${AI_DYNAMO_WHEELS[@]}" <<'PY'
+          import re
+          import sys
+          from email.parser import BytesParser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+
+          def wheel_metadata(path: Path):
+              with ZipFile(path) as wheel:
+                  metadata_files = [
+                      name
+                      for name in wheel.namelist()
+                      if name.endswith(".dist-info/METADATA")
+                  ]
+                  if len(metadata_files) != 1:
+                      raise SystemExit(
+                          f"::error::{path.name} contains {len(metadata_files)} "
+                          "METADATA files; expected exactly one"
+                      )
+                  return BytesParser().parsebytes(wheel.read(metadata_files[0]))
+
+
+          aisimulate_path = Path(sys.argv[1])
+          aisimulate_version = wheel_metadata(aisimulate_path)["Version"]
+          if not aisimulate_version:
+              raise SystemExit(
+                  f"::error::{aisimulate_path.name} has no Version in wheel metadata"
+              )
+
+          for raw_path in sys.argv[2:]:
+              ai_dynamo_path = Path(raw_path)
+              metadata = wheel_metadata(ai_dynamo_path)
+              pins = []
+              for requirement in metadata.get_all("Requires-Dist") or []:
+                  match = re.match(
+                      r"^\s*aisimulate\s*==\s*([^;,\s]+)",
+                      requirement,
+                      flags=re.IGNORECASE,
+                  )
+                  if match:
+                      pins.append(match.group(1))
+              if len(pins) != 1:
+                  raise SystemExit(
+                      f"::error::{ai_dynamo_path.name} contains {len(pins)} exact "
+                      "aisimulate pins in Requires-Dist; expected exactly one"
+                  )
+              if pins[0] != aisimulate_version:
+                  raise SystemExit(
+                      f"::error::aisimulate wheel version {aisimulate_version!r} "
+                      f"does not match {ai_dynamo_path.name} Requires-Dist pin "
+                      f"{pins[0]!r}"
+                  )
+              print(
+                  f"  {aisimulate_path.name} -> {aisimulate_version} "
+                  f"(matches {ai_dynamo_path.name})"
+              )
+          PY
+
           echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
 
           mismatch=0

@@ -81,7 +81,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
 # runtime code comes from the wheel installed above. The Router adapter and
-# replay bridge tests also run here because this image installs that wheel.
+# replay bridge unit tests also run here because this image installs that wheel.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/components/src/dynamo/planner
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
@@ -89,6 +89,17 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspac
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/replay/tests/test_simulation.py /workspace/components/src/dynamo/replay/tests/test_simulation.py
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_simulation_adapter.py /workspace/components/src/dynamo/router/tests/test_router_simulation_adapter.py
 COPY --chmod=775 --chown=dynamo:0 aisimulate/tests /workspace/aisimulate/tests
+COPY --chmod=664 --chown=dynamo:0 .github/workflows/release.yml /workspace/.github/workflows/release.yml
+COPY --chmod=664 --chown=dynamo:0 container/templates/wheel_builder.Dockerfile /workspace/container/templates/wheel_builder.Dockerfile
+RUN chmod 775 \
+    /workspace/components/src/dynamo/replay \
+    /workspace/components/src/dynamo/replay/tests \
+    /workspace/components/src/dynamo/router \
+    /workspace/components/src/dynamo/router/tests \
+    /workspace/.github \
+    /workspace/.github/workflows \
+    /workspace/container \
+    /workspace/container/templates
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples

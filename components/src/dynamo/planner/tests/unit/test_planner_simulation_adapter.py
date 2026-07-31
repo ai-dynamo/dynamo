@@ -3,7 +3,7 @@
 # Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
 
-"""Parity tests for the Planner-owned Spica simulation adapter."""
+"""Unit tests for the Planner-owned Spica simulation adapter."""
 
 from __future__ import annotations
 
@@ -168,8 +168,48 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "ttft_ms": 2000.0,
         "itl_ms": 30.0,
     }
-    assert replay_spec.config == expected
+    assert replay_spec.config == {
+        "scaling_policy": "throughput_180_5",
+        **expected,
+    }
     assert replay_spec.runtime_hooks[0].config == {"planner_config": expected}
+
+
+def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> None:
+    adapter = create_adapter()
+    custom_policy = {
+        "enable_throughput_scaling": True,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": 180.0,
+        "load_adjustment_interval_seconds": 5,
+    }
+    plan = adapter.generate_search_space(
+        {
+            "scaling_policy": [custom_policy],
+            "fpm_sampling": ["default"],
+            "load_sensitivity": ["default"],
+            "load_predictor_candidates": ["constant_last"],
+        },
+        _sweep_context(),
+    )
+
+    replay_spec = adapter.materialize_replay(
+        plan,
+        {
+            "scaling_policy": custom_policy,
+            "fpm_sampling": "default",
+            "load_sensitivity": "default",
+        },
+        _candidate_context(),
+    )
+
+    assert replay_spec.config["scaling_policy"] == custom_policy
+    assert replay_spec.config["throughput_adjustment_interval_seconds"] == 180
+    assert replay_spec.config["load_predictor"] == "constant"
+    planner_config = replay_spec.runtime_hooks[0].config["planner_config"]
+    assert isinstance(planner_config, dict)
+    assert "scaling_policy" not in planner_config
+    assert planner_config["load_predictor"] == "constant"
 
 
 def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:

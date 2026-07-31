@@ -246,18 +246,22 @@ class DynamoReplayRunner:
     def _synthetic_kwargs(spec: ReplaySpec) -> dict[str, JSONValue]:
         workload = spec.workload
         request_rate = workload.get("request_rate")
-        arrival_interval_ms = (
-            1000.0 / _float_value(request_rate, "request_rate")
-            if request_rate is not None
-            else None
-        )
+        rate: float | None = None
+        arrival_interval_ms: float | None = None
+        if request_rate is not None:
+            rate = _float_value(request_rate, "request_rate")
+            if rate <= 0.0:
+                raise ValueError(
+                    f"synthetic replay requires a positive request_rate, got {rate}"
+                )
+            arrival_interval_ms = 1000.0 / rate
         load: float
         if spec.concurrency is not None:
             load = float(spec.concurrency)
         elif workload.get("concurrency") is not None:
             load = _float_value(workload["concurrency"], "concurrency")
-        elif request_rate is not None:
-            load = _float_value(request_rate, "request_rate")
+        elif rate is not None:
+            load = rate
         else:
             raise ValueError(
                 "synthetic replay requires concrete concurrency or request_rate"

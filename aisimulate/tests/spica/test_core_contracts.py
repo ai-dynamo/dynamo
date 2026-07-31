@@ -13,6 +13,7 @@ from enum import Enum
 
 import pytest
 
+from aisimulate import spica
 from aisimulate.spica.adapter import (
     API_VERSION,
     AdapterReplaySpec,
@@ -218,3 +219,7 @@ def test_simulation_adapter_protocol_is_structural():
 def test_public_contract_versions_start_at_one():
     assert API_VERSION == 1
     assert REPLAY_SPEC_API_VERSION == 1
+
+
+def test_lazy_exports_are_listed_in_public_api():
+    assert set(spica._LAZY_EXPORTS).issubset(spica.__all__)

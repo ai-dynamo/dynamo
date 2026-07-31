@@ -47,14 +47,15 @@ def scaling_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
     """Expand one scaling-policy preset or self-contained custom value."""
 
     if isinstance(entry, dict):
+        throughput_interval = entry.get("throughput_adjustment_interval_seconds")
+        if throughput_interval is not None:
+            throughput_interval = int(throughput_interval)
         return {
             "enable_throughput_scaling": bool(
                 entry.get("enable_throughput_scaling", False)
             ),
             "enable_load_scaling": bool(entry.get("enable_load_scaling", False)),
-            "throughput_adjustment_interval_seconds": entry.get(
-                "throughput_adjustment_interval_seconds"
-            ),
+            "throughput_adjustment_interval_seconds": throughput_interval,
             "load_adjustment_interval_seconds": entry.get(
                 "load_adjustment_interval_seconds"
             ),

@@ -3,7 +3,7 @@
 # Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
 
-"""Golden parity tests for Planner simulation presets moved out of Spica core."""
+"""Unit tests for Planner simulation presets moved out of Spica core."""
 
 import pytest
 
@@ -64,6 +64,8 @@ def test_scaling_fields_accept_presets_and_custom_search_values() -> None:
         "load_adjustment_interval_seconds": 5,
     }
     assert scaling_fields(custom) == custom
+    custom["throughput_adjustment_interval_seconds"] = 180.0
+    assert scaling_fields(custom)["throughput_adjustment_interval_seconds"] == 180
 
 
 def test_fpm_and_sensitivity_accept_presets_and_custom_search_values() -> None:
