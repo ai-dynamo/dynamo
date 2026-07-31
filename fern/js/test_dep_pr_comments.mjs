@@ -79,6 +79,7 @@ const buildBlockquote = extractFn("buildBlockquote");
 const buildGitHubUrl = extractFn("buildGitHubUrl");
 const buildLineAnchor = extractFn("buildLineAnchor");
 const findSourceLine = extractBundle(["normWs", "stripMarkdown", "findSourceLine"]);
+const stripMarkdown = extractFn("stripMarkdown");
 const sha256Hex = extractFn("sha256Hex");
 
 let passes = 0;
@@ -190,6 +191,79 @@ test("empty / null / undefined input returns empty string", () => {
   assert.equal(sanitizeHtml(""), "");
   assert.equal(sanitizeHtml(null), "");
   assert.equal(sanitizeHtml(undefined), "");
+});
+
+console.log("stripMarkdown — entity decoding is single-pass");
+
+/* Chained per-entity replaces let an `&` produced by one step be re-read by
+ * the next, so text upstream had already escaped could decode twice and turn
+ * back into markup. The decode must run exactly once per entity. */
+test("does not double-decode &amp;lt; into a real angle bracket", () => {
+  const out = stripMarkdown("&amp;lt;script&amp;gt;");
+  assert.equal(out, "&lt;script&gt;", `double-decoded: ${out}`);
+  assert.ok(!out.includes("<"), `manufactured markup: ${out}`);
+});
+
+test("still decodes each supported entity once", () => {
+  assert.equal(stripMarkdown("a &amp; b"), "a & b");
+  assert.equal(stripMarkdown("&lt;tag&gt;"), "<tag>");
+  assert.equal(stripMarkdown("a&middot;b"), "a\u00B7b");
+  assert.equal(stripMarkdown("a&nbsp;b"), "a b");
+});
+
+console.log("sanitizeHtml — attribute layer is rebuilt, not deleted in place");
+
+/* The attribute layer rebuilds each tag from its parsed attribute list rather
+ * than deleting `on*=...` spans out of the document string. These cases pin
+ * the two properties that rebuild buys: a handler cannot survive in any
+ * quoting shape, and a value cannot close its own attribute to open a
+ * sibling one. */
+test("drops event handlers in every quoting shape", () => {
+  const shapes = [
+    '<img src="x" onerror="alert(1)">',
+    "<img src='x' onerror='alert(1)'>",
+    "<img src=x onerror=alert(1)>",
+    "<img src=x ONERROR=alert(1)>",
+    "<img src=x onerror =alert(1)>",
+    "<img src=x onerror= alert(1)>",
+    "<img src=x\nonerror=alert(1)>",
+    "<img/src=x onerror=alert(1)>"
+  ];
+  for (const html of shapes) {
+    const out = sanitizeHtml(html);
+    assert.ok(
+      !/\bon[a-z]{2,}\s*=/i.test(out),
+      `handler survived for ${html}: ${out}`
+    );
+  }
+});
+
+test("re-quotes values so one cannot open a sibling attribute", () => {
+  const out = sanitizeHtml(`<a href='x" onclick="alert(1)'>t</a>`);
+  assert.ok(out.includes("&quot;"), `quote not escaped: ${out}`);
+  assert.ok(!/\sonclick\s*=\s*"/i.test(out), `sibling attribute formed: ${out}`);
+});
+
+test("keeps a bare valueless attribute without inventing a value", () => {
+  const out = sanitizeHtml("<input disabled>");
+  assert.ok(/<input disabled>/.test(out), `got: ${out}`);
+});
+
+test("neutralizes schemes obfuscated with control chars or entities", () => {
+  const shapes = [
+    '<a href="java\tscript:alert(1)">t</a>',
+    '<a href="java&#09;script:alert(1)">t</a>',
+    '<a href="  JavaScript:alert(1)">t</a>',
+    "<a href=javascript:alert(1)>t</a>",
+    '<img src="vbscript:msgbox(1)">'
+  ];
+  for (const html of shapes) {
+    const out = sanitizeHtml(html).replace(/[\u0000-\u0020]/g, "");
+    assert.ok(
+      !/(javascript|vbscript|data):/i.test(out),
+      `scheme survived for ${html}: ${out}`
+    );
+  }
 });
 
 test("real ryanolson comment #7 with inline code survives", () => {

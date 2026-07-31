@@ -178,6 +178,18 @@
   }
 
   function stripMarkdown(line) {
+    /* The entity set this function decodes, as a table so the decode can run
+     * as one non-overlapping pass (see the call site below for why). Kept
+     * function-local: the node test harness extracts each top-level function
+     * body and evaluates it in isolation, so helpers must travel with it. */
+    var MD_ENTITIES = {
+      "&middot;": "\u00B7",
+      "&nbsp;": " ",
+      "&amp;": "&",
+      "&lt;": "<",
+      "&gt;": ">"
+    };
+    var MD_ENTITY_RE = /&(?:middot|nbsp|amp|lt|gt);/g;
     var s = String(line || "");
     s = s.replace(/^\s*>+\s?/, "");
     s = s.replace(/^\s*#{1,6}\s+/, "");
@@ -188,8 +200,14 @@
     s = s.replace(/(\*|_)([\s\S]*?)\1/g, "$2");
     s = s.replace(/~~([\s\S]*?)~~/g, "$1");
     s = s.replace(/`([^`]+)`/g, "$1");
-    s = s.replace(/&middot;/g, "\u00B7").replace(/&nbsp;/g, " ")
-         .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    /* Decode entities in ONE pass. Chaining per-entity replaces lets an `&`
+     * produced by an earlier step be re-read by a later one: `&amp;lt;` would
+     * decode to `&lt;` and then to `<`, manufacturing markup from text that
+     * upstream had already escaped as literal. Because `String.replace` with
+     * a global regex resumes scanning after the matched span of the *input*,
+     * a single table-driven pass decodes each entity exactly once and never
+     * re-reads what it just produced. */
+    s = s.replace(MD_ENTITY_RE, function (m) { return MD_ENTITIES[m]; });
     return s.trim();
   }
 
@@ -577,6 +595,46 @@
    * ------------------------------------------------------------------ */
   function sanitizeHtml(html) {
     if (html == null) return "";
+
+    /* An opening tag: name, then an attribute region that may contain quoted
+     * `>` characters, then an optional self-closing slash. Closing tags
+     * (`</a>`) and comments (`<!-- -->`) do not match — neither carries
+     * attributes. Kept function-local so the node test harness, which
+     * extracts and evaluates this function body on its own, still resolves
+     * every name it uses. */
+    var TAG_RE = /<([a-zA-Z][a-zA-Z0-9:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)(\/?)>/g;
+
+    /* One attribute inside a tag's attribute region: a name, then optionally
+     * a value that is double-quoted (group 2), single-quoted (group 3), or
+     * unquoted (group 4). Stray characters between attributes (a self-closing
+     * `/`, extra whitespace) match nothing and are dropped by the rebuild. */
+    var ATTR_RE = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>`]+)))?/g;
+
+    /* Attributes whose value the browser resolves as a URL. */
+    var URI_ATTRS = {
+      href: 1, src: 1, srcset: 1, "xlink:href": 1,
+      action: 1, formaction: 1, poster: 1, background: 1
+    };
+
+    /* True when an attribute value resolves to a scheme that can execute or
+     * carry markup. The value is normalised the way a browser's URL parser
+     * normalises it before reading the scheme — numeric character references
+     * decoded, then ASCII whitespace and control characters removed — so
+     * `java&#09;script:`, `java<TAB>script:` and `  JavaScript :` are all
+     * caught. That decode feeds only this predicate and never reaches the
+     * output, so it cannot itself become a double-unescape. */
+    function isUnsafeUri(value) {
+      var v = String(value == null ? "" : value)
+        .replace(/&#(\d+);?/g, function (_, d) {
+          return String.fromCharCode(parseInt(d, 10));
+        })
+        .replace(/&#x([0-9a-fA-F]+);?/g, function (_, h) {
+          return String.fromCharCode(parseInt(h, 16));
+        })
+        .replace(/[\u0000-\u0020]+/g, "");
+      return /^(?:javascript|data|vbscript):/i.test(v);
+    }
+
     var s = String(html);
     // Strip whole dangerous elements including any body they carry. The
     // outer group covers both `<x>...</x>` and self-closing `<x .../>`.
@@ -591,23 +649,41 @@
       // self-closing or unclosed: <tag ...> up to the next '>'
       s = s.replace(new RegExp("<" + tag + "\\b[^>]*>", "gi"), "");
     }
-    // Strip inline event-handler attributes: on* with =. Value can be
-    // double-quoted, single-quoted, or unquoted (up to whitespace or >).
-    s = s.replace(/\son[a-z0-9_-]+\s*=\s*"[^"]*"/gi, "");
-    s = s.replace(/\son[a-z0-9_-]+\s*=\s*'[^']*'/gi, "");
-    s = s.replace(/\son[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "");
-    // Neutralize javascript: / data: / vbscript: URIs on href/src.
-    // Three shapes matter — quoted (double or single) and unquoted:
-    //   href="javascript:..."    href='javascript:...'    href=javascript:...
-    // Prior version only caught the quoted forms; HTML5 lets unquoted
-    // attribute values through, and a compromised upstream could inject
-    // that shape. hardenLinks() below is the second line of defense for
-    // <a> at DOM time, but for <img>/<track>/<source> the string pass is
-    // the only pre-injection guard.
-    var badUriQuoted = /(\s(?:href|src|xlink:href)\s*=\s*)("|')\s*(?:javascript|data|vbscript)\s*:[^"']*\2/gi;
-    s = s.replace(badUriQuoted, '$1$2#$2');
-    var badUriUnquoted = /(\s(?:href|src|xlink:href)\s*=\s*)(?:javascript|data|vbscript)\s*:[^\s>]*/gi;
-    s = s.replace(badUriUnquoted, '$1"#"');
+    // Attribute layer: rebuild every tag from its parsed attribute list.
+    //
+    // Deleting `on*=...` spans out of the document string is unsound: a
+    // deletion splices whatever sat on either side of it together, and the
+    // join can form an attribute that was not present before the pass ran, so
+    // the output "may still contain on" no matter how the pattern is written.
+    // Nothing here is deleted in place. Each tag is re-serialised from an
+    // explicit list of surviving name/value pairs, so a dropped attribute
+    // leaves no seam for its neighbours to fuse across. Every surviving value
+    // is re-quoted with `"` escaped, which means a value can never close its
+    // own attribute and open a sibling one — the injection shape this pass
+    // exists to stop.
+    s = s.replace(TAG_RE, function (whole, name, attrSource, selfClose) {
+      if (!attrSource) return "<" + name + (selfClose ? "/>" : ">");
+      var out = "";
+      var m;
+      ATTR_RE.lastIndex = 0;
+      while ((m = ATTR_RE.exec(attrSource)) !== null) {
+        var attr = m[1];
+        // Inline event handlers never survive, in any quoting shape. The
+        // check is on the parsed attribute NAME, so quoting, whitespace and
+        // casing in the source cannot smuggle one past.
+        if (attr.toLowerCase().indexOf("on") === 0) continue;
+        var value = m[2] != null ? m[2] : (m[3] != null ? m[3] : (m[4] != null ? m[4] : null));
+        // Scheme-bearing attributes are neutralised rather than dropped so
+        // the element keeps its shape (an <a> without href is still an <a>).
+        if (value != null && URI_ATTRS[attr.toLowerCase()] === 1 && isUnsafeUri(value)) {
+          value = "#";
+        }
+        out += value == null
+          ? " " + attr
+          : " " + attr + '="' + value.replace(/"/g, "&quot;") + '"';
+      }
+      return "<" + name + out + (selfClose ? "/>" : ">");
+    });
     return s;
   }
 
