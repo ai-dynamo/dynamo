@@ -307,6 +307,11 @@ pub mod llm {
     /// back to 529.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
+    /// Emit an SSE comment at this interval while a streaming response has no
+    /// data. Unset, `0`, invalid, or unrepresentable values keep SSE comments
+    /// disabled.
+    pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -370,6 +375,20 @@ pub mod llm {
     ///
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
+
+    /// Pre-commit peek window in milliseconds for the streaming chat/responses
+    /// paths. Controls how long the frontend polls the engine stream for a
+    /// synchronous backend error before committing HTTP 200.
+    /// Trades a small first-token latency budget
+    /// for the ability to surface `Backend(InvalidArgument)` and other
+    /// request-validation errors as HTTP 4xx instead of an SSE error frame.
+    ///
+    /// Default: unset → peek disabled (matches pre-fix behavior; all errors
+    /// surface as SSE frames post-HTTP-200). Set to a value ≥ observed
+    /// request-parse / admission p99 latency to opt in — request-validation
+    /// errors within the window surface as HTTP 4xx; anything past the window
+    /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
@@ -476,7 +495,8 @@ pub mod llm {
         /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
+        /// Request trace sink selection. Comma-separated values: `file`,
+        /// `stderr`, `nats`, `otel`, `s3`.
         ///
         /// Legacy values map as follows: `jsonl` => `file` with `jsonl` format,
         /// `jsonl_gz` => `file` with `jsonl_gz` format, `stderr` => `stderr`,
@@ -553,6 +573,30 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// S3 bucket for the S3 request-trace sink. Required when
+        /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
+        pub const DYN_REQUEST_TRACE_S3_BUCKET: &str = "DYN_REQUEST_TRACE_S3_BUCKET";
+
+        /// AWS region for the S3 request-trace sink. When unset the AWS SDK
+        /// default region resolution is used (env, profile, IMDS).
+        pub const DYN_REQUEST_TRACE_S3_REGION: &str = "DYN_REQUEST_TRACE_S3_REGION";
+
+        /// Optional object key prefix for the S3 request-trace sink. When unset
+        /// records land at the bucket root.
+        pub const DYN_REQUEST_TRACE_S3_PREFIX: &str = "DYN_REQUEST_TRACE_S3_PREFIX";
+
+        /// S3 batch roll threshold in uncompressed bytes. When the pending
+        /// batch reaches this size, it is finalized and uploaded. Default
+        /// `67108864` (64 MiB).
+        pub const DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES: &str =
+            "DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES";
+
+        /// S3 periodic flush interval in milliseconds. Any partial batch is
+        /// finalized and uploaded when this elapses, so low-volume traces
+        /// still land in S3. Default `10000` (10 s).
+        pub const DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS";
     }
 }
 
@@ -810,6 +854,7 @@ mod tests {
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+            llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
@@ -830,6 +875,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::DYN_LORA_MCF_CONFIG,
+            llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,

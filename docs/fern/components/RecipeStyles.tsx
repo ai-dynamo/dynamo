@@ -201,6 +201,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-h100:checked ~ .dynamo-recipe-browser label[for="hardware-h100"],
 #hardware-h200:checked ~ .dynamo-recipe-browser label[for="hardware-h200"],
 #hardware-gb200:checked ~ .dynamo-recipe-browser label[for="hardware-gb200"],
+#hardware-gb300:checked ~ .dynamo-recipe-browser label[for="hardware-gb300"],
 #hardware-b200:checked ~ .dynamo-recipe-browser label[for="hardware-b200"],
 #technique-all:checked ~ .dynamo-recipe-browser label[for="technique-all"],
 #technique-aggregated:checked ~ .dynamo-recipe-browser label[for="technique-aggregated"],
@@ -671,6 +672,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #hardware-h100:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="h100"]),
 #hardware-h200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="h200"]),
 #hardware-gb200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb200"]),
+#hardware-gb300:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb300"]),
 #hardware-b200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b200"]),
 #technique-aggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="aggregated"]),
 #technique-disaggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="disaggregated"]),
@@ -2159,6 +2161,7 @@ body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sk
 body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),
 body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-sku~="gb200"]),
+body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-sku]:not([data-sku~="gb300"]),
 body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
 body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
     display: none;

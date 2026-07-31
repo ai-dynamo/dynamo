@@ -42,6 +42,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
 
@@ -87,7 +88,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/contribution-guide.md).
+devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -145,13 +146,13 @@ cargo fmt --all && cargo clippy --workspace
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/fern/contribution-guide.md) for the full workflow
+See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
 [`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
-[documentation style guide](docs/fern/documentation-style-guide.md): SPDX headers, Fern
+[documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.

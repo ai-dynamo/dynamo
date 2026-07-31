@@ -26,6 +26,7 @@ use crate::scheduler::{
 
 use super::core::{RequestStatus, VllmCore, VllmRequestState};
 use super::live::{MockerMetrics, Scheduler};
+use super::request::RequestKvState;
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 23;
 
@@ -76,6 +77,186 @@ fn router_args() -> MockEngineArgs {
         .speedup_ratio(0.0)
         .build()
         .unwrap()
+}
+
+#[test]
+fn flat_tokens_cover_every_native_g1_configuration() {
+    let args = |engine_type: EngineType,
+                backend: G1Backend,
+                prefix_caching: bool,
+                emit_token_ids: bool| {
+        MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .g1_backend(backend)
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(32))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(prefix_caching)
+            .zmq_kv_events_port(emit_token_ids.then_some(12_345))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap()
+    };
+    let mut next_uuid = 80_001_u128;
+
+    for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+        for prefix_caching in [false, true] {
+            for emit_token_ids in [false, true] {
+                let uuid = Uuid::from_u128(next_uuid);
+                next_uuid += 1;
+                let mut core = VllmCore::new(args(
+                    engine_type,
+                    G1Backend::Native,
+                    prefix_caching,
+                    emit_token_ids,
+                ));
+                core.receive(DirectRequest {
+                    tokens: (0..9).collect(),
+                    max_output_tokens: 2,
+                    uuid: Some(uuid),
+                    ..Default::default()
+                });
+                assert!(core.request_uses_flat_tokens(uuid));
+            }
+        }
+    }
+
+    let uuid = Uuid::from_u128(next_uuid);
+    let mut kvbm = VllmCore::new(args(EngineType::Vllm, G1Backend::Kvbm, true, false));
+    kvbm.receive(DirectRequest {
+        tokens: (0..9).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid),
+        ..Default::default()
+    });
+    assert!(!kvbm.request_uses_flat_tokens(uuid));
+}
+
+#[test]
+fn unset_g1_backend_constructs_native_request_state() {
+    let mut args = router_args();
+    args.g1_backend = None;
+    let mut core = VllmCore::new(args);
+    let uuid = Uuid::from_u128(80_100);
+    core.receive(DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid),
+        ..Default::default()
+    });
+
+    assert!(core.request_uses_flat_tokens(uuid));
+}
+
+#[test]
+fn minimum_shared_scheduler_block_size_constructs_requests_for_both_backends() {
+    let mut next_uuid = 80_200_u128;
+    for engine_type in [EngineType::Vllm, EngineType::Trtllm] {
+        for backend in [G1Backend::Native, G1Backend::Kvbm] {
+            let args = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .g1_backend(backend)
+                .block_size(2)
+                .num_gpu_blocks(4)
+                .max_num_batched_tokens(Some(4))
+                .max_num_seqs(Some(1))
+                .enable_chunked_prefill(true)
+                .enable_prefix_caching(true)
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap();
+            let mut core = VllmCore::new(args);
+            let uuid = Uuid::from_u128(next_uuid);
+            next_uuid += 1;
+            core.receive(DirectRequest {
+                tokens: vec![0],
+                max_output_tokens: 1,
+                output_token_ids: Some(vec![1]),
+                uuid: Some(uuid),
+                ..Default::default()
+            });
+
+            assert_eq!(
+                core.request_uses_flat_tokens(uuid),
+                backend == G1Backend::Native,
+                "engine_type={engine_type:?}, backend={backend:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "native decode never rolls back a sampled token")]
+fn native_request_state_rejects_decode_rollback() {
+    let mut request = RequestKvState::native(
+        Uuid::from_u128(80_101),
+        vec![1, 2],
+        1,
+        1,
+        4,
+        true,
+        false,
+        false,
+        None,
+    );
+    request.pop();
+}
+
+#[test]
+fn kvbm_request_state_preserves_decode_rollback() {
+    let mut request =
+        RequestKvState::kvbm(ActiveSequence::new(vec![1, 2], 1, Some(4), true, false));
+    let original_len = request.len();
+    request.generate_token();
+    request.pop();
+
+    assert_eq!(request.len(), original_len);
+}
+
+#[test]
+fn flat_storage_capacity_is_bounded_by_realizable_output() {
+    const BLOCK_SIZE: usize = 4;
+    const MAX_OUTPUT_TOKENS: usize = 1_000_000;
+
+    for (prompt_len, expected_output_capacity) in [(8_usize, 4_usize), (10, 2), (17, 0)] {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .g1_backend(G1Backend::Native)
+            .block_size(BLOCK_SIZE)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(12))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .zmq_kv_events_port(Some(12_345))
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::new_v4();
+        core.receive(DirectRequest {
+            tokens: (0..prompt_len as u32).collect(),
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            uuid: Some(uuid),
+            ..Default::default()
+        });
+
+        let sequence = &core.state().requests[&uuid].sequence;
+        assert_eq!(sequence.max_output_tokens(), MAX_OUTPUT_TOKENS);
+        let (token_capacity, lease_capacity) = sequence
+            .native_storage_capacities()
+            .expect("native G1 must use request-sequence storage");
+        let bounded_blocks = (prompt_len + expected_output_capacity).div_ceil(BLOCK_SIZE);
+        let unbounded_blocks = (prompt_len + MAX_OUTPUT_TOKENS).div_ceil(BLOCK_SIZE);
+
+        assert!(token_capacity >= prompt_len + expected_output_capacity);
+        assert!(token_capacity < prompt_len + MAX_OUTPUT_TOKENS);
+        assert!(lease_capacity >= bounded_blocks);
+        assert!(lease_capacity < unbounded_blocks);
+    }
 }
 
 #[rstest]
@@ -367,6 +548,12 @@ mod destination_lifecycle {
             .unwrap()
     }
 
+    fn args_for_backend(worker_type: WorkerType, backend: G1Backend) -> MockEngineArgs {
+        let mut args = args(worker_type);
+        args.g1_backend = Some(backend);
+        args
+    }
+
     fn request(uuid: Uuid, tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
         DirectRequest {
             tokens,
@@ -601,14 +788,20 @@ mod destination_lifecycle {
         assert_eq!(footprint(128), 12);
     }
 
-    #[test]
-    fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission() {
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
+    fn handoff_prefill_to_reserved_decode_owns_kv_until_normal_admission(
+        #[case] backend: G1Backend,
+    ) {
         let logical_uuid = Uuid::from_u128(10_001);
         let handoff_id = HandoffId::from(Uuid::from_u128(10_002));
         let logical_tokens = (0..8).collect::<Vec<_>>();
 
-        let mut source = VllmCore::new_with_kv_capture(args(WorkerType::Prefill), 31);
-        let mut destination = VllmCore::new_with_kv_capture(args(WorkerType::Decode), 32);
+        let mut source =
+            VllmCore::new_with_kv_capture(args_for_backend(WorkerType::Prefill, backend), 31);
+        let mut destination =
+            VllmCore::new_with_kv_capture(args_for_backend(WorkerType::Decode, backend), 32);
 
         destination.receive(request(Uuid::from_u128(10_003), (0..4).collect(), 1));
         execute(&mut destination, 0.0);
@@ -1373,6 +1566,10 @@ mod core_behavior {
     #[test]
     fn test_running_request_catches_up_decode_tail_before_promote() {
         let args = MockEngineArgs::builder()
+            // This test exercises the compatibility `G1Manager::process`
+            // entrypoint, which is intentionally KVBM-only. Production
+            // scheduler paths use the owner-aware entrypoint for native G1.
+            .g1_backend(G1Backend::Kvbm)
             .block_size(4)
             .num_gpu_blocks(8)
             .max_num_batched_tokens(Some(8))
@@ -1418,7 +1615,7 @@ mod core_behavior {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
@@ -1653,10 +1850,15 @@ mod router_events {
         assert!(pass.kv_events.iter().all(|event| event.event.dp_rank == 0));
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_completion_events_apply_cleanly() {
+    async fn test_completion_events_apply_cleanly(#[case] backend: G1Backend) {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
-        let mut core = VllmCore::new_with_kv_capture(router_args(), ROUTER_TEST_WORKER_ID);
+        let mut args = router_args();
+        args.g1_backend = Some(backend);
+        let mut core = VllmCore::new_with_kv_capture(args, ROUTER_TEST_WORKER_ID);
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 4,
@@ -1677,7 +1879,7 @@ mod router_events {
             harness.apply_events(pass.kv_events).await;
         }
 
-        assert!(saw_store);
+        assert!(saw_store, "backend={backend:?}");
         assert!(harness.ok_count(METRIC_EVENT_STORED) > 0);
         assert_eq!(core.kv_manager.num_active_blocks(), 0);
         harness.assert_no_event_warnings();
@@ -1791,10 +1993,14 @@ mod router_events {
         harness.shutdown();
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_preemption_recompute_events_apply_cleanly() {
+    async fn test_preemption_recompute_events_apply_cleanly(#[case] backend: G1Backend) {
         let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(4)
             .num_gpu_blocks(6)
             .max_num_batched_tokens(Some(16))
@@ -1838,11 +2044,12 @@ mod router_events {
             }
         }
 
-        assert!(saw_preemption);
+        assert!(saw_preemption, "backend={backend:?}");
         let request = core.state.requests.get(&r2).unwrap();
         assert_eq!(request.status, RequestStatus::Preempted);
         assert_eq!(request.num_computed_tokens, 0);
         assert_eq!(request.num_preemptions, 1);
+        assert_eq!(request.sequence.num_allocated_tokens(), 0);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
 
         let mut readmitted = false;
@@ -1858,7 +2065,7 @@ mod router_events {
 
         assert!(
             readmitted,
-            "preempted request should be admitted for recompute"
+            "preempted request should be admitted for recompute: backend={backend:?}"
         );
         harness.assert_no_event_warnings();
         harness.shutdown();
@@ -2271,11 +2478,17 @@ mod live_scheduler {
         assert_scheduler_idle(&metrics);
     }
 
+    #[rstest]
+    #[case::kvbm(G1Backend::Kvbm)]
+    #[case::native(G1Backend::Native)]
     #[tokio::test]
-    async fn test_live_scheduler_forwards_buffered_kv_token_ids() {
+    async fn raw_sink_emits_completed_unaligned_prompt_block_for_both_g1_backends(
+        #[case] backend: G1Backend,
+    ) {
         let sink = Arc::new(CapturingKvSink::default());
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let args = MockEngineArgs::builder()
+            .g1_backend(backend)
             .block_size(4)
             .num_gpu_blocks(12)
             .max_num_batched_tokens(Some(8))
@@ -2283,7 +2496,6 @@ mod live_scheduler {
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .speedup_ratio(1000.0)
-            .zmq_kv_events_port(Some(12345))
             .build()
             .unwrap();
         let scheduler = Scheduler::new(
@@ -2296,24 +2508,28 @@ mod live_scheduler {
         );
 
         scheduler.receive(DirectRequest {
-            tokens: (0..8).collect(),
-            max_output_tokens: 1,
-            output_token_ids: None,
+            tokens: vec![0, 1, 2],
+            max_output_tokens: 2,
+            output_token_ids: Some(vec![3, 4]),
             uuid: Some(Uuid::from_u128(72)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
             ..Default::default()
         });
 
-        let output_batch = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
-            .await
-            .expect("scheduler should emit output")
-            .expect("output channel should stay open");
-        let signal = output_batch
-            .into_iter()
-            .next()
-            .expect("live scheduler should emit one output signal");
-        assert!(signal.completed);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let output_batch = output_rx
+                    .recv()
+                    .await
+                    .expect("output channel should stay open");
+                if output_batch.iter().any(|signal| signal.completed) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("scheduler should complete the request");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let events = sink.take();
@@ -2324,8 +2540,7 @@ mod live_scheduler {
                 _ => None,
             })
             .expect("live scheduler should forward stored KV event token ids");
-        assert!(!stored.is_empty());
-        assert!(stored.iter().all(|block| !block.is_empty()));
+        assert_eq!(stored, vec![vec![0, 1, 2, 3]]);
     }
 
     #[tokio::test]
@@ -2865,7 +3080,9 @@ mod offload {
     use uuid::Uuid;
 
     use crate::common::handoff::HandoffId;
-    use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock, WorkerType};
+    use crate::common::protocols::{
+        DirectRequest, G1Backend, MockEngineArgs, MoveBlock, WorkerType,
+    };
     use crate::common::sequence::ActiveSequence;
     use crate::kv_manager::G1Acquire;
     use crate::kvbm_offload::shared_g3::shared_g3_test_guard_blocking;
@@ -2875,6 +3092,7 @@ mod offload {
     };
 
     use super::super::core::{RequestStatus, VllmCore, VllmRequestState};
+    use super::super::request::RequestKvState;
 
     /// Seed `g2` with each PLH by allocating a fresh slot, staging,
     /// registering, and dropping — so the block lands in the inactive
@@ -2923,7 +3141,7 @@ mod offload {
         core.state.requests.insert(
             uuid,
             VllmRequestState {
-                sequence,
+                sequence: RequestKvState::kvbm(sequence),
                 status: RequestStatus::Running,
                 num_computed_tokens,
                 num_preemptions: 0,
@@ -2978,8 +3196,25 @@ mod offload {
     }
 
     #[test]
+    #[should_panic(expected = "legacy kvbm-offload cannot be attached to native G1")]
+    fn native_g1_cannot_enter_kvbm_swap_in() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(4)
+            .block_size(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .g1_backend(G1Backend::Native)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        assert!(!core.kv_manager.has_offload_engine());
+        attach_g1_offload_engine(&mut core);
+    }
+
+    #[test]
     fn decode_growth_waits_without_preempting() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3065,6 +3300,7 @@ mod offload {
     #[test]
     fn speculative_decode_reservation_waits_without_preempting() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(5)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3146,6 +3382,7 @@ mod offload {
     #[tokio::test]
     async fn execute_pass_ticks_offload_engine_when_attached() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(8)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3172,6 +3409,7 @@ mod offload {
     async fn live_destination_eviction_uses_command_application_time() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3289,6 +3527,7 @@ mod offload {
     #[tokio::test]
     async fn ready_swap_ins_drain_on_pass_entry() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(8)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3365,6 +3604,7 @@ mod offload {
     #[tokio::test]
     async fn g2_swap_in_reserves_destination_slot_before_transfer() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(1)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3446,6 +3686,7 @@ mod offload {
     fn tick_offload_only_completes_g3_staging_before_same_timestamp_admission() {
         let _guard = shared_g3_test_guard_blocking();
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             // Use two blocks so the staged hit still has a reusable prefix
             // after vLLM's required final-block recompute.
             .num_gpu_blocks(2)
@@ -3530,6 +3771,7 @@ mod offload {
     async fn partial_g2_swap_in_pins_cached_g1_prefix() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3566,6 +3808,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),
@@ -3604,6 +3848,7 @@ mod offload {
     async fn cancel_parked_swap_in_releases_ownership_and_isolates_uuid_reuse() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(3)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3643,6 +3888,8 @@ mod offload {
             (
                 request
                     .sequence
+                    .legacy()
+                    .expect("KVBM test request must use legacy storage")
                     .prepare_allocation(block_size * 2)
                     .expect("prefix allocation signal"),
                 request.sequence.positional_lineage_hashes().to_vec(),
@@ -3755,6 +4002,7 @@ mod offload {
     #[tokio::test]
     async fn completed_swap_ins_reenter_front_preserving_order() {
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(4)
             .max_num_batched_tokens(Some(64))
@@ -3862,6 +4110,7 @@ mod offload {
         // 4 tokens per block; sequence has 16 tokens → 4 full blocks.
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(16)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))
@@ -3997,6 +4246,7 @@ mod offload {
 
         async fn run_mode() -> ModeReport {
             let args = MockEngineArgs::builder()
+                .g1_backend(G1Backend::Kvbm)
                 .num_gpu_blocks(32)
                 .block_size(BLOCK_SIZE)
                 .max_num_batched_tokens(Some(256))
@@ -4124,6 +4374,7 @@ mod offload {
     fn destination_reservation_retries_after_presence_filtered_offload() {
         let block_size = 4;
         let args = MockEngineArgs::builder()
+            .g1_backend(G1Backend::Kvbm)
             .num_gpu_blocks(2)
             .block_size(block_size)
             .max_num_batched_tokens(Some(64))

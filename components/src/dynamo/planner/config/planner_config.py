@@ -72,12 +72,13 @@ class PlannerPreDeploymentSweepMode(str, Enum):
 
 
 class AICPerfModelSpec(BaseModel):
-    """Native AIC model identity used by the Rust engine perf shim.
+    """Native AIC model identity used by Planner performance modeling.
 
     Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
     It is the forward-pass model/backend/parallelism identity used for
-    real-time shim queries. Unsupported native AIC configs are allowed: the
-    shim falls back to FPM regression and can still tune from observations.
+    real-time queries through the aiconfigurator-core wheel. Unsupported
+    native AIC configs are allowed: the AIC model falls back to FPM regression
+    and can still tune from observations.
     """
 
     hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
@@ -375,7 +376,7 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses the Rust engine perf model to target specific "
+            "'sla' uses the AIC core performance model to target specific "
             "ttft_ms/itl_ms values."
         ),
     )
@@ -424,10 +425,10 @@ class PlannerConfig(BaseModel):
     aic_perf_model: Optional[AICPerfModelSpec] = Field(
         default=None,
         description=(
-            "Native AIC forward-pass perf model identity for the Rust engine "
-            "perf shim. This enables real-time AIC estimates plus online "
+            "Native AIC forward-pass perf model identity for the Planner "
+            "engine-query layer. This enables real-time AIC estimates plus online "
             "correction; unsupported native configs automatically fall back to "
-            "FPM regression in the shim. This field does not trigger AIC "
+            "FPM regression in the AIC core wheel. This field does not trigger AIC "
             "interpolation sweeps."
         ),
     )
@@ -827,7 +828,7 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode is 'none' or unset while "
-                    "throughput scaling is enabled; the Rust engine perf model "
+                    "throughput scaling is enabled; the AIC core performance model "
                     "will start from native AIC estimates when available or "
                     "from live FPM regression after enough observations."
                 )
