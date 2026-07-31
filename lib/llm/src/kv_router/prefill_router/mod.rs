@@ -26,7 +26,7 @@ use crate::{
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+        preprocessor::{BootstrapInfo, PrefillResult, RoutingHints, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
     session_affinity::{AffinityCoordinator, AffinityTarget},
@@ -37,6 +37,7 @@ mod admission;
 mod conditional_bypass;
 mod query;
 
+use super::push_router::ConditionalDisaggAdmissionError;
 use admission::InnerPrefillRouter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,7 +207,7 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (mut req, context) = request.into_parts();
+        let (mut req, mut context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let policy_class = context.metadata().get("policy-class").cloned();
@@ -263,6 +264,7 @@ impl
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
 
+                    let original_routing = req.routing.clone();
                     let routing = req.routing_mut();
                     routing.decode_worker_id = Some(decision.worker.worker_id);
                     routing.dp_rank = Some(decision.worker.dp_rank);
@@ -270,17 +272,39 @@ impl
                     req.annotations
                         .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
-                    // TODO: This advisory selection does not reserve decode capacity. If the
-                    // exact pinned admission below races and fails, the no-clone fix is a
-                    // scheduler reservation handoff rather than retrying with a mutated request.
-                    let response_stream = next.generate(context.map(|_| req)).await?;
-                    let ctx = response_stream.context();
-                    let annotation = Annotated::<LLMEngineOutput>::from_annotation(
-                        BYPASS_REMOTE_PREFILL_ANNOTATION,
-                        &true,
-                    )?;
-                    let merged = stream::once(async move { annotation }).chain(response_stream);
-                    return Ok(ResponseStream::new(Box::pin(merged), ctx));
+                    match next.generate(context.map(|_| req)).await {
+                        Ok(response_stream) => {
+                            let ctx = response_stream.context();
+                            let annotation = Annotated::<LLMEngineOutput>::from_annotation(
+                                BYPASS_REMOTE_PREFILL_ANNOTATION,
+                                &true,
+                            )?;
+                            let merged =
+                                stream::once(async move { annotation }).chain(response_stream);
+                            return Ok(ResponseStream::new(Box::pin(merged), ctx));
+                        }
+                        Err(error) => {
+                            let error = match error.downcast::<ConditionalDisaggAdmissionError>() {
+                                Ok(error) => error,
+                                Err(error) => return Err(error),
+                            };
+                            let (failed_request, admission_error) = error.into_parts();
+                            let restored_request =
+                                restore_after_failed_conditional_disagg_admission(
+                                    failed_request,
+                                    original_routing,
+                                );
+                            let (restored_req, restored_context) = restored_request.into_parts();
+                            req = restored_req;
+                            context = restored_context;
+
+                            tracing::warn!(
+                                request_id = %request_id,
+                                error = %admission_error,
+                                "Conditional-disagg decode admission failed before dispatch; falling back to remote prefill"
+                            );
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -467,6 +491,17 @@ impl
 
         next.generate(context.map(|_| decode_req)).await
     }
+}
+
+fn restore_after_failed_conditional_disagg_admission(
+    mut request: SingleIn<PreprocessedRequest>,
+    original_routing: Option<RoutingHints>,
+) -> SingleIn<PreprocessedRequest> {
+    request.routing = original_routing;
+    request
+        .annotations
+        .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
+    request
 }
 
 impl PrefillRouter {
@@ -657,6 +692,76 @@ mod tests {
         assert_eq!(data.token_ids, vec![2]);
         assert_eq!(data.finish_reason, Some(FinishReason::EoS));
         assert!(data.disaggregated_params.is_none());
+    }
+
+    #[test]
+    fn failed_conditional_admission_restores_original_request() {
+        let original_routing = Some(RoutingHints {
+            decode_worker_id: Some(41),
+            dp_rank: Some(3),
+            priority: Some(7),
+            lora_name: Some("adapter".to_string()),
+            ..Default::default()
+        });
+        let expected_routing = serde_json::to_value(&original_routing).unwrap();
+        let mut request = Context::new(
+            PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .routing(original_routing.clone())
+                .annotations(vec![
+                    "keep-this".to_string(),
+                    BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        request.routing_mut().decode_worker_id = Some(99);
+        request.routing_mut().dp_rank = Some(0);
+        request.insert_unique("conditional-sentinel", "preserved".to_string());
+        let original_context = request.context();
+
+        let mut restored =
+            restore_after_failed_conditional_disagg_admission(request, original_routing);
+        let restored_context = restored.context();
+
+        assert!(Arc::ptr_eq(&original_context, &restored_context));
+        assert_eq!(
+            serde_json::to_value(&restored.routing).unwrap(),
+            expected_routing
+        );
+        assert_eq!(restored.annotations, vec!["keep-this".to_string()]);
+        assert_eq!(
+            restored
+                .take_unique::<String>("conditional-sentinel")
+                .unwrap(),
+            "preserved"
+        );
+    }
+
+    #[test]
+    fn failed_conditional_admission_restores_absent_routing() {
+        let mut request = Context::new(
+            PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .annotations(vec![BYPASS_REMOTE_PREFILL_ANNOTATION.to_string()])
+                .build()
+                .unwrap(),
+        );
+        request.routing_mut().decode_worker_id = Some(99);
+        request.routing_mut().dp_rank = Some(0);
+
+        let restored = restore_after_failed_conditional_disagg_admission(request, None);
+
+        assert!(restored.routing.is_none());
+        assert!(restored.annotations.is_empty());
     }
 
     #[test]

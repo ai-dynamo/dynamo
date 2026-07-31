@@ -17,7 +17,9 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -39,6 +41,24 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+#[derive(Debug, thiserror::Error)]
+#[error("conditional-disagg decode admission failed before dispatch: {source}")]
+pub(crate) struct ConditionalDisaggAdmissionError {
+    request: SingleIn<PreprocessedRequest>,
+    #[source]
+    source: Error,
+}
+
+impl ConditionalDisaggAdmissionError {
+    fn new(request: SingleIn<PreprocessedRequest>, source: Error) -> Self {
+        Self { request, source }
+    }
+
+    pub(crate) fn into_parts(self) -> (SingleIn<PreprocessedRequest>, Error) {
+        (self.request, self.source)
+    }
+}
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -517,9 +537,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (mut selection, mut operation) = self
+        let conditional_disagg_bypass = request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION);
+        let (mut selection, mut operation) = match self
             .select_with_affinity(&request, phase, is_query_only)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if conditional_disagg_bypass && !is_cancelled(&error) => {
+                return Err(ConditionalDisaggAdmissionError::new(request, error).into());
+            }
+            Err(error) => return Err(error),
+        };
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
@@ -660,7 +688,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -809,6 +837,97 @@ mod tests {
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_admission_failure_returns_original_context() {
+        let (router, runtime) = router(None).await;
+        let started_before = router.request_metrics.requests_started_total().get();
+        let metadata = BTreeMap::from([("policy-class".to_string(), "interactive".to_string())]);
+        let mut request = Context::with_id_and_metadata(
+            request(),
+            "conditional-admission-failure".to_string(),
+            metadata.clone(),
+        );
+        request.routing_mut().decode_worker_id = Some(99);
+        request.routing_mut().dp_rank = Some(0);
+        request
+            .annotations
+            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+        request.insert_unique("conditional-sentinel", "preserved".to_string());
+        let original_context = request.context();
+
+        let error = router.generate(request).await.unwrap_err();
+        let admission_error = error
+            .downcast::<ConditionalDisaggAdmissionError>()
+            .expect("marked pre-dispatch admission failure must return the request");
+        let (mut recovered, source) = admission_error.into_parts();
+        let recovered_context = recovered.context();
+
+        assert!(Arc::ptr_eq(&original_context, &recovered_context));
+        assert_eq!(recovered.id(), "conditional-admission-failure");
+        assert_eq!(recovered.metadata(), &metadata);
+        assert_eq!(
+            recovered
+                .take_unique::<String>("conditional-sentinel")
+                .unwrap(),
+            "preserved"
+        );
+        assert!(source.to_string().contains("not eligible"));
+        assert_eq!(
+            router.request_metrics.requests_started_total().get(),
+            started_before
+        );
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_cancellation_is_not_recoverable() {
+        let (router, runtime) = router(None).await;
+        let controller = Controller::new("conditional-cancellation".to_string());
+        controller.stop();
+        let mut request = Context::with_controller(request(), controller);
+        request
+            .annotations
+            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+
+        let error = router.generate(request).await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ConditionalDisaggAdmissionError>()
+                .is_none()
+        );
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Cancelled],
+            &[]
+        ));
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_dispatch_failure_is_not_recoverable() {
+        let (router, runtime) = router(None).await;
+        let mut request = Context::new(request());
+        request.routing_mut().decode_worker_id = Some(7);
+        request.routing_mut().dp_rank = Some(0);
+        request
+            .annotations
+            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+
+        let error = router.generate(request).await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ConditionalDisaggAdmissionError>()
+                .is_none()
+        );
 
         drop(router);
         runtime.shutdown();

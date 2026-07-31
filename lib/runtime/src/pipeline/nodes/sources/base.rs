@@ -59,11 +59,15 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
 impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Frontend<In, Out> {
     async fn generate(&self, request: In) -> Result<Out, Error> {
         let (tx, rx) = oneshot::channel::<Out>();
+        let request_id = request.id().to_string();
         {
             let mut sinks = self.sinks.lock().unwrap();
-            sinks.insert(request.id().to_string(), tx);
+            sinks.insert(request_id.clone(), tx);
         }
-        self.on_next(request, private::Token {}).await?;
+        if let Err(error) = self.on_next(request, private::Token {}).await {
+            self.sinks.lock().unwrap().remove(&request_id);
+            return Err(error);
+        }
         Ok(rx.await.map_err(|_| PipelineError::DetachedStreamSender)?)
     }
 }
@@ -87,6 +91,7 @@ mod tests {
             PipelineError::NoEdge => (),
             _ => panic!("Expected NoEdge error"),
         }
+        assert!(source.sinks.lock().unwrap().is_empty());
 
         let result = source
             .on_next(().into(), private::Token)
