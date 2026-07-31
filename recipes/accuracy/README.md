@@ -96,6 +96,15 @@ compare the general range rather than exact decimals:
 - **Give reasoning models generous `MAX_TOKENS`.** Reasoning chains can run to
   tens of thousands of tokens; a low cap truncates them mid-thought and
   deflates the score through unparsed answers.
+- **Check the time budget before a long run.** `activeDeadlineSeconds` bounds
+  the entire Job, including the readiness wait and any retry. Runtime scales
+  with the request count and per-request latency: a 198-question benchmark
+  against a large reasoning model takes hours, and a larger benchmark scales
+  from there. If the budget is exceeded the pod is killed mid-run and no score
+  is printed, which looks like a failure rather than a timeout. Raising
+  `CONCURRENCY` shortens the run — it sets how many requests are in flight, not
+  what is asked — so it is the first lever to reach for before extending the
+  deadline.
 - Replica counts do not affect accuracy (it is per-request), so a minimal
   1-replica deployment is sufficient and cheapest.
 - AIPerf prints an advisory recommending temperature 0 for reproducibility.
