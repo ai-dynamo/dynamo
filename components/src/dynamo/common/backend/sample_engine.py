@@ -5,20 +5,101 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
+import logging
+import queue
+import threading
+import uuid
 from collections.abc import AsyncGenerator
+from typing import Any, Optional
 
 from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
+from dynamo.llm import KvEventPublisher
 
-from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
+from . import telemetry
+from .disagg import enforce_prefill_max_tokens, require_prefill_result
+from .engine import (
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+    LlmRegistration,
+)
+from .health_check import build_health_check_payload, is_probe
+from .logprobs import parse_logprob_options
+from .multimodal import (
+    encoder_terminal_chunk,
+    extract_multimodal_kwargs,
+    require_encoder_result,
+)
+from .publisher import ComponentSnapshot, KvEventSource, PushSource
 from .worker import WorkerConfig
+
+logger = logging.getLogger(__name__)
+
+_SAMPLE_BLOCK_SIZE = 16
+
+# Mirrors the Rust mocker's `MAX_LOGPROBS` so unbounded `logprobs`
+# requests can't drive arbitrary memory / CPU here.
+_MAX_SYNTHETIC_TOP_LOGPROBS = 20
+
+
+def _stamp_synthetic_logprobs(
+    chunk: GenerateChunk, token_ids: list[int], logprobs_k: int
+) -> None:
+    """Stamp deterministic synthetic logprobs onto ``chunk``. Top-k
+    alternatives appear when ``logprobs_k >= 1``."""
+    if not token_ids:
+        return
+    logprobs_k = min(logprobs_k, _MAX_SYNTHETIC_TOP_LOGPROBS)
+    log_probs: list[float] = []
+    top_logprobs: list[list[dict[str, Any]]] = []
+    for tid in token_ids:
+        selected_lp = -0.1 * (tid % 10)
+        log_probs.append(selected_lp)
+        if logprobs_k > 0:
+            position = [
+                {
+                    "rank": 1,
+                    "token_id": tid,
+                    "token": f"token_id:{tid}",
+                    "logprob": selected_lp,
+                }
+            ]
+            for r in range(1, logprobs_k + 1):
+                alt_id = (tid + r) % 32000
+                position.append(
+                    {
+                        "rank": r + 1,
+                        "token_id": alt_id,
+                        "token": f"token_id:{alt_id}",
+                        "logprob": selected_lp - 0.1 * r,
+                    }
+                )
+            top_logprobs.append(position)
+    chunk["log_probs"] = log_probs
+    if top_logprobs:
+        chunk["top_logprobs"] = top_logprobs
 
 
 class SampleLLMEngine(LLMEngine):
     """Reference LLMEngine implementation.
 
     Generates rotating token IDs with configurable per-token latency.
-    Useful for testing the Worker lifecycle end-to-end
-    and as a template for engine leads implementing real backends.
+    Useful for testing the Worker lifecycle end-to-end and as a template
+    for engine leads implementing real backends.
+
+    Disaggregation:
+        ``--disaggregation-mode {agg,prefill,decode,encode}`` selects the role.
+        AGGREGATED is the default and produces ``max_tokens`` rotating
+        tokens. PREFILL caps generation at one token and stamps a
+        synthetic ``disaggregated_params`` payload on the terminal so
+        the frontend's PrefillRouter has something to forward. DECODE
+        requires the request to carry ``prefill_result`` (otherwise the
+        frontend forgot to route through the prefill peer); on success
+        it generates normally. ENCODE emits one terminal chunk containing
+        an object-shaped synthetic ``encoder_result`` and no generated tokens.
     """
 
     def __init__(
@@ -26,10 +107,24 @@ class SampleLLMEngine(LLMEngine):
         model_name: str = "sample-model",
         max_tokens: int = 16,
         delay: float = 0.01,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+        route_to_encoder: bool = False,
     ):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.delay = delay
+        self.disaggregation_mode = disaggregation_mode
+        self.route_to_encoder = route_to_encoder
+        self._kv_used_blocks = 0
+        self._publish_queue: queue.SimpleQueue[tuple[str, dict]] = queue.SimpleQueue()
+        self._publish_stop = threading.Event()
+        self._publish_thread: Optional[threading.Thread] = None
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. Driven from _publish_loop alongside KV events.
+        self._snapshot_publisher: Optional[Any] = None
+        # itertools.count is thread-safe — concurrent generate() calls
+        # won't race on hash issuance.
+        self._block_hash_counter = itertools.count(1)
 
     @classmethod
     async def from_args(
@@ -46,12 +141,31 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
         parser.add_argument("--event-plane", default=None)
+        parser.add_argument(
+            "--disaggregation-mode",
+            choices=[m.value for m in DisaggregationMode],
+            default=DisaggregationMode.AGGREGATED.value,
+            help="Disaggregation role: 'agg' (default), 'prefill', 'decode', or 'encode'.",
+        )
+        parser.add_argument(
+            "--route-to-encoder",
+            action="store_true",
+            help="Require an upstream Encode worker (valid for agg/prefill).",
+        )
+        parser.add_argument(
+            "--disable-kv-routing",
+            action="store_true",
+            help="Disable KV event and load publishers (useful for isolated smokes).",
+        )
         args = parser.parse_args(argv)
 
+        mode = DisaggregationMode(args.disaggregation_mode)
         engine = cls(
             model_name=args.model_name,
             max_tokens=args.max_tokens,
             delay=args.delay,
+            disaggregation_mode=mode,
+            route_to_encoder=args.route_to_encoder,
         )
         worker_config = WorkerConfig(
             namespace=args.namespace,
@@ -63,28 +177,224 @@ class SampleLLMEngine(LLMEngine):
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
             event_plane=args.event_plane,
+            disaggregation_mode=mode,
+            route_to_encoder=args.route_to_encoder,
+            enable_kv_routing=not args.disable_kv_routing,
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.model_name,
-            context_length=2048,
-            kv_cache_block_size=16,
-            total_kv_blocks=1000,
-            max_num_seqs=64,
-            max_num_batched_tokens=2048,
+            llm=LlmRegistration(
+                context_length=2048,
+                kv_cache_block_size=_SAMPLE_BLOCK_SIZE,
+                total_kv_blocks=1000,
+                max_num_seqs=64,
+                max_num_batched_tokens=2048,
+            ),
         )
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            return []
+        return [PushSource(on_ready=self._start_publisher_thread, dp_rank=0)]
+
+    def component_metrics_dp_ranks(self) -> list[int]:
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            return []
+        return [0]
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        # Stash the Rust-owned publisher; the synthetic per-token loop in
+        # `generate()` increments `_kv_used_blocks`. We piggy-back on
+        # `_publish_loop` to push snapshots at ~50 ms cadence (it already
+        # runs to drive KV events).
+        self._snapshot_publisher = publisher
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        # Token 1 stands in for BOS (no real tokenizer here). DECODE bypass
+        # lives in `generate()` via `is_probe(request)` — no payload tricks.
+        return build_health_check_payload(bos_token_id=1)
+
+    def _start_publisher_thread(self, publisher: KvEventPublisher) -> None:
+        self._publish_thread = threading.Thread(
+            target=self._publish_loop,
+            args=(publisher,),
+            daemon=True,
+            name="sample-kv-publisher",
+        )
+        self._publish_thread.start()
+
+    def _publish_loop(self, publisher: KvEventPublisher) -> None:
+        while not self._publish_stop.is_set():
+            try:
+                kind, payload = self._publish_queue.get(timeout=0.1)
+            except queue.Empty:
+                # Push a snapshot on the idle tick (~10 Hz) so /metrics
+                # reflects current _kv_used_blocks without needing an
+                # event. Real engines push from their stat-logger event
+                # surface; the sample engine has no natural one, so we
+                # piggy-back on this loop.
+                if self._snapshot_publisher is not None:
+                    self._snapshot_publisher.publish(
+                        0,
+                        ComponentSnapshot(
+                            kv_used_blocks=self._kv_used_blocks,
+                            kv_total_blocks=1000,
+                            gpu_cache_usage=self._kv_used_blocks / 1000.0,
+                            kv_cache_hit_rate=None,  # sample engine doesn't track hits
+                            dp_rank=0,
+                        ),
+                    )
+                continue
+            try:
+                if kind == "stored":
+                    publisher.publish_stored(**payload)
+                elif kind == "removed":
+                    publisher.publish_removed(**payload)
+            except Exception:
+                logger.exception("Sample publisher dropped event of kind=%s", kind)
+
+    def _emit_synthetic_events(self, prompt_len: int) -> list[int]:
+        block_count = max(1, prompt_len // _SAMPLE_BLOCK_SIZE)
+        hashes: list[int] = []
+        for _ in range(block_count):
+            h = next(self._block_hash_counter)
+            hashes.append(h)
+        self._publish_queue.put(
+            (
+                "stored",
+                {
+                    "token_ids": list(range(block_count * _SAMPLE_BLOCK_SIZE)),
+                    "num_block_tokens": [_SAMPLE_BLOCK_SIZE] * block_count,
+                    "block_hashes": hashes,
+                },
+            )
+        )
+        self._kv_used_blocks += block_count
+        return hashes
+
+    def _release_synthetic_blocks(self, hashes: list[int]) -> None:
+        self._publish_queue.put(("removed", {"block_hashes": hashes}))
+        self._kv_used_blocks = max(0, self._kv_used_blocks - len(hashes))
+
+    async def _encode_multimodal(self, request: GenerateRequest) -> dict[str, Any]:
+        """Return a deterministic-shape synthetic encoder handoff payload."""
+        await asyncio.sleep(self.delay)
+        multimodal_kwargs = extract_multimodal_kwargs(request) or {}
+        return {
+            "handle": f"sample-encoder:{uuid.uuid4().hex}",
+            "multimodal_kwargs": multimodal_kwargs,
+        }
+
+    def _validate_encoder_result(self, request: GenerateRequest) -> dict[str, Any]:
+        encoder_result = require_encoder_result(request, self.disaggregation_mode)
+        handle = encoder_result.get("handle")
+        if not isinstance(handle, str) or not handle.startswith("sample-encoder:"):
+            raise ValueError(
+                "encoder_result.handle must be a string starting with 'sample-encoder:'"
+            )
+        return encoder_result
 
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            prompt_len = len(request.get("token_ids", []))
+            if context.is_stopped():
+                yield {
+                    "token_ids": [],
+                    "index": 0,
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": 0,
+                        "total_tokens": prompt_len,
+                    },
+                }
+                return
+            encoder_result = await self._encode_multimodal(request)
+            if context.is_stopped():
+                yield {
+                    "token_ids": [],
+                    "index": 0,
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": 0,
+                        "total_tokens": prompt_len,
+                    },
+                }
+                return
+            yield encoder_terminal_chunk(
+                encoder_result,
+                completion_usage={
+                    "prompt_tokens": prompt_len,
+                    "completion_tokens": 0,
+                    "total_tokens": prompt_len,
+                },
+            )
+            return
+
+        # Canary probes bypass cross-worker coordination — run as aggregated.
+        if self.disaggregation_mode == DisaggregationMode.DECODE and not is_probe(
+            request
+        ):
+            require_prefill_result(request, self.disaggregation_mode)
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            enforce_prefill_max_tokens(request)
+
+        multimodal_kwargs = extract_multimodal_kwargs(request)
+        sample_multimodal_result: Optional[dict[str, Any]] = None
+        if multimodal_kwargs is not None:
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                raise ValueError(
+                    "decode worker should not receive raw multimodal payloads; "
+                    "encoder inputs are consumed by the upstream prefill worker"
+                )
+            if self.route_to_encoder:
+                sample_multimodal_result = self._validate_encoder_result(request)
+            else:
+                # Aggregated workers process multimodal inputs locally when
+                # encoder routing is disabled.
+                sample_multimodal_result = await self._encode_multimodal(request)
+
         token_ids = request.get("token_ids", [])
         prompt_len = len(token_ids)
         stop_conditions = request.get("stop_conditions", {})
         max_new = stop_conditions.get("max_tokens") or self.max_tokens
+        logprobs_k, _prompt_logprobs = parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
 
+        block_hashes = self._emit_synthetic_events(prompt_len)
+        try:
+            # Parent-chain pinned in test_unified_worker_otlp_export.
+            with telemetry.start_span(context, "sample.tokens", prompt_len=prompt_len):
+                async for chunk in self._generate_tokens(
+                    prompt_len, max_new, context, logprobs_k
+                ):
+                    if (
+                        chunk.get("finish_reason")
+                        and sample_multimodal_result is not None
+                    ):
+                        chunk["engine_data"] = {
+                            "sample_multimodal": sample_multimodal_result
+                        }
+                    yield chunk
+        finally:
+            self._release_synthetic_blocks(block_hashes)
+
+    async def _generate_tokens(
+        self,
+        prompt_len: int,
+        max_new: int,
+        context: Context,
+        logprobs_k: Optional[int],
+    ) -> AsyncGenerator[GenerateChunk, None]:
         for i in range(max_new):
             if context.is_stopped():
                 yield {
@@ -101,6 +411,8 @@ class SampleLLMEngine(LLMEngine):
             await asyncio.sleep(self.delay)
             token_id = (i + 1) % 32000
             out: GenerateChunk = {"token_ids": [token_id], "index": 0}
+            if logprobs_k is not None:
+                _stamp_synthetic_logprobs(out, [token_id], logprobs_k)
             if i == max_new - 1:
                 out["finish_reason"] = "length"
                 out["completion_usage"] = {
@@ -108,7 +420,14 @@ class SampleLLMEngine(LLMEngine):
                     "completion_tokens": max_new,
                     "total_tokens": prompt_len + max_new,
                 }
+                if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                    out["disaggregated_params"] = {
+                        "sample_handle": uuid.uuid4().hex,
+                        "completed_tokens": [token_id],
+                    }
             yield out
 
     async def cleanup(self) -> None:
-        pass
+        self._publish_stop.set()
+        if self._publish_thread is not None:
+            self._publish_thread.join(timeout=1.0)

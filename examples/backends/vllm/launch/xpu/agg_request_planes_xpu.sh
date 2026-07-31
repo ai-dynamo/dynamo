@@ -10,6 +10,11 @@ source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 export VLLM_TARGET_DEVICE=xpu
 
+# Device affinity: Use auto-selected device via ZE_AFFINITY_MASK if set by test framework,
+# otherwise default to device 0
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}
+export ZE_AFFINITY_MASK
+
 # Parse command-line arguments for request plane mode
 REQUEST_PLANE="tcp"  # Default to TCP
 
@@ -19,18 +24,13 @@ while [[ $# -gt 0 ]]; do
             REQUEST_PLANE="tcp"
             shift
             ;;
-        --http)
-            REQUEST_PLANE="http"
-            shift
-            ;;
         --nats)
             REQUEST_PLANE="nats"
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--tcp|--http|--nats]"
+            echo "Usage: $0 [--tcp|--nats]"
             echo "  --tcp   Use TCP request plane (default)"
-            echo "  --http  Use HTTP/2 request plane"
             echo "  --nats  Use NATS request plane"
             exit 0
             ;;
@@ -47,6 +47,7 @@ MODEL="Qwen/Qwen3-0.6B"
 # ---- Tunable (override via env vars) ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_free_port)}"
 
 # Set the request plane mode
 export DYN_REQUEST_PLANE=$REQUEST_PLANE
@@ -56,6 +57,7 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving + Request Planes (1 GPU)" "$MODEL" "$HTTP_PORT"
+echo "Forward-pass metrics port: ${DYN_FORWARDPASS_METRIC_PORT}"
 
 python -m dynamo.frontend &
 
@@ -64,7 +66,6 @@ DYN_HEALTH_CHECK_ENABLED=true \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    --block-size "${BLOCK_SIZE:-64}" \
     $GPU_MEM_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

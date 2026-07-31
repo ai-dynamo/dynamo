@@ -34,7 +34,7 @@ pub struct Annotated<R> {
 
 impl<R> Annotated<R> {
     /// Create a new annotated stream from the given error string
-    pub fn from_error(error: String) -> Self {
+    pub fn from_error(error: impl Into<String>) -> Self {
         Self {
             data: None,
             id: None,
@@ -91,10 +91,6 @@ impl<R> Annotated<R> {
 
     pub fn is_ok(&self) -> bool {
         self.event.as_deref() != Some("error")
-    }
-
-    pub fn is_err(&self) -> bool {
-        !self.is_ok()
     }
 
     pub fn is_event(&self) -> bool {

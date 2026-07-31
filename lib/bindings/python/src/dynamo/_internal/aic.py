@@ -1,19 +1,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared AIC session helpers used by internal Dynamo integrations."""
+"""Shared AIC-core session helpers used by internal Dynamo integrations."""
 
 from __future__ import annotations
 
 import logging
+import math
+import os
 
 logger = logging.getLogger(__name__)
 
+_NEXTN_ACCEPT_RATES_LEN = 5
+# Dynamo's historical default when conditional acceptance rates are omitted.
+_DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
+
+# Default backend versions match the AIC-core v0.11.0 perf DB.
 DEFAULT_BACKEND_VERSIONS = {
-    "vllm": "0.12.0",
-    "sglang": "0.5.6.post2",
+    "vllm": "0.19.0",
+    "sglang": "0.5.10",
+    "trtllm": "1.3.0rc10",
 }
+_KV_CAPACITY_BACKENDS = frozenset(DEFAULT_BACKEND_VERSIONS)
 DEFAULT_STATIC_STRIDE = 32
+DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
+DEFAULT_MEM_FRACTION_STATIC = 0.88
+DEFAULT_FREE_GPU_MEMORY_FRACTION = 0.9
+
+
+def _validate_kv_capacity_backend(backend_name: str) -> None:
+    if backend_name not in _KV_CAPACITY_BACKENDS:
+        supported = ", ".join(sorted(_KV_CAPACITY_BACKENDS))
+        raise ValueError(
+            "AIC KV cache capacity estimation does not support "
+            f"backend {backend_name!r}; supported backends: {supported}. "
+            "Set num_gpu_blocks explicitly for this backend."
+        )
 
 
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
@@ -23,27 +45,112 @@ def resolve_backend_version(backend_name: str, backend_version: str | None) -> s
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
 
 
+def _normalize_aic_quant_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() in {"auto", "none", "null"}:
+        return None
+    if value == "int4":
+        return "int4_wo"
+    return value
+
+
+def _resolve_quant_mode(field: str, value: str | None):
+    """Resolve a dtype-override string to aiconfigurator's per-field quant-mode
+    enum, or ``None`` to use the model default.
+
+    The four quant fields accept *different* value sets (e.g. KV cache only
+    supports ``bfloat16``/``int8``/``fp8``), so the string -> enum lookup is per
+    field. On an unsupported value, raise a clear ``ValueError`` naming the
+    field and its allowed values instead of letting an opaque ``KeyError``
+    escape from deep inside aiconfigurator. ``field`` is one of ``gemm``,
+    ``moe``, ``fmha``, ``kvcache``, ``comm``.
+    """
+    normalized = _normalize_aic_quant_mode(value)
+    if normalized is None:
+        return None
+    from aiconfigurator_core.sdk import common
+
+    enum_cls = {
+        "gemm": common.GEMMQuantMode,
+        "moe": common.MoEQuantMode,
+        "fmha": common.FMHAQuantMode,
+        "kvcache": common.KVCacheQuantMode,
+        "comm": common.CommQuantMode,
+    }[field]
+    try:
+        return enum_cls[normalized]
+    except KeyError:
+        allowed = ", ".join(member.name for member in enum_cls)
+        raise ValueError(
+            f"unsupported AIC {field} quant mode {value!r} "
+            f"(normalized to {normalized!r}); supported values: {allowed}"
+        ) from None
+
+
+def _resolve_quant_mode_name(field: str, value: str | None) -> str | None:
+    """Like :func:`_resolve_quant_mode` but return the canonical quant-mode
+    *name* (the string aiconfigurator's string-keyed APIs expect), validated
+    against the field's enum. ``None`` means "use the model default"."""
+    mode = _resolve_quant_mode(field, value)
+    return mode.name if mode is not None else None
+
+
+def _pad_nextn_accept_rates(
+    nextn_accept_rates: list[float] | str | None,
+) -> list[float]:
+    """Normalize accept-rates for the released ``aiconfigurator`` wheel.
+
+    The upper AIC wheel still accepts the fixed length-5 conditional-rate
+    contract. When rates are omitted entirely we preserve its CLI default;
+    shorter lists are zero-padded and longer lists are truncated.
+    """
+    if isinstance(nextn_accept_rates, str):
+        try:
+            nextn_accept_rates = [
+                float(x) for x in nextn_accept_rates.split(",") if x.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                "aic_nextn_accept_rates must be comma-separated floats, got "
+                f"{nextn_accept_rates!r}"
+            ) from exc
+    if not nextn_accept_rates:
+        return list(_DEFAULT_NEXTN_ACCEPT_RATES)
+    rates = list(nextn_accept_rates)
+    # Rates are acceptance probabilities; out-of-range or non-finite values
+    # would silently skew calc_expectation rather than surface a config error.
+    if any(not math.isfinite(r) or not 0.0 <= r <= 1.0 for r in rates):
+        raise ValueError(
+            f"aic_nextn_accept_rates must be finite floats in [0, 1], got {rates}"
+        )
+    if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
+    elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
+    return rates
+
+
 def _load_aiconfigurator():
     try:
-        from aiconfigurator.sdk import config
-        from aiconfigurator.sdk.backends.factory import get_backend
-        from aiconfigurator.sdk.inference_session import InferenceSession
-        from aiconfigurator.sdk.models import get_model
-        from aiconfigurator.sdk.perf_database import (
+        from aiconfigurator_core.sdk import config
+        from aiconfigurator_core.sdk.backends.factory import get_backend
+        from aiconfigurator_core.sdk.models import get_model
+        from aiconfigurator_core.sdk.perf_database import (
             get_database,
             get_supported_databases,
         )
-    except (
-        ImportError
-    ) as exc:  # pragma: no cover - exercised in integration environments
+    except ModuleNotFoundError as exc:
+        if exc.name != "aiconfigurator_core":
+            raise
         raise RuntimeError(
-            "aiconfigurator is required for AIC perf modeling but is not installed"
+            "aiconfigurator-core is required for AIC perf modeling but is not installed"
         ) from exc
 
     return {
         "config": config,
         "get_backend": get_backend,
-        "InferenceSession": InferenceSession,
         "get_model": get_model,
         "get_database": get_database,
         "get_supported_databases": get_supported_databases,
@@ -51,7 +158,7 @@ def _load_aiconfigurator():
 
 
 class AicSession:
-    """Wrap an AIC InferenceSession with direct prefill/decode predictors."""
+    """Wrap AIC-core model objects with direct prefill/decode predictors."""
 
     def __init__(
         self,
@@ -63,6 +170,13 @@ class AicSession:
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
         attention_dp_size: int | None = None,
+        gemm_dtype: str | None = None,
+        moe_dtype: str | None = None,
+        fmha_dtype: str | None = None,
+        kv_cache_dtype: str | None = None,
+        comm_dtype: str | None = None,
+        nextn: int | None = None,
+        nextn_accept_rates: list[float] | str | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
@@ -81,21 +195,44 @@ class AicSession:
                 f"Supported versions for this system/backend: {supported_versions}"
             )
 
-        model_config = aic["config"].ModelConfig(
+        model_config_kwargs: dict = dict(
             tp_size=tp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             attention_dp_size=attention_dp_size or 1,
         )
+        # Quantization overrides drive the per-op perf-DB lookups (GEMM/MoE/FMHA
+        # precision) and the KV-cache element size, so predicted latency tracks
+        # the quantized deployment instead of the model's default dtype. Omit
+        # unset fields so ModelConfig keeps its own defaults.
+        for cfg_key, field, dtype in (
+            ("gemm_quant_mode", "gemm", gemm_dtype),
+            ("moe_quant_mode", "moe", moe_dtype),
+            ("fmha_quant_mode", "fmha", fmha_dtype),
+            ("kvcache_quant_mode", "kvcache", kv_cache_dtype),
+            ("comm_quant_mode", "comm", comm_dtype),
+        ):
+            quant_mode = _resolve_quant_mode(field, dtype)
+            if quant_mode is not None:
+                model_config_kwargs[cfg_key] = quant_mode
+        if nextn:
+            if not 1 <= nextn <= _NEXTN_ACCEPT_RATES_LEN:
+                raise ValueError(
+                    f"nextn must be 1..={_NEXTN_ACCEPT_RATES_LEN} when set, got {nextn}"
+                )
+            model_config_kwargs["nextn"] = nextn
+            # aic-core models one verification iteration. Dynamo's scheduler
+            # owns accepted-token progress and burst sampling above core.
+            _pad_nextn_accept_rates(nextn_accept_rates)
+        model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
             model_path=model_path,
             model_config=model_config,
             backend_name=backend_name,
         )
         backend = aic["get_backend"](backend_name)
-        self._session = aic["InferenceSession"](
-            model=model, database=database, backend=backend
-        )
+        self._backend = backend
+        self._backend_name = backend_name
         self._database = database
         self._model = model
         self._model_name = getattr(model, "model_name", None) or model_path
@@ -106,6 +243,38 @@ class AicSession:
             model_path,
             tp_size,
         )
+
+        # Phase 1.5: compile the model's op list to a Rust Engine ONCE, so each
+        # predict call is a single Rust dispatch instead of a per-call Python
+        # walk over model.context_ops / generation_ops. Falls back to the
+        # Python op-walk if the compiled AIC-core engine is unavailable or fails.
+        self._engine = self._build_compiled_engine()
+
+    def _build_compiled_engine(self):
+        """Build a cached aiconfigurator_core EngineHandle from the already-built
+        model, or return None to fall back to the Python op-walk."""
+        if os.environ.get("DYNAMO_AIC_DISABLE_COMPILED_ENGINE"):
+            logger.info(
+                "AIC compiled-engine path disabled via env; using Python op-walk."
+            )
+            return None
+        try:
+            from aiconfigurator_core.sdk.rust_engine_step import _cached_engine_handle
+        except Exception as exc:  # aiconfigurator-core without the compiled engine
+            logger.info(
+                "AIC compiled-engine path unavailable (%s); using Python op-walk.",
+                exc,
+            )
+            return None
+        try:
+            handle = _cached_engine_handle(self._model, self._database)
+            logger.info("AIC compiled-engine path active (Phase 1.5 Rust engine).")
+            return handle
+        except Exception as exc:
+            logger.warning(
+                "AIC compiled-engine build failed (%s); using Python op-walk.", exc
+            )
+            return None
 
     def _predict_context_latency(
         self, batch_size: int, effective_isl: int, prefix: int
@@ -163,10 +332,21 @@ class AicSession:
         self, batch_size: int, effective_isl: int, prefix: int
     ) -> float:
         """Predict prefill latency in ms from uncached tokens and cached prefix."""
+        if self._engine is not None:
+            # The engine's predict_prefill_latency takes the FULL isl and
+            # subtracts `prefix` internally, whereas the caller already gives us
+            # the post-prefix `effective_isl`. Pass effective_isl + prefix so the
+            # engine recovers the same effective length (and keeps prefix for the
+            # KV-cache-aware context-attention cost).
+            return self._engine.predict_prefill_latency(
+                batch_size, effective_isl + prefix, prefix
+            )
         return self._predict_context_latency(batch_size, effective_isl, prefix)
 
     def predict_decode(self, batch_size: int, isl: int, osl: int) -> float:
         """Predict decode (generation) latency in ms."""
+        if self._engine is not None:
+            return self._engine.predict_decode_latency(batch_size, isl, osl)
         return self._predict_generation_latency(batch_size, isl, osl)
 
 
@@ -179,6 +359,13 @@ def create_session(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    gemm_dtype: str | None = None,
+    moe_dtype: str | None = None,
+    fmha_dtype: str | None = None,
+    kv_cache_dtype: str | None = None,
+    comm_dtype: str | None = None,
+    nextn: int | None = None,
+    nextn_accept_rates: list[float] | str | None = None,
 ) -> AicSession:
     """Factory function called from Rust via PyO3."""
     return AicSession(
@@ -190,4 +377,116 @@ def create_session(
         moe_tp_size,
         moe_ep_size,
         attention_dp_size,
+        gemm_dtype=gemm_dtype,
+        moe_dtype=moe_dtype,
+        fmha_dtype=fmha_dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        comm_dtype=comm_dtype,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
+    )
+
+
+def estimate_num_gpu_blocks(
+    backend_name: str,
+    system: str,
+    model_path: str,
+    tp_size: int,
+    block_size: int,
+    max_num_batched_tokens: int,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
+    mem_fraction_static: float | None = None,
+    free_gpu_memory_fraction: float | None = None,
+    backend_version: str | None = None,
+    moe_tp_size: int | None = None,
+    moe_ep_size: int | None = None,
+    attention_dp_size: int | None = None,
+    gemm_dtype: str | None = None,
+    moe_dtype: str | None = None,
+    fmha_dtype: str | None = None,
+    kv_cache_dtype: str | None = None,
+    comm_dtype: str | None = None,
+) -> int:
+    """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
+
+    Delegates the budget math to aiconfigurator-core's unified
+    ``sdk.memory.estimate_num_gpu_blocks`` (the single source of truth for the
+    AIC memory estimator) instead of recomputing it here. The result is
+    per rank (per single GPU): AIC's memory model is already sharded for the
+    configured TP/DP shape, so the caller must not multiply it by TP or DP.
+
+    The backend selects which memory-fraction knob applies, mapped onto AIC's
+    ``memory_fraction_kind``/``memory_fraction_value``:
+
+    - ``vllm``   -> ``of_total`` with ``gpu_memory_utilization`` (fraction of total HBM)
+    - ``sglang`` -> ``of_total`` with ``mem_fraction_static``
+    - ``trtllm`` -> ``of_free`` with ``free_gpu_memory_fraction`` (fraction of the
+      HBM left after the model is loaded)
+    """
+    _validate_kv_capacity_backend(backend_name)
+
+    if backend_name == "trtllm":
+        memory_fraction_kind = "of_free"
+        memory_fraction_value = (
+            free_gpu_memory_fraction
+            if free_gpu_memory_fraction is not None
+            else DEFAULT_FREE_GPU_MEMORY_FRACTION
+        )
+    elif backend_name == "sglang":
+        memory_fraction_kind = "of_total"
+        memory_fraction_value = (
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        )
+    else:  # vllm
+        memory_fraction_kind = "of_total"
+        memory_fraction_value = gpu_memory_utilization
+
+    # Imported lazily because aiconfigurator-core is provided by the optional
+    # `mocker` extra. An AIC-backed call requires that extra and fails fast when
+    # it is absent.
+    # TODO: account for whether specdec is enabled (pass `nextn=...`). Currently
+    #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
+    #   negative KV capacity with Eagle.
+    try:
+        from aiconfigurator_core.sdk.memory import (
+            estimate_num_gpu_blocks as aic_estimate_num_gpu_blocks,
+        )
+    except ImportError as exc:
+        missing = exc.name or ""
+        if missing == "aiconfigurator_core" or missing.startswith(
+            "aiconfigurator_core."
+        ):
+            raise RuntimeError(
+                "aiconfigurator-core is required for AIC KV-cache estimation but is "
+                "not installed; install the 'mocker' extra"
+            ) from exc
+        raise
+
+    # AIC's non-KV memory is independent of batch size (activations track
+    # max_num_tokens), so the fixed max_batch_size here does not affect the result.
+    return int(
+        aic_estimate_num_gpu_blocks(
+            model_path,
+            system,
+            backend_name,
+            backend_version=resolve_backend_version(backend_name, backend_version),
+            scheduler_block_size=block_size,
+            max_num_tokens=max_num_batched_tokens,
+            max_batch_size=1,
+            memory_fraction_kind=memory_fraction_kind,
+            memory_fraction_value=memory_fraction_value,
+            tp_size=tp_size,
+            attention_dp_size=(
+                attention_dp_size if attention_dp_size is not None else 1
+            ),
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=_resolve_quant_mode_name("gemm", gemm_dtype),
+            moe_quant_mode=_resolve_quant_mode_name("moe", moe_dtype),
+            fmha_quant_mode=_resolve_quant_mode_name("fmha", fmha_dtype),
+            kvcache_quant_mode=_resolve_quant_mode_name("kvcache", kv_cache_dtype),
+            comm_quant_mode=_resolve_quant_mode_name("comm", comm_dtype),
+        )
     )

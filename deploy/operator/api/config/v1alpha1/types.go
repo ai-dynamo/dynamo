@@ -152,15 +152,14 @@ type LeaderElectionConfiguration struct {
 
 // NamespaceConfiguration determines operator namespace mode.
 type NamespaceConfiguration struct {
-	// Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.
-	// Use cluster-wide mode (leave Restricted empty) instead.
+	// Restricted enables namespace-restricted mode for development and testing.
+	// Namespace-restricted mode is not supported for production.
 	Restricted string `json:"restricted"`
-	// Deprecated: Scope is only used in namespace-restricted mode, which is deprecated.
+	// Scope configures the namespace ownership claim in namespace-restricted mode.
 	Scope NamespaceScopeConfiguration `json:"scope"`
 }
 
-// Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-// mode and will be removed in a future release.
+// NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
 	// +kubebuilder:default="30s"
@@ -178,6 +177,8 @@ type OrchestratorConfiguration struct {
 	LWS LWSConfiguration `json:"lws"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
+	// VolcanoScheduler configuration
+	VolcanoScheduler VolcanoSchedulerConfiguration `json:"volcanoScheduler"`
 }
 
 // GroveConfiguration holds Grove orchestrator settings.
@@ -201,10 +202,16 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+// VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+type VolcanoSchedulerConfiguration struct {
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
 //
-// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
-// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
+// registered on the apiserver (Kubernetes 1.34+). It does NOT verify that a
 // GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
 // installed, that its DeviceClass exists, or that node-level GPU drivers are
 // compatible. An admin can use `enabled: false` to force-off DRA integration
@@ -213,7 +220,7 @@ type KaiSchedulerConfiguration struct {
 // with a clear error instead of letting pods Pend with a confusing
 // "resourceclaim not found" at schedule time.
 type DRAConfiguration struct {
-	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// Enabled overrides auto-detection of the resource.k8s.io/v1 API.
 	// nil = auto-detect. Setting true requires detection to also succeed (the
 	// operator will exit at startup otherwise).
 	Enabled *bool `json:"enabled,omitempty"`
@@ -261,6 +268,8 @@ const (
 // DestinationRules) for EPP components so that sidecar proxies connect
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
 	Provider string `json:"provider"`
@@ -268,19 +277,37 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a supported service mesh provider is configured.
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
 	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
 // IstioMeshConfiguration holds Istio-specific mesh settings.
 type IstioMeshConfiguration struct {
-	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// TLSMode is the Istio TLS mode for DestinationRules.
+	// Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".
 	// Defaults to "SIMPLE".
 	TLSMode string `json:"tlsMode"`
 	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
 	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
 	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+	// ClientCertificate is the path (in the istio-proxy sidecar's filesystem)
+	// to the file holding the client-side TLS certificate used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	ClientCertificate string `json:"clientCertificate,omitempty"`
+	// PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the
+	// file holding the client-side TLS private key used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	PrivateKey string `json:"privateKey,omitempty"`
+	// CaCertificates is the optional path (in the istio-proxy sidecar's
+	// filesystem) to the file holding CA certificates used to verify the
+	// server certificate. Used only when TLSMode is "MUTUAL"; for other modes
+	// the field is ignored.
+	CaCertificates string `json:"caCertificates,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
@@ -313,10 +340,15 @@ type CheckpointConfiguration struct {
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.
 	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
-	// Deprecated: Storage is retained for compatibility and ignored by the
-	// current snapshot flow. Snapshot storage is discovered from the
-	// snapshot-agent DaemonSet instead.
+	// Storage optionally configures the namespace-local checkpoint PVC that
+	// workload pods mount. When omitted, the operator preserves the legacy
+	// behavior of discovering storage from a snapshot-agent DaemonSet in the
+	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
+	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
+	// +kubebuilder:default="busybox:1.36"
+	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied
@@ -337,8 +369,8 @@ type CheckpointSeccompConfiguration struct {
 }
 
 // EffectiveSeccompProfile returns the seccomp profile to use, or "" to disable.
-// nil substruct or zero-value substruct → DefaultSeccompProfile. Disabled=true
-// → "". Profile override takes effect when Disabled is false.
+// A nil substruct or zero-value substruct uses DefaultSeccompProfile. Disabled=true
+// disables injection. Profile override takes effect when Disabled is false.
 func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 	if c.Seccomp == nil {
 		return DefaultSeccompProfile
@@ -352,26 +384,35 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 	return c.Seccomp.Profile
 }
 
-// Deprecated: CheckpointStorageConfiguration is retained for compatibility and
-// ignored by the current snapshot flow.
+// CheckpointStorageConfiguration configures checkpoint storage for operator
+// pod mutations. Only PVC storage is implemented today.
 type CheckpointStorageConfiguration struct {
-	// Type is the legacy storage backend type: pvc, s3, or oci.
+	// Type is the storage backend type. Only pvc is implemented today.
 	Type string `json:"type"`
-	// PVC configuration for legacy pvc-based settings.
+	// PVC configuration for pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
-	// S3 configuration for legacy s3-based settings.
+	// Deprecated: S3 is retained for compatibility and ignored.
 	S3 CheckpointS3Config `json:"s3"`
-	// OCI configuration for legacy oci-based settings.
+	// Deprecated: OCI is retained for compatibility and ignored.
 	OCI CheckpointOCIConfig `json:"oci"`
 }
 
-// Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
-// the current snapshot flow.
+// CheckpointPVCConfig configures the namespace-local PVC mounted into
+// checkpoint and restore workload pods.
 type CheckpointPVCConfig struct {
-	// PVCName is the legacy PVC name.
+	// PVCName is the PVC name in each workload namespace.
 	PVCName string `json:"pvcName"`
-	// BasePath is the legacy base directory within the PVC.
+	// BasePath is the mount path inside checkpoint and restore workload pods.
 	BasePath string `json:"basePath"`
+	// Create tells the operator to create the PVC in workload namespaces when
+	// it is missing. When false, the PVC must already exist.
+	Create bool `json:"create"`
+	// Size is the storage request used when Create is true.
+	Size string `json:"size"`
+	// StorageClassName is the optional StorageClass name used when Create is true.
+	StorageClassName string `json:"storageClassName"`
+	// AccessMode is the PVC access mode used when Create is true.
+	AccessMode string `json:"accessMode"`
 }
 
 // Deprecated: CheckpointS3Config is retained for compatibility and ignored by

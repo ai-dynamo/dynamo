@@ -21,7 +21,8 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub min_tokens: Option<u32>,
 
-    /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
+    /// Integer that controls the number of top tokens to consider. Set to -1 or 0 to consider all
+    /// tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub top_k: Option<i32>,
@@ -81,6 +82,11 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub skip_special_tokens: Option<bool>,
+
+    /// Number of log probabilities to return per prompt token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub prompt_logprobs: Option<u32>,
 }
 
 impl CommonExt {
@@ -111,6 +117,11 @@ pub trait CommonExtProvider {
 
     /// Output Options
     fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    /// Number of prompt logprobs to request from the engine.
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +217,7 @@ mod tests {
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
+            prompt_logprobs: None,
         };
         assert!(common_ext.validate().is_ok());
     }

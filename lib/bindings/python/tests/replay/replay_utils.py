@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 
 MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}
 {"timestamp": 0, "input_length": 7319, "output_length": 490, "hash_ids": [0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]}
@@ -37,7 +38,7 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
 AIC_PARITY_VERSIONS = {
-    "vllm": "0.12.0",
+    "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
 AIC_PARITY_BACKENDS = [
@@ -71,18 +72,14 @@ def _router_config_payload():
         "router_event_threads": 1,
         "router_queue_policy": "wspt",
         "router_temperature": 0.0,
-        "overlap_score_weight": 1.0,
+        "overlap_score_credit": 1.0,
         "use_kv_events": True,
-        "durable_kv_events": False,
         "router_replica_sync": False,
         "router_track_active_blocks": True,
         "router_track_output_blocks": False,
         "router_assume_kv_reuse": True,
         "router_track_prefill_tokens": True,
-        "router_snapshot_threshold": 1000000,
-        "router_reset_states": False,
         "router_ttl_secs": 120.0,
-        "router_enable_cache_control": False,
         "skip_initial_worker_wait": False,
         "use_remote_indexer": False,
     }
@@ -345,24 +342,23 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aiconfigurator = pytest.importorskip("aiconfigurator")
+    aic_core = pytest.importorskip("aiconfigurator_core")
 
-    database = aiconfigurator.sdk.perf_database.get_database(
+    database = aic_core.sdk.perf_database.get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
-    model = aiconfigurator.sdk.models.get_model(
+    backend = aic_core.sdk.backends.factory.get_backend(backend_name)
+    model = aic_core.sdk.models.get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        model_config=aic_core.sdk.config.ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    session = aiconfigurator.sdk.inference_session.InferenceSession(
-        model, database, backend
-    )
-    summary = session.run_static(
-        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+    summary = backend.run_static(
+        model=model,
+        database=database,
+        runtime_config=aic_core.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,

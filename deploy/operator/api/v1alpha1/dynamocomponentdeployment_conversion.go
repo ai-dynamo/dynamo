@@ -39,6 +39,17 @@ const (
 	preservedDCDEmptyServiceNamePath = "serviceName"
 )
 
+// IsDynamoComponentDeploymentConversionAnnotation reports whether key is owned
+// by the DCD conversion layer and should be treated as conversion bookkeeping.
+func IsDynamoComponentDeploymentConversionAnnotation(key string) bool {
+	switch key {
+	case annDCDSpec, annDCDStatus:
+		return true
+	default:
+		return false
+	}
+}
+
 // DynamoComponentDeploymentConversionContext carries DCD-level conversion
 // context that shared-spec converters cannot derive from their local inputs.
 // +kubebuilder:object:generate=false

@@ -74,7 +74,7 @@ The ISL/OSL/cache hit statistics of our trace is below.
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
+1. **Dynamo Platform installed** - See [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 2. **32x GB200 GPUs** across 8 nodes
 3. **HuggingFace token** configured:
    ```bash
@@ -198,4 +198,3 @@ kubectl delete dynamographdeployment disagg-kv-dsv32-nvfp4 -n ${NAMESPACE}
 
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) - FAST25 paper and trace data
 - [Optimizing DeepSeek-V3.2 on NVIDIA Blackwell GPUs](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html) - TRTLLM tech blog on available optimizations for DSV3.2 on GB200
-

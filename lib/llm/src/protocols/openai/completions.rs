@@ -14,8 +14,10 @@ use super::{
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     common_ext::{CommonExt, CommonExtProvider},
-    nvext::{NvExt, NvExtProvider},
     validate,
+};
+use crate::protocols::common::extensions::{
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 mod aggregator;
@@ -34,11 +36,17 @@ pub struct NvCreateCompletionRequest {
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
     // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+
+    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// instead of the decoded text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_tokens_as_token_ids: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
@@ -129,6 +137,10 @@ impl NvExtProvider for NvCreateCompletionRequest {
             return Some(prompt_to_string(&self.inner.prompt));
         }
         None
+    }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        Some(&self.unsupported_fields)
     }
 }
 
@@ -231,6 +243,10 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.common.prompt_logprobs
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
@@ -243,11 +259,16 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        use dynamo_protocols::types::Stop;
-        self.inner.stop.as_ref().map(|s| match s {
-            Stop::String(s) => vec![s.clone()],
-            Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        if let Some(ids) = self.inner.stop.as_ref().and_then(|stop| stop.token_ids()) {
+            return Some(ids);
+        }
+        self.unsupported_fields
+            .get("stop_token_ids")
+            .and_then(|v| serde_json::from_value::<Vec<crate::types::TokenIdType>>(v.clone()).ok())
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -404,9 +425,11 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        self.inner
-            .echo
-            .and_then(|echo| if echo { Some(1) } else { None })
+        self.common.prompt_logprobs.or_else(|| {
+            self.inner
+                .echo
+                .and_then(|echo| if echo { Some(1) } else { None })
+        })
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
@@ -415,6 +438,10 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 
     fn get_formatted_prompt(&self) -> Option<bool> {
         None
+    }
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        self.return_tokens_as_token_ids
     }
 }
 
@@ -436,6 +463,10 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_n(self.inner.n)?;
+        validate_completion_token_ids_single_choice(
+            get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
         // none for stream
         // none for stream_options
         validate::validate_logprobs(self.inner.logprobs)?;
@@ -509,6 +540,22 @@ mod tests {
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
+    }
+
+    #[test]
+    fn test_prompt_logprobs_propagates() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "prompt_logprobs": 3
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+        assert_eq!(output_options.prompt_logprobs, Some(3));
     }
 
     #[test]
@@ -660,6 +707,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(null_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let one_stop = json!({
             "model": "test-model",
@@ -669,6 +717,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(one_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), Some(vec!["foo".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let many_stops = json!({
             "model": "test-model",
@@ -681,5 +730,143 @@ mod tests {
             request.get_stop(),
             Some(vec!["foo".to_string(), "bar".to_string()])
         );
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": [32, 34]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), Some(vec![32, 34]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![32, 34]));
+        assert_eq!(stop_conditions.stop_token_ids_hidden, None);
+
+        let token_id_display_string_scalar_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": "token_id:576"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_scalar_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_display_string_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": ["token_id:576"]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        // Top-level stop_token_ids should be accepted and plumbed.
+        let whitelisted_stop_token_ids = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop_token_ids": [576]
+        });
+        let request: NvCreateCompletionRequest = serde_json::from_value(whitelisted_stop_token_ids)
+            .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "stop_token_ids must be accepted via PASSTHROUGH_EXTRA_FIELDS"
+        );
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![576]));
+
+        let invalid_stop_token_ids = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop_token_ids": "bad"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
+        assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn test_passthrough_token_constraints_validate() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "allowed_token_ids": [10, 11],
+            "bad_words_token_ids": [[12, 13]]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert_eq!(
+            request.unsupported_fields.get("allowed_token_ids"),
+            Some(&serde_json::json!([10, 11]))
+        );
+        assert_eq!(
+            request.unsupported_fields.get("bad_words_token_ids"),
+            Some(&serde_json::json!([[12, 13]]))
+        );
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejected_for_multi_choice() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "n": 2,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejected_for_prompt_batch() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": ["first", "second"],
+            "n": 1,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("prompt batch token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_truncate_prompt_tokens_rejected_until_supported() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "truncate_prompt_tokens": 2
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_err());
     }
 }

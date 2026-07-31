@@ -256,6 +256,23 @@ Every test must have **at least**:
    - `integration` -- integration test
    - `e2e` -- end-to-end test
 
+4. **A component marker** -- which backend component the test exercises (only required
+   when the test also has a framework marker like `vllm`/`trtllm`/`sglang`). Pick
+   **exactly one** so tests are grouped consistently by feature area:
+   - `multimodal` -- exercises image/video/audio paths, VL models, omni pipeline,
+     multimodal embedding caches, multimodal hashing/routing
+   - `router` -- exercises the dynamo request router (worker selection, KV-prefix
+     routing, KV cache events on the router path); not the same as omni's internal
+     stage_router
+   - `kvbm` -- exercises the KV Block Manager (cross-engine determinism, offload/
+     onboard, eviction, the consolidator); use `kvbm_concurrency` *additionally*
+     for stress tests that should run separately
+   - `fault_tolerance` -- exercises fault-tolerance paths: request cancellation,
+     migration, etcd HA failover, worker health checks, canary rank-pause detection
+   - `core` -- residual: anything that isn't multimodal/router/kvbm/fault_tolerance.
+     Worker handlers, scheduler, prefill/decode, frontend HTTP/gRPC, CUDA version
+     checks, predownload, etc.
+
 ### Scheduling marker guidance
 
 CI compute is finite. Choose placement carefully:
@@ -273,6 +290,12 @@ CI compute is finite. Choose placement carefully:
 
 Apply when the test depends on a specific inference backend:
 - `vllm`, `trtllm`, `sglang`
+
+Framework markers say **which backend** the test runs against. They are independent
+of the component marker (`multimodal` / `router` / `kvbm` / `fault_tolerance` / `core`),
+which says **which part of the backend** the test exercises. Together they let
+selectors like `pytest -m "vllm and multimodal"` target a specific slice locally
+or in CI.
 
 ### Timeouts
 
@@ -303,6 +326,8 @@ def test_poll_server():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core  # component bucket: pick one of core, multimodal, router, kvbm, fault_tolerance
 def test_vllm_aggregated(...):
     ...
 ```
@@ -316,7 +341,8 @@ Timing comments let AI/automation understand requirements when shuffling test su
 - `slow` -- known slow test.
 - `parallel` -- safe to run with pytest-xdist.
 - `h100` -- requires H100 hardware.
-- `fault_tolerance`, `deploy`, `router`, `planner`, `kvbm` -- component markers.
+- `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
+  `router` / `kvbm` / `fault_tolerance`).
 - `k8s` -- requires Kubernetes.
 
 ### Example
@@ -326,6 +352,7 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.vllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):

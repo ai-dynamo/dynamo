@@ -11,7 +11,7 @@ in Rust (``dynamo_backend_common::Worker``). This module only:
     ``from_runtime_config`` helper, and
   * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
 
-Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+Engine semantics (``start``/``generate``/``abort``/``is_quiescent``/``cleanup``)
 remain the only thing engine authors implement.
 """
 
@@ -19,17 +19,86 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import warnings
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
-from dynamo.llm import ModelInput
+from dynamo.common.constants import DisaggregationMode
+from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import LLMEngine
+from .engine import BaseEngine, RawEngine
+from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
+
+
+def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    """Suppress engine ``loop.add_signal_handler`` calls for SIGTERM/SIGINT.
+
+    The Rust ``Worker`` owns graceful shutdown via its own OS signal handlers;
+    engines must do teardown in ``cleanup()``, not a signal handler. Some
+    engines register loop handlers during ``start()`` anyway (e.g. SGLang's
+    tokenizer manager), which would reinstall the process ``sigaction`` and
+    override the Worker. Only SIGTERM/SIGINT are suppressed — other signals
+    (e.g. SGLang's SIGQUIT watchdog) pass through.
+    """
+    orig_add_signal_handler = loop.add_signal_handler
+    owned = frozenset({signal.SIGINT, signal.SIGTERM})
+
+    def add_signal_handler(sig, callback, *args):
+        if sig in owned:
+            logger.info(
+                "Suppressed engine loop.add_signal_handler(%s); the Rust Worker "
+                "owns graceful shutdown.",
+                sig,
+            )
+            return None
+        return orig_add_signal_handler(sig, callback, *args)
+
+    loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
+
+
+# Map the user-facing `dynamo.common.constants.DisaggregationMode` to the
+# Rust enum. All four modes (AGGREGATED, PREFILL, DECODE, ENCODE) are
+# supported by the unified abstraction.
+_DISAGG_MODE_TO_RUST = {
+    DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
+    DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
+    DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+    DisaggregationMode.ENCODE: _backend.DisaggregationMode.Encode,
+}
+
+
+def _to_rust_disaggregation_mode(mode: DisaggregationMode):
+    try:
+        return _DISAGG_MODE_TO_RUST[mode]
+    except KeyError as e:
+        raise NotImplementedError(
+            f"DisaggregationMode.{mode.name} is not supported by the unified "
+            "backend abstraction; use the legacy backend entry point for this "
+            "worker role"
+        ) from e
+
+
+def _coerce_disagg_mode(value) -> DisaggregationMode:
+    """`None` → `AGGREGATED`. Native `DisaggregationMode` passes through.
+    Foreign enums (e.g. TRT-LLM's local `DisaggregationMode`) coerce by
+    `name` — same name → same mode, regardless of value-string. Anything
+    else raises so a typo-string can't be silently mapped to AGG."""
+    if value is None:
+        return DisaggregationMode.AGGREGATED
+    if isinstance(value, DisaggregationMode):
+        return value
+    if isinstance(value, Enum) and value.name in DisaggregationMode.__members__:
+        return DisaggregationMode[value.name]
+    raise TypeError(
+        f"disaggregation_mode is {type(value).__name__}({value!r}); "
+        "expected dynamo.common.constants.DisaggregationMode"
+    )
 
 
 @dataclass
@@ -50,7 +119,34 @@ class WorkerConfig:
     reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
+    # Operator-level kill switch for KV-aware-routing publishers. When False,
+    # Worker skips engine.kv_event_sources() and SnapshotPublisher setup so
+    # the worker ships no KV events or worker-load metrics.
+    enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
+    # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
+    # The Rust Worker reads this for registration (Prefill → ModelType.Prefill
+    # legacy marker bit + WorkerType.Prefill, Decode → disable local indexer);
+    # engines read it from their own runtime config to switch per-mode protocol
+    # behavior in `generate()`.
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
+    # Operator override; when set, the Rust Worker uses this instead of
+    # `engine.health_check_payload()`. Populated by `from_runtime_config`.
+    health_check_payload: Optional[dict] = None
+    structural_tag_mode: str = "off"
+    structural_tag_scope: str = "auto"
+    structural_tag_schema: str = "auto"
+    # When True, this worker declares an upstream Encode peer in its
+    # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
+    # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
+    # Keep this and future fields appended to preserve positional callers;
+    # inserting fields earlier would silently shift downstream arguments.
+    route_to_encoder: bool = False
+    media_decoder: Optional[MediaDecoder] = None
+    media_fetcher: Optional[MediaFetcher] = None
+    # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
+    kv_state_endpoint: Optional[str] = None
+    default_thinking_mode: Optional[str] = None
 
     @classmethod
     def from_runtime_config(
@@ -70,6 +166,7 @@ class WorkerConfig:
             "namespace": runtime_cfg.namespace,
             "component": getattr(runtime_cfg, "component", None) or "backend",
             "endpoint": getattr(runtime_cfg, "endpoint", None) or "generate",
+            "kv_state_endpoint": getattr(runtime_cfg, "kv_state_endpoint", None),
             "model_name": model_name,
             "served_model_name": served_model_name,
             "endpoint_types": getattr(
@@ -84,21 +181,59 @@ class WorkerConfig:
             ),
             "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
             "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "default_thinking_mode": getattr(
+                runtime_cfg, "dyn_default_thinking_mode", None
+            ),
             "exclude_tools_when_tool_choice_none": getattr(
                 runtime_cfg, "exclude_tools_when_tool_choice_none", True
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
+            "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
+            "structural_tag_mode": (
+                "on"
+                if getattr(runtime_cfg, "dyn_enable_structural_tag", False)
+                else "off"
+            ),
+            "structural_tag_scope": getattr(
+                runtime_cfg, "dyn_structural_tag_scope", "auto"
+            ),
+            "structural_tag_schema": getattr(
+                runtime_cfg, "dyn_structural_tag_schema", "auto"
+            ),
+            # vLLM exposes `route_to_encoder` on its backend_args today;
+            # SGLang/TRT-LLM don't yet, so the getattr default keeps them at
+            # False until they add the field on their own runtime config.
+            "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
         }
+        # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
+        # `serving_mode`. Skip the probe when an override is supplied so
+        # backends with a foreign enum (TRT-LLM) bypass the coercer.
+        if "disaggregation_mode" not in overrides:
+            kwargs["disaggregation_mode"] = _coerce_disagg_mode(
+                getattr(
+                    runtime_cfg,
+                    "disaggregation_mode",
+                    getattr(runtime_cfg, "serving_mode", None),
+                )
+            )
         if model_input is not None:
             kwargs["model_input"] = model_input
+        kwargs["health_check_payload"] = parse_health_check_payload_cli(
+            getattr(runtime_cfg, "health_check_payload", None)
+        )
         kwargs.update(overrides)
         return cls(**kwargs)
 
 
 class Worker:
-    """Drive the Rust ``Worker`` for a single ``LLMEngine`` instance."""
+    """Drive the Rust ``Worker`` for a single engine instance.
 
-    def __init__(self, engine: LLMEngine, config: WorkerConfig):
+    Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
+    or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+    selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
+    ``WorkerConfig.model_input`` is validated against that kind."""
+
+    def __init__(self, engine: BaseEngine, config: WorkerConfig):
         self.engine = engine
         self.config = config
 
@@ -127,6 +262,7 @@ class Worker:
             namespace=self.config.namespace,
             component=self.config.component,
             endpoint=self.config.endpoint,
+            kv_state_endpoint=self.config.kv_state_endpoint,
             model_name=self.config.model_name,
             served_model_name=self.config.served_model_name,
             model_input=self.config.model_input,
@@ -134,14 +270,31 @@ class Worker:
             custom_jinja_template=self.config.custom_jinja_template,
             tool_call_parser=self.config.tool_call_parser,
             reasoning_parser=self.config.reasoning_parser,
+            default_thinking_mode=self.config.default_thinking_mode,
             exclude_tools_when_tool_choice_none=(
                 self.config.exclude_tools_when_tool_choice_none
             ),
             enable_local_indexer=self.config.enable_local_indexer,
+            enable_kv_routing=self.config.enable_kv_routing,
             metrics_labels=list(self.config.metrics_labels),
+            disaggregation_mode=_to_rust_disaggregation_mode(
+                self.config.disaggregation_mode
+            ),
+            health_check_payload=self.config.health_check_payload,
+            structural_tag_mode=self.config.structural_tag_mode,
+            structural_tag_scope=self.config.structural_tag_scope,
+            structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
+            route_to_encoder=self.config.route_to_encoder,
+            media_decoder=self.config.media_decoder,
+            media_fetcher=self.config.media_fetcher,
         )
 
         loop = asyncio.get_running_loop()
-        worker = _backend.Worker(self.engine, worker_cfg, loop)
+        _guard_loop_signal_handlers(loop)
+        # A RawEngine (e.g. DiffusionEngine) drives the raw media pipeline
+        # (JSON request adapter); everything else is a token-pipeline
+        # LLMEngine. The Rust Worker validates model_input against the kind.
+        is_raw = isinstance(self.engine, RawEngine)
+        worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
         await worker.run()

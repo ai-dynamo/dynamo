@@ -56,6 +56,8 @@ typedef struct {
     uint32_t decode_dp_rank;
     uint32_t *token_ids;
     size_t token_count;
+    uint8_t *cache_namespace;
+    size_t cache_namespace_len;
 } CRoutingResult;
 
 // Router bindings API
@@ -75,12 +77,14 @@ query_router_result_t route_decode_request(RouterHandles *handle,
                                            bool is_disaggregated,
                                            CRoutingResult *out_result);
 
-query_router_result_t add_request(RouterHandles *handle,
-                                  const char *request_id,
-                                  const uint32_t *token_ids,
-                                  size_t token_count,
-                                  uint64_t worker_id,
-                                  uint32_t dp_rank);
+query_router_result_t add_request_with_cache_namespace(RouterHandles *handle,
+                                                       const char *request_id,
+                                                       const uint32_t *token_ids,
+                                                       size_t token_count,
+                                                       uint64_t worker_id,
+                                                       uint32_t dp_rank,
+                                                       const uint8_t *cache_namespace,
+                                                       size_t cache_namespace_len);
 
 query_router_result_t mark_prefill_complete(RouterHandles *handle,
                                             const char *request_id);
@@ -97,6 +101,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -104,6 +109,7 @@ import (
 	"unsafe"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -113,9 +119,8 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace     string
-	ffiComponent     string
-	ffiEnforceDisagg bool
+	ffiNamespace string
+	ffiComponent string
 
 	routerInitialized bool
 
@@ -131,11 +136,12 @@ const UnsetDpRank = ^uint32(0)
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+	}
 	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
 		"component", ffiComponent,
-		"enforce_disagg", ffiEnforceDisagg,
 		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
 		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
@@ -175,7 +181,7 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			C.bool(ffiEnforceDisagg),
+			C.bool(false),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
@@ -242,13 +248,13 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 
 		if meta := ep.GetMetadata(); meta != nil {
 			entry.Pod = &endpointInfoJSON{
-				Name:      meta.NamespacedName.Name,
-				Namespace: meta.NamespacedName.Namespace,
-				PodName:   meta.PodName,
-				Address:   meta.Address,
-				Port:      meta.Port,
+				Name:        meta.NamespacedName.Name,
+				Namespace:   meta.NamespacedName.Namespace,
+				PodName:     meta.PodName,
+				Address:     meta.Address,
+				Port:        meta.Port,
 				MetricsHost: meta.MetricsHost,
-				Labels:    meta.Labels,
+				Labels:      meta.Labels,
 			}
 		}
 
@@ -277,48 +283,36 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
-	requestBody := make(map[string]any)
-
+// BuildOpenAIRequestJSON forwards the full request body (req.Body.Payload) to
+// the Rust router's FFI, overriding only the model, so tool-calling and
+// reasoning fields survive the router's parse and chat-template render. Errors
+// when no payload is available so the scorer falls back to non-KV routing.
+func BuildOpenAIRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	if req == nil || req.Body == nil {
-		return nil, fmt.Errorf("missing request body")
+		return "", fmt.Errorf("missing request body")
 	}
 
-	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
-		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
-		anyNonEmpty := false
-		for _, msg := range req.Body.ChatCompletions.Messages {
-			content := msg.Content.PlainText()
-			if strings.TrimSpace(content) != "" {
-				anyNonEmpty = true
-			}
-			messages = append(messages, map[string]any{
-				"role":    msg.Role,
-				"content": content,
-			})
-		}
-		if !anyNonEmpty {
-			return nil, fmt.Errorf("empty chat messages")
-		}
-		requestBody["messages"] = messages
-	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
-		requestBody["messages"] = []map[string]any{
-			{"role": "user", "content": req.Body.Completions.Prompt.PlainText()},
-		}
-	} else {
-		return nil, fmt.Errorf("no messages or prompt provided")
+	pm, ok := req.Body.Payload.(fwkrh.PayloadMap)
+	if !ok || len(pm) == 0 {
+		return "", fmt.Errorf("request payload unavailable; cannot build KV-routing request")
 	}
 
-	if req != nil && strings.TrimSpace(req.TargetModel) != "" {
+	requestBody := make(map[string]any, len(pm))
+	maps.Copy(requestBody, pm)
+	// Route on the resolved target model.
+	if strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
-	} else {
-		requestBody["model"] = "default"
 	}
-	return requestBody, nil
+
+	data, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request JSON: %w", err)
+	}
+	return string(data), nil
 }
 
 // CallAddRequest registers a request with the router's bookkeeping.
-func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank uint32) error {
+func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank uint32, cacheNamespace string) error {
 	if !routerInitialized {
 		return fmt.Errorf("dynamo router not initialized")
 	}
@@ -338,19 +332,26 @@ func CallAddRequest(requestID string, tokenData []int64, workerID uint64, dpRank
 
 	cRequestID := C.CString(requestID)
 	defer C.free(unsafe.Pointer(cRequestID))
+	var cCacheNamespace *C.uint8_t
+	if cacheNamespace != "" {
+		cCacheNamespace = (*C.uint8_t)(C.CBytes([]byte(cacheNamespace)))
+		defer C.free(unsafe.Pointer(cCacheNamespace))
+	}
 
 	var cTokens *C.uint32_t
 	if len(tokens) > 0 {
 		cTokens = (*C.uint32_t)(unsafe.Pointer(&tokens[0]))
 	}
 
-	rc := C.add_request(
+	rc := C.add_request_with_cache_namespace(
 		router,
 		cRequestID,
 		cTokens,
 		C.size_t(len(tokens)),
 		C.uint64_t(workerID),
 		C.uint32_t(dpRank),
+		cCacheNamespace,
+		C.size_t(len(cacheNamespace)),
 	)
 
 	if rc != C.QUERY_ROUTER_OK {
@@ -409,9 +410,10 @@ func CallFreeRequest(requestID string) error {
 
 // RoutingResult holds the result of a prefill or decode routing call.
 type RoutingResult struct {
-	WorkerID  uint64
-	DpRank    uint32
-	TokenData []int64
+	WorkerID       uint64
+	DpRank         uint32
+	TokenData      []int64
+	CacheNamespace string
 }
 
 // extractTokenData copies token IDs from a C result into Go memory.
@@ -426,6 +428,15 @@ func extractTokenData(result *C.CRoutingResult) []int64 {
 		return tokens
 	}
 	return nil
+}
+
+// extractCacheNamespace copies the namespace bytes from a C result into Go memory.
+func extractCacheNamespace(result *C.CRoutingResult) string {
+	count := int(result.cache_namespace_len)
+	if count > 0 && result.cache_namespace != nil {
+		return string(unsafe.Slice((*byte)(unsafe.Pointer(result.cache_namespace)), count))
+	}
+	return ""
 }
 
 // CallRoutePrefillRequest routes a request to the best prefill worker.
@@ -458,15 +469,21 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	}
 
 	tokens := extractTokenData(&result)
+	cacheNamespace := extractCacheNamespace(&result)
 	workerID := uint64(result.prefill_worker_id)
 	dpRank := uint32(result.prefill_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
+	return &RoutingResult{
+		WorkerID:       workerID,
+		DpRank:         dpRank,
+		TokenData:      tokens,
+		CacheNamespace: cacheNamespace,
+	}, nil
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
-// When isDisaggregated is true, overlap_score_weight=0 is used (KV cache transferred from prefill).
+// When isDisaggregated is true, overlap_score_credit=0 is used (KV cache transferred from prefill).
 func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated bool) (*RoutingResult, error) {
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")
@@ -495,9 +512,15 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 	}
 
 	tokens := extractTokenData(&result)
+	cacheNamespace := extractCacheNamespace(&result)
 	workerID := uint64(result.decode_worker_id)
 	dpRank := uint32(result.decode_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
+	return &RoutingResult{
+		WorkerID:       workerID,
+		DpRank:         dpRank,
+		TokenData:      tokens,
+		CacheNamespace: cacheNamespace,
+	}, nil
 }

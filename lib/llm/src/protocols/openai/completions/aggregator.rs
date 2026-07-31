@@ -10,7 +10,7 @@ use super::NvCreateCompletionResponse;
 use crate::protocols::{
     Annotated, DataStream,
     codec::{Message, SseCodecError},
-    common::FinishReason,
+    common::{FinishReason, extensions::merge_response_nvext},
     convert_sse_stream,
     openai::ParsingOptions,
 };
@@ -85,10 +85,7 @@ impl DeltaAggregator {
                     if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
-                    // Aggregate nvext field (take the last non-None value)
-                    if delta.nvext.is_some() {
-                        aggregator.nvext = delta.nvext;
-                    }
+                    merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
                     // handle the choices
                     for choice in delta.inner.choices {
@@ -158,7 +155,7 @@ impl DeltaAggregator {
             .map(dynamo_protocols::types::Choice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
         let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: aggregator.id,
@@ -334,8 +331,10 @@ mod tests {
         // One will have a MessageRole and no FinishReason,
         // the other will have a FinishReason and no MessageRole
         let annotated_delta1 = create_test_delta(0, "Hello,", None, Some(-0.1));
-        let annotated_delta2 =
+        let mut annotated_delta2 =
             create_test_delta(0, " world!", Some("stop".to_string()), Some(-0.2));
+        annotated_delta2.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "stop_reason": 128001 }));
 
         // Create a stream
         let annotated_deltas = vec![annotated_delta1, annotated_delta2];
@@ -357,10 +356,37 @@ mod tests {
             choice.finish_reason,
             Some(dynamo_protocols::types::CompletionFinishReason::Stop)
         );
+        assert_eq!(
+            response.nvext,
+            Some(serde_json::json!({ "stop_reason": 128001 }))
+        );
         assert_eq!(choice.logprobs.as_ref().unwrap().tokens.len(), 2);
         assert_eq!(
             choice.logprobs.as_ref().unwrap().token_logprobs,
             vec![Some(-0.1), Some(-0.2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_deltas_merge_nvext_fields() {
+        let mut annotated_delta1 = create_test_delta(0, "Hello,", None, None);
+        annotated_delta1.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "engine_data": { "trace_id": "abc" } }));
+        let mut annotated_delta2 = create_test_delta(0, " world!", Some("stop".to_string()), None);
+        annotated_delta2.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "stop_reason": 128001 }));
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregate stream");
+
+        assert_eq!(
+            response.nvext,
+            Some(serde_json::json!({
+                "engine_data": { "trace_id": "abc" },
+                "stop_reason": 128001,
+            }))
         );
     }
 
@@ -412,7 +438,7 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(choice0.text, "Choice 0".to_string());

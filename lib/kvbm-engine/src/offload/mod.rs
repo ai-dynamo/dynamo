@@ -100,6 +100,7 @@ mod pending;
 mod pipeline;
 mod policy;
 mod queue;
+mod settlement;
 mod source;
 
 #[cfg(test)]
@@ -108,7 +109,10 @@ mod cancel_tests;
 // Re-export public API
 pub use cancel::{CancelConfirmation, CancelState, CancellationToken};
 pub use engine::{OffloadEngine, OffloadEngineBuilder};
-pub use handle::{TransferHandle, TransferId, TransferResult, TransferStatus};
+pub use handle::{
+    TransferHandle, TransferId, TransferProgressCounts, TransferProgressCursor,
+    TransferProgressDelta, TransferResult, TransferStatus,
+};
 pub use pending::{PendingGuard, PendingTracker};
 pub use pipeline::{
     ObjectPipeline, ObjectPipelineBuilder, ObjectPipelineConfig, Pipeline, PipelineBuilder,
@@ -121,6 +125,10 @@ pub use policy::{
     async_result, create_policy_from_config, sync_batch_result, sync_result,
 };
 pub use queue::CancellableQueue;
+pub use settlement::{
+    PipelineFailure, PipelineFailureKind, PipelineLane, SettlementError, SettlementTarget,
+    SettlementToken,
+};
 pub use source::{ExternalBlock, SourceBlock, SourceBlocks};
 
 // Re-export batch config for advanced users

@@ -228,7 +228,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -353,7 +353,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -527,7 +527,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer)
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
@@ -631,7 +631,7 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

@@ -8,11 +8,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-import dynamo.nixl_connect as nixl_connect
-from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,31 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+
+
+def _create_nixl_connector() -> Any:
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for frontend audio decoding; install "
+            "dynamo.nixl_connect to enable decoded audio transfers."
+        ) from exc
+
+    return nixl_connect.Connector()
+
+
+async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
+    try:
+        from dynamo.common.utils.media_nixl import (
+            read_decoded_media_via_nixl as _read_decoded_media_via_nixl,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL media utilities are required for frontend audio decoding."
+        ) from exc
+
+    return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
 try:
@@ -68,7 +95,7 @@ class AudioLoader:
         self._nixl_connector = None
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
-            self._nixl_connector = nixl_connect.Connector()
+            self._nixl_connector = _create_nixl_connector()
             run_async(self._nixl_connector.initialize)
 
     def _get_vllm_media_connector(self) -> Any:
@@ -121,6 +148,12 @@ class AudioLoader:
                 )
             return waveform, sr
         except FileNotFoundError:
+            raise
+        except (UrlValidationError, HttpStatusError):
+            # Preserve deliberate client-error verdicts. UrlValidationError is
+            # a ValueError, so the generic handler below would otherwise erase
+            # its type and prevent the frontend from returning a 4xx.
+            logger.error("URL rejected loading audio: '%s'", audio_url)
             raise
         except Exception as exc:
             logger.error("Error loading audio from %s: %s", audio_url, exc)
@@ -183,6 +216,8 @@ class AudioLoader:
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
+        status_error: HttpStatusError | None = None
+        url_error: UrlValidationError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -192,8 +227,17 @@ class AudioLoader:
                 collective_exceptions.append(
                     f"Failed to load audio from {source[:80]}...: {result}\n"
                 )
+                if status_error is None and isinstance(result, HttpStatusError):
+                    status_error = result
+                elif url_error is None and isinstance(result, UrlValidationError):
+                    url_error = result
                 continue
             loaded_audio.append(result)
+
+        if status_error is not None:
+            raise status_error
+        if url_error is not None:
+            raise url_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))

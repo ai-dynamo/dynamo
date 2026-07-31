@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Third-party Python dependencies for the vllm runtime image. Installed
+# with --reinstall-package imageio-ffmpeg --no-deps to replace the upstream
+# vllm/vllm-openai base image's imageio-ffmpeg wheel (which ships a
+# GPL-encumbered prebuilt ffmpeg binary) with a source build that leaves
+# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
+# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
+# purely to clear the GPL binary.
 
-# vLLM-specific runtime dependencies (multimodal features).
+--no-binary imageio-ffmpeg
 
-av==15.0.0
-ftfy==6.3.1
-# Pin transformers and onnxruntime: vLLM only sets a lower bound on
-# transformers, so resolver drift can change versions between builds
-# and shift LLaVA/vision preprocessing, making multimodal outputs
-# non-reproducible. Lock both here to keep the image deterministic.
-onnxruntime==1.24.4
-ray==2.55.0
-sentencepiece==0.2.1
-transformers==5.6.2
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file

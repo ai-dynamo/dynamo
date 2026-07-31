@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: fastvideo-agg
+spec:
+  components:
+  - name: FastVideoWorker
+    podTemplate:
+      spec:
+        containers:
+        - command:
+          - python
+          - worker.py
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: LD_LIBRARY_PATH
+            value: ""
+          - name: TORCHINDUCTOR_CACHE_DIR
+            value: /cache/torchinductor
+          - name: TRITON_CACHE_DIR
+            value: /cache/triton
+          - name: HF_HOME
+            value: /root/.cache/huggingface
+          image: my-registry/fastvideo-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /root/.cache/huggingface
+            name: huggingface-cache
+          workingDir: /opt/app
+        volumes:
+        - name: huggingface-cache
+          persistentVolumeClaim:
+            claimName: huggingface-cache
+        imagePullSecrets:
+        - name: my-image-pull-secret
+        tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: user-workload
+        - effect: NoExecute
+          key: dedicated
+          operator: Equal
+          value: user-workload
+    replicas: 1
+    sharedMemorySize: 8Gi
+    type: worker
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-port
+          - "8000"
+          command:
+          - python
+          - -m
+          - dynamo.frontend
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          image: my-registry/fastvideo-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          name: main
+          workingDir: /opt/app
+        imagePullSecrets:
+        - name: my-image-pull-secret
+        tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: user-workload
+        - effect: NoExecute
+          key: dedicated
+          operator: Equal
+          value: user-workload
+    replicas: 1
+    type: frontend

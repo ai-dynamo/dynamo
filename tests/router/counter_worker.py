@@ -112,6 +112,7 @@ async def main():
         ModelType,
         RouterConfig,
         RouterMode,
+        WorkerType,
         register_model,
     )
     from dynamo.runtime import DistributedRuntime
@@ -138,6 +139,7 @@ async def main():
         HF_MODEL_NAME,
         "counter",
         router_config=router_config,
+        worker_type=WorkerType.Aggregated,
     )
 
     await endpoint.serve_endpoint(generate)

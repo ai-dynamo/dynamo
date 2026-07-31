@@ -54,7 +54,24 @@ class _GMSClientSession:
     ):
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
-        self._transport.connect()
+        # Two distinct timeouts apply to this session, and they're asymmetric on
+        # purpose:
+        #
+        #   socket connect (here) — bounded by 30 s when the caller passes None.
+        #     This is the wait for the GMS server's UDS socket to be listening.
+        #     The server is a native sidecar in the same pod (intra-pod GMS) or a
+        #     sister pod under the same Grove gang-schedule (inter-pod GMS), so
+        #     the actual ready window is sub-second to a few seconds in the
+        #     normal case. A 30 s ceiling produces a clean ConnectionError on a
+        #     missing-server misconfiguration instead of an indefinite hang.
+        #
+        #   handshake / lock acquisition (below) — passes the caller's timeout_ms
+        #     through unchanged, including None which means "wait indefinitely."
+        #     The handshake wait depends on what other clients are doing
+        #     (engine loading weights, loader committing, etc.) and can be
+        #     minutes for large models. We deliberately don't impose a
+        #     server-availability ceiling on a workload-shaped wait.
+        self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:

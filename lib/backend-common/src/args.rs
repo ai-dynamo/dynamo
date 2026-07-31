@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use crate::disagg::DisaggregationMode;
+
 /// CLI flags that every Rust backend needs. Flatten these into your engine's
 /// `Args` struct:
 ///
@@ -47,4 +49,45 @@ pub struct CommonArgs {
     /// template shipped with the model.
     #[arg(long, env = "DYN_CUSTOM_JINJA_TEMPLATE")]
     pub custom_jinja_template: Option<PathBuf>,
+
+    /// Dynamo frontend tool-call parser name for this model.
+    #[arg(long = "dyn-tool-call-parser", env = "DYN_TOOL_CALL_PARSER")]
+    pub dyn_tool_call_parser: Option<String>,
+
+    /// Dynamo frontend reasoning parser name for this model.
+    #[arg(long = "dyn-reasoning-parser", env = "DYN_REASONING_PARSER")]
+    pub dyn_reasoning_parser: Option<String>,
+
+    /// Exclude tools from the chat template when tool_choice is none.
+    #[arg(
+        long = "exclude-tools-when-tool-choice-none",
+        env = "DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub exclude_tools_when_tool_choice_none: bool,
+
+    /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
+    /// Prefill workers register with `ModelType::empty()` and
+    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
+    /// workers do not advertise a local KV indexer. Encode workers register as
+    /// `WorkerType::Encode` and are not exposed on the public chat/completions
+    /// surface.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DisaggregationMode::Aggregated,
+        env = "DYN_DISAGGREGATION_MODE",
+    )]
+    pub disaggregation_mode: DisaggregationMode,
+
+    /// Declare an upstream Encode peer in this worker's topology `needs`.
+    /// Meaningful only on `--disaggregation-mode agg` and `prefill`.
+    /// Setting it on `decode` or `encode` is rejected at startup.
+    ///
+    /// Scope: Rust backends consuming `CommonArgs` via clap. Python
+    /// backends populate this from their own runtime config -- the Python
+    /// shim does not read this env var.
+    #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
+    pub route_to_encoder: bool,
 }

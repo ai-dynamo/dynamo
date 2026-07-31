@@ -21,14 +21,19 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 
 # ── TextFormatter ──────────────────────────────────────────
 
 
-def _make_request_output(text="hello world", finish_reason=None):
+def _make_request_output(
+    text="hello world", finish_reason=None, num_cached_tokens=None
+):
     output = MagicMock()
     output.text = text
     output.finish_reason = finish_reason
@@ -42,6 +47,7 @@ def _make_request_output(text="hello world", finish_reason=None):
         40,
         50,
     ]  # 5 prompt tokens (different from completion)
+    ro.num_cached_tokens = num_cached_tokens
     return ro
 
 
@@ -243,6 +249,23 @@ class TestBuildCompletionUsage:
         usage = _build_completion_usage(ro)
         assert usage["prompt_tokens"] is None
         assert usage["total_tokens"] is None
+
+    @pytest.mark.parametrize(
+        ("num_cached_tokens", "expected_prompt_tokens_details"),
+        [
+            (None, None),
+            (0, {"cached_tokens": 0}),
+            (3, {"cached_tokens": 3}),
+        ],
+    )
+    def test_cached_token_details(
+        self, num_cached_tokens, expected_prompt_tokens_details
+    ):
+        ro = _make_request_output(num_cached_tokens=num_cached_tokens)
+
+        usage = _build_completion_usage(ro)
+
+        assert usage["prompt_tokens_details"] == expected_prompt_tokens_details
 
 
 # ── AudioFormatter ─────────────────────────────────────────
@@ -482,11 +505,12 @@ class TestAudioFormatterOutputFormat:
 
         f = self._make_formatter()
         mm = self._make_mm_output()
-        with patch.object(
-            f, "_encode_audio", return_value=(b"bytes", "audio/ogg")
-        ), _patch(
-            "dynamo.vllm.omni.output_formatter.upload_to_fs",
-            return_value="http://x/a.ogg",
+        with (
+            patch.object(f, "_encode_audio", return_value=(b"bytes", "audio/ogg")),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.upload_to_fs",
+                return_value="http://x/a.ogg",
+            ),
         ):
             result = await f.format(
                 mm, "r4", response_format="url", output_format="opus"

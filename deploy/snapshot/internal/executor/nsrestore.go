@@ -20,6 +20,7 @@ type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
 	CgroupRoot     string
+	TargetPodIP    string
 }
 
 type RestoreInNamespaceResult struct {
@@ -36,6 +37,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
 		"cgroup_root", opts.CgroupRoot,
+		"target_pod_ip_present", opts.TargetPodIP != "",
 	)
 
 	manifestReadStart := time.Now()
@@ -53,6 +55,9 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
+	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
+		return nil, err
+	}
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
 	if err != nil {
 		return nil, err
@@ -117,10 +122,14 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// CRIU restore
 	criuRestoreStart := time.Now()
-	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
+	restoredPID, cleanup, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
 	if err != nil {
 		return nil, 0, err
 	}
+	// Run the restore's FD cleanup at return, after cuda unlock and the
+	// restore-complete sentinel below, so nothing but the required PID resolve
+	// sits between the CRIU restore and unlock. Runs on any return, incl. errors.
+	defer cleanup()
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import argparse
-from typing import Self
+
+# typing.Self is 3.11+; pyproject declares requires-python>=3.10 so use the
+# typing_extensions back-port (added as an explicit dep in pyproject.toml).
+from typing_extensions import Self
 
 
 class ConfigBase:

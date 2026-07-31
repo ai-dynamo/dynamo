@@ -262,6 +262,26 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             offload_min_priority,
         }
     }
+
+    pub fn reset_prefix_cache(&self) -> Result<(), SlotError> {
+        if let Some(disk) = self.block_manager.disk() {
+            disk.reset_blocking()?;
+            tracing::debug!("reset disk prefix cache");
+        }
+
+        if let Some(host) = self.block_manager.host() {
+            host.reset_blocking()?;
+            tracing::debug!("reset host prefix cache");
+        }
+
+        if let Some(device) = self.block_manager.device() {
+            device.reset_blocking()?;
+            tracing::debug!("reset device prefix cache");
+        }
+
+        self.slots.lock().unwrap().clear();
+        Ok(())
+    }
 }
 
 impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
@@ -1703,7 +1723,7 @@ where
     let block_pairs: Vec<(usize, usize)> = offload_req
         .block_ids
         .into_iter()
-        .zip(allocated_block_ids.into_iter())
+        .zip(allocated_block_ids)
         .collect();
 
     tracing::debug!(
@@ -1717,10 +1737,8 @@ where
     let mut blocks_to_register = Vec::new();
     let priorities = offload_req.priorities;
 
-    for ((mut mutable_block, token_block), priority) in blocks
-        .into_iter()
-        .zip(token_blocks.into_iter())
-        .zip(priorities.into_iter())
+    for ((mut mutable_block, token_block), priority) in
+        blocks.into_iter().zip(token_blocks).zip(priorities)
     {
         mutable_block
             .apply_token_block(token_block.clone())

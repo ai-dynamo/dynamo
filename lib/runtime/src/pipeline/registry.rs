@@ -63,15 +63,24 @@ impl Registry {
 
     /// Retrieve a shared object from the registry by key and type.
     pub fn get_shared<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
-        match self.shared_storage.get(key) {
-            Some(boxed) => boxed.clone().downcast::<V>().map_err(|_| {
-                format!(
-                    "Failed to downcast to the requested type for shared key: {}",
-                    key
-                )
-            }),
-            None => Err(format!("Shared key not found: {}", key)),
-        }
+        self.get_shared_optional(key)?
+            .ok_or_else(|| format!("Shared key not found: {}", key))
+    }
+
+    /// Retrieve an optional shared object from the registry by key and type.
+    pub fn get_shared_optional<V: Send + Sync + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<V>>, String> {
+        let Some(boxed) = self.shared_storage.get(key) else {
+            return Ok(None);
+        };
+        boxed.clone().downcast::<V>().map(Some).map_err(|_| {
+            format!(
+                "Failed to downcast to the requested type for shared key: {}",
+                key
+            )
+        })
     }
 
     /// Check if a unique object exists in the registry by key.
@@ -124,6 +133,27 @@ mod tests {
         registry.insert_shared("shared1", 42);
         assert_eq!(*registry.get_shared::<i32>("shared1").unwrap(), 42);
         assert!(registry.get_shared::<f64>("shared1").is_err()); // Testing a downcast failure
+    }
+
+    #[test]
+    fn test_get_optional_shared() {
+        let mut registry = Registry::new();
+        assert!(
+            registry
+                .get_shared_optional::<i32>("missing")
+                .unwrap()
+                .is_none()
+        );
+
+        registry.insert_shared("shared1", 42);
+        assert_eq!(
+            *registry
+                .get_shared_optional::<i32>("shared1")
+                .unwrap()
+                .unwrap(),
+            42
+        );
+        assert!(registry.get_shared_optional::<f64>("shared1").is_err());
     }
 
     #[test]

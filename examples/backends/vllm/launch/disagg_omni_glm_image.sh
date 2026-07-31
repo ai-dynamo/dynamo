@@ -7,6 +7,7 @@
 # Stage 1: DiT (GPU 1) — diffusion denoising + VAE decode → image
 # Router: orchestrates the 2-stage pipeline, formats response
 set -e
+
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -16,7 +17,7 @@ MODEL="${MODEL:-zai-org/GLM-Image}"
 
 # Resolve vllm-omni's built-in GLM-Image stage config
 if [ -z "$STAGE_CONFIG" ]; then
-    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'model_executor/stage_configs/glm_image.yaml'))" 2>/dev/null | tail -1)"
+    STAGE_CONFIG="$(python -c "import vllm_omni, os; print(os.path.join(os.path.dirname(vllm_omni.__file__), 'deploy/glm_image.yaml'))" 2>/dev/null | tail -1)"
 fi
 
 EXTRA_ARGS=()
@@ -35,6 +36,7 @@ if [ -z "${DYN_NAMESPACE:-}" ]; then
     export DYN_NAMESPACE="dynamo-omni-glm-$(date +%s)"
 fi
 echo "Namespace:   ${DYN_NAMESPACE}"
+echo "Stage config: ${STAGE_CONFIG}"
 print_launch_banner --no-curl "Disaggregated GLM-Image (2-stage, 2 GPUs)" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<CURL
 curl -s http://localhost:${HTTP_PORT}/v1/images/generations \\
@@ -50,7 +52,7 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 # Stage 0: AR worker (GPU 0) — generates prior_token_ids
 echo "Starting Stage 0 (AR)..."
-CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
     --stage-id 0 \
@@ -62,7 +64,8 @@ sleep 20
 
 # Stage 1: DiT worker (GPU 1) — diffusion denoising + VAE decode
 echo "Starting Stage 1 (DiT)..."
-CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 \
+# Use CUDA_VISIBLE_DEVICES to select GPU 1, which appears as device "0" to this process
+DYN_SYSTEM_PORT=8082 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
     --stage-id 1 \

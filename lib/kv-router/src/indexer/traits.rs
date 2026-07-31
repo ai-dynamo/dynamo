@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
+use super::{
+    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, TieredMatchDetails, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Trait for querying an external shared KV cache pool.
@@ -16,19 +18,30 @@ use crate::protocols::*;
 #[async_trait]
 pub trait SharedKvCache: Send + Sync {
     /// Query which blocks exist in the shared cache for the given token sequence.
+    ///
+    /// `cache_namespace` must be honored by implementations to avoid scoring
+    /// shared-cache hits across isolated cache namespaces.
     async fn check_blocks(
         &self,
         tokens: &[u32],
         block_size: u32,
+        cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
+}
+
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
 }
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
 ///
-/// `worker_count` and `block_count` are always populated.
-/// `node_count` is populated only when the `shard-metrics` feature is enabled
-/// on the `dynamo-kv-router` crate; otherwise it is `0`.
-#[derive(Debug, Clone)]
+/// `worker_count` and `block_count` are always populated. `node_count` is
+/// reserved for backends that can expose a structural node count.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
     pub shard_idx: usize,
@@ -36,7 +49,7 @@ pub struct ShardSizeSnapshot {
     pub worker_count: usize,
     /// Total cached blocks across all workers in this shard.
     pub block_count: usize,
-    /// Radix-tree node count (only non-zero with `shard-metrics` feature).
+    /// Radix-tree node count, or zero when the backend does not expose one.
     pub node_count: usize,
 }
 
@@ -62,6 +75,7 @@ pub trait KvIndexerInterface {
     ///
     /// * `tokens` - A vector of `u32` tokens.
     /// * `lora_name` - Optional LoRA adapter name to include in block hash computation.
+    /// * `cache_namespace` - Optional cache namespace to include in block hash computation.
     ///
     /// ### Returns
     ///
@@ -70,6 +84,7 @@ pub trait KvIndexerInterface {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError>;
 
@@ -93,6 +108,21 @@ pub trait KvIndexerInterface {
     /// Indexers that track dp_rank-level granularity should override this.
     async fn remove_worker_dp_rank(&self, worker: WorkerId, _dp_rank: DpRank) {
         self.remove_worker(worker).await;
+    }
+
+    /// Remove one logical worker rank and return only after the reset is visible.
+    ///
+    /// This is a cold-path lifecycle barrier. Implementations must order the
+    /// reset after mutations already accepted for the worker and acknowledge it
+    /// only after those entries can no longer be returned by reads.
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        _worker: WorkerId,
+        _dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        Err(KvRouterError::Unsupported(
+            "acknowledged worker-rank reset is not supported".to_string(),
+        ))
     }
 
     /// Shutdown the KV Indexer.
@@ -167,6 +197,9 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    /// Bind optional shared metrics before the backend is published to worker threads.
+    fn configure_metrics(&mut self, _metrics: Option<&KvIndexerMetrics>) {}
+
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
@@ -176,9 +209,19 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Whether this backend can reconstruct its complete state as router events.
+    fn supports_event_dump(&self) -> bool {
+        true
+    }
+
+    /// Whether Boolean event acknowledgements are sufficient for pruning bookkeeping.
+    fn supports_routing_decision_pruning(&self) -> bool {
+        true
+    }
+
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///
-    /// Backends that do not support anchor-aware routing keep the default
+    /// Backends that do not support anchored routing keep the default
     /// unsupported response. This is only called by the branch-sharded wrapper
     /// when a routed subtree starts on a different shard than its parent prefix.
     fn apply_anchor(
@@ -196,7 +239,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         _suffix: &[LocalBlockHash],
     ) -> Result<OverlapScores, KvRouterError> {
         Err(KvRouterError::Unsupported(
-            "backend does not support anchor-aware find_matches".to_string(),
+            "backend does not support anchored find_matches".to_string(),
         ))
     }
 
@@ -224,8 +267,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         String::new()
     }
 
-    /// Number of radix-tree nodes created since construction.
-    /// Only meaningful when the `shard-metrics` feature is enabled; returns 0 otherwise.
+    /// Number of radix-tree nodes created since construction, when available.
     fn node_count(&self) -> usize {
         0
     }
@@ -236,3 +278,10 @@ pub trait SyncIndexer: Send + Sync + 'static {
         vec![]
     }
 }
+
+/// Marker trait for [`SyncIndexer`] backends that implement structural anchors.
+///
+/// Branch-sharded routing can split a suffix onto a shard whose backend needs a
+/// synthetic parent anchor. Implement this only when `apply_anchor` and
+/// `find_matches_from_anchor` are supported by the backend.
+pub trait AnchorCapableSyncIndexer: SyncIndexer {}

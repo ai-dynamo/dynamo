@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use dynamo_kv_router::protocols::{ActiveLoad, DpRank};
-use dynamo_runtime::component::{Component, Namespace};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -54,55 +54,46 @@ impl WorkerMetricsPublisher {
             .map_err(|_| anyhow::anyhow!("metrics channel closed"))
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let worker_id = component.drt().connection_id();
-        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
+    pub async fn create_endpoint(&self, endpoint: Endpoint) -> Result<()> {
+        let worker_id = endpoint.drt().connection_id();
+        let event_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+        self.start_metrics_publishing(event_publisher, worker_id);
         Ok(())
     }
 
-    pub(super) fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
-        let nats_rx = self.rx.clone();
+    pub(super) fn start_metrics_publishing(&self, event_publisher: EventPublisher, worker_id: u64) {
+        let metrics_rx = self.rx.clone();
 
         tokio::spawn(async move {
-            let event_publisher =
-                match EventPublisher::for_namespace(&namespace, KV_METRICS_SUBJECT).await {
-                    Ok(publisher) => publisher,
-                    Err(e) => {
-                        tracing::error!("Failed to create metrics publisher: {}", e);
-                        return;
-                    }
-                };
-
-            let mut rx = nats_rx;
+            let mut rx = metrics_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_timer =
-                Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
-            publish_timer.as_mut().reset(tokio::time::Instant::now());
+            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+            tokio::pin!(publish_timer);
 
             loop {
                 tokio::select! {
                     result = rx.changed() => {
                         if result.is_err() {
                             tracing::debug!(
-                                "Metrics publisher sender dropped, stopping NATS background task"
+                                "Metrics publisher sender dropped, stopping event-plane background task"
                             );
                             break;
                         }
 
                         let metrics = rx.borrow_and_update().clone();
-                        let has_changed = last_metrics.as_ref() != Some(&metrics);
-
-                        if has_changed {
-                            pending_publish = Some(metrics.clone());
-                            last_metrics = Some(metrics);
-                            publish_timer.as_mut().reset(
-                                tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1)
-                            );
+                        if last_metrics.as_ref() == Some(&metrics) {
+                            continue;
                         }
+
+                        pending_publish = Some(metrics.clone());
+                        last_metrics = Some(metrics);
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now()
+                                + tokio::time::Duration::from_millis(1)
+                        );
                     }
-                    _ = &mut publish_timer => {
+                    _ = &mut publish_timer, if pending_publish.is_some() => {
                         if let Some(metrics) = pending_publish.take() {
                             let active_load = ActiveLoad {
                                 worker_id,
@@ -116,11 +107,6 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
-
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_secs(3600)
-                        );
                     }
                 }
             }

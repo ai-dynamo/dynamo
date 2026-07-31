@@ -16,6 +16,8 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
+CACHE_CAPACITY_GB=""
+TRANSFER_BACKEND="${DYN_SGLANG_DISAGGREGATION_TRANSFER_BACKEND:-nixl}"
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
@@ -41,6 +43,14 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --multimodal-embedding-cache-capacity-gb)
+            CACHE_CAPACITY_GB=$2
+            shift 2
+            ;;
+        --disaggregation-transfer-backend)
+            TRANSFER_BACKEND=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -48,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
             echo "  --single-gpu         Pack both workers on 1 GPU (for small models, e.g. 2B)"
+            echo "  --multimodal-embedding-cache-capacity-gb <gb>"
+            echo "                       Enable encode-worker CPU embedding cache with this capacity"
+            echo "  --disaggregation-transfer-backend <backend>"
+            echo "                       SGLang disaggregation transfer backend (default: $TRANSFER_BACKEND)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -68,6 +82,12 @@ fi
 SERVED_MODEL_ARG=""
 if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
+fi
+
+# TODO: Switch back to nixl-write once Dynamo embedding transfer can share a
+# NIXL/UCX backend with SGLang NIXL KV transfer in the same worker process.
+if [[ "$TRANSFER_BACKEND" == "nixl" && -z "${DYN_SGL_EMBEDDING_TRANSFER_MODE:-}" ]]; then
+    export DYN_SGL_EMBEDDING_TRANSFER_MODE="nixl-read"
 fi
 
 # GPU assignments (override via environment variables)
@@ -97,6 +117,10 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"
 WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
 
+if [[ -n "$CACHE_CAPACITY_GB" ]]; then
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --multimodal-embedding-cache-capacity-gb $CACHE_CAPACITY_GB"
+fi
+
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Both workers share one GPU; cap activations tightly.
     SHARED_CAPS="--max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
@@ -123,7 +147,14 @@ python3 -m dynamo.frontend &
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting PD worker.
@@ -141,7 +172,9 @@ fi
 echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
-  --multimodal-worker \
+  --enable-multimodal \
+  --dedicated-mm-encoder \
+  --disaggregation-mode pd \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \
@@ -149,7 +182,7 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disable-radix-cache \
-  --disaggregation-transfer-backend nixl \
+  --disaggregation-transfer-backend "$TRANSFER_BACKEND" \
   $WORKER_EXTRA_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

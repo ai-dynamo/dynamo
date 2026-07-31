@@ -6,7 +6,7 @@
 set -euo pipefail
 
 
-NIXL_VERSION="0.10.1"
+NIXL_VERSION="1.0.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Function to check if a command exists
@@ -182,8 +182,9 @@ build_nixlbench() {
     cd "${NIXL_BUILD_DIR}"
 
     echo "Downloading NIXL source..."
-    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_VERSION}.zip
-    unzip "${NIXL_VERSION}.zip"
+    # Tag is v-prefixed; GitHub strips the leading "v" from the extracted dir.
+    wget https://github.com/ai-dynamo/nixl/archive/refs/tags/v${NIXL_VERSION}.zip
+    unzip "v${NIXL_VERSION}.zip"
     cd "nixl-${NIXL_VERSION}/benchmark/nixlbench/contrib"
     read -p "Press Enter to continue"
     echo "Building Docker image..."

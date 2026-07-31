@@ -10,10 +10,6 @@ This module provides a modular, domain-driven configuration architecture where:
 - Unrecognized arguments are captured for backend engines (passthrough)
 """
 
-from .arg_group import ArgGroup
-from .config_base import ConfigBase
-from .utils import add_argument, add_negatable_bool_argument, env_or_default
-
 __all__ = [
     # Base classes
     "ArgGroup",
@@ -23,3 +19,19 @@ __all__ = [
     "env_or_default",
     "add_negatable_bool_argument",
 ]
+
+
+def __getattr__(name: str):
+    if name == "ArgGroup":
+        from .arg_group import ArgGroup
+
+        return ArgGroup
+    if name == "ConfigBase":
+        from .config_base import ConfigBase
+
+        return ConfigBase
+    if name in {"add_argument", "add_negatable_bool_argument", "env_or_default"}:
+        from . import utils
+
+        return getattr(utils, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

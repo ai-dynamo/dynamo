@@ -29,14 +29,15 @@ import (
 
 func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 	tests := []struct {
-		name string
-		ctx  context.Context
-		dcd  *nvidiacomv1beta1.DynamoComponentDeployment
-		want string
+		name    string
+		ctx     context.Context
+		dcd     *nvidiacomv1beta1.DynamoComponentDeployment
+		want    string
+		wantErr bool
 	}{
 		{
 			name: "CREATE defaults empty spec name from metadata name",
-			ctx:  admissionCtx(admissionv1.Create),
+			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
 			},
@@ -44,7 +45,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 		},
 		{
 			name: "CREATE preserves explicit spec name",
-			ctx:  admissionCtx(admissionv1.Create),
+			ctx:  admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
@@ -57,19 +58,19 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 		},
 		{
 			name: "UPDATE does not default empty spec name",
-			ctx:  admissionCtx(admissionv1.Update),
+			ctx:  admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
 			},
 			want: "",
 		},
 		{
-			name: "missing admission request skips defaulting gracefully",
+			name: "missing admission request fails closed",
 			ctx:  context.Background(),
 			dcd: &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "worker"},
 			},
-			want: "",
+			wantErr: true,
 		},
 	}
 
@@ -77,8 +78,12 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			defaulter := NewDCDDefaulter()
 
-			if err := defaulter.Default(tt.ctx, tt.dcd); err != nil {
-				t.Fatalf("Default() unexpected error: %v", err)
+			err := defaulter.Default(tt.ctx, tt.dcd)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Default() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
 			}
 
 			if got := tt.dcd.Spec.ComponentName; got != tt.want {
@@ -91,7 +96,7 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 func TestDCDDefaulter_DefaultRejectsWrongType(t *testing.T) {
 	defaulter := NewDCDDefaulter()
 
-	if err := defaulter.Default(admissionCtx(admissionv1.Create), &corev1.Pod{}); err == nil {
+	if err := defaulter.Default(admissionCtx(admissionv1.Create, nvidiacomv1beta1.DynamoComponentDeploymentGVK), &corev1.Pod{}); err == nil {
 		t.Fatal("Default() error = nil, want type error")
 	}
 }

@@ -125,6 +125,7 @@ def test_echo(start_services_with_echo_worker) -> None:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 @pytest.mark.parallel
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "request_params",
     [
@@ -160,6 +161,7 @@ def test_model_infer_failure(start_services_with_echo_worker, request_params):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 @pytest.mark.parallel
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "request_params",
     [
@@ -202,26 +204,30 @@ def test_model_stream_infer_failure(start_services_with_echo_worker, request_par
             user_data._completed_requests.put(result)
 
     user_data = UserData()
-    client.start_stream(
-        callback=partial(callback, user_data),
-    )
+    try:
+        client.start_stream(
+            callback=partial(callback, user_data),
+        )
 
-    client.async_stream_infer(
-        model_name="echo",
-        inputs=inputs,
-        parameters=request_params,
-    )
+        client.async_stream_infer(
+            model_name="echo",
+            inputs=inputs,
+            parameters=request_params,
+        )
 
-    # For stream infer, the exception and error will pass to the callback but not
-    # raised
-    with pytest.raises(Exception) as excinfo:
-        data_item = user_data._completed_requests.get(timeout=5)
-        if isinstance(data_item, Exception):
-            print("Raising exception received from stream infer callback")
-            raise data_item
-    if "malformed_response" in request_params:
-        assert "missing field `data_type`" in str(excinfo.value).lower()
-    elif "data_mismatch" in request_params:
-        assert "shape implies" in str(excinfo.value).lower()
-    elif "raise_exception" in request_params:
-        assert "intentional exception" in str(excinfo.value).lower()
+        # For stream infer, the exception and error will pass to the callback but not
+        # raised
+        with pytest.raises(Exception) as excinfo:
+            data_item = user_data._completed_requests.get(timeout=5)
+            if isinstance(data_item, Exception):
+                print("Raising exception received from stream infer callback")
+                raise data_item
+        if "malformed_response" in request_params:
+            assert "missing field `data_type`" in str(excinfo.value).lower()
+        elif "data_mismatch" in request_params:
+            assert "shape implies" in str(excinfo.value).lower()
+        elif "raise_exception" in request_params:
+            assert "intentional exception" in str(excinfo.value).lower()
+    finally:
+        client.stop_stream(cancel_requests=True)
+        client.close()

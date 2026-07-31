@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated multimodal serving for Qwen VL with dynamic LoRA adapter support.
+# Uses dynamo.vllm --enable-multimodal --enable-lora in a single-worker PD architecture
+# where the Rust OpenAIPreprocessor in the Frontend handles image URLs directly.
+#
+# LoRA adapters are managed via the system API on DYN_SYSTEM_PORT:
+#   Load:   curl -X POST http://<worker>:9090/v1/loras \
+#             -H "Content-Type: application/json" \
+#             -d '{"lora_name": "my-adapter", "source": {"uri": "s3://my-loras/adapter"}}'
+#   List:   curl http://<worker>:9090/v1/loras
+#   Unload: curl -X DELETE http://<worker>:9090/v1/loras/my-adapter
+#
+# Matches the pattern in: examples/backends/vllm/launch/lora/multimodal/lora_agg.sh
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg-qwen-multimodal-lora
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-VL-2B-Instruct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - modelRef:
+      name: Qwen/Qwen3-VL-2B-Instruct
+    name: VllmWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --enable-multimodal
+          - --model
+          - Qwen/Qwen3-VL-2B-Instruct
+          - --enable-lora
+          - --max-lora-rank
+          - "64"
+          - --gpu-memory-utilization
+          - "0.85"
+          - --max-model-len
+          - "8192"
+          - --max-num-batched-tokens
+          - "8192"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-VL-2B-Instruct
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: DYN_LORA_PATH
+            value: /tmp/dynamo_loras_multimodal
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: AWS_ENDPOINT
+            value: http://minio:9000
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                key: AWS_ACCESS_KEY_ID
+                name: minio-secret
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                key: AWS_SECRET_ACCESS_KEY
+                name: minio-secret
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ALLOW_HTTP
+            value: "true"
+          - name: BUCKET_NAME
+            value: my-loras
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+    replicas: 1
+    type: worker

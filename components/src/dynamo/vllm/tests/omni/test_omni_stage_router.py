@@ -21,6 +21,8 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 
@@ -53,7 +55,11 @@ def _make_stage_cfg(stage_id: int):
 
 def _make_router(stage_configs, stage_clients, formatter=None, output_modalities=None):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=output_modalities)
+    router.config = SimpleNamespace(
+        output_modalities=output_modalities,
+        model="test-model",
+        served_model_name=None,
+    )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
     router._formatter = formatter or AsyncMock()
@@ -68,6 +74,35 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
         ),
         patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
     )
+
+
+def test_router_loads_stage_configs_from_model_deploy_config():
+    config = SimpleNamespace(
+        model="zai-org/GLM-Image",
+        served_model_name=None,
+        media_output_fs_url=None,
+        media_output_http_url=None,
+        default_video_fps=16,
+    )
+    stage_configs = [_make_stage_cfg(0)]
+
+    with (
+        patch(
+            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
+            return_value=("/deploy/glm_image.yaml", stage_configs, None),
+        ) as load_and_resolve_stage_configs,
+        patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
+    ):
+        router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
+
+    load_and_resolve_stage_configs.assert_called_once_with(
+        config.model,
+        "/deploy/glm_image.yaml",
+        kwargs={},
+        trust_remote_code=False,
+    )
+    output_formatter.assert_called_once()
+    assert router.stage_configs == stage_configs
 
 
 # ── issue-004: opaque router ──────────────────────────────
@@ -452,3 +487,94 @@ class TestStageRouterContextNormalization:
         ctx = formatter_calls[0]
         assert "response_format" not in ctx
         assert "output_format" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_format_output_uses_connector_deserialized_object_directly():
+    """Connector path should pass deserialized object straight to formatter."""
+    formatted = {"finished": True}
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = formatted
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    final_obj = SimpleNamespace(final_output_type="text", outputs=[])
+    connector = MagicMock()
+    connector.get.return_value = (final_obj, 10)
+    router.connectors = {stage_router._connector_key(0, "router"): connector}
+
+    stage_output = SimpleNamespace(
+        stage_connector_refs={"0": {"rdma": "meta"}},
+        shm_meta=None,
+    )
+
+    chunks = [
+        c
+        async for c in router._format_output(
+            stage_output,
+            request_id="req-connector",
+            request_type=RequestType.CHAT_COMPLETION,
+            ctx={},
+            final_stage_id=0,
+        )
+    ]
+
+    assert chunks == [formatted]
+    connector.get.assert_called_once_with(
+        "0", "router", "req-connector", metadata={"rdma": "meta"}
+    )
+    mock_formatter.format.assert_awaited_once_with(
+        final_obj,
+        "req-connector",
+        request_type=RequestType.CHAT_COMPLETION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_format_output_restores_completion_attrs_from_engine_inputs_wrapper():
+    """Connector payload wrapper is restored before formatting."""
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    completion = SimpleNamespace(token_ids=[1, 2, 3])
+    wrapped = {
+        "engine_inputs": SimpleNamespace(
+            outputs=[completion], final_output_type="text"
+        ),
+        "_dynamo_completion_output_attrs": [
+            {
+                "cumulative_token_ids": [1, 2, 3],
+                "multimodal_output": {"hidden": True},
+            }
+        ],
+    }
+    connector = MagicMock()
+    connector.get.return_value = (wrapped, 32)
+    router.connectors = {stage_router._connector_key(0, "router"): connector}
+
+    stage_output = SimpleNamespace(
+        stage_connector_refs={"0": {"rdma": "meta"}},
+        shm_meta=None,
+    )
+    _ = [
+        c
+        async for c in router._format_output(
+            stage_output,
+            request_id="req-wrap",
+            request_type=RequestType.CHAT_COMPLETION,
+            ctx={},
+            final_stage_id=0,
+        )
+    ]
+
+    restored = wrapped["engine_inputs"].outputs[0]
+    assert restored.cumulative_token_ids == [1, 2, 3]
+    assert restored.multimodal_output == {"hidden": True}

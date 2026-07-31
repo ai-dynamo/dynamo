@@ -13,10 +13,21 @@ import (
 const (
 	CheckpointSourceLabel = "nvidia.com/snapshot-is-checkpoint-source"
 
+	// CaptureEligibleLabel is the gate-applied promotion label. The operator stamps
+	// CheckpointSourceLabel on the checkpoint Job pod at creation; the node agent's pre-bind gate adds
+	// CaptureEligibleLabel only after the source pod passes validation. The source-pod capture
+	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
+	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
+
 	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
-	CheckpointIDLabel = "nvidia.com/snapshot-checkpoint-id"
+	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
+	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
+
+	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
+	// object so the per-node agent's cache can label-select work for its node.
+	SnapshotNodeLabel = "nvidia.com/snapshot-node"
 
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
@@ -29,17 +40,28 @@ const (
 	// Full keys are nvidia.com/snapshot-restore-container-id.<containerName>.
 	RestoreContainerIDAnnotationPrefix = "nvidia.com/snapshot-restore-container-id."
 
-	CheckpointVolumeName             = "checkpoint-storage"
-	DefaultCheckpointArtifactVersion = "1"
-	DefaultCheckpointJobTTLSeconds   = int32(300)
-	DefaultSeccompLocalhostProfile   = "profiles/block-iouring.json"
-	StorageTypePVC                   = "pvc"
+	// Legacy unscoped restore status keys, cleared when stamping fresh metadata.
+	RestoreStatusAnnotation      = "nvidia.com/snapshot-restore-status"
+	RestoreContainerIDAnnotation = "nvidia.com/snapshot-restore-container-id"
+
+	CheckpointStorageTypeAnnotation     = "nvidia.com/snapshot-storage-type"
+	CheckpointStorageBasePathAnnotation = "nvidia.com/snapshot-storage-base-path"
+	CheckpointVolumeName                = "checkpoint-storage"
+	DefaultCheckpointArtifactVersion    = "1"
+	DefaultCheckpointJobTTLSeconds      = int32(300)
+	DefaultSeccompLocalhostProfile      = "profiles/block-iouring.json"
+	StorageTypePVC                      = "pvc"
 
 	CheckpointStatusCompleted = "completed"
 	CheckpointStatusFailed    = "failed"
 	RestoreStatusInProgress   = "in_progress"
 	RestoreStatusCompleted    = "completed"
 	RestoreStatusFailed       = "failed"
+
+	linkerdInjectAnnotation      = "linkerd.io/inject"
+	linkerdInjectDisabled        = "disabled"
+	istioSidecarInjectAnnotation = "sidecar.istio.io/inject"
+	istioSidecarInjectDisabled   = "false"
 )
 
 type Storage struct {
@@ -178,6 +200,7 @@ func clearRestoreStatusKeys(annotations map[string]string) {
 // The caller owns TargetContainersAnnotation.
 func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string]string, enabled bool, checkpointID string, artifactVersion string) {
 	delete(labels, CheckpointSourceLabel)
+	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
@@ -187,13 +210,35 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 		return
 	}
 
+	labels[RestoreTargetLabel] = "true"
 	if checkpointID != "" {
 		labels[CheckpointIDLabel] = checkpointID
 	}
 	annotations[CheckpointArtifactVersionAnnotation] = ArtifactVersion(artifactVersion)
 }
 
+func ApplyCheckpointStorageMetadata(annotations map[string]string, storage Storage) {
+	if annotations == nil {
+		return
+	}
+	delete(annotations, CheckpointStorageTypeAnnotation)
+	delete(annotations, CheckpointStorageBasePathAnnotation)
+	storageType := strings.TrimSpace(storage.Type)
+	if storageType != "" {
+		annotations[CheckpointStorageTypeAnnotation] = storageType
+	}
+	basePath := strings.TrimSpace(storage.BasePath)
+	if basePath != "" {
+		basePath = strings.TrimRight(basePath, "/")
+		if basePath == "" {
+			basePath = "/"
+		}
+		annotations[CheckpointStorageBasePathAnnotation] = basePath
+	}
+}
+
 func applyCheckpointSourceMetadata(labels map[string]string, annotations map[string]string, checkpointID string, artifactVersion string) {
+	delete(labels, RestoreTargetLabel)
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 
@@ -216,9 +261,16 @@ func resolveStorageConfig(storage Storage) (Storage, error) {
 	if basePath == "" {
 		return Storage{}, fmt.Errorf("checkpoint base path is required")
 	}
+	if !strings.HasPrefix(basePath, "/") {
+		return Storage{}, fmt.Errorf("checkpoint base path %q must be absolute", basePath)
+	}
+	basePath = strings.TrimRight(basePath, "/")
+	if basePath == "" {
+		basePath = "/"
+	}
 	return Storage{
 		Type:     storageType,
 		PVCName:  strings.TrimSpace(storage.PVCName),
-		BasePath: strings.TrimRight(basePath, "/"),
+		BasePath: basePath,
 	}, nil
 }

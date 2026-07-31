@@ -28,14 +28,19 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	istioNetworking "istio.io/api/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -46,10 +51,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const testTopologyLabelKey = "topology.kubernetes.io/zone"
+
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment
-		ingressSpec                 *v1alpha1.IngressSpec
 	}
 	tests := []struct {
 		name    string
@@ -272,7 +278,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "Test GenerateDynamoComponentsDeployments with ingress enabled",
+			name: "Test GenerateDynamoComponentsDeployments with frontend component",
 			args: args{
 				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -309,10 +315,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{
-					Enabled: true,
-					Host:    "test-dynamographdeployment",
-				},
 			},
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
@@ -343,10 +345,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoComponent:           "service1",
 								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
 								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
-							},
-							Ingress: &v1alpha1.IngressSpec{
-								Enabled: true,
-								Host:    "test-dynamographdeployment",
 							},
 						},
 					},
@@ -729,12 +727,14 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil, RollingUpdateContext{})
+			got, err := GenerateDynamoComponentsDeployments(betaDGD(t, tt.args.parentDynamoGraphDeployment), nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if diff := cmp.Diff(got, tt.want); diff != "" {
+			want := normalizeGeneratedDCDMap(betaDCDMap(t, tt.want))
+			got = normalizeGeneratedDCDMap(got)
+			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("GenerateDynamoComponentsDeployments() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -763,7 +763,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, RollingUpdateContext{})
+	got, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -775,16 +775,511 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 	for _, d := range got {
 		switch d.Spec.ComponentType {
 		case commonconsts.ComponentTypeFrontend:
-			assert.Equal(t, commonconsts.GlobalDynamoNamespace, *d.Spec.DynamoNamespace)
 			assert.Equal(t, commonconsts.GlobalDynamoNamespace, d.Labels[commonconsts.KubeLabelDynamoNamespace])
 		case commonconsts.ComponentTypeWorker:
 			expectedNamespace := fmt.Sprintf("%s-%s", dgd.Namespace, dgd.Name)
-			assert.Equal(t, expectedNamespace, *d.Spec.DynamoNamespace)
 			assert.Equal(t, expectedNamespace, d.Labels[commonconsts.KubeLabelDynamoNamespace])
 		default:
 			t.Errorf("unexpected component type: %s", d.Spec.ComponentType)
 		}
 	}
+}
+
+func TestGenerateDynamoComponentsDeployments_UsesDynDeploymentWorkers(t *testing.T) {
+	tests := []struct {
+		name              string
+		componentReplicas *int32
+		wantReplicas      int32
+	}{
+		{
+			name:         "dyn config workers used when component replicas omitted",
+			wantReplicas: 2,
+		},
+		{
+			name:              "component replicas override dyn config workers",
+			componentReplicas: ptr.To(int32(3)),
+			wantReplicas:      3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const (
+				dgdName       = "test-dgd"
+				componentName = "service1"
+			)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: "default",
+				},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Env: []corev1.EnvVar{{
+						Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+						Value: fmt.Sprintf(`{"%s":{"ServiceArgs":{"workers":2}}}`, componentName),
+					}},
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: componentName,
+						ComponentType: v1beta1.ComponentTypeFrontend,
+						Replicas:      tt.componentReplicas,
+					}},
+				},
+			}
+
+			dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			dcd, ok := dcds[componentName]
+			require.True(t, ok, "expected generated DCD for component %q", componentName)
+			require.NotNil(t, dcd.Spec.Replicas)
+			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
+		})
+	}
+}
+
+func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+		{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "cache", MountPath: "/cache"},
+		{Name: "model-cache", MountPath: "/models"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, "cache", got[0].Name)
+	assert.Equal(t, "model-cache", got[1].Name)
+	require.NotNil(t, got[1].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache", got[1].PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, "config", got[2].Name)
+}
+
+func TestAppendMissingPVCVolumesForMountsKeepsRepeatedVolumeMountsUnique(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "shared-model", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "shared-model", MountPath: "/model-store", SubPath: "models/glm"},
+		{Name: "shared-model", MountPath: "/cache/sglang", SubPath: "cache/sglang/glm"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "shared-model", got[0].Name)
+	require.NotNil(t, got[0].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache-pvc", got[0].PersistentVolumeClaim.ClaimName)
+}
+
+func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
+	className := "nginx"
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ServiceName:      "frontend",
+					DynamoNamespace:  ptr.To("custom-ns"),
+					ComponentType:    commonconsts.ComponentTypeFrontend,
+					SubComponentType: "legacy-sub",
+					Annotations:      map[string]string{"legacy-annotation": "kept"},
+					Labels:           map[string]string{"legacy-label": "kept"},
+					Ingress: &v1alpha1.IngressSpec{
+						Enabled:                    true,
+						Host:                       "legacy.example",
+						IngressControllerClassName: &className,
+					},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+
+	got, err := GenerateDynamoComponentsDeployments(beta, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+	dcd := got["frontend"]
+	require.NotNil(t, dcd)
+
+	assert.Equal(t, "custom-ns", GetDCDDynamoNamespace(dcd))
+	assert.Equal(t, "legacy-sub", GetDCDSubComponentType(dcd))
+	assert.Equal(t, map[string]string{"legacy-annotation": "kept"}, GetDCDPreservedAlphaAnnotations(dcd))
+	assert.Equal(t, map[string]string{"legacy-label": "kept"}, GetDCDPreservedAlphaLabels(dcd))
+	ingressSpec, ok, err := GetDCDPreservedAlphaIngressSpec(dcd)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "legacy.example", ingressSpec.Host)
+	assert.Equal(t, "nginx", ptr.Deref(ingressSpec.IngressControllerClassName, ""))
+}
+
+func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorkers(t *testing.T) {
+	labelKey := testTopologyLabelKey
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					LabelKey:    labelKey,
+					Domain:      "zone",
+					Enforcement: v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	worker := dcds["worker"]
+	require.NotNil(t, worker)
+	assert.Equal(t, labelKey, worker.Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
+	assert.Equal(t, labelKey, GetDCDKubeAnnotations(worker)[commonconsts.KubeAnnotationTopologyLabelKey])
+
+	frontend := dcds["frontend"]
+	require.NotNil(t, frontend)
+	assert.NotContains(t, frontend.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(frontend), commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateDynamoComponentsDeployments_AddsClusterTopologyAnnotationToWorkers(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					ClusterTopologyName: "grove-topology",
+					Domain:              "rack",
+					Enforcement:         v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	worker := dcds["worker"]
+	require.NotNil(t, worker)
+	assert.Equal(t, "grove-topology", worker.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.Equal(t, "grove-topology", GetDCDKubeAnnotations(worker)[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.NotContains(t, worker.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(worker), commonconsts.KubeAnnotationTopologyLabelKey)
+
+	frontend := dcds["frontend"]
+	require.NotNil(t, frontend)
+	assert.NotContains(t, frontend.Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	assert.NotContains(t, GetDCDKubeAnnotations(frontend), commonconsts.KubeAnnotationTopologyClusterTopologyName)
+}
+
+func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
+	labelKey := testTopologyLabelKey
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationTopologyLabelKey: "wrong-from-dgd-spec",
+			},
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-dgd-spec",
+				commonconsts.KubeLabelDynamoComponent:           "wrong-from-dgd-spec",
+			},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: commonconsts.ComponentTypePrefill,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationTopologyLabelKey: "wrong-from-alpha-service",
+					},
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-alpha-service",
+						commonconsts.KubeLabelDynamoComponent:           "wrong-from-alpha-service",
+					},
+					ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationTopologyLabelKey: "wrong-from-extra-metadata",
+						},
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
+							commonconsts.KubeLabelDynamoComponent:           "wrong-from-extra-metadata",
+						},
+					},
+				},
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+				},
+			},
+			Experimental: &v1alpha1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1alpha1.KvTransferPolicy{
+					LabelKey:    labelKey,
+					Domain:      v1alpha1.TopologyDomain("zone"),
+					Enforcement: v1alpha1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+
+	dcds, err := GenerateDynamoComponentsDeployments(beta, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, labelKey, prefillDCD.Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
+	assert.Equal(t, labelKey, GetDCDKubeAnnotations(prefillDCD)[commonconsts.KubeAnnotationTopologyLabelKey])
+
+	prefillDCDLabels := GetDCDKubeLabels(prefillDCD)
+	assert.Equal(t, "test-dgd", prefillDCDLabels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "prefill", prefillDCDLabels[commonconsts.KubeLabelDynamoComponent])
+	frontendDCD := dcds["frontend"]
+	require.NotNil(t, frontendDCD)
+	assert.NotContains(t, frontendDCD.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(frontendDCD), commonconsts.KubeAnnotationTopologyLabelKey)
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		beta,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+	for _, clique := range pcs.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	require.Contains(t, cliques, "prefill")
+	assert.Equal(t, labelKey, cliques["prefill"].Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
+	assert.Equal(t, "test-dgd", cliques["prefill"].Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "prefill", cliques["prefill"].Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateDynamoComponentsDeployments_SkipsTopologyLabelAnnotationWithoutLabelKey(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					Domain:      "zone",
+					Enforcement: v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	worker := dcds["worker"]
+	require.NotNil(t, worker)
+	assert.NotContains(t, worker.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(worker), commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t *testing.T) {
+	labelKey := testTopologyLabelKey
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					LabelKey:    labelKey,
+					Domain:      "zone",
+					Enforcement: v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+
+	require.Contains(t, cliques, "worker")
+	require.Contains(t, cliques, "frontend")
+	assert.Equal(t, labelKey, cliques["worker"].Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
+	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
+	clusterTopology := &grovev1alpha1.ClusterTopologyBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
+			Levels: []grovev1alpha1.TopologyLevel{
+				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(clusterTopology).Build()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					ClusterTopologyName: "grove-topology",
+					Domain:              "rack",
+					Enforcement:         v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		kubeClient,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+
+	require.Contains(t, cliques, "worker")
+	require.Contains(t, cliques, "frontend")
+	worker := cliques["worker"]
+	assert.Equal(t, "grove-topology", worker.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.NotContains(t, worker.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+
+	envMap := envVarsToMap(worker.Spec.PodSpec.Containers[0].Env)
+	assert.Equal(t, "rack", envMap[commonconsts.EnvKvTransferDomain])
+	assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled])
+	assert.NotContains(t, envMap, "DYN_TOPOLOGY_DOMAIN")
+
+	topologyItems := map[string]string{}
+	for _, volume := range worker.Spec.PodSpec.Volumes {
+		if volume.Name != topologyVolumeName {
+			continue
+		}
+		require.NotNil(t, volume.DownwardAPI)
+		for _, item := range volume.DownwardAPI.Items {
+			topologyItems[item.Path] = item.FieldRef.FieldPath
+		}
+	}
+	assert.Equal(t, map[string]string{
+		"zone": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("zone") + "']",
+		"rack": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("rack") + "']",
+	}, topologyItems)
+	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
+}
+
+func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{
+				"dgd-annotation":          "from-dgd",
+				"legacy-annotation":       "from-dgd",
+				"pod-template-annotation": "from-dgd",
+			},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: "legacy-sub",
+					Annotations:      map[string]string{"legacy-annotation": "kept"},
+					Labels:           map[string]string{"legacy-label": "kept"},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+
+	service := beta.GetComponentByName("worker")
+	require.NotNil(t, service)
+	component := service
+	ensurePodTemplate(component).Annotations["pod-template-annotation"] = "from-pod-template"
+
+	labels, err := generateLabels(component, beta, "worker", DiscoveryContext{})
+	require.NoError(t, err)
+	assert.Equal(t, "kept", labels["legacy-label"])
+	assert.Equal(t, "legacy-sub", labels[commonconsts.KubeLabelDynamoSubComponentType])
+
+	annotations, err := generateAnnotations(component, beta, "worker")
+	require.NoError(t, err)
+	assert.Equal(t, "from-dgd", annotations["dgd-annotation"])
+	assert.Equal(t, "kept", annotations["legacy-annotation"])
+	assert.Equal(t, "from-pod-template", annotations["pod-template-annotation"])
 }
 
 // TestGenerateComponentContext tests the generateComponentContext function
@@ -886,7 +1381,7 @@ func TestGenerateComponentContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := generateComponentContext(
-				tt.component,
+				betaComponent(t, tt.component),
 				tt.parentGraphDeploymentName,
 				tt.namespace,
 				tt.numberOfNodes,
@@ -1000,7 +1495,6 @@ func Test_updateDynDeploymentConfig(t *testing.T) {
 
 func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	type args struct {
-		ctx                       context.Context
 		dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment
 	}
 	tests := []struct {
@@ -1012,7 +1506,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "no env var",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1049,7 +1542,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "override workers and resources",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1103,7 +1595,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "override subset of resources",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1157,7 +1648,7 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := overrideWithDynDeploymentConfig(tt.args.ctx, tt.args.dynamoDeploymentComponent); (err != nil) != tt.wantErr {
+			if err := overrideWithDynDeploymentConfig(tt.args.dynamoDeploymentComponent); (err != nil) != tt.wantErr {
 				t.Errorf("overrideWithDynDeploymentConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if diff := cmp.Diff(tt.args.dynamoDeploymentComponent, tt.expected); diff != "" {
@@ -1218,6 +1709,48 @@ func Test_mergeEnvs(t *testing.T) {
 			})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddStandardEnvVars_NATS(t *testing.T) {
+	tests := []struct {
+		name        string
+		natsAddress string
+		wantNATS    bool
+	}{
+		{
+			name: "default configuration omits NATS_SERVER",
+		},
+		{
+			name:        "bundled NATS injects NATS_SERVER",
+			natsAddress: "nats://dynamo-nats.dynamo-system.svc.cluster.local:4222",
+			wantNATS:    true,
+		},
+		{
+			name:        "external NATS injects NATS_SERVER",
+			natsAddress: "nats://external-nats:4222",
+			wantNATS:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{
+				Infrastructure: configv1alpha1.InfrastructureConfiguration{
+					NATSAddress: tt.natsAddress,
+				},
+			}
+
+			AddStandardEnvVars(container, operatorConfig)
+			envByName := envVarsToMap(container.Env)
+
+			if tt.wantNATS {
+				assert.Equal(t, tt.natsAddress, envByName["NATS_SERVER"])
+			} else {
+				assert.NotContains(t, envByName, "NATS_SERVER")
 			}
 		})
 	}
@@ -1402,6 +1935,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -1494,10 +2030,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -1704,10 +2236,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2019,6 +2547,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -2103,10 +2634,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2322,10 +2849,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
-													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2516,10 +3039,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -2717,10 +3236,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3055,6 +3570,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -3138,10 +3656,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3344,10 +3858,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
-													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3538,10 +4048,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -3740,10 +4246,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
-													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3847,7 +4349,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, betaDGD(t, tt.args.dynamoDeployment), tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3908,7 +4410,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dynamoDeployment), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -4062,10 +4564,10 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GeneratePodSpecForComponent(
-				tt.component,
+				betaComponent(t, tt.component),
 				tt.backendFramework,
 				secretsRetriever,
-				dynamoDeployment,
+				betaDGD(t, dynamoDeployment),
 				tt.role,
 				tt.numberOfNodes,
 				controllerConfig,
@@ -4205,7 +4707,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
-						Args: []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+						Args: []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 					},
 				},
 			},
@@ -4213,7 +4715,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 			expectNotContains: []string{"ray start"},
 		},
 	}
@@ -4221,10 +4723,10 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GeneratePodSpecForComponent(
-				tt.component,
+				betaComponent(t, tt.component),
 				tt.backendFramework,
 				secretsRetriever,
-				dynamoDeployment,
+				betaDGD(t, dynamoDeployment),
 				tt.role,
 				tt.numberOfNodes,
 				controllerConfig,
@@ -4309,10 +4811,10 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := GeneratePodSpecForComponent(
-				component,
+				betaComponent(t, component),
 				tt.backendFramework,
 				secretsRetriever,
-				dynamoDeployment,
+				betaDGD(t, dynamoDeployment),
 				RoleMain,
 				1,
 				controllerConfig,
@@ -4493,9 +4995,9 @@ func TestExpandRolesForService(t *testing.T) {
 			if component == nil {
 				component = &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 			}
-			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes, component)
+			result := expandRolesForComponent(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes, betaComponent(t, component))
 			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf("expandRolesForService() = %v, want %v", result, tt.expected)
+				t.Errorf("expandRolesForComponent() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
@@ -4622,7 +5124,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := detectBackendFrameworkFromArgs(tt.command, tt.args)
+			result, err := DetectBackendFrameworkFromArgs(tt.command, tt.args)
 
 			if tt.expectError {
 				if err == nil {
@@ -4840,7 +5342,7 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := getBackendFrameworkFromComponent(tt.component, tt.deployment)
+			result, err := getBackendFrameworkFromComponent(betaComponent(t, tt.component), betaDGD(t, tt.deployment))
 
 			if tt.expectError {
 				if err == nil {
@@ -5179,7 +5681,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dynamoDeployment), controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -5278,7 +5780,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				tt.backendFramework,
 				secretsRetriever,
 				dynamoDeployment.Name,
@@ -5355,7 +5857,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkSGLang,
 				secretsRetriever,
 				"test-deployment",
@@ -5479,7 +5981,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 			controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkNoop,
 				tt.secretsRetriever,
 				"test-deployment",
@@ -5586,7 +6088,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkSGLang,
 				secretsRetriever,
 				"test-deployment",
@@ -5651,7 +6153,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-							{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
@@ -5758,7 +6259,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkSGLang,
 				secretsRetriever,
 				"test-deployment",
@@ -5785,6 +6286,138 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: commonconsts.ComponentTypeWorker,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				Mode:                  v1alpha1.GMSModeIntraPod,
+				ExtraClientContainers: []string{"gms-loader"},
+			},
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+				PodSpec: &corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "gms-loader",
+						Image: "loader:latest",
+					}},
+				},
+			},
+		}),
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
+	var main *corev1.Container
+	var loader *corev1.Container
+	for i := range podSpec.Containers {
+		switch podSpec.Containers[i].Name {
+		case commonconsts.MainContainerName:
+			main = &podSpec.Containers[i]
+		case "gms-loader":
+			loader = &podSpec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	require.NotNil(t, loader)
+
+	assertGMSClientContainer(t, main)
+	assertGMSClientContainer(t, loader)
+}
+
+func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+			ComponentType: commonconsts.ComponentTypeWorker,
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:               true,
+				Mode:                  v1alpha1.GMSModeIntraPod,
+				ExtraClientContainers: []string{"missing"},
+			},
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		}),
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	var main *corev1.Container
+	var missing *corev1.Container
+	for i := range podSpec.Containers {
+		switch podSpec.Containers[i].Name {
+		case commonconsts.MainContainerName:
+			main = &podSpec.Containers[i]
+		case "missing":
+			missing = &podSpec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	assertGMSClientContainer(t, main)
+	assert.Nil(t, missing)
+}
+
+func assertGMSClientContainer(t *testing.T, container *corev1.Container) {
+	t.Helper()
+
+	env := envVarsToMap(container.Env)
+	assert.Equal(t, gmsruntime.SharedMountPath, env[gmsruntime.EnvSocketDir])
+
+	mounts := map[string]string{}
+	for _, mount := range container.VolumeMounts {
+		mounts[mount.Name] = mount.MountPath
+	}
+	assert.Equal(t, gmsruntime.SharedMountPath, mounts[gmsruntime.SharedVolumeName])
+
+	require.Len(t, container.Resources.Claims, 1)
+	assert.Equal(t, dra.ClaimName, container.Resources.Claims[0].Name)
+}
+
+func findInitContainerByName(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
 func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
@@ -5795,6 +6428,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 		expectError    bool
 		expectedPVCs   []string
 		expectedMounts []corev1.VolumeMount
+		expectedInit   []corev1.VolumeMount
 	}{
 		{
 			name: "valid volumeMounts",
@@ -5812,6 +6446,55 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			expectedMounts: []corev1.VolumeMount{
 				{Name: "test-pvc", MountPath: "/data"},
 				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+		},
+		{
+			name: "volumeMounts compose with extra main container mounts",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:       "test-pvc",
+						MountPoint: "/data",
+					},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{
+								Name: "init",
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "test-pvc", MountPath: "/data"},
+								},
+							},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "config",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{
+										LocalObjectReference: corev1.LocalObjectReference{Name: "config"},
+									},
+								},
+							},
+						},
+					},
+					MainContainer: &corev1.Container{
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "config", MountPath: "/config"},
+						},
+					},
+				},
+			},
+			expectError:  false,
+			expectedPVCs: []string{"test-pvc"},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "config", MountPath: "/config"},
+				{Name: "test-pvc", MountPath: "/data"},
+				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+			expectedInit: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
 			},
 		},
 		{
@@ -5856,7 +6539,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkVLLM,
 				secretsRetriever,
 				"test-deployment",
@@ -5917,8 +6600,56 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
 				}
 			}
+			if tt.expectedInit != nil {
+				require.NotEmpty(t, podSpec.InitContainers)
+				assert.Equal(t, tt.expectedInit, podSpec.InitContainers[0].VolumeMounts)
+			}
 		})
 	}
+}
+
+func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
+	sshSecretName := "mpi-run-ssh-secret"
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Resources: &v1alpha1.Resources{
+			Limits: &v1alpha1.ResourceItem{GPU: "1"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.trtllm", "--model-path", "/model"},
+			},
+		},
+	})
+
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkTRTLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleLeader,
+		2,
+		&configv1alpha1.OperatorConfiguration{
+			MPI: configv1alpha1.MPIConfiguration{SSHSecretName: sshSecretName},
+		},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	var sshVolumes []corev1.Volume
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == sshSecretName {
+			sshVolumes = append(sshVolumes, volume)
+		}
+	}
+	require.Len(t, sshVolumes, 1)
+	assert.NotNil(t, sshVolumes[0].Secret)
+	assert.Nil(t, sshVolumes[0].PersistentVolumeClaim)
 }
 
 func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
@@ -6093,7 +6824,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkTRTLLM,
 				secretsRetriever,
 				"test-deployment",
@@ -6306,7 +7037,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				tt.backendFramework,
 				secretsRetriever,
 				"test-deployment",
@@ -6365,6 +7096,302 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", tt.expectedMount)
 				}
 			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{
+				Name:                  "compilation-cache",
+				MountPoint:            "/home/dynamo/.cache/vllm",
+				UseAsCompilationCache: true,
+			},
+		},
+	}
+
+	for _, deploymentType := range []commonconsts.MultinodeDeploymentType{
+		commonconsts.MultinodeDeploymentTypeGrove,
+		commonconsts.MultinodeDeploymentTypeLWS,
+	} {
+		t.Run(string(deploymentType), func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				betaComponent(t, component),
+				BackendFrameworkVLLM,
+				nil,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				deploymentType,
+				"test-service",
+				nil,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotEmpty(t, podSpec.Containers)
+
+			var compilationCacheMounts []corev1.VolumeMount
+			for _, mount := range podSpec.Containers[0].VolumeMounts {
+				if mount.MountPath == "/home/dynamo/.cache/vllm" {
+					compilationCacheMounts = append(compilationCacheMounts, mount)
+				}
+			}
+			require.Equal(t, []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/home/dynamo/.cache/vllm",
+			}}, compilationCacheMounts)
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{Name: "compilation-cache", UseAsCompilationCache: true},
+		},
+	}
+
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, component),
+		BackendFrameworkVLLM,
+		nil,
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      "compilation-cache",
+		MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	})
+}
+
+func TestApplyCompilationCacheRepairsLegacyMounts(t *testing.T) {
+	container := &corev1.Container{
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "model-cache", MountPath: "/models"},
+			{Name: "compilation-cache"},
+			{Name: "compilation-cache"},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"},
+	}
+
+	require.NoError(t, applyCompilationCache(container, component, BackendFrameworkVLLM))
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "model-cache", MountPath: "/models"},
+		{Name: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
+	}, container.VolumeMounts)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, component.CompilationCache.MountPath)
+}
+
+func TestApplyCompilationCacheVolume(t *testing.T) {
+	const volumeName = "compilation-cache"
+	cache := &v1beta1.CompilationCacheConfig{PVCName: volumeName}
+
+	tests := []struct {
+		name            string
+		volumes         []corev1.Volume
+		expectedVolumes []corev1.Volume
+		expectedError   string
+	}{
+		{
+			name: "missing volume is added",
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "matching PVC volume is preserved",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "non-PVC volume is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+		{
+			name: "different PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "other-pvc"},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" references PVC "other-pvc" instead of "compilation-cache"`,
+		},
+		{
+			name: "read-only PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName, ReadOnly: true},
+				},
+			}},
+			expectedError: `compilation cache PVC "compilation-cache" must be writable`,
+		},
+		{
+			name: "duplicate matching PVC volumes are rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" is defined more than once`,
+		},
+		{
+			name: "conflicting duplicate volume is rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec := &corev1.PodSpec{Volumes: append([]corev1.Volume(nil), tt.volumes...)}
+
+			err := applyCompilationCacheVolume(podSpec, cache)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.volumes, podSpec.Volumes)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedVolumes, podSpec.Volumes)
+		})
+	}
+}
+
+func TestApplyCompilationCacheExistingMount(t *testing.T) {
+	const mountPath = "/home/dynamo/.cache/vllm"
+
+	tests := []struct {
+		name           string
+		mounts         []corev1.VolumeMount
+		expectedMounts []corev1.VolumeMount
+		expectedError  string
+	}{
+		{
+			name: "matching writable mount is preserved",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+			expectedMounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+		},
+		{
+			name: "different volume at mount path is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "other-volume",
+				MountPath: mountPath,
+			}},
+			expectedError: `compilationCache.mountPath "/home/dynamo/.cache/vllm" is already used by volume "other-volume"`,
+		},
+		{
+			name: "read-only cache mount is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				ReadOnly:  true,
+			}},
+			expectedError: `compilation cache volume "compilation-cache" at "/home/dynamo/.cache/vllm" must be writable`,
+		},
+		{
+			name: "same volume at another path does not satisfy cache mount",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/other-path",
+			}},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "compilation-cache", MountPath: "/other-path"},
+				{Name: "compilation-cache", MountPath: mountPath},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				VolumeMounts: append([]corev1.VolumeMount(nil), tt.mounts...),
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "compilation-cache",
+					MountPath: mountPath,
+				},
+			}
+
+			err := applyCompilationCache(container, component, BackendFrameworkVLLM)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.mounts, container.VolumeMounts)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedMounts, container.VolumeMounts)
 		})
 	}
 }
@@ -6493,7 +7520,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				BackendFrameworkNoop,
 				secretsRetriever,
 				"test-deployment",
@@ -6741,7 +7768,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DetermineRestartState(tt.dgd, tt.restartStatus)
+			got := DetermineRestartState(betaDGD(t, tt.dgd), betaRestartStatus(tt.restartStatus))
 
 			if tt.wantNil {
 				if got != nil {
@@ -6756,7 +7783,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 			}
 
 			var gotSvcs []string
-			for svc, shouldAnnotate := range got.ServicesToAnnotate {
+			for svc, shouldAnnotate := range got.ComponentsToAnnotate {
 				if shouldAnnotate {
 					gotSvcs = append(gotSvcs, svc)
 				}
@@ -6774,7 +7801,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 	}
 }
 
-func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
+func TestGroveRestartStateShouldAnnotateComponent(t *testing.T) {
 	tests := []struct {
 		name        string
 		state       *RestartState
@@ -6790,8 +7817,8 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		{
 			name: "nil services map returns false",
 			state: &RestartState{
-				Timestamp:          "2024-01-01T00:00:00Z",
-				ServicesToAnnotate: nil,
+				Timestamp:            "2024-01-01T00:00:00Z",
+				ComponentsToAnnotate: nil,
 			},
 			serviceName: "Frontend",
 			want:        false,
@@ -6799,8 +7826,8 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		{
 			name: "service in map returns true",
 			state: &RestartState{
-				Timestamp:          "2024-01-01T00:00:00Z",
-				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+				Timestamp:            "2024-01-01T00:00:00Z",
+				ComponentsToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
 			serviceName: "Frontend",
 			want:        true,
@@ -6808,8 +7835,8 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		{
 			name: "service not in map returns false",
 			state: &RestartState{
-				Timestamp:          "2024-01-01T00:00:00Z",
-				ServicesToAnnotate: map[string]bool{"Frontend": true},
+				Timestamp:            "2024-01-01T00:00:00Z",
+				ComponentsToAnnotate: map[string]bool{"Frontend": true},
 			},
 			serviceName: "Worker",
 			want:        false,
@@ -6818,8 +7845,8 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.state.ShouldAnnotateService(tt.serviceName); got != tt.want {
-				t.Errorf("ShouldAnnotateService() = %v, want %v", got, tt.want)
+			if got := tt.state.ShouldAnnotateComponent(tt.serviceName); got != tt.want {
+				t.Errorf("ShouldAnnotateComponent() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -6854,10 +7881,10 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 			},
 		},
 		{
-			name: "nil ServicesToAnnotate - no annotations",
+			name: "nil ComponentsToAnnotate - no annotations",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: nil,
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: nil,
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -6872,8 +7899,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		{
 			name: "all services annotated - parallel restart",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -6893,8 +7920,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		{
 			name: "only first service annotated - sequential restart start",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Frontend": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Frontend": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -6914,8 +7941,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		{
 			name: "completed services keep annotation - sequential restart in progress",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -6938,10 +7965,10 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 			},
 		},
 		{
-			name: "service not in DGD spec - annotation still applied if in ServicesToAnnotate",
+			name: "service not in DGD spec - annotation still applied if in ComponentsToAnnotate",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Frontend": true, "NonExistent": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Frontend": true, "NonExistent": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -6956,8 +7983,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		{
 			name: "multinode service - all cliques get restart annotation",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Worker": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Worker": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Worker": {
@@ -6976,8 +8003,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		{
 			name: "preserves existing annotations when adding restart annotation",
 			restartState: &RestartState{
-				Timestamp:          restartTimestamp,
-				ServicesToAnnotate: map[string]bool{"Frontend": true},
+				Timestamp:            restartTimestamp,
+				ComponentsToAnnotate: map[string]bool{"Frontend": true},
 			},
 			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
@@ -7020,7 +8047,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -7092,7 +8119,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 
 func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testing.T) {
 	labels, err := generateLabels(
-		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
@@ -7105,10 +8132,10 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 					snapshotprotocol.CheckpointIDLabel: "stale-hash",
 				},
 			},
-		},
-		&v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
-		},
+		}),
+		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		}),
 		"Worker",
 		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 	)
@@ -7129,7 +8156,7 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 
 func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testing.T) {
 	labels, err := generateLabels(
-		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
@@ -7137,10 +8164,10 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 					snapshotprotocol.CheckpointIDLabel: "stale-hash",
 				},
 			},
-		},
-		&v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
-		},
+		}),
+		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		}),
 		"Worker",
 		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 	)
@@ -7159,10 +8186,12 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
 	labels, err := generateLabels(
-		&v1alpha1.DynamoComponentDeploymentSharedSpec{
+		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:            "wrong-from-labels",
+				commonconsts.KubeLabelDynamoComponent:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoNamespace:           "wrong-from-labels",
 				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-labels",
@@ -7170,20 +8199,24 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoSelector:            "wrong-from-extra-metadata",
+					commonconsts.KubeLabelDynamoComponent:           "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoNamespace:           "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 					commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-from-extra-metadata",
 					commonconsts.KubeLabelDynamoWorkerHash:          "wrong-from-extra-metadata",
 				},
 			},
-		},
-		&v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
-		},
+		}),
+		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		}),
 		"Worker",
 		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 	)
 	require.NoError(t, err)
+	assert.Equal(t, "test-dgd-worker", labels[commonconsts.KubeLabelDynamoSelector])
+	assert.Equal(t, "Worker", labels[commonconsts.KubeLabelDynamoComponent])
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
 	assert.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
 	assert.Equal(t, "test-dgd", labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
@@ -7236,7 +8269,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -7266,10 +8299,10 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 // no CRIU state to capture; shaping them as restore targets would replace
 // the GMS wrapper command with `sleep infinity` and break the layout.
 //
-// Engine cliques in the same service must still be shaped: target-
-// containers annotation set to "main", restore-target label set to true,
-// and the placeholder `sleep infinity` command injected so the snapshot
-// agent can drive the restore.
+// Engine cliques in the same service must still be restore candidates: the
+// target-containers annotation is set to "main", but Immediate startup keeps
+// the owner template cold-start-shaped. The pod-create mutating webhook turns
+// newly-created engine pods into restore targets after the checkpoint is Ready.
 func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -7338,10 +8371,16 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	}).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
-		"decode": {Enabled: true, Ready: true, Hash: "abc123def4567890"},
+		"decode": {
+			Enabled:        true,
+			Exists:         true,
+			Ready:          true,
+			Hash:           "abc123def4567890",
+			CheckpointName: "decode-checkpoint",
+		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -7361,10 +8400,12 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
 				"engine clique %q must carry snapshot-target-containers=main annotation", clique.Name)
-			assert.NotEmpty(t, checkpointID,
-				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
-			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
-				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
+			assert.Empty(t, checkpointID,
+				"engine clique %q must not carry checkpoint-id label until the pod-create mutating webhook restore-shapes a Pod", clique.Name)
+			assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
+				"engine clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
+			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
+				"engine clique %q main container must stay cold-start-shaped in Immediate startup", clique.Name)
 		}
 	}
 	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")
@@ -7385,7 +8426,9 @@ func findContainerInClique(t *testing.T, clique *grovev1alpha1.PodCliqueTemplate
 // TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets pins the
 // contract that intra-pod failover services (Failover.Mode=intraPod) stamp
 // the snapshot-target-containers annotation with "engine-0,engine-1" on
-// the restore pod and shape every engine container as a restore target.
+// the restore candidate pod template. Immediate startup leaves the owner
+// template cold-start-shaped; the pod-create mutating webhook shape every
+// engine container as a restore target after the checkpoint is Ready.
 // Intra-pod failover clones the main container into engine-0 + engine-1 and
 // both engines must be driven by the snapshot agent from the same checkpoint.
 func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.T) {
@@ -7456,13 +8499,15 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
 			Enabled:                 true,
+			Exists:                  true,
 			Ready:                   true,
 			Hash:                    "abc123def4567890",
+			CheckpointName:          "decode-checkpoint",
 			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, kubeClient, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -7474,22 +8519,179 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		sawDecode = true
 		assert.Equal(t, "engine-0,engine-1", clique.Annotations[snapshotprotocol.TargetContainersAnnotation],
 			"clique %q must carry snapshot-target-containers=engine-0,engine-1", clique.Name)
+		assert.Equal(t, "true", clique.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation],
+			"clique %q must carry the restore-candidate annotation for the pod-create webhook", clique.Name)
 		for _, engineName := range IntraPodFailoverEngineContainerNames() {
 			c := findContainerInClique(t, clique, engineName)
-			assert.Equal(t, []string{"sleep", "infinity"}, c.Command,
-				"%s in clique %q must be shaped as a snapshot restore target", engineName, clique.Name)
-			foundMount := false
+			assert.NotEqual(t, []string{"sleep", "infinity"}, c.Command,
+				"%s in clique %q must stay cold-start-shaped in Immediate startup", engineName, clique.Name)
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
-					foundMount = true
-					assert.Equal(t, engineName, m.SubPath,
-						"%s in clique %q must have its own subPath on the control volume", engineName, clique.Name)
+					t.Fatalf("%s in clique %q must not mount the snapshot-control volume before the pod-create webhook runs", engineName, clique.Name)
 				}
 			}
-			assert.True(t, foundMount, "%s in clique %q must mount the snapshot-control volume", engineName, clique.Name)
 		}
 	}
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
+}
+
+func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(3)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
+		nil,
+		nil,
+		nil,
+		nil,
+		map[string]*checkpoint.CheckpointInfo{
+			"decode": {
+				Enabled:        true,
+				Exists:         true,
+				StartupPolicy:  v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				CheckpointName: "decode-checkpoint",
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	require.NotNil(t, pcsg.Replicas)
+	assert.EqualValues(t, 0, *pcsg.Replicas)
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 1, *pcsg.MinAvailable)
+	for _, clique := range got.Spec.Template.Cliques {
+		if strings.Contains(clique.Name, "gms") {
+			continue
+		}
+		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
+		require.NotNil(t, clique.Spec.MinAvailable)
+		assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "clique %q should keep its configured minAvailable", clique.Name)
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
+	tests := []struct {
+		name             string
+		service          *v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantClique       bool
+		wantScalingGroup bool
+		wantMinAvailable int32
+	}{
+		{
+			name: "standalone pod clique",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(2),
+		},
+		{
+			name: "standalone pod clique defaults minAvailable to 1",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(1),
+		},
+		{
+			name: "pod clique scaling group",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(2),
+		},
+		{
+			name: "pod clique scaling group defaults minAvailable to 1",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": tt.service,
+					},
+				},
+			}
+
+			got, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				betaDGD(t, dgd),
+				&configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{},
+				nil, nil, nil, nil, nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+
+			if tt.wantClique {
+				require.Len(t, got.Spec.Template.Cliques, 1)
+				require.NotNil(t, got.Spec.Template.Cliques[0].Spec.MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.Cliques[0].Spec.MinAvailable)
+			}
+			if tt.wantScalingGroup {
+				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				require.NotNil(t, got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+			}
+		})
+	}
 }
 
 // TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins
@@ -7524,12 +8726,12 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		betaDGD(t, dgd),
 		&configv1alpha1.OperatorConfiguration{
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
 		},
-		&controller_common.RuntimeConfig{DRAEnabled: true},
+		&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 		nil, nil, nil, nil, nil,
 	)
 	require.NoError(t, err)
@@ -7567,7 +8769,7 @@ func TestIsWorkerComponent(t *testing.T) {
 func TestRollingUpdateContext_InProgress(t *testing.T) {
 	assert.False(t, RollingUpdateContext{}.InProgress())
 	assert.False(t, RollingUpdateContext{NewWorkerHash: "abc"}.InProgress())
-	assert.True(t, RollingUpdateContext{OldWorkerReplicas: map[string]int32{"w": 1}}.InProgress())
+	assert.True(t, RollingUpdateContext{OldWorkerReplicaTargetsByComponent: map[string]int32{"w": 1}}.InProgress())
 }
 
 func TestGetDCDResourceName(t *testing.T) {
@@ -7583,16 +8785,78 @@ func TestGetDCDResourceName(t *testing.T) {
 		},
 	}
 
+	beta := betaDGD(t, dgd)
+
 	// Workers get hash suffix
-	assert.Equal(t, "my-dgd-prefill-abc12345", GetDCDResourceName(dgd, "prefill", "abc12345"))
-	assert.Equal(t, "my-dgd-decode-abc12345", GetDCDResourceName(dgd, "decode", "abc12345"))
-	assert.Equal(t, "my-dgd-worker-abc12345", GetDCDResourceName(dgd, "worker", "abc12345"))
+	assert.Equal(t, "my-dgd-prefill-abc12345", GetDCDResourceName(beta, "prefill", "abc12345"))
+	assert.Equal(t, "my-dgd-decode-abc12345", GetDCDResourceName(beta, "decode", "abc12345"))
+	assert.Equal(t, "my-dgd-worker-abc12345", GetDCDResourceName(beta, "worker", "abc12345"))
 
 	// Non-workers never get hash suffix
-	assert.Equal(t, "my-dgd-frontend", GetDCDResourceName(dgd, "frontend", "abc12345"))
+	assert.Equal(t, "my-dgd-frontend", GetDCDResourceName(beta, "frontend", "abc12345"))
 
 	// Empty hash — workers don't get suffix
-	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(dgd, "prefill", ""))
+	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(beta, "prefill", ""))
+}
+
+func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testing.T) {
+	ingressSpec := IngressSpec{
+		Enabled:               true,
+		Host:                  "example",
+		UseVirtualService:     true,
+		VirtualServiceGateway: ptr.To("mesh/gateway"),
+	}
+
+	ingress := GenerateComponentIngress(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	require.Len(t, ingress.Spec.Rules, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
+	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service)
+	assert.Equal(t, "model-qwen3-0-6b", ingress.Name)
+	assert.Equal(t, "model-qwen3-0-6b", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
+
+	virtualService := GenerateComponentVirtualService(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	require.Len(t, virtualService.Spec.Http, 1)
+	require.Len(t, virtualService.Spec.Http[0].Route, 1)
+	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
+	assert.Equal(t, "model-qwen3-0-6b", virtualService.Name)
+	assert.Equal(t, "model-qwen3-0-6b", virtualService.Spec.Http[0].Route[0].Destination.Host)
+}
+
+func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "router", Namespace: "default"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "router",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: commonconsts.MainContainerName,
+								Env: []corev1.EnvVar{
+									{
+										Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+										Value: `{"Frontend":{"ServiceArgs":{"Resources":{"CPU":"2","Memory":"2Gi","GPU":"1"}}}}`,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, applyDynDeploymentConfig(dcd, commonconsts.DynamoServicePort))
+
+	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	require.NotNil(t, main)
+	assert.Equal(t, resource.MustParse("2"), main.Resources.Requests[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("2Gi"), main.Resources.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("1"), main.Resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)])
 }
 
 func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
@@ -7606,14 +8870,13 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 		},
 	}
 
-	ctx := context.Background()
 	ruCtx := RollingUpdateContext{
-		NewWorkerHash:     "aabb1122",
-		OldWorkerReplicas: map[string]int32{"prefill": 2},
-		NewWorkerReplicas: map[string]int32{"prefill": 2},
+		NewWorkerHash:                      "aabb1122",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(ctx, dgd, nil, &RestartState{}, nil, ruCtx)
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	// Worker DCD: hash suffix in name, hash label, replica override
@@ -7629,6 +8892,115 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateDynamoComponentsDeploymentsDoesNotMutateParentDGD(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"dgd-annotation": "value"},
+			Labels:      map[string]string{"dgd-label": "value"},
+			Env:         []corev1.EnvVar{{Name: "GLOBAL_ENV", Value: "from-dgd"}},
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypePrefill,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{"component-annotation": "value"},
+							Labels:      map[string]string{"component-label": "value"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: commonconsts.MainContainerName,
+									Env:  []corev1.EnvVar{{Name: "COMPONENT_ENV", Value: "from-component"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	original := dgd.DeepCopy()
+
+	dcds, err := GenerateDynamoComponentsDeployments(
+		dgd,
+		&RestartState{},
+		map[string]string{"prefill": "2026-05-12T13:00:00Z"},
+		RollingUpdateContext{
+			NewWorkerHash:                      "aabb1122",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 1},
+			NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, cmp.Diff(original, dgd))
+
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, "aabb1122", GetPodTemplateLabels(&prefillDCD.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP},
+				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
+	require.NoError(t, err)
+
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, commonconsts.ComponentClassWorker, prefillDCD.Labels[commonconsts.KubeLabelDynamoComponentClass])
+	assert.Equal(t, commonconsts.ComponentClassWorker, GetPodTemplateLabels(&prefillDCD.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeLabelDynamoComponentClass])
+}
+
+func TestGenerateDynamoComponentsDeployments_InferBackendFrameworkForGeneratedDCDs(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"decode": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:         ptr.To(int32(1)),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B"},
+							Env: []corev1.EnvVar{
+								{Name: "MY_NEW_ENV", Value: "enabled"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(BackendFrameworkVLLM), dcds["decode"].Spec.BackendFramework)
+	assert.Equal(t, string(BackendFrameworkVLLM), dcds["frontend"].Spec.BackendFramework)
+}
+
 func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
@@ -7639,7 +9011,7 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{})
 	assert.NoError(t, err)
 
 	dcd := dcds["worker"]
@@ -7662,12 +9034,12 @@ func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
 	}
 
 	ruCtx := RollingUpdateContext{
-		NewWorkerHash:     "aabb1122",
-		OldWorkerReplicas: map[string]int32{"decode": 3},
-		NewWorkerReplicas: map[string]int32{"decode": 0},
+		NewWorkerHash:                      "aabb1122",
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"decode": 3},
+		NewWorkerReplicaTargetsByComponent: map[string]int32{"decode": 0},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, ruCtx)
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	decodeDCD := dcds["decode"]
@@ -7682,22 +9054,30 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx := generateComponentContext(component, "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
 
 	// Worker without hash label
 	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx2 := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
+
+	// Legacy is the active suffix for DCD generations created before managed rolling updates.
+	componentLegacy := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
+	}
+	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx3 := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
 }
 
@@ -7747,6 +9127,44 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+}
+
+func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	podModeContainer, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		Discovery: DiscoveryContext{
+			Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			Mode:    configv1alpha1.KubeDiscoveryModePod,
+		},
+	})
+	require.NoError(t, err)
+	podModeEnv := envVarsToMap(podModeContainer.Env)
+	assert.NotContains(t, podModeEnv, "CONTAINER_NAME")
+	assert.NotContains(t, podModeEnv, "DYN_KUBE_DISCOVERY_MODE")
+
+	containerModeContainer, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		Discovery: DiscoveryContext{
+			Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			Mode:    configv1alpha1.KubeDiscoveryModeContainer,
+		},
+	})
+	require.NoError(t, err)
+	containerModeEnv := envVarsToMap(containerModeContainer.Env)
+	assert.Equal(t, commonconsts.MainContainerName, containerModeEnv["CONTAINER_NAME"])
+	assert.Equal(t, string(configv1alpha1.KubeDiscoveryModeContainer), containerModeEnv["DYN_KUBE_DISCOVERY_MODE"])
+}
+
+func envVarsToMap(envs []corev1.EnvVar) map[string]string {
+	out := make(map[string]string, len(envs))
+	for _, env := range envs {
+		out[env.Name] = env.Value
+	}
+	return out
 }
 
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
@@ -7956,7 +9374,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				role = RoleLeader
 			}
 			podSpec, err := GenerateBasePodSpec(
-				tt.component,
+				betaComponent(t, tt.component),
 				backendFramework,
 				secretsRetriever,
 				tt.parentDGDName,
@@ -8140,14 +9558,16 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: tt.serviceAnnotations,
 			}
-			propagateDGDAnnotations(tt.dgdAnnotations, component)
+			betaComponent := betaComponent(t, component)
+			propagateDGDAnnotations(tt.dgdAnnotations, betaComponent)
+			annotations := GetPodTemplateAnnotations(betaComponent)
 
 			if tt.expectedAnnotation == nil {
-				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
-					"expected no annotations, got %v", component.Annotations)
+				assert.True(t, len(annotations) == 0 || annotations == nil,
+					"expected no annotations, got %v", annotations)
 			} else {
 				for k, v := range tt.expectedAnnotation {
-					assert.Equal(t, v, component.Annotations[k], "annotation %s mismatch", k)
+					assert.Equal(t, v, annotations[k], "annotation %s mismatch", k)
 				}
 			}
 		})
@@ -8199,19 +9619,22 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 				Annotations: tt.serviceAnnotations,
 				Labels:      tt.serviceLabels,
 			}
-			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, component)
+			betaComponent := betaComponent(t, component)
+			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, betaComponent)
+			annotations := GetPodTemplateAnnotations(betaComponent)
+			labels := GetPodTemplateLabels(betaComponent)
 
 			if tt.expectedAnnotations == nil {
-				assert.True(t, len(component.Annotations) == 0 || component.Annotations == nil,
-					"expected no annotations, got %v", component.Annotations)
+				assert.True(t, len(annotations) == 0 || annotations == nil,
+					"expected no annotations, got %v", annotations)
 			} else {
-				assert.Equal(t, tt.expectedAnnotations, component.Annotations)
+				assert.Equal(t, tt.expectedAnnotations, annotations)
 			}
 			if tt.expectedLabels == nil {
-				assert.True(t, len(component.Labels) == 0 || component.Labels == nil,
-					"expected no labels, got %v", component.Labels)
+				assert.True(t, len(labels) == 0 || labels == nil,
+					"expected no labels, got %v", labels)
 			} else {
-				assert.Equal(t, tt.expectedLabels, component.Labels)
+				assert.Equal(t, tt.expectedLabels, labels)
 			}
 		})
 	}
@@ -8236,7 +9659,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		},
 	}
 
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 
 	// PCS object-level metadata
@@ -8248,6 +9671,291 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 	clique := pcs.Spec.Template.Cliques[0]
 	assert.Equal(t, "svc-override", clique.Annotations["team/cost-center"],
 		"service-level annotation should take precedence over spec.metadata")
+}
+
+func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T) {
+	tests := []struct {
+		name                string
+		metadataAnnotations map[string]string
+		specAnnotations     map[string]string
+		runtimeConfig       *controller_common.RuntimeConfig
+		expectedQueue       string
+		expectQueue         bool
+	}{
+		{
+			name: "dynamo metadata annotation maps to grove annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "qa-volcano-e2e",
+			expectQueue:   true,
+		},
+		{
+			name: "dynamo metadata annotation is trimmed and takes precedence over spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " metadata-queue ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "metadata-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation does not override spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation is ignored",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectQueue: false,
+		},
+		{
+			name: "grove spec annotation remains a direct pass-through",
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true, VolcanoScheduler: true},
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "metadata annotation is ignored when volcano scheduler integration is disabled",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				Gate: features.Gates{Grove: true},
+			},
+			expectQueue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-dgd",
+					Namespace:   "ns",
+					Annotations: tt.metadataAnnotations,
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Annotations: tt.specAnnotations,
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.NotNil(t, pcs)
+			if tt.expectQueue {
+				require.NotNil(t, pcs.Annotations)
+				assert.Equal(t, tt.expectedQueue, pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+				return
+			}
+			assert.NotContains(t, pcs.Annotations, commonconsts.GroveAnnotationVolcanoQueue)
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "gpu-training",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, VolcanoScheduler: true}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	assert.Equal(t, "gpu-training", pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+	assert.Equal(t, commonconsts.VolcanoSchedulerName, pcs.Spec.Template.Cliques[0].Spec.PodSpec.SchedulerName)
+}
+
+func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	_, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true, VolcanoScheduler: true}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kai-scheduler and volcano scheduler integrations cannot both be enabled")
+}
+
+func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			PriorityClassName: "high-priority",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "high-priority", pcs.Spec.Template.PriorityClassName)
+}
+
+func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
+	tests := []struct {
+		name          string
+		annotation    string
+		hasAnnotation bool
+		wantStrategy  *grovev1alpha1.UpdateStrategyType
+		wantErr       string
+	}{
+		{
+			name: "default leaves Grove strategy unset",
+		},
+		{
+			name:          "RollingRecreate annotation maps to Grove strategy",
+			annotation:    "RollingRecreate",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.RollingRecreateStrategy),
+		},
+		{
+			name:          "OnDelete annotation maps to Grove strategy",
+			annotation:    "OnDelete",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.OnDeleteStrategy),
+		},
+		{
+			name:          "lowercase annotation is rejected",
+			annotation:    "ondelete",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "annotation with whitespace is rejected",
+			annotation:    " OnDelete ",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "unknown annotation is rejected",
+			annotation:    "BlueGreen",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+			if tt.hasAnnotation {
+				dgd.Annotations = map[string]string{
+					commonconsts.KubeAnnotationGroveUpdateStrategy: tt.annotation,
+				}
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantStrategy == nil {
+				assert.Nil(t, pcs.Spec.UpdateStrategy)
+				return
+			}
+			require.NotNil(t, pcs.Spec.UpdateStrategy)
+			assert.Equal(t, *tt.wantStrategy, pcs.Spec.UpdateStrategy.Type)
+		})
+	}
 }
 
 func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
@@ -8270,28 +9978,30 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, &v1alpha1.IngressSpec{}, nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	dcd := dcds["frontend"]
 	require.NotNil(t, dcd)
+	annotations := GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	labels := GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 
 	// Annotations: service-level takes precedence over DGD-level
-	assert.Equal(t, "abc", dcd.Spec.Annotations["team/cost-center"])
-	assert.Equal(t, "svc", dcd.Spec.Annotations["shared"],
+	assert.Equal(t, "abc", annotations["team/cost-center"])
+	assert.Equal(t, "svc", annotations["shared"],
 		"service-level annotation should take precedence over DGD annotation")
 
 	// Labels: service-level survives and takes precedence over DGD-level
-	assert.Equal(t, "svc", dcd.Spec.Labels["shared-label"],
+	assert.Equal(t, "svc", labels["shared-label"],
 		"service-level label should take precedence over DGD label")
-	assert.Equal(t, "val", dcd.Spec.Labels["svc-only"],
+	assert.Equal(t, "val", labels["svc-only"],
 		"service-only label should be preserved")
-	assert.Equal(t, "prod", dcd.Spec.Labels["env"],
+	assert.Equal(t, "prod", labels["env"],
 		"DGD-level label should propagate when no service override")
 
 	// Controller labels must always be present
-	assert.Equal(t, "frontend", dcd.Spec.Labels[commonconsts.KubeLabelDynamoComponent])
-	assert.Equal(t, dgd.Name, dcd.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "frontend", dcd.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, dgd.Name, dcd.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
 }
 
 func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
@@ -8350,10 +10060,50 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("rack")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
+			},
+			wantPCSGCount: 0,
+		},
+		{
+			name: "service-only topology constraint - topology name is explicit on clique",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("rack"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("rack"),
+					},
+				},
 			},
 			wantPCSGCount: 0,
 		},
@@ -8384,14 +10134,61 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				},
 			},
 			wantPCSTemplateTC: &grovev1alpha1.TopologyConstraint{
-				PackDomain: grovev1alpha1.TopologyDomain("zone"),
+				TopologyName: "test-topology",
+				Pack: &grovev1alpha1.TopologyPackConstraint{
+					RequiredDomain: grovev1alpha1.TopologyDomain("zone"),
+				},
 			},
 			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
 				"worker-ldr": nil,
 				"worker-wkr": nil,
 			},
 			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
-				"worker": {PackDomain: grovev1alpha1.TopologyDomain("block")},
+				"worker": {
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
+			},
+			wantPCSGCount: 1,
+		},
+		{
+			name: "service-only multinode constraint - topology name is explicit on scaling group",
+			deployment: &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deploy",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{
+						TopologyProfile: "test-topology",
+					},
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(2)),
+							Multinode: &v1alpha1.MultinodeSpec{
+								NodeCount: 4,
+							},
+							TopologyConstraint: &v1alpha1.TopologyConstraint{
+								PackDomain: v1alpha1.TopologyDomain("block"),
+							},
+						},
+					},
+				},
+			},
+			wantPCSTemplateTC: nil,
+			wantCliqueTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker-ldr": nil,
+				"worker-wkr": nil,
+			},
+			wantPCSGTC: map[string]*grovev1alpha1.TopologyConstraint{
+				"worker": {
+					TopologyName: "test-topology",
+					Pack: &grovev1alpha1.TopologyPackConstraint{
+						RequiredDomain: grovev1alpha1.TopologyDomain("block"),
+					},
+				},
 			},
 			wantPCSGCount: 1,
 		},
@@ -8401,7 +10198,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pcs, err := GenerateGrovePodCliqueSet(
 				context.Background(),
-				tt.deployment,
+				betaDGD(t, tt.deployment),
 				operatorConfig,
 				&controller_common.RuntimeConfig{},
 				nil,
@@ -8417,8 +10214,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			if tt.wantPCSTemplateTC == nil {
 				assert.Nil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be nil")
 			} else {
-				assert.NotNil(t, pcs.Spec.Template.TopologyConstraint, "expected PCS template TopologyConstraint to be set")
-				assert.Equal(t, tt.wantPCSTemplateTC.PackDomain, pcs.Spec.Template.TopologyConstraint.PackDomain)
+				assert.Equal(t, tt.wantPCSTemplateTC, pcs.Spec.Template.TopologyConstraint)
 			}
 
 			// Verify clique-level TopologyConstraints (exhaustive)
@@ -8434,8 +10230,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				if expectedTC == nil {
 					assert.Nil(t, clique.TopologyConstraint, "clique %q: expected nil TopologyConstraint", clique.Name)
 				} else {
-					assert.NotNil(t, clique.TopologyConstraint, "clique %q: expected non-nil TopologyConstraint", clique.Name)
-					assert.Equal(t, expectedTC.PackDomain, clique.TopologyConstraint.PackDomain, "clique %q: packDomain mismatch", clique.Name)
+					assert.Equal(t, expectedTC, clique.TopologyConstraint, "clique %q: topologyConstraint mismatch", clique.Name)
 				}
 			}
 			for expectedName := range tt.wantCliqueTC {
@@ -8458,8 +10253,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 					if expectedTC == nil {
 						assert.Nil(t, pcsg.TopologyConstraint, "PCSG %q: expected nil TopologyConstraint", pcsg.Name)
 					} else {
-						assert.NotNil(t, pcsg.TopologyConstraint, "PCSG %q: expected non-nil TopologyConstraint", pcsg.Name)
-						assert.Equal(t, expectedTC.PackDomain, pcsg.TopologyConstraint.PackDomain, "PCSG %q: packDomain mismatch", pcsg.Name)
+						assert.Equal(t, expectedTC, pcsg.TopologyConstraint, "PCSG %q: topologyConstraint mismatch", pcsg.Name)
 					}
 				}
 			}
@@ -8470,4 +10264,642 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPCSNameForDGD(t *testing.T) {
+	singleNodeComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
+		return v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: name}
+	}
+	multinodeComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
+		return v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: name,
+			Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		dgdName    string
+		components []v1beta1.DynamoComponentDeploymentSharedSpec
+		want       string
+		wantLen    int // 0 means check exact match via want; >0 means check length
+	}{
+		{
+			name:    "short name passes through unchanged",
+			dgdName: "trtllm-disagg",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				singleNodeComponent("prefill"),
+				singleNodeComponent("decode"),
+			},
+			want: "trtllm-disagg",
+		},
+		{
+			name:    "short name with multinode passes through unchanged",
+			dgdName: "my-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("prefill"),
+				multinodeComponent("decode"),
+			},
+			want: "my-dgd",
+		},
+		{
+			name:    "long name gets truncated with hash",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("prefill"),
+				multinodeComponent("decode"),
+			},
+			// prefill multinode: PCSG=7, PCLQ=7+1+3=11 → budget=18, pcsBudget=45-18=27
+			// dgdName is 28 chars → needs truncation to 27
+			wantLen: 27,
+		},
+		{
+			name:    "deterministic - same input always produces same output",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("prefill"),
+			},
+			// Just verify determinism by calling twice
+			wantLen: 27,
+		},
+		{
+			name:    "old long vllm service names get truncated more aggressively",
+			dgdName: "my-deployment-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("VllmPrefillWorker"),
+			},
+			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
+			// 7 < minPCSNameLength(8), so clamped to 8
+			wantLen: 8,
+		},
+		{
+			name:       "empty components - no truncation needed",
+			dgdName:    "my-dgd",
+			components: nil,
+			want:       "my-dgd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PCSNameForDGD(tt.dgdName, tt.components)
+
+			if tt.want != "" {
+				if got != tt.want {
+					t.Errorf("PCSNameForDGD() = %q, want %q", got, tt.want)
+				}
+			}
+			if tt.wantLen > 0 {
+				if len(got) != tt.wantLen {
+					t.Errorf("PCSNameForDGD() = %q (len %d), want len %d", got, len(got), tt.wantLen)
+				}
+			}
+
+			// Verify determinism
+			got2 := PCSNameForDGD(tt.dgdName, tt.components)
+			if got != got2 {
+				t.Errorf("PCSNameForDGD() not deterministic: %q != %q", got, got2)
+			}
+
+			// Verify the result actually fits within the Grove limit
+			maxComponentBudget := 0
+			for i := range tt.components {
+				component := &tt.components[i]
+				lowerName := strings.ToLower(component.ComponentName)
+				var budget int
+				if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+					maxCliqueNameLen := 0
+					for _, role := range expandRolesForComponent(component.ComponentName, component.Replicas, component.GetNumberOfNodes(), component) {
+						if cliqueNameLen := len(strings.ToLower(role.Name)); cliqueNameLen > maxCliqueNameLen {
+							maxCliqueNameLen = cliqueNameLen
+						}
+					}
+					budget = len(lowerName) + maxCliqueNameLen
+				} else {
+					budget = len(lowerName)
+				}
+				if budget > maxComponentBudget {
+					maxComponentBudget = budget
+				}
+			}
+			combinedLength := len(got) + maxComponentBudget
+			if combinedLength > commonconsts.MaxCombinedGroveResourceNameLength && len(got) > 8 {
+				t.Errorf("PCSNameForDGD() result %q (len %d) + max component budget %d = %d, exceeds %d",
+					got, len(got), maxComponentBudget, combinedLength, commonconsts.MaxCombinedGroveResourceNameLength)
+			}
+		})
+	}
+}
+
+func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	t.Run("worker gets required transfer policy env vars when experimental kvTransferPolicy is set", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    testTopologyLabelKey,
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, podSpec.Containers, 1)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "zone", envMap[commonconsts.EnvKvTransferDomain],
+			"worker should have DYN_KV_TRANSFER_DOMAIN")
+		assert.Equal(t, "required", envMap[commonconsts.EnvKvTransferEnforcement],
+			"worker should have DYN_KV_TRANSFER_ENFORCEMENT")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight)
+	})
+
+	t.Run("worker gets preferred transfer policy env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:        "nvidia.com/rack",
+						Domain:          "rack",
+						Enforcement:     v1beta1.KvTransferEnforcementPreferred,
+						PreferredWeight: ptr.To[float32](0.85),
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "rack", envMap[commonconsts.EnvKvTransferDomain])
+		assert.Equal(t, "preferred", envMap[commonconsts.EnvKvTransferEnforcement])
+		assert.Equal(t, "0.85", envMap[commonconsts.EnvKvTransferPreferredWeight])
+	})
+
+	t.Run("worker policy env vars override user-supplied transfer and topology env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Env: []corev1.EnvVar{
+					{Name: commonconsts.EnvKvTransferPreferredWeight, Value: "1"},
+					{Name: commonconsts.EnvTopologyEnabled, Value: "false"},
+					{Name: "GLOBAL_ENV", Value: "global"},
+				},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{
+						ComponentName: "worker",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name: v1beta1.MainContainerName,
+										Env: []corev1.EnvVar{
+											{Name: commonconsts.EnvKvTransferDomain, Value: "wrong-domain"},
+											{Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"},
+											{Name: commonconsts.EnvTopologyMountPath, Value: "/tmp/wrong-topology"},
+											{Name: "USER_ENV", Value: "user"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    testTopologyLabelKey,
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "zone", envMap[commonconsts.EnvKvTransferDomain])
+		assert.Equal(t, "required", envMap[commonconsts.EnvKvTransferEnforcement])
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight)
+		assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled])
+		assert.Equal(t, "/etc/dynamo/topology", envMap[commonconsts.EnvTopologyMountPath])
+		assert.Equal(t, "global", envMap["GLOBAL_ENV"])
+		assert.Equal(t, "user", envMap["USER_ENV"])
+	})
+
+	t.Run("frontend does NOT get transfer policy env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    testTopologyLabelKey,
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
+			"frontend should NOT have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"frontend should NOT have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
+			"frontend should NOT have transfer policy env vars")
+	})
+
+	t.Run("worker without policy has no transfer policy env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
+			"worker without policy should not have transfer policy env vars")
+	})
+
+	t.Run("worker with experimental but without policy has no transfer policy env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
+			"worker without policy should not have transfer policy env vars")
+	})
+
+	t.Run("worker defaults enforcement to required when omitted", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey: testTopologyLabelKey,
+						Domain:   "zone",
+						// Enforcement omitted (zero value)
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "required", envMap[commonconsts.EnvKvTransferEnforcement],
+			"omitted enforcement should default to required")
+	})
+}
+
+func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	t.Run("worker gets topology env vars and volume", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{
+						ComponentName: "worker",
+						ComponentType: v1beta1.ComponentTypeWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Volumes: []corev1.Volume{
+									{
+										Name: "topology-labels",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{},
+										},
+									},
+									{
+										Name: "keep-me",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{},
+										},
+									},
+								},
+								Containers: []corev1.Container{
+									{
+										Name: v1beta1.MainContainerName,
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "topology-labels",
+												MountPath: "/tmp/wrong-topology",
+											},
+											{
+												Name:      "wrong-volume",
+												MountPath: "/etc/dynamo/topology",
+											},
+											{
+												Name:      "keep-me",
+												MountPath: "/mnt/keep-me",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    testTopologyLabelKey,
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled])
+		assert.Equal(t, "/etc/dynamo/topology", envMap[commonconsts.EnvTopologyMountPath])
+		assert.NotContains(t, envMap, "DYN_TOPOLOGY_DOMAIN")
+
+		// Downward API volume
+		var topologyVolumes int
+		assert.True(t, hasVolumeNamed(podSpec.Volumes, "keep-me"))
+		for _, v := range podSpec.Volumes {
+			if v.Name == "topology-labels" {
+				topologyVolumes++
+				require.NotNil(t, v.DownwardAPI)
+				require.Len(t, v.DownwardAPI.Items, 1)
+				assert.Equal(t, "zone", v.DownwardAPI.Items[0].Path)
+				assert.Equal(t, "metadata.labels['"+testTopologyLabelKey+"']", v.DownwardAPI.Items[0].FieldRef.FieldPath)
+			}
+		}
+		assert.Equal(t, 1, topologyVolumes, "topology-labels volume should be operator-owned")
+
+		// Volume mount
+		var topologyMounts int
+		assert.True(t, hasVolumeMountNamed(podSpec.Containers[0].VolumeMounts, "keep-me"))
+		for _, m := range podSpec.Containers[0].VolumeMounts {
+			if m.Name == "topology-labels" {
+				topologyMounts++
+				assert.Equal(t, "/etc/dynamo/topology", m.MountPath)
+				assert.True(t, m.ReadOnly)
+			}
+			assert.NotEqual(t, "wrong-volume", m.Name)
+		}
+		assert.Equal(t, 1, topologyMounts, "topology-labels mount should be operator-owned")
+	})
+
+	t.Run("frontend does NOT get topology env vars", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    testTopologyLabelKey,
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvTopologyEnabled)
+		assert.False(t, hasTopologyLabelVolume(podSpec.Volumes))
+		assert.False(t, hasTopologyLabelVolumeMount(podSpec.Containers[0].VolumeMounts))
+	})
+
+	t.Run("worker without policy has no topology", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvTopologyEnabled)
+		assert.False(t, hasTopologyLabelVolume(podSpec.Volumes))
+		assert.False(t, hasTopologyLabelVolumeMount(podSpec.Containers[0].VolumeMounts))
+	})
+
+	t.Run("worker with experimental but without policy has no topology", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvTopologyEnabled)
+		assert.False(t, hasTopologyLabelVolume(podSpec.Volumes))
+		assert.False(t, hasTopologyLabelVolumeMount(podSpec.Containers[0].VolumeMounts))
+	})
+
+	t.Run("worker with empty label key has no topology", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain)
+		assert.NotContains(t, envMap, commonconsts.EnvTopologyEnabled)
+		assert.False(t, hasTopologyLabelVolume(podSpec.Volumes))
+		assert.False(t, hasTopologyLabelVolumeMount(podSpec.Containers[0].VolumeMounts))
+	})
+}
+
+func hasTopologyLabelVolume(volumes []corev1.Volume) bool {
+	for _, v := range volumes {
+		if v.Name == topologyVolumeName {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTopologyLabelVolumeMount(mounts []corev1.VolumeMount) bool {
+	for _, m := range mounts {
+		if m.Name == topologyVolumeName {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolumeNamed(volumes []corev1.Volume, name string) bool {
+	for _, v := range volumes {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolumeMountNamed(mounts []corev1.VolumeMount, name string) bool {
+	for _, m := range mounts {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGenerateEPPDestinationRule_MUTUALPropagatesCerts is the regression test
+// MUTUAL TLS mode must populate ClientCertificate, PrivateKey,
+// and CaCertificates on the generated DestinationRule, otherwise Istio's
+// validation webhook rejects the DR with "client certificate required for
+// mutual tls" / "private key required for mutual tls" and the DGD never
+// finishes reconciling.
+func TestGenerateEPPDestinationRule_MUTUALPropagatesCerts(t *testing.T) {
+	mesh := configv1alpha1.ServiceMeshConfiguration{
+		Provider: string(configv1alpha1.ServiceMeshProviderIstio),
+		Istio: &configv1alpha1.IstioMeshConfiguration{
+			TLSMode:           "MUTUAL",
+			ClientCertificate: "/etc/certs/client.pem",
+			PrivateKey:        "/etc/certs/client.key",
+			CaCertificates:    "/etc/certs/ca.pem",
+		},
+	}
+
+	dr := GenerateEPPDestinationRule("qwen-epp", "dynamo-cloud", mesh)
+
+	require.NotNil(t, dr.Spec.TrafficPolicy)
+	require.NotNil(t, dr.Spec.TrafficPolicy.Tls)
+	assert.Equal(t, istioNetworking.ClientTLSSettings_MUTUAL, dr.Spec.TrafficPolicy.Tls.Mode)
+	assert.Equal(t, "/etc/certs/client.pem", dr.Spec.TrafficPolicy.Tls.ClientCertificate)
+	assert.Equal(t, "/etc/certs/client.key", dr.Spec.TrafficPolicy.Tls.PrivateKey)
+	assert.Equal(t, "/etc/certs/ca.pem", dr.Spec.TrafficPolicy.Tls.CaCertificates)
 }

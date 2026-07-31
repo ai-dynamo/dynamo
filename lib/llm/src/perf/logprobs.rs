@@ -963,7 +963,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: Some(ChatChoiceLogprobs {
                         content: Some(token_logprobs),
                         refusal: None,
@@ -977,6 +976,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -999,7 +999,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1019,6 +1018,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -1353,7 +1353,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None, // No logprobs
                 }],
                 created: 1234567890,
@@ -1364,6 +1363,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1581,6 +1581,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

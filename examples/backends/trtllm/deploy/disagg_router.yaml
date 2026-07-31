@@ -16,7 +16,7 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
@@ -41,7 +41,7 @@ spec:
             - --disaggregation-mode
             - prefill
             - --publish-events-and-metrics
-    TRTLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2

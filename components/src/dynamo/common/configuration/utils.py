@@ -5,9 +5,30 @@
 
 import argparse
 import os
+import re
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
+
+
+def split_served_model_names(served_model_name: Any) -> list[str]:
+    """Split a ``--served-model-name`` value into individual names.
+
+    Accepts a single string (whitespace- or comma-separated) or a
+    list/tuple of such strings, and returns a flat list of non-empty names
+    in order. The first is the primary served name; any remaining names are
+    aliases. Returns ``[]`` when nothing parses out.
+    """
+    if served_model_name is None:
+        return []
+    if isinstance(served_model_name, (list, tuple)):
+        raw_names = [str(name) for name in served_model_name]
+    else:
+        raw_names = [str(served_model_name)]
+    names: list[str] = []
+    for raw_name in raw_names:
+        names.extend(name for name in re.split(r"[\s,]+", raw_name.strip()) if name)
+    return names
 
 
 def env_or_default(
@@ -42,7 +63,7 @@ def env_or_default(
     target_type = value_type if value_type is not None else type(default)
 
     if target_type is bool:
-        return value.lower() in ("true", "1", "yes", "on")  # type: ignore
+        return value.strip().lower() in ("true", "1", "yes", "on")  # type: ignore
     if target_type is int:
         return int(value)  # type: ignore
     if target_type is float:
@@ -52,6 +73,20 @@ def env_or_default(
 
     # Fall back to calling the type/callable for custom validators (e.g., pathlib.Path)
     return target_type(value) if callable(target_type) else value  # type: ignore
+
+
+def nullable_float(value: str) -> Optional[float]:
+    """Parse a float, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return float(value)
+
+
+def nullable_int(value: str) -> Optional[int]:
+    """Parse an int, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return int(value)
 
 
 def add_argument(
@@ -82,7 +117,7 @@ def add_argument(
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
-    if arg_type is not None and isinstance(arg_type, type):
+    if arg_type is not None and callable(arg_type):
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None

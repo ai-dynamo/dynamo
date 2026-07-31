@@ -13,6 +13,7 @@ pub enum Action {
     RequestFinished(RequestFinishedInput, RequestFinishedOutput),
     HasSlot(HasSlotInput, HasSlotOutput),
     CreateSlot(CreateSlotInput, CreateSlotOutput),
+    ResetCache(ResetCacheInput, ResetCacheOutput),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +78,14 @@ pub struct CreateSlotInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSlotOutput {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCacheInput {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetCacheOutput {
+    result: bool,
+}
 
 #[derive(Debug)]
 pub struct KvConnectorLeaderRecorder {
@@ -352,5 +361,14 @@ impl Leader for KvConnectorLeaderRecorder {
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
         Ok(())
+    }
+
+    fn reset_cache(&mut self) -> anyhow::Result<bool> {
+        let output = self.connector_leader.reset_cache()?;
+        let _ = self.unbounded_tx.send(Action::ResetCache(
+            ResetCacheInput {},
+            ResetCacheOutput { result: output },
+        ));
+        Ok(output)
     }
 }

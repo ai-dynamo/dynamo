@@ -24,14 +24,17 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID       string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NSRestorePath      string
-	PodName            string
-	PodNamespace       string
-	ContainerName      string
-	Clientset          kubernetes.Interface
+	CheckpointID                string
+	CheckpointLocation          string
+	ContainerCheckpointLocation string
+	ContainerID                 string
+	StartedAt                   time.Time
+	NSRestorePath               string
+	PodName                     string
+	PodNamespace                string
+	TargetPodIP                 string
+	ContainerName               string
+	Clientset                   kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
@@ -129,7 +132,12 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		containerName = "main"
 	}
 
-	placeholderPID, _, err := rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+	var placeholderPID int
+	if req.ContainerID != "" {
+		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
+	} else {
+		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
@@ -185,19 +193,29 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+	checkpointPath := req.ContainerCheckpointLocation
+	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
+		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
+	}
+	if checkpointPath == "" {
+		checkpointPath = snap.CheckpointPath
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
 		"--", req.NSRestorePath,
-		"--checkpoint-path", snap.CheckpointPath,
+		"--checkpoint-path", checkpointPath,
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
+	}
+	if req.TargetPodIP != "" {
+		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

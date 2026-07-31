@@ -10,63 +10,144 @@ constructor kwargs 1:1, so ``kv_router_kwargs()`` returns a dict that can be
 unpacked directly into ``KvRouterConfig(**config.kv_router_kwargs())``.
 """
 
+import argparse
+import os
+import warnings
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    nullable_float,
+)
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
+    "overlap_score_credit",
+    "overlap_score_credit_decay",
+    "prefill_load_scale",
+    "decode_active_request_weight",
+    "host_cache_hit_weight",
+    "disk_cache_hit_weight",
     "router_temperature",
     "use_kv_events",
-    "durable_kv_events",
     "router_replica_sync",
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_tracking_hash",
+    "router_tracking_key_file",
+    "router_tracking_key_id",
     "router_prefill_load_model",
-    "router_snapshot_threshold",
-    "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
+    "router_policy_config",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "router_predicted_ttl_secs",
 )
+
+_DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
+    "router KV overlap score weight is deprecated; use "
+    "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
+)
+_LOAD_AWARE_KWARG_OVERRIDES = {
+    "overlap_score_credit": 0.0,
+    "use_kv_events": False,
+    "router_track_active_blocks": True,
+    "router_assume_kv_reuse": False,
+    "router_track_prefill_tokens": True,
+    "use_remote_indexer": False,
+    "serve_indexer": False,
+    "shared_cache_multiplier": 0.0,
+    "shared_cache_type": "none",
+    "router_predicted_ttl_secs": None,
+}
+
+
+class _DeprecatedOverlapScoreWeightAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        warnings.warn(_DEPRECATED_OVERLAP_WEIGHT_MESSAGE, FutureWarning, stacklevel=2)
+        setattr(namespace, self.dest, values)
+
+
+def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
+    for env_var in ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT"):
+        if env_var in os.environ:
+            return env_var, float(os.environ[env_var])
+    return None
+
+
+def _default_overlap_score_weight() -> Optional[float]:
+    legacy = _deprecated_overlap_score_weight_from_env()
+    if legacy is None:
+        return None
+
+    env_var, value = legacy
+    warnings.warn(
+        f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+        FutureWarning,
+        stacklevel=3,
+    )
+
+    return value
+
+
+def _default_prefill_load_scale() -> float:
+    return 1.0
 
 
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
-    overlap_score_weight: float
+    overlap_score_weight: Optional[float] = None
+    overlap_score_credit: float
+    overlap_score_credit_decay: float
+    prefill_load_scale: float
+    decode_active_request_weight: float
+    host_cache_hit_weight: float
+    disk_cache_hit_weight: float
     router_temperature: float
     use_kv_events: bool
-    durable_kv_events: bool
     router_replica_sync: bool
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_tracking_hash: str = "public-xxh3-v1"
+    router_tracking_key_file: Optional[str] = None
+    router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
-    router_snapshot_threshold: int
-    router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
+    router_policy_config: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    router_predicted_ttl_secs: Optional[float] = None
+    load_aware: bool = False
+
+    def apply_load_aware_preset(self) -> None:
+        if not self.load_aware:
+            return
+
+        for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
+            setattr(self, field, value)
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
+        self.apply_load_aware_preset()
         return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
@@ -76,18 +157,108 @@ class KvRouterArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--load-aware",
+            env_var="DYN_ROUTER_LOAD_AWARE",
+            default=False,
+            dest="load_aware",
+            help=(
+                "KV Router: Enable load-aware routing without cache-reuse signals. "
+                "On the frontend, this implies --router-mode kv. "
+                "This preset sets overlap_score_credit=0, disables KV events and "
+                "KV-reuse assumptions, enables active-block "
+                "and prefill-token load tracking, and disables remote/shared cache indexers."
+            ),
+        )
         add_argument(
             g,
-            flag_name="--router-kv-overlap-score-weight",
-            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+            flag_name="--router-kv-overlap-score-credit",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
             default=1.0,
             help=(
-                "KV Router: Weight for overlap score in worker selection. "
-                "Higher values prioritize KV cache reuse."
+                "KV Router: Credit multiplier for device-local prefix overlap. "
+                "Must be finite and non-negative; values above 1.0 give device "
+                "overlap extra credit and can make the adjusted prefill cost negative."
             ),
             arg_type=float,
+            dest="overlap_score_credit",
+        )
+        add_argument(
+            g,
+            flag_name="--router-kv-overlap-score-credit-decay",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+            default=0.0,
+            help=(
+                "KV Router: Decay rate for device-local overlap credit as active "
+                "prefill load rises above the least-loaded eligible worker. "
+                "0 disables decay; 1 halves credit at one request-equivalent "
+                "of excess active prefill load."
+            ),
+            arg_type=float,
+            dest="overlap_score_credit_decay",
+        )
+        g.add_argument(
+            "--router-kv-overlap-score-weight",
+            "--kv-overlap-score-weight",
             dest="overlap_score_weight",
-            obsolete_flag="--kv-overlap-score-weight",
+            type=float,
+            action=_DeprecatedOverlapScoreWeightAction,
+            default=_default_overlap_score_weight(),
+            help=argparse.SUPPRESS,
+        )
+        add_argument(
+            g,
+            flag_name="--router-prefill-load-scale",
+            env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
+            default=_default_prefill_load_scale(),
+            help=(
+                "KV Router: Scale applied to adjusted prompt-side prefill load after "
+                "overlap and lower-tier cache-hit credits are subtracted."
+            ),
+            arg_type=float,
+            dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-active-request-weight",
+            env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+            default=0.0,
+            help=(
+                "[EXPERIMENTAL] KV Router: Block-equivalent decode cost added for "
+                "each active request on a candidate worker. Use this to balance "
+                "decode batch size when step latency depends more on request count "
+                "than resident KV footprint. Must be finite and non-negative."
+            ),
+            arg_type=float,
+            dest="decode_active_request_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-host-cache-hit-weight",
+            env_var="DYN_ROUTER_HOST_CACHE_HIT_WEIGHT",
+            default=0.75,
+            help=(
+                "KV Router: Credit multiplier for host-pinned (CPU offload) prefix overlap. "
+                "Range: 0.0 to 1.0; higher values more strongly prefer workers holding the "
+                "prefix in CPU-tier KV cache. Symmetric to --router-kv-overlap-score-credit "
+                "but applied to host_pinned tier overlap."
+            ),
+            arg_type=float,
+            dest="host_cache_hit_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-disk-cache-hit-weight",
+            env_var="DYN_ROUTER_DISK_CACHE_HIT_WEIGHT",
+            default=0.25,
+            help=(
+                "KV Router: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap. "
+                "Range: 0.0 to 1.0. Same semantics as --router-host-cache-hit-weight applied to "
+                "the disk tier."
+            ),
+            arg_type=float,
+            dest="disk_cache_hit_weight",
         )
         add_argument(
             g,
@@ -95,8 +266,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_TEMPERATURE",
             default=0.0,
             help=(
-                "KV Router: Temperature for worker sampling via softmax. Higher values "
-                "promote more randomness, and 0 fallbacks to deterministic."
+                "KV Router: Temperature for normalized worker sampling via softmax. "
+                "Higher values promote more randomness, and 0 falls back to deterministic."
             ),
             arg_type=float,
         )
@@ -115,26 +286,12 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--router-durable-kv-events",
-            env_var="DYN_ROUTER_DURABLE_KV_EVENTS",
-            default=False,
-            help=(
-                "[Deprecated] KV Router: Enable durable KV events using NATS JetStream. "
-                "This option will be removed in a future release. The event-plane subscriber "
-                "(local_indexer mode) is now the recommended path."
-            ),
-            dest="durable_kv_events",
-            obsolete_flag="--durable-kv-events",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--router-replica-sync",
             env_var="DYN_ROUTER_REPLICA_SYNC",
             default=False,
             help=(
-                "KV Router: Enable replica synchronization across multiple router instances. "
-                "When true, routers will publish and subscribe to events to maintain "
-                "consistent state."
+                "KV Router: Enable best-effort active-sequence synchronization through "
+                "the Runtime event plane."
             ),
         )
         add_negatable_bool_argument(
@@ -189,6 +346,28 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-tracking-hash",
+            env_var="DYN_ROUTER_TRACKING_HASH",
+            default="public-xxh3-v1",
+            choices=["public-xxh3-v1", "keyed-xxh3-v1"],
+            help="KV Router: Hash function for router-derived active-sequence identities.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-file",
+            env_var="DYN_ROUTER_TRACKING_KEY_FILE",
+            default=None,
+            help="KV Router: File containing the 32-byte provider tracking key.",
+        )
+        add_argument(
+            g,
+            flag_name="--router-tracking-key-id",
+            env_var="DYN_ROUTER_TRACKING_KEY_ID",
+            default=None,
+            help="KV Router: Provider-managed tracking-key epoch identifier.",
+        )
+        add_argument(
+            g,
             flag_name="--router-prefill-load-model",
             env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
             default="none",
@@ -197,24 +376,6 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "
                 "'aic' decays the oldest active prefill request using AIC-predicted duration."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--router-snapshot-threshold",
-            env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
-            default=1000000,
-            help="KV Router: Number of messages in stream before triggering a snapshot.",
-            arg_type=int,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-reset-states",
-            env_var="DYN_ROUTER_RESET_STATES",
-            default=False,
-            help=(
-                "KV Router: Reset router state on startup, purging stream and object store. "
-                "WARNING: This can affect existing router replicas."
             ),
         )
         add_argument(
@@ -232,19 +393,35 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=4.0,
+            default=None,
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active). "
+                "queueing sensitivity (queue once every eligible worker has active "
+                "prefill load). "
+                "Unset by default; setting a numeric value enables router queueing. "
                 "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
                 "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
                 "cache pool size), not the per-step prefill window, which inflates "
                 "the threshold's effective denominator. Set --max-prefill-tokens "
                 "explicitly for predictable semantics, or use a smaller threshold."
             ),
-            arg_type=float,
+            arg_type=nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-policy-config",
+            env_var="DYN_ROUTER_POLICY_CONFIG",
+            default=None,
+            help=(
+                "KV Router: Startup-only YAML policy-family and cache-bucket "
+                "queue configuration. "
+                "When omitted, router_queue_threshold and router_queue_policy define "
+                "one synthetic policy class; queueing remains disabled unless "
+                "router_queue_threshold is set."
+            ),
+            arg_type=str,
         )
         add_argument(
             g,
@@ -308,4 +485,16 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["none", "hicache"],
+        )
+        add_argument(
+            g,
+            flag_name="--router-predicted-ttl-secs",
+            env_var="DYN_ROUTER_PREDICTED_TTL_SECS",
+            default=None,
+            help=(
+                "KV Router: Enable predict-on-route with this TTL in seconds for entries "
+                "in the local side indexer. Requires KV events; omit to disable. "
+                "Independent of --router-ttl-secs, which covers pure approximate mode."
+            ),
+            arg_type=float,
         )

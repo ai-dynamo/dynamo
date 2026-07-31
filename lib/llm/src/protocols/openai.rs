@@ -8,17 +8,20 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
+use crate::protocols::common::extensions::NvExt;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
 
 pub mod audios;
+pub mod batches;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
+pub(crate) mod delta_common;
 pub mod embeddings;
+pub mod generate;
 pub mod images;
 pub mod models;
-pub mod nvext;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -53,7 +56,7 @@ pub(crate) trait OpenAISamplingOptionsProvider {
 
     fn get_best_of(&self) -> Option<u8>;
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn nvext(&self) -> Option<&NvExt>;
 }
 
 pub(crate) trait OpenAIStopConditionsProvider {
@@ -63,7 +66,11 @@ pub(crate) trait OpenAIStopConditionsProvider {
 
     fn get_stop(&self) -> Option<Vec<String>>;
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn get_stop_token_ids(&self) -> Option<Vec<TokenIdType>> {
+        None
+    }
+
+    fn nvext(&self) -> Option<&NvExt>;
 
     /// Get ignore_eos from CommonExt if the type supports it.
     /// Default returns None for types without CommonExt support.
@@ -91,6 +98,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
     fn get_formatted_prompt(&self) -> Option<bool>;
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -109,7 +120,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
-        let top_k = CommonExtProvider::get_top_k(self);
+        // Canonicalize the public disabled sentinels before backend dispatch.
+        // Backend adapters translate -1 when their native API uses a different value.
+        let top_k = CommonExtProvider::get_top_k(self).map(|k| if k == 0 { -1 } else { k });
         let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
         let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
         let seed = self.get_seed();
@@ -135,7 +148,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json,
             guided_regex,
@@ -143,6 +155,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_grammar,
             guided_decoding_backend,
             guided_whitespace_pattern,
+            None,
         ) {
             Ok(options) => options,
             Err(e) => {
@@ -176,12 +189,18 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let stop_token_ids = self.get_stop_token_ids();
         let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
             && stop.len() > 4
         {
             anyhow::bail!("stop conditions must be less than 4")
+        }
+        if let Some(stop_token_ids) = &stop_token_ids
+            && stop_token_ids.len() > 4
+        {
+            anyhow::bail!("stop token IDs must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -191,6 +210,8 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
+            stop_token_ids,
+            stop_token_ids_visible: None,
             stop_token_ids_hidden: None,
             ignore_eos,
             max_thinking_tokens,
@@ -204,12 +225,14 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let prompt_logprobs = self.get_prompt_logprobs();
         let skip_special_tokens = self.get_skip_special_tokens();
         let formatted_prompt = self.get_formatted_prompt();
+        let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
             formatted_prompt,
+            return_tokens_as_token_ids,
         })
     }
 }
@@ -231,14 +254,23 @@ pub(crate) fn convert_backend_top_logprobs(
     selected_token: &str,
     selected_token_id: TokenIdType,
     selected_logprob: f32,
+    return_tokens_as_token_ids: bool,
 ) -> Vec<dynamo_protocols::types::TopLogprobs> {
     let mut found_selected = false;
     let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
         .iter()
         .map(|top_lp| {
-            let tok = top_lp.token.clone().unwrap_or_default();
+            let tok = if return_tokens_as_token_ids {
+                format!("token_id:{}", top_lp.token_id)
+            } else {
+                top_lp.token.clone().unwrap_or_default()
+            };
             found_selected = found_selected || top_lp.token_id == selected_token_id;
-            let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
+            let bytes = if return_tokens_as_token_ids {
+                token_to_utf8_bytes(&tok)
+            } else {
+                top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok))
+            };
             dynamo_protocols::types::TopLogprobs {
                 token: tok,
                 logprob: top_lp.logprob as f32,
@@ -248,10 +280,15 @@ pub(crate) fn convert_backend_top_logprobs(
         .collect();
 
     if !found_selected {
+        let token = if return_tokens_as_token_ids {
+            format!("token_id:{}", selected_token_id)
+        } else {
+            selected_token.to_string()
+        };
         result.push(dynamo_protocols::types::TopLogprobs {
-            token: selected_token.to_string(),
+            bytes: token_to_utf8_bytes(&token),
+            token,
             logprob: selected_logprob,
-            bytes: token_to_utf8_bytes(selected_token),
         });
     }
     result
@@ -291,6 +328,22 @@ pub struct ParsingOptions {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Request-side gate for routing the batch tool-call finalize through
+    /// `dynamo-parsers-v2` (see
+    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`). Defaults `false`
+    /// so any path that does not explicitly opt in stays on the v1 finalize path; the
+    /// chat HTTP handlers set it from the request's tool_choice. The env flag and family
+    /// support are checked separately in the aggregator.
+    #[serde(default)]
+    pub experimental_v2_batch_eligible: bool,
+
+    /// The request's `parallel_tool_calls`. When `Some(false)`, the aggregator
+    /// caps each choice to a single tool call as a post-parse fallback for
+    /// tool_choice modes / engines where generation-time enforcement does not
+    /// fire. `None` / `Some(true)` leave the tool calls untouched.
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl ParsingOptions {
@@ -298,6 +351,24 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            experimental_v2_batch_eligible: false,
+            parallel_tool_calls: None,
         }
+    }
+
+    /// Set whether this request is eligible for the experimental v2 batch parser
+    /// (request-side tool_choice gate). See
+    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
+    pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
+        self.experimental_v2_batch_eligible = eligible;
+        self
+    }
+
+    /// Set the request's `parallel_tool_calls`. `Some(false)` caps the aggregated
+    /// response to the first tool call. `None` / `Some(true)` leave tool calls
+    /// untouched.
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: Option<bool>) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
+        self
     }
 }
