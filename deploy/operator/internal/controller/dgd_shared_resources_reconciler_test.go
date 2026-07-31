@@ -38,6 +38,7 @@ import (
 )
 
 func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
+	t.Log("Build a DGD whose GMS configuration requires disabled DRA support")
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -56,35 +57,37 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 			},
 		},
 	}
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(s).
-			WithObjects(dgd).
-			Build(),
-		Recorder: record.NewFakeRecorder(100),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
-		},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd).
+		Build()
+	recorder := record.NewFakeRecorder(100)
+	config := &configv1alpha1.OperatorConfiguration{
+		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
 	}
+	runtimeConfig := &controller_common.RuntimeConfig{}
 
+	t.Log("Reconcile shared resources through their explicit dependencies")
 	sharedResources := newDGDSharedResourcesReconciler(
-		reconciler.Client,
-		reconciler.Recorder,
-		reconciler.Config,
-		reconciler.RuntimeConfig,
-		reconciler.RestConfig,
-		reconciler.DockerSecretRetriever,
-		reconciler.SSHKeyManager,
-		reconciler.RBACManager,
+		kubeClient,
+		recorder,
+		config,
+		runtimeConfig,
+		nil,
+		nil,
+		nil,
+		nil,
 	)
 	_, err := sharedResources.Reconcile(ctx, dgd)
+
+	t.Log("Verify DRA validation fails before workload-path reconciliation")
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
 	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
 }
 
 func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t *testing.T) {
+	t.Log("Build a ready checkpoint and a DGD that fails later EPP reconciliation")
 	ctx := context.Background()
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
@@ -153,8 +156,10 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 		nil,
 	)
 
+	t.Log("Reconcile the ordered shared-resource sequence")
 	result, err := reconciler.Reconcile(ctx, dgd)
 
+	t.Log("Verify the later error preserves checkpoint progress")
 	require.ErrorContains(t, err, "EPP configuration is required")
 	require.Contains(t, result.Infos, "worker")
 	assert.True(t, result.Infos["worker"].Ready)

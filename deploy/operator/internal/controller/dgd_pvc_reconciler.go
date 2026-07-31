@@ -55,7 +55,7 @@ func (r *dgdPVCReconciler) Reconcile(
 
 		pvcName := *pvcConfig.Name
 		logger.Info("Reconciling legacy top-level PVC", "pvcName", pvcName, "namespace", dgd.Namespace)
-		if _, err := r.reconcilePVC(ctx, dgd, pvcName, pvcConfig); err != nil {
+		if err := r.reconcilePVC(ctx, dgd, pvcName, pvcConfig); err != nil {
 			return err
 		}
 	}
@@ -67,27 +67,30 @@ func (r *dgdPVCReconciler) reconcilePVC(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pvcName string,
 	pvcConfig nvidiacomv1alpha1.PVC,
-) (*corev1.PersistentVolumeClaim, error) {
+) error {
 	logger := log.FromContext(ctx)
 	pvc := &corev1.PersistentVolumeClaim{}
 	key := types.NamespacedName{Name: pvcName, Namespace: dgd.Namespace}
 	if err := r.Get(ctx, key, pvc); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("unable to retrieve legacy top-level PVC %q: %w", pvcName, err)
+			return fmt.Errorf("unable to retrieve legacy top-level PVC %q: %w", pvcName, err)
 		}
 		if pvcConfig.Create == nil || !*pvcConfig.Create {
-			return nil, fmt.Errorf("legacy top-level PVC %q does not exist and create is not enabled: %w", pvcName, err)
+			return fmt.Errorf("legacy top-level PVC %q does not exist and create is not enabled: %w", pvcName, err)
 		}
 
 		pvc = constructPVC(dgd, pvcConfig)
 		if err := controllerutil.SetControllerReference(dgd, pvc, r.Scheme()); err != nil {
-			return nil, fmt.Errorf("failed to set controller reference for legacy top-level PVC %q: %w", pvcName, err)
+			return fmt.Errorf("failed to set controller reference for legacy top-level PVC %q: %w", pvcName, err)
 		}
 		if err := r.Create(ctx, pvc); err != nil {
-			return nil, fmt.Errorf("failed to create legacy top-level PVC %q: %w", pvcName, err)
+			if apierrors.IsAlreadyExists(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to create legacy top-level PVC %q: %w", pvcName, err)
 		}
 		logger.Info("Legacy top-level PVC created", "pvcName", pvcName, "namespace", dgd.Namespace)
 	}
 
-	return pvc, nil
+	return nil
 }

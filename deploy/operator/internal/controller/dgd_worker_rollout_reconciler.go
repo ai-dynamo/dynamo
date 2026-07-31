@@ -70,7 +70,7 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 	logger := log.FromContext(ctx)
 
 	if r.currentWorkerHashes(dgd).empty() {
-		hashes, err := r.desiredWorkerHashes(dgd)
+		hashes, err := desiredWorkerHashes(dgd)
 		if err != nil {
 			logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
@@ -91,7 +91,7 @@ func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
 		return nil
 	}
 
-	hashes, err := r.desiredWorkerHashes(dgd)
+	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
@@ -129,12 +129,6 @@ func (h workerGenerationHashes) contains(hash string) bool {
 		return false
 	}
 	return hash == h.v1 || hash == h.v2
-}
-
-func (r *dgdWorkerRolloutReconciler) desiredWorkerHashes(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (workerGenerationHashes, error) {
-	return desiredWorkerHashes(dgd)
 }
 
 func desiredWorkerHashes(
@@ -233,7 +227,7 @@ func (r *dgdWorkerRolloutReconciler) workerHashesForUnsupportedPathway(
 func (r *dgdWorkerRolloutReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return false, err
 	}
@@ -296,7 +290,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	}
 
 	// Normal first deploy — set the canonical v2 hash.
-	hashes, err := r.desiredWorkerHashes(dgd)
+	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -327,7 +321,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		return nil
 	}
 
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -525,7 +519,7 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -747,7 +741,7 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 		return nil
 	}
 
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -1432,7 +1426,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 ) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	desiredHashes, err := r.desiredWorkerHashes(dgd)
+	desiredHashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return dynamo.RollingUpdateContext{}, err
 	}

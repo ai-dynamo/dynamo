@@ -116,9 +116,9 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		var err error
 		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 		if !hasCheckpointRef {
-			workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
-			if err != nil {
-				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
+			workerHash, hashErr := checkpointWorkerHashForComponent(dgd, componentName)
+			if hashErr != nil {
+				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, hashErr)
 			}
 			checkpointID := checkpoint.DGDCheckpointID(
 				dgd.Namespace,
@@ -545,16 +545,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	// frontend sidecar, failover transforms) that conflict with the checkpoint path's
 	// own setup.
 	componentForJob := component.DeepCopy()
-	if componentForJob.Experimental != nil {
-		componentForJob.Experimental.Checkpoint = nil
-		componentForJob.Experimental.GPUMemoryService = nil
-		componentForJob.Experimental.Failover = nil
-		if componentForJob.Experimental.GPUMemoryService == nil &&
-			componentForJob.Experimental.Failover == nil &&
-			componentForJob.Experimental.Checkpoint == nil {
-			componentForJob.Experimental = nil
-		}
-	}
+	componentForJob.Experimental = nil
 	componentForJob.FrontendSidecar = nil
 
 	// Use the normal DGD path so graph-level defaults such as spec.env,

@@ -36,6 +36,8 @@ type componentRestartProgressResolver struct {
 	reader client.Reader
 }
 
+const dcdNotFoundReason = "resource not found"
+
 func newComponentRestartProgressResolver(reader client.Reader) *componentRestartProgressResolver {
 	return &componentRestartProgressResolver{reader: reader}
 }
@@ -76,7 +78,7 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	for _, hash := range activeWorkerHashCandidates(dgd, hashes) {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
 		ready, reason := checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
-		if ready || reason != "resource not found" {
+		if ready || reason != dcdNotFoundReason {
 			return ready, reason
 		}
 		lastReason = reason
@@ -96,13 +98,13 @@ func checkDCDReady(
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.V(2).Info("DynamoComponentDeployment not found", "resourceName", resourceName)
-			return false, "resource not found"
+			return false, dcdNotFoundReason
 		}
 		logger.V(1).Info("Failed to get DynamoComponentDeployment", "error", err, "resourceName", resourceName)
 		return false, fmt.Sprintf("get error: %v", err)
 	}
 
-	logger.Info("CheckDCDFullyUpdated",
+	logger.V(1).Info("CheckDCDFullyUpdated",
 		"resourceName", resourceName,
 		"generation", dcd.Generation,
 		"observedGeneration", dcd.Status.ObservedGeneration,

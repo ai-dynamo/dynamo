@@ -119,7 +119,6 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	logger := log.FromContext(ctx)
 	_, synced, err := commoncontroller.SyncResource(
 		ctx,
 		&r.syncer,
@@ -129,8 +128,7 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 		},
 	)
 	if err != nil {
-		logger.Error(err, "failed to sync the Grove PodCliqueSet")
-		return nil, fmt.Errorf("failed to sync the Grove PodCliqueSet: %w", err)
+		return nil, err
 	}
 	return synced, nil
 }

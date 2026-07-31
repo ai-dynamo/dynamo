@@ -316,33 +316,32 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build initial objects
+			t.Log("Build the DGD and any pre-existing scaling adapters")
 			var initObjs []client.Object
 			initObjs = append(initObjs, tt.dgd)
 			for i := range tt.existingAdapters {
 				initObjs = append(initObjs, &tt.existingAdapters[i])
 			}
 
-			// Create fake client
+			t.Log("Build the fake client and scaling-adapters reconciler")
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(testScheme).
 				WithObjects(initObjs...).
 				Build()
 
-			// Create reconciler
 			r := &DynamoGraphDeploymentReconciler{
 				Client:   fakeClient,
 				Recorder: record.NewFakeRecorder(10),
 			}
 
-			// Run reconcileScalingAdapters
+			t.Log("Reconcile scaling adapters")
 			ctx := context.Background()
 			err := newDGDScalingAdaptersReconciler(r.Client, r.Recorder).Reconcile(ctx, tt.dgd)
 			if err != nil {
-				t.Fatalf("reconcileScalingAdapters() error = %v", err)
+				t.Fatalf("dgdScalingAdaptersReconciler.Reconcile() error = %v", err)
 			}
 
-			// Verify adapters
+			t.Log("Verify the resulting adapter set")
 			adapterList := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 			if err := fakeClient.List(ctx, adapterList, client.InNamespace("default")); err != nil {
 				t.Fatalf("Failed to list adapters: %v", err)
@@ -352,7 +351,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 				t.Errorf("Expected %d adapters, got %d", tt.expectedAdapterCount, len(adapterList.Items))
 			}
 
-			// Check expected adapters exist with correct replicas
+			t.Log("Verify expected adapters and replicas")
 			for name, expectedReplicas := range tt.expectedAdapters {
 				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
 				err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, adapter)
@@ -365,7 +364,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 				}
 			}
 
-			// Check that deleted adapters don't exist
+			t.Log("Verify stale adapters were deleted")
 			for _, name := range tt.expectDeleted {
 				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
 				err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, adapter)
@@ -2946,20 +2945,6 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 			wantCondition: true,
 			wantStatus:    metav1.ConditionTrue,
 			wantReason:    v1alpha1.ConditionReasonAllTopologyLevelsAvailable,
-		},
-		{
-			name: "topology set but Grove not enabled - no condition added",
-			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test", Namespace: "default",
-					Annotations: map[string]string{commonconsts.KubeAnnotationEnableGrove: "false"},
-				},
-				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
-				},
-			}),
-			groveEnabled:  false,
-			wantCondition: false,
 		},
 		{
 			name: "topology set, PCS has no topology condition - unknown",

@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -42,11 +43,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func newTestDGDCheckpointsReconciler(
@@ -61,6 +62,7 @@ func newTestDGDCheckpointsReconciler(
 }
 
 func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T) {
+	t.Log("Build an existing checkpoint and a DGD-managed checkpoint request")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -133,10 +135,13 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 		},
 	}
 
+	t.Log("Create the DGD-managed checkpoint")
 	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
+
+	t.Log("Verify a deterministic owned checkpoint was created without mutating the existing one")
 	if ckpt.Name == "existing-worker-checkpoint" {
 		t.Fatalf("createCheckpointCR() reused existing checkpoint")
 	}
@@ -179,6 +184,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 }
 
 func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *testing.T) {
+	t.Log("Build a legacy checkpoint and ResourceClaimTemplate with existing ownership")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -245,8 +251,11 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 		},
 	}
 
+	t.Log("Create the DGD-managed checkpoint")
 	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
 	require.NoError(t, err)
+
+	t.Log("Verify the new checkpoint does not adopt the legacy template")
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
@@ -268,6 +277,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 }
 
 func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
+	t.Log("Build a GMS checkpoint component with a saver client")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -335,10 +345,13 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		},
 	}
 
+	t.Log("Create the GMS-backed checkpoint")
 	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
+
+	t.Log("Verify GMS clients, containers, claims, and templates are preserved")
 	if ckpt.Spec.GPUMemoryService == nil || !ckpt.Spec.GPUMemoryService.Enabled {
 		t.Fatalf("expected auto-created checkpoint to carry enabled GMS spec, got %#v", ckpt.Spec.GPUMemoryService)
 	}
@@ -389,6 +402,7 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
+	t.Log("Build a checkpoint component with graph-level defaults")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -441,8 +455,11 @@ func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 		},
 	}
 
+	t.Log("Create the checkpoint job pod template")
 	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
 	require.NoError(t, err)
+
+	t.Log("Verify graph defaults reach the checkpoint job")
 	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
 	require.NotNil(t, main)
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_HOME", Value: "/models/huggingface"})
@@ -454,6 +471,7 @@ func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
+	t.Log("Build a checkpoint component with an explicit target container")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -511,8 +529,11 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 		},
 	}
 
+	t.Log("Create the target-container checkpoint")
 	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
 	require.NoError(t, err)
+
+	t.Log("Verify target and GMS containers are retained")
 	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "snapshot-me"))
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver"))
@@ -522,6 +543,7 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *testing.T) {
+	t.Log("Build an auto-checkpoint component without an explicit identity")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -559,10 +581,13 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 		},
 	}
 
+	t.Log("Reconcile the auto checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	require.NoError(t, err)
+
+	t.Log("Verify target-container restore state and managed checkpoint identity")
 	info := checkpointInfos["worker"]
 	require.NotNil(t, info)
 	assert.Equal(t, []string{"snapshot-me"}, info.RestoreTargetContainers)
@@ -577,6 +602,7 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 }
 
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
+	t.Log("Build a checkpoint-enabled DGD while the checkpoint feature is disabled")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -607,9 +633,11 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 		},
 	}
 
+	t.Log("Reconcile checkpoint resources")
 	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	require.ErrorContains(t, err, "checkpoint functionality is disabled")
 
+	t.Log("Verify rejection happens before checkpoint or storage resources are created")
 	checkpoints := &v1alpha1.DynamoCheckpointList{}
 	require.NoError(t, reconciler.List(ctx, checkpoints, client.InNamespace("default")))
 	assert.Empty(t, checkpoints.Items)
@@ -618,7 +646,57 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	assert.Empty(t, pvcs.Items)
 }
 
+func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *testing.T) {
+	t.Log("Build an auto-checkpoint DGD and inject a checkpoint read failure")
+	ctx := context.Background()
+	resolveErr := errors.New("checkpoint read failed")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*v1alpha1.DynamoCheckpoint); ok {
+					return resolveErr
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Mode:    v1beta1.CheckpointModeAuto,
+					},
+				},
+			}},
+		},
+	}
+
+	t.Log("Reconcile the managed checkpoint")
+	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+
+	t.Log("Verify the read failure is returned instead of dereferencing a nil result")
+	require.ErrorIs(t, err, resolveErr)
+	require.ErrorContains(t, err, "failed to resolve checkpoint for component worker")
+}
+
 func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T) {
+	t.Log("Build an auto-checkpoint component with pod-template metadata")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -663,24 +741,25 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 		},
 	}
 
+	t.Log("Reconcile the auto checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	require.NoError(t, err)
 	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
 
+	t.Log("Verify workload metadata and managed labels on the checkpoint job")
 	ckpt := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
 
 	jobMeta := ckpt.Spec.Job.PodTemplateSpec.ObjectMeta
-	// Workload pod-template labels/annotations must survive onto the checkpoint job.
 	assert.Equal(t, "keep-me", jobMeta.Labels["workload-label"])
 	assert.Equal(t, "false", jobMeta.Annotations[commonconsts.KubeAnnotationIstioSidecarInject])
 	assert.Equal(t, "yes", jobMeta.Annotations["policy.example.com/keep"])
-	// Controller-managed component label is still applied.
 	assert.Equal(t, "worker", jobMeta.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
 func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
+	t.Log("Build a DGD-managed checkpoint with lifecycle fields requiring synchronization")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -774,6 +853,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 		WithStatusSubresource(existing).
 		Build()
 
+	t.Log("Reconcile the existing managed checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -783,6 +863,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 	require.NotNil(t, checkpointInfos["worker"])
 	assert.True(t, checkpointInfos["worker"].Exists)
 
+	t.Log("Verify lifecycle annotations, ownership, finalizer, and labels were synchronized")
 	updated := &v1alpha1.DynamoCheckpoint{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
 	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
@@ -794,6 +875,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
+	t.Log("Build a DGD referencing a checkpoint that is not ready")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -861,6 +943,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 		},
 	})
 
+	t.Log("Reconcile the not-ready checkpoint reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -868,6 +951,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
+	t.Log("Verify the reference remains pending without creating an automatic checkpoint")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -898,6 +982,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 }
 
 func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.T) {
+	t.Log("Build a DGD referencing a ready checkpoint")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -955,6 +1040,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 		},
 	})
 
+	t.Log("Reconcile the ready checkpoint reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -962,6 +1048,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
+	t.Log("Verify ready checkpoint information and status are projected")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -984,6 +1071,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 }
 
 func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
+	t.Log("Build a checkpoint reference with component-level GMS clients")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1049,12 +1137,14 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 		},
 	})
 
+	t.Log("Reconcile the referenced GMS checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointInfos := checkpointResult.Infos
 	if err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
+	t.Log("Verify component-level GMS clients overlay the resolved checkpoint")
 	info := checkpointInfos["worker"]
 	if info == nil || info.GPUMemoryService == nil {
 		t.Fatalf("expected resolved GMS checkpoint info, got %#v", info)
@@ -1065,6 +1155,7 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testing.T) {
+	t.Log("Build a GMS component referencing a non-GMS checkpoint")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1124,17 +1215,18 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 		},
 	})
 
+	t.Log("Reconcile the incompatible checkpoint reference")
 	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+
+	t.Log("Verify the incompatibility is returned with checkpoint context")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
 	assert.Contains(t, err.Error(), friendlyCheckpointName)
 }
 
 func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
+	t.Log("Build checkpoint storage configuration that creates a PVC")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	ctx := context.Background()
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
@@ -1161,7 +1253,7 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
@@ -1204,10 +1296,12 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 		},
 	})
 
+	t.Log("Reconcile checkpoint resources")
 	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd); err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
+	t.Log("Verify the checkpoint storage PVC settings")
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := reconciler.Get(ctx, types.NamespacedName{Name: "snapshot-pvc", Namespace: "default"}, pvc); err != nil {
 		t.Fatalf("expected checkpoint storage PVC to be created: %v", err)
@@ -1225,6 +1319,7 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
+	t.Log("Build an auto-checkpoint DGD with an existing checkpoint still creating")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1300,6 +1395,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 		},
 	})
 
+	t.Log("Reconcile the automatic checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -1307,6 +1403,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
+	t.Log("Verify the DGD-owned checkpoint remains pending without reusing the legacy identity")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -1387,6 +1484,7 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
+	t.Log("Build automatic, retained, manual, and foreign checkpoint fixtures")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1467,9 +1565,12 @@ func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
 			Build(),
 	}
 
+	t.Log("Delete automatic checkpoints owned by the DGD")
 	if err := newTestDGDCheckpointsReconciler(reconciler).deleteAutoCheckpointsForDGD(ctx, dgd); err != nil {
 		t.Fatalf("deleteAutoCheckpointsForDGD() error = %v", err)
 	}
+
+	t.Log("Verify only eligible automatic checkpoints were deleted")
 	if err := reconciler.Get(ctx, types.NamespacedName{Name: "auto", Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("auto checkpoint get err = %v, want not found", err)
 	}

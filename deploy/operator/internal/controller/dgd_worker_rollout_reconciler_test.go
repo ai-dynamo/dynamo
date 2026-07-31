@@ -120,10 +120,7 @@ func createTestReconcilerWithStatus(
 func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
-	return &componentWorkloadsReconciler{
-		syncer:  rollout.dgdResourceSyncer,
-		rollout: rollout,
-	}
+	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {
@@ -245,7 +242,7 @@ func TestShouldTriggerRollingUpdate_IgnoresReplicaChanges(t *testing.T) {
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(10))
 
 	r := createTestReconcilerWithStatus(dgd)
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	assert.Equal(t, legacyHash, desired.v1)
 	assert.Equal(t, v2Hash, desired.v2)
@@ -566,7 +563,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	completed := r.workerHashesForUnsupportedPathway(dgd, desired)
 	require.Empty(t, completed.v1)
@@ -2119,7 +2116,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 	assert.Equal(t, consts.LegacyWorkerHash, updatedDCD.Labels[consts.KubeLabelDynamoWorkerHash],
 		"Legacy DCD should have worker hash label backfilled")
 
-	desired, err := r.desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	require.NoError(t, r.completeRollingUpdate(ctx, dgd, &dgd.Status, desired.v1))
 

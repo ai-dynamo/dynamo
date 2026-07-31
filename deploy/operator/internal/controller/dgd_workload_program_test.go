@@ -45,13 +45,17 @@ import (
 
 func TestDGDWorkloadProgramSelection(t *testing.T) {
 	tests := []struct {
-		name         string
-		groveEnabled bool
-		annotations  map[string]string
-		wantProgram  workloadProgram
+		name               string
+		groveEnabled       bool
+		annotations        map[string]string
+		topologyConstraint *nvidiacomv1beta1.SpecTopologyConstraint
+		wantProgram        workloadProgram
 	}{
 		{
-			name:        "Grove feature disabled selects component program",
+			name: "Grove feature disabled selects component program despite topology intent",
+			topologyConstraint: &nvidiacomv1beta1.SpecTopologyConstraint{
+				ClusterTopologyName: "test-topology",
+			},
 			wantProgram: &componentProgram{},
 		},
 		{
@@ -74,6 +78,9 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			t.Log("Build the reconciler selection inputs")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					TopologyConstraint: tt.topologyConstraint,
+				},
 			}
 			reconciler := &DynamoGraphDeploymentReconciler{
 				RuntimeConfig: &commonController.RuntimeConfig{
@@ -86,6 +93,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 
 			assert.IsType(t, tt.wantProgram, got)
 			if component, ok := got.(*componentProgram); ok {
+				assert.NotNil(t, component.sharedResources)
 				assert.NotNil(t, component.rollout)
 				assert.NotNil(t, component.restart)
 				assert.NotNil(t, component.restartProgress)
@@ -93,6 +101,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, component.scalingAdapters)
 			}
 			if grove, ok := got.(*groveProgram); ok {
+				assert.NotNil(t, grove.sharedResources)
 				assert.NotNil(t, grove.rollout)
 				assert.NotNil(t, grove.restart)
 				assert.NotNil(t, grove.restartProgress)

@@ -43,6 +43,7 @@ import (
 )
 
 func TestDGDGMSResourceClaimsReconciler_DRAValidation(t *testing.T) {
+	t.Log("Define GMS configurations with and without DRA requirements")
 	tests := []struct {
 		name    string
 		spec    v1beta1.DynamoComponentDeploymentSharedSpec
@@ -81,6 +82,7 @@ func TestDGDGMSResourceClaimsReconciler_DRAValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build the DGD and GMS resource-claims reconciler")
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoGraphDeploymentReconciler{
 				RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -92,10 +94,12 @@ func TestDGDGMSResourceClaimsReconciler_DRAValidation(t *testing.T) {
 				},
 			}
 
+			t.Log("Reconcile GMS ResourceClaimTemplates")
 			err := newDGDGMSResourceClaimsReconciler(
 				newTestDGDResourceSyncer(r),
 				r.RuntimeConfig.Gate,
 			).Reconcile(context.Background(), dgd)
+			t.Log("Verify validation matches the DRA requirement")
 			if tt.wantErr {
 				g.Expect(err).To(gomega.HaveOccurred())
 				g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
@@ -107,6 +111,7 @@ func TestDGDGMSResourceClaimsReconciler_DRAValidation(t *testing.T) {
 }
 
 func TestDGDGMSResourceClaimsReconciler_ToleratesNonGMSComponents(t *testing.T) {
+	t.Log("Build a DGD containing only components without GMS")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -133,12 +138,14 @@ func TestDGDGMSResourceClaimsReconciler_ToleratesNonGMSComponents(t *testing.T) 
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
+	t.Log("Reconcile GMS ResourceClaimTemplates")
 	if err := newDGDGMSResourceClaimsReconciler(newTestDGDResourceSyncer(r), r.RuntimeConfig.Gate).Reconcile(ctx, dgd); err != nil {
-		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error for non-GMS components: %v", err)
+		t.Fatalf("dgdGMSResourceClaimsReconciler.Reconcile() returned error for non-GMS components: %v", err)
 	}
 }
 
 func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t *testing.T) {
+	t.Log("Build a non-GMS DGD with a stale ResourceClaimTemplate")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -166,9 +173,12 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
+	t.Log("Reconcile GMS ResourceClaimTemplates")
 	if err := newDGDGMSResourceClaimsReconciler(newTestDGDResourceSyncer(r), r.RuntimeConfig.Gate).Reconcile(ctx, dgd); err != nil {
-		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error: %v", err)
+		t.Fatalf("dgdGMSResourceClaimsReconciler.Reconcile() returned error: %v", err)
 	}
+
+	t.Log("Verify the stale template was deleted")
 	got := &resourcev1.ResourceClaimTemplate{}
 	err := cl.Get(ctx, client.ObjectKey{Name: templateName, Namespace: "default"}, got)
 	if !apierrors.IsNotFound(err) {
@@ -177,6 +187,7 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 }
 
 func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testing.T) {
+	t.Log("Build a DGD with a checkpoint-owned GMS ResourceClaimTemplate")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -278,8 +289,10 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true, GMSSnapshot: true}},
 	}
 
+	t.Log("Reconcile GMS ResourceClaimTemplates")
 	require.NoError(t, newDGDGMSResourceClaimsReconciler(newTestDGDResourceSyncer(r), r.RuntimeConfig.Gate).Reconcile(ctx, dgd))
 
+	t.Log("Verify the checkpoint-owned template remains unchanged")
 	template := &resourcev1.ResourceClaimTemplate{}
 	require.NoError(t, cl.Get(ctx, client.ObjectKey{
 		Name:      checkpointGMSResourceClaimTemplateName(hash),

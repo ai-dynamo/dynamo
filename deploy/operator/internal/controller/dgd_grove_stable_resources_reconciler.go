@@ -70,12 +70,12 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	}
 
 	resources := []Resource{}
+	isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(
+		r.config.Discovery.Backend,
+		dgd.Annotations,
+	)
 	for i := range renderDeployment.Spec.Components {
 		component := &renderDeployment.Spec.Components[i]
-		isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(
-			r.config.Discovery.Backend,
-			dgd.Annotations,
-		)
 		if isK8sDiscoveryEnabled || string(component.ComponentType) == commonconsts.ComponentTypeFrontend {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,
