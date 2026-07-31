@@ -352,7 +352,7 @@ trtllm_configs = {
             pytest.mark.pre_merge,
             pytest.mark.profiled_vram_gib(15.0),
             pytest.mark.requested_trtllm_kv_tokens(1056),
-            pytest.mark.timeout(900),
+            pytest.mark.timeout(360),  # 3x measured 118s CI runtime
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
