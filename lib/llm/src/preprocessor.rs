@@ -2119,7 +2119,14 @@ impl OpenAIPreprocessor {
                     anyhow::anyhow!("embedding tokenizer is unavailable for a non-embedding model")
                 })?,
         };
-        let all_token_ids = match &request.inner.input {
+        let is_text_input = matches!(
+            &request.inner.input,
+            dynamo_protocols::types::EmbeddingInput::String(_)
+                | dynamo_protocols::types::EmbeddingInput::StringArray(_)
+        );
+        let truncation_limit =
+            self.embedding_truncation_limit(request.truncate_prompt_tokens, is_text_input)?;
+        let mut all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
                 let encoding = tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
@@ -2147,6 +2154,11 @@ impl OpenAIPreprocessor {
                 token_arrays.clone()
             }
         };
+        if let Some(limit) = truncation_limit {
+            for token_ids in &mut all_token_ids {
+                token_ids.truncate(limit);
+            }
+        }
 
         // Handle annotations
         if request.has_annotation(ANNOTATION_TOKEN_IDS) {
@@ -2162,12 +2174,68 @@ impl OpenAIPreprocessor {
             EncodingFormat::Float => "float".to_string(),
             EncodingFormat::Base64 => "base64".to_string(),
         }));
+        builder.truncate_prompt_tokens(request.truncate_prompt_tokens);
         builder.dimensions(request.inner.dimensions);
 
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))
+    }
+
+    fn embedding_truncation_limit(
+        &self,
+        requested: Option<i64>,
+        is_text_input: bool,
+    ) -> Result<Option<usize>> {
+        let Some(requested) = requested else {
+            return Ok(None);
+        };
+
+        let invalid_argument = |message: String| {
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .build()
+        };
+
+        if requested < -1 {
+            return Err(invalid_argument(format!(
+                "truncate_prompt_tokens must be >= -1, got {requested}"
+            ))
+            .into());
+        }
+
+        // Token IDs supplied by the caller are already preprocessed. Preserve
+        // the existing text-worker behavior and never modify them here.
+        if !is_text_input {
+            return Ok(None);
+        }
+
+        let model_limit = self.context_length as usize;
+        if requested == -1 {
+            if model_limit == 0 {
+                return Err(invalid_argument(
+                    "truncate_prompt_tokens=-1 requires a configured model context length"
+                        .to_string(),
+                )
+                .into());
+            }
+            return Ok(Some(model_limit));
+        }
+
+        let requested = usize::try_from(requested).map_err(|_| {
+            invalid_argument("truncate_prompt_tokens is too large for this platform".to_string())
+        })?;
+        if model_limit > 0 && requested > model_limit {
+            return Err(invalid_argument(format!(
+                "truncate_prompt_tokens={requested} cannot be greater than \
+                 max_model_len={model_limit}. Please request a smaller truncation size."
+            ))
+            .into());
+        }
+
+        Ok(Some(requested))
     }
 
     pub fn postprocessor_parsing_stream<S>(

@@ -750,6 +750,7 @@ mod embedding_without_chat_template {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::model_type::ModelType;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use serde_json::json;
@@ -861,15 +862,41 @@ mod embedding_without_chat_template {
         );
     }
 
-    fn embedding_request(add_special_tokens: Option<bool>) -> NvCreateEmbeddingRequest {
+    fn embedding_request_with_options(
+        input: serde_json::Value,
+        add_special_tokens: Option<bool>,
+        truncate_prompt_tokens: Option<i64>,
+    ) -> NvCreateEmbeddingRequest {
         let mut value = json!({
             "model": "test-model",
-            "input": "hello"
+            "input": input
         });
         if let Some(value_) = add_special_tokens {
             value["add_special_tokens"] = json!(value_);
         }
+        if let Some(value_) = truncate_prompt_tokens {
+            value["truncate_prompt_tokens"] = json!(value_);
+        }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn embedding_request(add_special_tokens: Option<bool>) -> NvCreateEmbeddingRequest {
+        embedding_request_with_options(json!("hello"), add_special_tokens, None)
+    }
+
+    async fn preprocess_embedding(
+        preprocessor: &OpenAIPreprocessor,
+        input: serde_json::Value,
+        truncate_prompt_tokens: Option<i64>,
+    ) -> anyhow::Result<PreprocessedEmbeddingRequest> {
+        Ok(preprocessor
+            .preprocess_embedding_request(&embedding_request_with_options(
+                input,
+                None,
+                truncate_prompt_tokens,
+            ))
+            .await?
+            .0)
     }
 
     async fn token_ids(
@@ -936,6 +963,89 @@ mod embedding_without_chat_template {
                 Err(err) => err,
             };
             assert!(err.to_string().contains("expected true/false/yes/no/1/0"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_truncation_keeps_the_token_prefix() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let input = json!("<|eot_id|><|eot_id|><|eot_id|>");
+            let full = preprocess_embedding(&preprocessor, input.clone(), None)
+                .await
+                .unwrap()
+                .token_ids;
+
+            for limit in [0, 2] {
+                let truncated = preprocess_embedding(&preprocessor, input.clone(), Some(limit))
+                    .await
+                    .unwrap()
+                    .token_ids;
+                assert_eq!(truncated[0], full[0][..limit as usize]);
+            }
+            assert_eq!(full[0][0], 128000, "BOS is added before truncation");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_truncation_handles_batches_and_preserves_token_inputs() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let input = json!([
+                "<|eot_id|><|eot_id|><|eot_id|>",
+                "<|eot_id|><|eot_id|><|eot_id|><|eot_id|>"
+            ]);
+            let full = preprocess_embedding(&preprocessor, input.clone(), None)
+                .await
+                .unwrap()
+                .token_ids;
+            let truncated = preprocess_embedding(&preprocessor, input, Some(3))
+                .await
+                .unwrap()
+                .token_ids;
+            for (actual, expected) in truncated.iter().zip(&full) {
+                assert_eq!(actual, &expected[..3]);
+            }
+
+            let caller_tokens = preprocess_embedding(&preprocessor, json!([11, 12, 13]), Some(2))
+                .await
+                .unwrap();
+            assert_eq!(caller_tokens.token_ids, vec![vec![11, 12, 13]]);
+            assert_eq!(caller_tokens.truncate_prompt_tokens, Some(2));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_truncation_validates_model_limits() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let mut mdc = embedding_mdc(MODEL_PATH);
+            mdc.prompt_formatter = None;
+            mdc.chat_template_file = None;
+            mdc.runtime_config.context_length = Some(3);
+            let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+            let input = json!("<|eot_id|><|eot_id|><|eot_id|><|eot_id|>");
+
+            let truncated = preprocess_embedding(&preprocessor, input.clone(), Some(-1))
+                .await
+                .unwrap()
+                .token_ids;
+            assert_eq!(truncated[0].len(), 3);
+
+            for (limit, message) in [
+                (-2, "must be >= -1"),
+                (4, "cannot be greater than max_model_len=3"),
+            ] {
+                let error = preprocess_embedding(&preprocessor, input.clone(), Some(limit))
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(message), "{error}");
+            }
         })
         .await;
     }

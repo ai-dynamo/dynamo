@@ -1660,6 +1660,7 @@ class TestEmbeddingWorkerHandlerCancellation:
             "token_ids": [[11, 12, 13], [21, 22]],
             "model": "test-model",
             "add_special_tokens": True,
+            "truncate_prompt_tokens": 2,
         }
         _ = [r async for r in handler.generate(request, context)]
 
