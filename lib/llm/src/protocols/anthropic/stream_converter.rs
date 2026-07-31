@@ -40,6 +40,11 @@ pub struct AnthropicStreamConverter {
     // Starts with a frontend estimate and is replaced atomically when the
     // engine reports authoritative usage.
     usage: AnthropicUsage,
+    // True once the backend has reported authoritative usage at least once
+    // (via `include_usage`/`continuous_usage_stats`). Until then the converter
+    // falls back to counting output deltas so that every `content_block_delta`
+    // still carries a non-zero output-token estimate.
+    saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     tool_blocks_flushed: bool,
@@ -80,6 +85,7 @@ impl AnthropicStreamConverter {
                 input_tokens: estimated_input_tokens,
                 ..Default::default()
             },
+            saw_backend_usage: false,
             tool_call_states: Vec::new(),
             tool_blocks_flushed: false,
             next_block_index: 0,
@@ -192,12 +198,42 @@ impl AnthropicStreamConverter {
 
     fn append_buffered_tool_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         for (event_type, event) in self.drain_buffered_tool_events() {
-            events.push(make_sse_event(event_type, &event));
+            // Route through serialize_event so tool-argument `content_block_delta`
+            // chunks also carry the per-chunk usage triple.
+            events.push(self.serialize_event(event_type, &event));
         }
     }
 
     fn record_usage(&mut self, usage: &CompletionUsage) {
+        // Preserve the running output-token estimate if the backend reports a
+        // lower value than we have already emitted. Backends that only send a
+        // final usage chunk (`include_usage` without `continuous_usage_stats`)
+        // would otherwise regress `output_tokens` on the terminal chunk.
+        let running = self.usage.output_tokens;
         self.usage = completion_usage_to_anthropic(usage);
+        self.usage.output_tokens = self.usage.output_tokens.max(running);
+        self.saw_backend_usage = true;
+    }
+
+    /// Serialize an event to SSE, stamping the current cumulative `usage` onto
+    /// every `content_block_delta`.
+    ///
+    /// Anthropic's native protocol only reports usage on `message_start` and the
+    /// terminal `message_delta`, so a proxy that reads the stream for live
+    /// per-token accounting gets nothing until the stream ends — and nothing at
+    /// all if the client aborts mid-stream. Mirroring OpenAI's
+    /// `continuous_usage_stats`, we attach a `usage` triple to each token chunk.
+    /// This is a Dynamo extension to the wire format (the field is additive;
+    /// spec-compliant clients ignore unknown fields).
+    fn serialize_event(
+        &self,
+        event_type: &'static str,
+        event: &AnthropicStreamEvent,
+    ) -> Result<Event, anyhow::Error> {
+        let value = event_json_with_usage(event, &self.usage)?;
+        Ok(Event::default()
+            .event(event_type)
+            .data(serde_json::to_string(&value)?))
     }
 
     /// Emit the initial `message_start` event.
@@ -247,6 +283,32 @@ impl AnthropicStreamConverter {
         // non-overlapping cached-token accounting.
         if let Some(usage) = &chunk.inner.usage {
             self.record_usage(usage);
+        }
+
+        // Fallback output-token accounting for backends that never populate
+        // per-chunk `usage` (e.g. the `ModelInput::Text` / PushRouter path).
+        // Once the backend reports authoritative usage, `record_usage` owns the
+        // count and this estimate is dropped. One token per content-bearing
+        // chunk is the standard approximation for token-by-token streaming.
+        //
+        // This must run *before* the content_block_delta events below are
+        // serialized so every token chunk carries a non-zero output-token count
+        // (the acceptance requirement: usage present on 100% of token chunks).
+        if !self.saw_backend_usage {
+            let produced_output = chunk.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|r| !r.is_empty())
+                    || matches!(
+                        &choice.delta.content,
+                        Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
+                    )
+            });
+            if produced_output {
+                self.usage.output_tokens += 1;
+            }
         }
 
         let mut should_flush_tool_blocks = false;
@@ -302,7 +364,7 @@ impl AnthropicStreamConverter {
                         thinking: reasoning.clone(),
                     },
                 };
-                events.push(make_sse_event("content_block_delta", &block_delta));
+                events.push(self.serialize_event("content_block_delta", &block_delta));
             }
 
             // Handle text content deltas
@@ -331,7 +393,7 @@ impl AnthropicStreamConverter {
                             signature: "erased".to_string(),
                         },
                     };
-                    events.push(make_sse_event("content_block_delta", &sig_delta));
+                    events.push(self.serialize_event("content_block_delta", &sig_delta));
 
                     let block_stop = AnthropicStreamEvent::ContentBlockStop {
                         index: self.thinking_block_index,
@@ -362,7 +424,7 @@ impl AnthropicStreamConverter {
                         text: text.to_string(),
                     },
                 };
-                events.push(make_sse_event("content_block_delta", &block_delta));
+                events.push(self.serialize_event("content_block_delta", &block_delta));
             }
 
             // Handle tool call deltas
@@ -376,7 +438,7 @@ impl AnthropicStreamConverter {
                             signature: "erased".to_string(),
                         },
                     };
-                    events.push(make_sse_event("content_block_delta", &sig_delta));
+                    events.push(self.serialize_event("content_block_delta", &sig_delta));
                     let block_stop = AnthropicStreamEvent::ContentBlockStop {
                         index: self.thinking_block_index,
                     };
@@ -428,7 +490,7 @@ impl AnthropicStreamConverter {
                     signature: "erased".to_string(),
                 },
             };
-            events.push(make_sse_event("content_block_delta", &sig_delta));
+            events.push(self.serialize_event("content_block_delta", &sig_delta));
             let block_stop = AnthropicStreamEvent::ContentBlockStop {
                 index: self.thinking_block_index,
             };
@@ -484,6 +546,33 @@ impl AnthropicStreamConverter {
 fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
     let data = serde_json::to_string(event)?;
     Ok(Event::default().event(event_type).data(data))
+}
+
+/// Serialize an Anthropic stream event to JSON, injecting a `usage` triple onto
+/// `content_block_delta` events (and leaving every other event untouched).
+///
+/// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
+/// field — the type is an external crate we don't own — so the field is added at
+/// the JSON layer. The triple is `{input_tokens, output_tokens, total_tokens}`
+/// (plus any Anthropic cache fields), where `total_tokens = input + output`,
+/// giving proxies the same per-chunk accounting OpenAI exposes via
+/// `continuous_usage_stats`.
+fn event_json_with_usage(
+    event: &AnthropicStreamEvent,
+    usage: &AnthropicUsage,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let mut value = serde_json::to_value(event)?;
+    if let (AnthropicStreamEvent::ContentBlockDelta { .. }, serde_json::Value::Object(map)) =
+        (event, &mut value)
+    {
+        let mut usage_value = serde_json::to_value(usage)?;
+        if let serde_json::Value::Object(usage_map) = &mut usage_value {
+            let total = usage.input_tokens.saturating_add(usage.output_tokens);
+            usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
+        }
+        map.insert("usage".to_string(), usage_value);
+    }
+    Ok(value)
 }
 
 /// A tagged event for testing: the event type string paired with the
@@ -814,6 +903,10 @@ mod tests {
         events.clear();
         let capacity = events.capacity();
         conv.append_chunk_events(&text_chunk("I'll edit the file."), &mut events);
+        // content_block_start + content_block_delta. The content_block_delta now
+        // carries an injected per-chunk usage triple (see
+        // test_content_block_delta_carries_usage_triple) rather than a separate
+        // interim message_delta event.
         assert_eq!(events.len(), 2);
         assert_eq!(events.capacity(), capacity);
         assert!(events.iter().all(Result::is_ok));
@@ -897,10 +990,10 @@ mod tests {
         // Exercise the production chunk path rather than its tagged test mirror.
         let mut events = Vec::new();
         conv.append_chunk_events(&usage_chunk(12, Some(11), 5), &mut events);
-        assert!(
-            events.is_empty(),
-            "usage-only chunk emits no content events"
-        );
+        // A usage-only chunk carries no content deltas, so it emits no SSE
+        // events; the reconciled usage is stamped onto subsequent token chunks
+        // and the terminal message_delta.
+        assert!(events.is_empty(), "usage-only chunk emits no SSE events");
         assert_eq!(conv.usage.input_tokens, 1);
         assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
         assert_eq!(conv.usage.output_tokens, 5);
@@ -918,6 +1011,74 @@ mod tests {
             }
             other => panic!("expected MessageDelta, got {other:?}"),
         }
+    }
+
+    /// Backends that never populate per-chunk `usage` (the `ModelInput::Text`
+    /// path) still get a running output-token estimate that advances *before*
+    /// each token chunk is serialized, so every `content_block_delta` carries a
+    /// non-zero usage triple even for a client that aborts mid-stream.
+    #[test]
+    fn test_fallback_counter_advances_before_each_token_chunk() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 7);
+        let mut events = Vec::new();
+
+        // First content chunk: content_block_start + content_block_delta. The
+        // fallback advances output_tokens to 1 before the delta is serialized.
+        conv.append_chunk_events(&text_chunk("Hello"), &mut events);
+        assert_eq!(conv.usage.output_tokens, 1);
+        assert_eq!(events.len(), 2);
+
+        // Second content chunk on the open block: content_block_delta only
+        // (output_tokens advanced to 2).
+        events.clear();
+        conv.append_chunk_events(&text_chunk(" world"), &mut events);
+        assert_eq!(conv.usage.output_tokens, 2);
+        assert_eq!(events.len(), 1);
+
+        // The frontend input estimate is preserved until the backend reports.
+        assert_eq!(conv.usage.input_tokens, 7);
+        assert!(!conv.saw_backend_usage);
+    }
+
+    /// The root fix: `content_block_delta` events carry an injected `usage`
+    /// triple (input/output/total) — mirroring OpenAI `continuous_usage_stats`
+    /// — while non-delta events are left untouched.
+    #[test]
+    fn test_content_block_delta_carries_usage_triple() {
+        let usage = AnthropicUsage {
+            input_tokens: 7,
+            output_tokens: 3,
+            ..Default::default()
+        };
+
+        let delta = AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: AnthropicDelta::TextDelta {
+                text: "hi".to_string(),
+            },
+        };
+        let value = event_json_with_usage(&delta, &usage).expect("serialize");
+        let usage_obj = value
+            .get("usage")
+            .expect("content_block_delta must carry usage");
+        assert_eq!(usage_obj.get("input_tokens").and_then(|v| v.as_u64()), Some(7));
+        assert_eq!(
+            usage_obj.get("output_tokens").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            usage_obj.get("total_tokens").and_then(|v| v.as_u64()),
+            Some(10),
+            "total_tokens must equal input + output"
+        );
+
+        // A non-delta event carries no injected usage.
+        let stop = AnthropicStreamEvent::ContentBlockStop { index: 0 };
+        let stop_value = event_json_with_usage(&stop, &usage).expect("serialize");
+        assert!(
+            stop_value.get("usage").is_none(),
+            "only content_block_delta gets injected usage"
+        );
     }
 
     /// Regression test: text block must be closed (content_block_stop)
