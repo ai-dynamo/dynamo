@@ -20,7 +20,7 @@ For GB200 on AWS, please see the [efa variant](sglang/disagg/efa/README.md).
 ## Prerequisites
 
 - 5 4xGB200 nodes in an NVL36 or NVL72 domain
-- A Kubernetes cluster with the [Dynamo Operator](../../docs/fern/kubernetes/quickstart.mdx) installed
+- A Kubernetes cluster with the [Dynamo Operator](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) installed
 - DRA / ComputeDomain support for MNNVL placement
 - Access to `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13`
 - Shared RWX PVC for model weights and FlashInfer JIT artifacts
