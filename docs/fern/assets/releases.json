@@ -1667,37 +1667,22 @@
         "name": "Ubuntu",
         "version": "24.04",
         "arch": "x86_64, ARM64",
-        "status": "Supported",
+        "scope": "Containers and wheels",
         "chip": "ubuntu"
       },
       {
         "name": "Ubuntu",
         "version": "22.04",
         "arch": "x86_64",
-        "status": "Supported",
+        "scope": "Wheels only",
         "chip": "ubuntu"
-      },
-      {
-        "name": "CentOS Stream",
-        "version": "9",
-        "arch": "x86_64",
-        "status": "Experimental",
-        "chip": "centos"
       }
     ],
     "arch": [
       "x86_64",
       "ARM64 (Ubuntu 24.04 only)"
     ],
-    "wheelsNote": "Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04. Other Linux distributions are expected to work but are not officially verified.",
-    "csp": [
-      {
-        "provider": "AWS",
-        "os": "Amazon Linux 2023",
-        "arch": "x86_64",
-        "status": "Supported"
-      }
-    ]
+    "wheelsNote": "Wheels are built in a manylinux_2_28 environment (AlmaLinux 8, glibc 2.28+) and validated on Ubuntu 22.04 and 24.04. They install on any Linux distribution with glibc 2.28+ (Debian 11+, RHEL 9, etc.), but only Ubuntu 22.04/24.04 are officially verified."
   },
   "knownArtifactIssues": [
     {

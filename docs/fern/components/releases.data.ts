@@ -954,17 +954,24 @@ export const PLATFORM_PREVIEW_COVERAGE: Record<string, Coverage> = {
   "v1.1.0-dev.1": { images: true, wheels: true, helm: true, crates: false },
 };
 
+/* PLATFORM.os splits two distinct facts a reader needs to keep straight:
+ *   * "Containers and wheels" — the Dynamo CUDA container images (vLLM, SGLang,
+ *     TensorRT-LLM) are built on this OS; wheels install here too. Ubuntu
+ *     24.04 is the shipped container base (see container/context.yaml —
+ *     every CUDA runtime image uses cuda-dl-base 25.11-cuda13.x-devel-ubuntu24.04).
+ *   * "Wheels only" — the OS is not a shipped container base, but the wheels
+ *     are manylinux_2_28 (glibc 2.28+), so `pip install ai-dynamo` runs on it.
+ *     Getting Started's Local Installation lists Ubuntu 22.04 for that reason.
+ * A future host that carries neither status would take a third scope value. */
 export const PLATFORM = {
   gpus: ["Blackwell", "Hopper", "Ada Lovelace", "Ampere"],
   os: [
-    { name: "Ubuntu", version: "24.04", arch: "x86_64, ARM64", status: "Supported", chip: "ubuntu" },
-    { name: "Ubuntu", version: "22.04", arch: "x86_64", status: "Supported", chip: "ubuntu" },
-    { name: "CentOS Stream", version: "9", arch: "x86_64", status: "Experimental", chip: "centos" },
+    { name: "Ubuntu", version: "24.04", arch: "x86_64, ARM64", scope: "Containers and wheels", chip: "ubuntu" },
+    { name: "Ubuntu", version: "22.04", arch: "x86_64", scope: "Wheels only", chip: "ubuntu" },
   ],
   arch: ["x86_64", "ARM64 (Ubuntu 24.04 only)"],
   wheelsNote:
-    "Wheels are built in a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu 22.04/24.04. Other Linux distributions are expected to work but are not officially verified.",
-  csp: [{ provider: "AWS", os: "Amazon Linux 2023", arch: "x86_64", status: "Supported" }],
+    "Wheels are built in a manylinux_2_28 environment (AlmaLinux 8, glibc 2.28+) and validated on Ubuntu 22.04 and 24.04. They install on any Linux distribution with glibc 2.28+ (Debian 11+, RHEL 9, etc.), but only Ubuntu 22.04/24.04 are officially verified.",
 };
 
 export const KNOWN_ARTIFACT_ISSUES = [

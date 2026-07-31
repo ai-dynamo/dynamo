@@ -11,15 +11,12 @@ script reads the single source of truth ``components/releases.data.ts`` and
 emits equivalent markdown tables into each page between idempotent markers,
 wrapped in <llms-only> so only agent exports see them.
 
-A page may carry more than one generated span, each keyed by its own marker
-name. reference/compatibility.mdx also carries a human-facing
-``support-matrix`` span: a single collapsed <Accordion> holding the CUDA
-toolkit and minimum driver matrix for every released line (stable releases
-and their patches), split into one captioned table per minor line so a
-header stays in view while scrolling. The agent twin on the same page keeps
-the matrix as one flat table instead -- the human cut is optimized for
-scanning, the agent cut for parsing, so the two spans are deliberately
-different renderings of the same rows rather than a redundant pair.
+reference/compatibility.mdx's human-facing release support matrix is a
+React component (``ReleaseSupportMatrix``, in ``components/``); its data
+comes from the same ``releases.data.ts`` module this script parses, so the
+human and agent views cannot drift. This script therefore only emits the
+``llms-tables`` twin for that page — a single flat CUDA / feature / pins
+table optimized for parsing.
 
 It also emits three machine-readable outputs from the same parse:
 
@@ -406,16 +403,11 @@ def feature_cell(fc: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def cuda_table(data: dict, versions: set[str] | None = None) -> str:
-    """CUDA toolkit and minimum-driver history table.
-
-    ``versions`` optionally restricts the rows to a set of bare release
-    versions (e.g. ``{"1.3.0", "1.2.0"}``); ``None`` emits the full history.
-    """
+def cuda_table(data: dict) -> str:
+    """CUDA toolkit and minimum-driver history table."""
     rows = [
         [r["version"], r["backend"], r["toolkit"], r["minDriver"], r.get("note")]
         for r in data["CUDA_HISTORY"]
-        if versions is None or r["version"] in versions
     ]
     return md_table(["Dynamo", "Backend", "CUDA Toolkit", "Min Driver", "Note"], rows)
 
@@ -464,16 +456,17 @@ def crates_table(data: dict) -> str:
 
 
 def platform_lines(data: dict) -> str:
-    """Platform-support bullet lines (GPUs / OS / CSP / CPU arch / wheels)."""
+    """Platform-support bullet lines (GPUs / OS / CPU arch / wheels).
+
+    OS rows carry a ``scope`` field distinguishing shipped container bases
+    ("Containers and wheels") from wheels-only hosts ("Wheels only") — see
+    releases.data.ts for the reasoning.
+    """
     plat = data["PLATFORM"]
     lines = [f"- GPU architectures: {', '.join(plat['gpus'])}"]
     for os_row in plat["os"]:
         lines.append(
-            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['status']}"
-        )
-    for csp in plat.get("csp", []):
-        lines.append(
-            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['status']}"
+            f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['scope']}"
         )
     lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
     if plat.get("wheelsNote"):
@@ -567,12 +560,11 @@ def render_compatibility(data: dict) -> str:
         )
     )
 
-    # Deliberately restates the support-matrix accordion's table. The
-    # accordion covers the same rows, but it is <Accordion> markup and this
-    # twin exists precisely because component output may be dropped from the
-    # agent-facing exports. Losing the matrix for agents is a worse failure
-    # than repeating it, so keep both until the deployed .md export is
-    # confirmed to carry Accordion children.
+    # The human view of the CUDA history renders through the
+    # <ReleaseSupportMatrix /> React component (which reads the same
+    # releases.data.ts module) and Fern's agent-facing .md export may drop
+    # component output; this flat twin exists so the matrix survives an
+    # agent export whether or not the component's DOM is captured.
     parts.append("**CUDA toolkit and minimum driver per Dynamo release**")
     parts.append(cuda_table(data))
     cuda_notes = data.get("CUDA_NOTES") or []
@@ -586,84 +578,6 @@ def render_compatibility(data: dict) -> str:
     parts.append("**Platform support**")
     parts.append(platform_lines(data))
 
-    return "\n\n".join(parts)
-
-
-# Release kinds the human-facing support matrix covers: the lines a reader
-# can actually pull and run. Platform previews (-dev.N) and model-specific
-# builds are deliberately excluded -- CUDA_NOTES covers their toolkit support
-# in prose. CUDA_HISTORY happens to carry no preview or model-build rows
-# today, so this filter is currently a no-op; it is expressed on kind anyway
-# so a future preview entry cannot leak into the matrix unnoticed.
-SUPPORT_MATRIX_KINDS = ("stable", "patch")
-
-
-def released_versions(data: dict) -> set[str]:
-    """Bare versions of the released lines -- stable releases and patches."""
-    return {
-        rel["version"].removeprefix("v")
-        for rel in data["RELEASES"]
-        if rel.get("kind") in SUPPORT_MATRIX_KINDS
-    }
-
-
-def minor_line(version: str) -> str:
-    """'1.2.1' -> '1.2.x' -- the caption a matrix table is grouped under."""
-    parts = version.split(".")
-    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
-        raise TSParseError(
-            f"CUDA_HISTORY version {version!r} is not MAJOR.MINOR... -- the "
-            "support matrix cannot group it by minor line"
-        )
-    return f"{parts[0]}.{parts[1]}.x"
-
-
-def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
-    """Minor line -> its versions, keyed in CUDA_HISTORY order (newest first).
-
-    Insertion order carries the sort: CUDA_HISTORY is maintained newest-first,
-    so the first time a minor line is seen fixes its position, and dicts
-    preserve that. No separate version sort to drift out of step with it.
-    """
-    groups: dict[str, set[str]] = {}
-    for row in data["CUDA_HISTORY"]:
-        if row["version"] in versions:
-            groups.setdefault(minor_line(row["version"]), set()).add(row["version"])
-    return groups
-
-
-def render_support_matrix(data: dict) -> str:
-    """Human-facing collapsed CUDA/driver matrix for the released lines.
-
-    One captioned table per minor line, all inside a single <Accordion>. A
-    flat 60-row run pushes its header off screen inside a collapsed panel;
-    per-line tables repeat the header every few rows. Separate tables rather
-    than a version column blanked after its first row -- blank leading cells
-    are ambiguous once the page is flattened into the agent markdown export.
-    """
-    versions = released_versions(data)
-    groups = group_by_minor_line(data, versions)
-    if not groups:
-        raise TSParseError(
-            "no CUDA_HISTORY row matches a released RELEASES version -- the "
-            "support-matrix accordion would render an empty table"
-        )
-
-    parts = [
-        '<Accordion title="CUDA toolkit and minimum driver by release">',
-        "Every released line — stable releases and their patches, grouped by "
-        "minor line, newest first. Platform previews and model-specific "
-        "builds are not listed individually; the notes below cover their "
-        "toolkit support, and [Releases (machine-readable)](releases-data.mdx) "
-        "has the full release inventory.",
-    ]
-    for line, line_versions in groups.items():
-        parts.append(f"**{line}**")
-        parts.append(cuda_table(data, line_versions))
-    cuda_notes = data.get("CUDA_NOTES") or []
-    if cuda_notes:
-        parts.append("\n".join(f"- {note}" for note in cuda_notes))
-    parts.append("</Accordion>")
     return "\n\n".join(parts)
 
 
@@ -1005,13 +919,9 @@ class Block(NamedTuple):
 
 # The three component-backed pages get <llms-only> twins (humans see the React
 # components); releases-data.mdx IS the page body, human-viewable and
-# machine-consumable alike. compatibility.mdx additionally carries the
-# human-facing support-matrix accordion at a fixed spot in the page.
+# machine-consumable alike.
 PAGES: dict[str, tuple[Block, ...]] = {
-    "compatibility.mdx": (
-        Block("support-matrix", render_support_matrix, False, False),
-        Block("llms-tables", render_compatibility, True, True),
-    ),
+    "compatibility.mdx": (Block("llms-tables", render_compatibility, True, True),),
     "release-artifacts.mdx": (
         Block("llms-tables", render_release_artifacts, True, True),
     ),

@@ -312,15 +312,14 @@ export function CompatibilityHero() {
             <div className="dynref-hero-req-values">
               {PLATFORM.os.map((row) => (
                 <span
-                  className={
-                    row.status === "Experimental"
-                      ? "dynref-chip dynref-chip--amber dynref-chip--exp"
-                      : `dynref-chip dynref-chip--${row.chip}`
-                  }
+                  className={`dynref-chip dynref-chip--${row.chip}`}
                   key={`${row.name} ${row.version}`}
+                  title={`${row.scope} · ${row.arch}`}
                 >
                   {row.name} {row.version}
-                  {row.status === "Experimental" ? " · experimental" : ""}
+                  {row.scope === "Wheels only" && (
+                    <span className="dynref-muted"> · wheels only</span>
+                  )}
                 </span>
               ))}
             </div>
