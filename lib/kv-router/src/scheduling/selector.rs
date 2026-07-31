@@ -95,50 +95,6 @@ fn softmax_sample_entries(
     *entries.last().unwrap()
 }
 
-struct MinCostPicker {
-    best_worker: Option<WorkerWithDpRank>,
-    best_cost: f64,
-    tie_count: usize,
-}
-
-impl MinCostPicker {
-    fn new() -> Self {
-        Self {
-            best_worker: None,
-            best_cost: f64::INFINITY,
-            tie_count: 0,
-        }
-    }
-
-    fn consider(
-        &mut self,
-        worker: WorkerWithDpRank,
-        cost: f64,
-        choose_tie: impl FnOnce(std::ops::Range<usize>) -> usize,
-    ) {
-        if cost < self.best_cost {
-            self.best_worker = Some(worker);
-            self.best_cost = cost;
-            self.tie_count = 1;
-            return;
-        }
-
-        if cost == self.best_cost {
-            self.tie_count += 1;
-            if choose_tie(0..self.tie_count) == 0 {
-                self.best_worker = Some(worker);
-            }
-        }
-    }
-
-    fn finish(self) -> (WorkerWithDpRank, f64) {
-        (
-            self.best_worker.expect("eligible worker rank non-empty"),
-            self.best_cost,
-        )
-    }
-}
-
 /// Default implementation matching the Python _cost_function.
 #[derive(Debug, Clone)]
 pub struct DefaultWorkerSelector {
@@ -418,11 +374,29 @@ impl DefaultWorkerSelector {
 
             let mut rng = rng.lock();
             if temperature == 0.0 {
-                let mut picker = MinCostPicker::new();
+                let mut best_worker = None;
+                let mut best_logit = f64::INFINITY;
+                let mut tie_count = 0usize;
                 for worker in candidates {
-                    picker.consider(worker, get_score(worker), |range| rng.usize(range));
+                    let score = get_score(worker);
+                    if score < best_logit {
+                        best_worker = Some(worker);
+                        best_logit = score;
+                        tie_count = 1;
+                        continue;
+                    }
+
+                    if score == best_logit {
+                        tie_count += 1;
+                        if rng.usize(0..tie_count) == 0 {
+                            best_worker = Some(worker);
+                        }
+                    }
                 }
-                return picker.finish();
+                return (
+                    best_worker.expect("eligible worker rank non-empty"),
+                    best_logit,
+                );
             }
 
             let entries = candidates
@@ -434,11 +408,31 @@ impl DefaultWorkerSelector {
 
         let random_choice = || {
             if temperature == 0.0 {
-                let mut picker = MinCostPicker::new();
+                let mut best_worker = None;
+                let mut best_logit = f64::INFINITY;
+                let mut tie_count = 0usize;
                 eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    picker.consider(worker, get_score(worker), fastrand::usize);
+                    let score = get_score(worker);
+                    if score < best_logit {
+                        best_worker = Some(worker);
+                        best_logit = score;
+                        tie_count = 1;
+                        return;
+                    }
+
+                    if score == best_logit {
+                        tie_count += 1;
+                        // Reservoir sampling keeps tied minima uniform without collecting workers.
+                        if fastrand::usize(0..tie_count) == 0 {
+                            best_worker = Some(worker);
+                        }
+                    }
                 });
-                return picker.finish();
+
+                return (
+                    best_worker.expect("eligible worker rank non-empty"),
+                    best_logit,
+                );
             }
 
             let mut worker_logits = FxHashMap::default();
