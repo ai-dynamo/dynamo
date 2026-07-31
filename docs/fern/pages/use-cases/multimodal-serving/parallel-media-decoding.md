@@ -75,8 +75,3 @@ registers the model.
   required by the Rust frontend. It cannot run parallel media decoding as
   shipped. Run the frontend in a backend runtime image or environment where
   NIXL and UCX are configured and available.
-- Run the frontend on a node with GPU access. NIXL initialization requires
-  `libcuda.so.1`, even though image decompression runs on the CPU.
-- To fetch images from trusted internal IP addresses or ports, set
-  `DYN_MM_ALLOW_INTERNAL=1` on the backend worker. Direct IP addresses and
-  nonstandard ports are blocked by default.
