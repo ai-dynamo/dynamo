@@ -3,6 +3,8 @@
 
 use std::collections::VecDeque;
 
+use dynamo_kv_router::protocols::compute_next_seq_hash;
+
 use crate::kv_manager::SglangKvManager;
 use rustc_hash::FxHashSet;
 
@@ -30,12 +32,24 @@ pub(super) fn apply_schedule_policy(
             let mut waiting_prefixes = FxHashSet::default();
             let mut scored = Vec::with_capacity(waiting.len());
 
-            for req in waiting.drain(..) {
-                let sequence = req.sequence_tokens();
-                let prefix_len = kv_manager.cache().prefix_match_len(sequence);
+            for mut req in waiting.drain(..) {
+                let sequence_tokens = &req.sequence_tokens;
+                req.kv_lease.ensure_page_hashes(sequence_tokens, page_size);
+                let prefix_len = kv_manager
+                    .cache()
+                    .prefix_match_hashes_len(req.kv_lease.page_hashes());
                 let deprioritized = prefix_len <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD
-                    && sequence.len() >= duplicate_prefix_len
-                    && !waiting_prefixes.insert(sequence[..duplicate_prefix_len].to_vec());
+                    && req.sequence_tokens().len() >= duplicate_prefix_len
+                    && {
+                        let duplicate_prefix =
+                            &req.kv_lease.page_hashes()[..duplicate_prefix_len / page_size];
+                        let mut local_hashes = duplicate_prefix.iter().copied();
+                        let first = local_hashes
+                            .next()
+                            .expect("duplicate-prefix threshold must cover at least one page");
+                        let sequence_hash = local_hashes.fold(first.0, compute_next_seq_hash);
+                        !waiting_prefixes.insert(sequence_hash)
+                    };
 
                 scored.push((prefix_len, deprioritized, req));
             }

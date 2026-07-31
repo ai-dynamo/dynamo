@@ -31,6 +31,7 @@ import (
 
 const (
 	admissionOperatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
+	customRuntimeImage         = "registry.example/runtime:custom"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
 )
 

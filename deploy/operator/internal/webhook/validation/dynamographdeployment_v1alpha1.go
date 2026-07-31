@@ -26,7 +26,8 @@ import (
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) field.ErrorList {
-	if !hasV1Alpha1CompatibilityFields(dgd) {
+	if !hasV1Alpha1CompatibilityFields(dgd) &&
+		!v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		return nil
 	}
 	return v.validateDynamoGraphDeploymentSpecV1alpha1(
@@ -59,6 +60,30 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			service,
 			servicePath,
 			dynamoNamespace,
+		)...)
+	}
+	return allErrs
+}
+
+// validateDynamoGraphDeploymentSpecUpdateV1alpha1 validates source-version runtime fields on update.
+// newSpec, oldSpec, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdateV1alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	servicesPath := fldPath.Child("services")
+	for _, serviceName := range sortedV1Alpha1ServiceNames(newSpec.Services) {
+		newService := newSpec.Services[serviceName]
+		oldService, exists := oldSpec.Services[serviceName]
+		if !exists {
+			continue
+		}
+		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdateV1alpha1(
+			newService,
+			oldService,
+			servicesPath.Key(serviceName),
 		)...)
 	}
 	return allErrs

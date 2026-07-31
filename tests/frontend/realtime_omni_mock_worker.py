@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import uvloop
-from vllm_omni.engine.mm_outputs import MultimodalPayload
+from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
