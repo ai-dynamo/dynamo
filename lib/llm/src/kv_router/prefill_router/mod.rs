@@ -270,6 +270,9 @@ impl
                     req.annotations
                         .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
+                    // TODO: This advisory selection does not reserve decode capacity. If the
+                    // exact pinned admission below races and fails, the no-clone fix is a
+                    // scheduler reservation handoff rather than retrying with a mutated request.
                     let response_stream = next.generate(context.map(|_| req)).await?;
                     let ctx = response_stream.context();
                     let annotation = Annotated::<LLMEngineOutput>::from_annotation(
