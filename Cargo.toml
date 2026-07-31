@@ -109,8 +109,11 @@ futures-util = { version = "0.3.32" }
 hf-hub = { version = "0.4.2", default-features = false }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.3.0" }
-modelexpress-common = { version = "0.3.0" }
+# ModelExpress 0.5.0 RC4 (release/0.5.0 head, 2026-07-30). Pinned by SHA until
+# 0.5.0 is published to crates.io at GA; the version key keeps `cargo publish`
+# metadata valid and is what registries resolve once 0.5.0 exists.
+modelexpress-client = { version = "0.5.0", git = "https://github.com/ai-dynamo/modelexpress.git", rev = "54fc540d81b6345796a97c39de8174ec4e090f9a" }
+modelexpress-common = { version = "0.5.0", git = "https://github.com/ai-dynamo/modelexpress.git", rev = "54fc540d81b6345796a97c39de8174ec4e090f9a" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
