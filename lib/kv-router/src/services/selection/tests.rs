@@ -26,7 +26,8 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerCandidate, WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -52,14 +53,10 @@ impl WorkerScorer for HighestWorkerScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-        contributions: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError> {
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
         self.calls.set(self.calls.get() + 1);
-        for (row, worker) in candidates.workers().iter().enumerate() {
-            contributions[row] = -2.0 * worker.worker_id as f64;
-        }
-        Ok(())
+        Ok(-2.0 * candidate.worker().worker_id as f64)
     }
 }
 
@@ -69,13 +66,9 @@ impl WorkerScorer for WorkerIdScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-        contributions: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        for (row, worker) in candidates.workers().iter().enumerate() {
-            contributions[row] = worker.worker_id as f64;
-        }
-        Ok(())
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        Ok(candidate.worker().worker_id as f64)
     }
 }
 
@@ -85,15 +78,11 @@ impl WorkerPicker for LowestCostPicker {
     fn pick(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidates: WorkerCandidates<'_>,
-        costs: &[f64],
+        candidates: WorkerCandidates<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        Ok(costs
-            .iter()
-            .enumerate()
-            .min_by(|left, right| left.1.total_cmp(right.1))
-            .expect("eligible candidate")
-            .0)
+        Ok((0..candidates.len())
+            .min_by(|left, right| candidates.cost(*left).total_cmp(&candidates.cost(*right)))
+            .expect("eligible candidate"))
     }
 }
 
@@ -103,11 +92,9 @@ impl WorkerScorer for NonFiniteScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidates: WorkerCandidates<'_>,
-        contributions: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        contributions[0] = f64::NAN;
-        Ok(())
+        _candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        Ok(f64::NAN)
     }
 }
 
@@ -118,7 +105,6 @@ impl WorkerPicker for InvalidRowPicker {
         &mut self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        _costs: &[f64],
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(candidates.len())
     }
