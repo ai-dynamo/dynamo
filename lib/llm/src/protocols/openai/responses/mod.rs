@@ -128,11 +128,20 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), St
                             };
                             text.push(text_part);
                         }
+                        // Codex sends the child task in this extension field. Its
+                        // name reflects an upstream transport concern, but current
+                        // Codex clients provide a string that must survive the
+                        // OpenResponses translation for the child to receive its
+                        // assignment.
                         Some("encrypted_content") => {
-                            return Err(
-                                "Codex agent_message with encrypted content is unsupported"
-                                    .to_string(),
-                            );
+                            let Some(text_part) = part
+                                .get("encrypted_content")
+                                .and_then(serde_json::Value::as_str)
+                            else {
+                                return Err("Codex agent_message encrypted_content missing value"
+                                    .to_string());
+                            };
+                            text.push(text_part);
                         }
                         Some(kind) => {
                             return Err(format!(
@@ -3114,23 +3123,55 @@ thinking
     }
 
     #[test]
-    fn test_nvcreate_response_rejects_encrypted_codex_agent_message() {
+    fn test_nvcreate_response_normalizes_encrypted_content_on_codex_agent_message() {
         let body = serde_json::json!({
             "model": "m",
             "input": [{
                 "type": "agent_message",
                 "author": "/root",
                 "recipient": "/root/dynamo_subagent_smoke",
-                "content": [{"type": "encrypted_content", "encrypted_content": "AB=="}],
+                "content": [
+                    {"type": "encrypted_content", "encrypted_content": "AB=="},
+                    {"type": "input_text", "text": "Return exactly OK."},
+                ],
+            }],
+        });
+
+        let req: NvCreateResponse = serde_json::from_value(body)
+            .expect("encrypted content should preserve Codex child handoff");
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[..] {
+            [ChatCompletionRequestMessage::User(message)] => {
+                assert_eq!(
+                    message.content,
+                    ChatCompletionRequestUserMessageContent::Text(
+                        "Message from /root to /root/dynamo_subagent_smoke:\nAB==\nReturn exactly OK."
+                            .to_string(),
+                    )
+                );
+            }
+            messages => panic!("expected one user message, got {messages:?}"),
+        }
+    }
+
+    #[test]
+    fn test_nvcreate_response_rejects_encrypted_content_without_value() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": [{"type": "encrypted_content"}],
             }],
         });
 
         let error = serde_json::from_value::<NvCreateResponse>(body)
-            .expect_err("encrypted Codex agent messages must be rejected");
+            .expect_err("encrypted content without a value must be rejected");
         assert!(
             error
                 .to_string()
-                .contains("encrypted content is unsupported")
+                .contains("encrypted_content missing value")
         );
     }
 

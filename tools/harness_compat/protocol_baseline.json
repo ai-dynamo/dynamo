@@ -1,0 +1,20 @@
+{
+  "claude": {
+    "header_names": ["accept", "accept-encoding", "anthropic-beta", "anthropic-dangerous-direct-browser-access", "anthropic-version", "authorization", "connection", "content-length", "content-type", "host", "user-agent", "x-api-key", "x-app", "x-claude-code-session-id", "x-stainless-arch", "x-stainless-lang", "x-stainless-os", "x-stainless-package-version", "x-stainless-retry-count", "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-timeout"],
+    "input_content_types": [], "input_item_types": [],
+    "message_content_types": ["text", "tool_result", "tool_use"], "message_roles": ["assistant", "system", "user"],
+    "output_config_keys": ["effort", "format"], "request_paths": ["/v1/messages?beta=true"],
+    "shape_keys": ["max_tokens", "messages", "model", "output_config_keys", "stream", "tool_names", "tool_types", "top_level_keys"],
+    "text_keys": [], "tool_names": ["Bash", "Edit", "Read", "StructuredOutput"], "tool_types": ["object"],
+    "top_level_keys": ["context_management", "max_tokens", "messages", "metadata", "model", "output_config", "stream", "system", "thinking", "tools"]
+  },
+  "codex": {
+    "header_names": ["accept", "authorization", "content-length", "content-type", "host", "originator", "session-id", "thread-id", "user-agent", "x-client-request-id", "x-codex-beta-features", "x-codex-turn-metadata", "x-codex-window-id"],
+    "input_content_types": ["input_text", "null", "output_text"], "input_item_types": ["function_call", "function_call_output", "message"],
+    "message_content_types": [], "message_roles": [], "output_config_keys": [], "request_paths": ["/v1/responses"],
+    "shape_keys": ["input_items", "model", "stream", "text_keys", "tool_names", "tool_types", "top_level_keys"], "text_keys": ["format"],
+    "tool_names": ["collaboration", "create_goal", "exec_command", "get_goal", "request_user_input", "update_goal", "update_plan", "view_image", "write_stdin"],
+    "tool_types": ["function", "namespace", "web_search"],
+    "top_level_keys": ["client_metadata", "include", "input", "instructions", "model", "parallel_tool_calls", "prompt_cache_key", "reasoning", "store", "stream", "text", "tool_choice", "tools"]
+  }
+}
