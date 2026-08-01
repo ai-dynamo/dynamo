@@ -28,6 +28,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C5a | Codex forked coding thread | fork and original each complete a later tool turn | forked history/session lineage remains isolated and accepted | P1 |
 | C5a1 | Codex persisted-thread resume | fresh app-server process completes a later tool turn | stored Responses history remains accepted after process restart | P1 |
 | C5a2 | Codex archive/unarchive | archive and restore a completed thread, then resume it for a state-dependent tool turn | archival lifecycle notifications, stored Responses history, and subsequent rehydration remain accepted | P2 |
+| C5a3 | Codex injected Responses history | inject an assistant `output_text` item, then have a coding turn derive a file from it | app-server’s raw Responses history injection remains accepted by Dynamo and preserves assistant context | P2 |
 | C5b | Codex detached review | detached review thread emits entry/exit review items | reviewer-specific Responses stream and lifecycle remain accepted | P1 |
 | C6 | Codex active-turn steering | `turn/steer` accepted while turn is active | cancellation/final SSE semantics leave next user item valid | P0 |
 | C7 | Codex interruption | `turn/interrupt` accepted before completion | canceled stream terminates without corrupting follow-up turn | P0 |

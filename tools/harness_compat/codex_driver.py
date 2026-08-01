@@ -995,6 +995,37 @@ async def _run_scenario(
             and resumed_file_exists,
         }
 
+    if scenario == "inject_items":
+        injected = await server.request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "The required marker is INJECTED_CONTEXT."}
+                        ],
+                    }
+                ],
+            },
+        )
+        turn_id = await _start_turn(
+            server,
+            thread_id,
+            "Use the assistant context already in this thread. Create injected_context.txt containing exactly its required marker, then read the file with a shell tool.",
+        )
+        turn = await _wait_turn(server, thread_id, turn_id)
+        injected_file = workspace / "injected_context.txt"
+        injected_marker_matches = injected_file.exists() and injected_file.read_text().strip() == "INJECTED_CONTEXT"
+        return {
+            "inject_result": _fingerprint(injected),
+            "turn_status": turn["status"],
+            "injected_marker_matches": injected_marker_matches,
+            "reached": turn["status"] == "completed" and injected_marker_matches,
+        }
+
     if scenario == "detached_review":
         review = await server.request(
             "review/start",
@@ -1377,6 +1408,7 @@ def main() -> int:
             "thread_fork",
             "thread_resume",
             "thread_archive",
+            "inject_items",
             "detached_review",
             "subagent_compact",
             "invalid_lifecycle",
