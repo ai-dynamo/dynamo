@@ -96,16 +96,52 @@ def _progress(params: Any) -> None:
         time.sleep(0.05)
 
 
+def _roots() -> bool:
+    """Request client roots while retaining only the response shape and count."""
+    roots_id = "fixture-roots-1"
+    _send({"jsonrpc": "2.0", "id": roots_id, "method": "roots/list", "params": {}})
+    _record_trace(roots_request_sent=True)
+    for line in sys.stdin:
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(response, dict) or response.get("id") != roots_id:
+            continue
+        result = response.get("result")
+        roots = result.get("roots") if isinstance(result, dict) else None
+        _record_trace(
+            roots_response_result_keys=sorted(result) if isinstance(result, dict) else [],
+            roots_response_root_count=len(roots) if isinstance(roots, list) else None,
+            roots_response_error_code=(
+                response.get("error", {}).get("code") if isinstance(response.get("error"), dict) else None
+            ),
+        )
+        return isinstance(roots, list)
+    return False
+
+
 def main() -> int:
     failure_mode = os.environ.get("DYNAMO_COMPAT_FIXTURE_MCP_FAIL") == "1"
     elicitation_mode = os.environ.get("DYNAMO_COMPAT_FIXTURE_MCP_ELICIT") == "1"
     progress_mode = os.environ.get("DYNAMO_COMPAT_FIXTURE_MCP_PROGRESS") == "1"
-    tool_name = "fixture_failure" if failure_mode else "fixture_elicitation" if elicitation_mode else "fixture_answer"
+    roots_mode = os.environ.get("DYNAMO_COMPAT_FIXTURE_MCP_ROOTS") == "1"
+    tool_name = (
+        "fixture_failure"
+        if failure_mode
+        else "fixture_elicitation"
+        if elicitation_mode
+        else "fixture_roots"
+        if roots_mode
+        else "fixture_answer"
+    )
     tool_description = (
         "Return the fixed compatibility fixture error."
         if failure_mode
         else "Elicit one fixed form response and return the compatibility fixture answer."
         if elicitation_mode
+        else "Request the client roots list and return the compatibility fixture answer."
+        if roots_mode
         else "Return the fixed compatibility fixture answer."
     )
     for line in sys.stdin:
@@ -136,7 +172,7 @@ def main() -> int:
             )
             negotiated_protocol = (
                 params.get("protocolVersion")
-                if elicitation_mode and isinstance(params, dict) and isinstance(params.get("protocolVersion"), str)
+                if (elicitation_mode or roots_mode) and isinstance(params, dict) and isinstance(params.get("protocolVersion"), str)
                 else "2025-03-26"
             )
             _result(
@@ -175,6 +211,11 @@ def main() -> int:
                     _result(
                         request_id,
                         {"content": [{"type": "text", "text": "fixture elicitation declined"}], "isError": True},
+                    )
+                elif roots_mode and not _roots():
+                    _result(
+                        request_id,
+                        {"content": [{"type": "text", "text": "fixture roots unavailable"}], "isError": True},
                     )
                 else:
                     _result(request_id, {"content": [{"type": "text", "text": "42"}], "isError": False})

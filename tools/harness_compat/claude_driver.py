@@ -557,11 +557,12 @@ async def _run_scenario(
             and task_stats["errored"] == 0,
         }
 
-    if scenario in {"mcp_tool", "mcp_tool_failure", "mcp_progress"}:
+    if scenario in {"mcp_tool", "mcp_tool_failure", "mcp_progress", "mcp_roots"}:
         failure = scenario == "mcp_tool_failure"
-        tool_name = "mcp__fixture__fixture_failure" if failure else "mcp__fixture__fixture_answer"
+        roots = scenario == "mcp_roots"
+        tool_name = "mcp__fixture__fixture_failure" if failure else "mcp__fixture__fixture_roots" if roots else "mcp__fixture__fixture_answer"
         progress = scenario == "mcp_progress"
-        result_path = workspace / ("mcp_tool_failure_recovered.txt" if failure else "mcp_progress.txt" if progress else "mcp_tool.txt")
+        result_path = workspace / ("mcp_tool_failure_recovered.txt" if failure else "mcp_roots.txt" if roots else "mcp_progress.txt" if progress else "mcp_tool.txt")
         action = (
             "After it returns an error, use Bash to create mcp_tool_failure_recovered.txt containing RECOVERED, read that "
             "file back, and finish."
@@ -576,16 +577,19 @@ async def _run_scenario(
         trace_path = stream.artifact_dir / "mcp_transport.json"
         trace = json.loads(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else {}
         progress_sent = trace.get("progress_sent") if isinstance(trace, dict) else None
+        roots_completed = "roots" in trace.get("roots_response_result_keys", []) if isinstance(trace, dict) else None
         return {
             "result_subtype": result.get("subtype"),
             "mcp_failure": failure,
             "mcp_progress_sent": progress_sent,
+            "mcp_roots_completed": roots_completed,
             "mcp_tool_calls": mcp_tool_calls,
             "result_file_exists": result_path.exists(),
             "reached": result.get("subtype") == "success"
             and mcp_tool_calls >= 1
             and result_path.exists()
-            and (not progress or progress_sent is True),
+            and (not progress or progress_sent is True)
+            and (not roots or roots_completed is True),
         }
 
     if scenario == "mcp_elicitation":
@@ -762,7 +766,7 @@ async def run(args: argparse.Namespace) -> int:
         "--include-partial-messages",
         "--replay-user-messages",
     ]
-    if args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress"}:
+    if args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress", "mcp_roots"}:
         mcp_env: dict[str, str] = {}
         if args.scenario == "mcp_tool_failure":
             mcp_env["DYNAMO_COMPAT_FIXTURE_MCP_FAIL"] = "1"
@@ -774,6 +778,11 @@ async def run(args: argparse.Namespace) -> int:
         elif args.scenario == "mcp_progress":
             mcp_env = {
                 "DYNAMO_COMPAT_FIXTURE_MCP_PROGRESS": "1",
+                "DYNAMO_COMPAT_FIXTURE_MCP_TRACE": str(artifact_dir / "mcp_transport.json"),
+            }
+        elif args.scenario == "mcp_roots":
+            mcp_env = {
+                "DYNAMO_COMPAT_FIXTURE_MCP_ROOTS": "1",
                 "DYNAMO_COMPAT_FIXTURE_MCP_TRACE": str(artifact_dir / "mcp_transport.json"),
             }
         mcp_config = json.dumps(
@@ -817,7 +826,7 @@ async def run(args: argparse.Namespace) -> int:
         "result_timeout_s": args.result_timeout_s,
         "client_session_sha256_12": _id_digest(session_id),
         "root_tools": root_tools,
-        "mcp_fixture_enabled": args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress"},
+        "mcp_fixture_enabled": args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress", "mcp_roots"},
         "run_started_unix_ms": run_started_unix_ms,
     }
     (artifact_dir / "scenario.json").write_text(
@@ -927,7 +936,7 @@ def main() -> int:
     parser.add_argument("--result-timeout-s", type=float, default=900)
     parser.add_argument(
         "--scenario",
-        choices=("baseline", "structured_output", "prompt_suggestions", "tool_failure", "auto_compact", "baseline_eof", "agent", "agent_forwarded", "agent_eof", "nested_agent", "compact", "resume", "fork_session", "steer", "background", "mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress"),
+        choices=("baseline", "structured_output", "prompt_suggestions", "tool_failure", "auto_compact", "baseline_eof", "agent", "agent_forwarded", "agent_eof", "nested_agent", "compact", "resume", "fork_session", "steer", "background", "mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress", "mcp_roots"),
         required=True,
     )
     return asyncio.run(run(parser.parse_args()))

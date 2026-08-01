@@ -67,7 +67,7 @@ The normal proxy mode is transparent: it neither injects headers nor rewrites re
 
 `launch_try67676.sh` takes `MODEL_NAME` as the primary served name and an optional comma- or whitespace-separated `MODEL_ALIASES` list. The launcher waits for the primary name, while Dynamo registers every alias against the same worker set. Use this for native harness child features that select a fixed secondary model name.
 
-The MCP scenarios start `fixture_mcp_server.py` only from each run's isolated client configuration. It exposes one no-argument fixed-result tool and records no request content, allowing Codex and Claude Code to exercise their native MCP tool declaration and result paths without adding an external dependency.
+The MCP scenarios start `fixture_mcp_server.py` only from each run's isolated client configuration. Its fixed-result tools exercise normal, error, progress, elicitation, and client-roots paths without recording request content or adding an external dependency.
 
 ## Evidence contract
 
