@@ -580,6 +580,7 @@ def main() -> None:
     )
     generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
+    generate.add_argument("--requests", type=int, default=REQUESTS)
     generate.add_argument(
         "--image-size-count",
         action="append",
@@ -604,6 +605,7 @@ def main() -> None:
             concurrencies=tuple(args.concurrencies),
             image_size=args.image_size,
             unique_images=args.unique_images,
+            requests=args.requests,
             image_size_counts=(
                 tuple(args.image_size_count) if args.image_size_count else None
             ),
