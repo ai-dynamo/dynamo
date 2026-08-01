@@ -25,7 +25,11 @@ from transformers import AutoTokenizer
 
 from dynamo._core import Client, Context
 from dynamo.common.http import fetch_bytes
-from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
@@ -554,6 +558,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             # Constructing the decoder opens the container and reads its frame
             # index, so keep it off the event loop.
             return await asyncio.to_thread(NvdecVideoDecoder, content)
+        except UrlValidationError:
+            # A policy refusal is not a decode failure and must not degrade to
+            # the URL fallback. SGLang applies no policy of its own: it fetches
+            # http(s) through get_mm_http_session and resolves file:// to a bare
+            # path, so passing a rejected URL on turns "denied" into an
+            # unvalidated fetch or local read.
+            #
+            # Confirmed on GPU hardware before this guard existed: a loopback
+            # URL the policy refused was served to SGLang (38128 bytes fetched
+            # from a blocked address), and a refused file:// path resolved to a
+            # readable local file.
+            #
+            # UrlValidationError subclasses ValueError, which is how this
+            # handler already reports a bad request, so the caller surfaces it
+            # as one instead of silently widening what the deployment accepts.
+            raise
         except Exception as exc:  # noqa: BLE001 - additive; fall back to URL
             logger.warning(
                 "NVDEC decode failed for video URL (%s); using URL passthrough",

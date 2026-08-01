@@ -425,14 +425,24 @@ async def test_maybe_nvdec_decoder_skips_non_hw_codec(
 async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
     nvdec_handler, monkeypatch
 ) -> None:
-    """file:// (or any non-http) is never NVDEC-decoded here."""
+    """A scheme that is neither http(s) nor a permitted local source is skipped.
+
+    Note file:// and data: are *not* in that group -- they are read through
+    read_local_media_bytes when the policy allows -- so this uses a scheme with
+    no reader at all. Validation is stubbed as succeeding so the assertion is
+    about scheme dispatch rather than about the policy refusing it.
+    """
     monkeypatch.setattr(
         f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(return_value="file:///etc/passwd"),
+        AsyncMock(return_value="ftp://example.invalid/clip.mp4"),
     )
     fetch = AsyncMock()
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
-    assert await nvdec_handler._maybe_nvdec_decoder("file:///etc/passwd") is None
+    assert (
+        await nvdec_handler._maybe_nvdec_decoder("ftp://example.invalid/clip.mp4")
+        is None
+    )
+    fetch.assert_not_called()
     fetch.assert_not_called()
 
 
@@ -449,6 +459,67 @@ async def test_maybe_nvdec_decoder_falls_back_on_error(
         f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(side_effect=RuntimeError("boom"))
     )
     assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") is None
+
+
+@pytest.mark.asyncio
+async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A refused URL must fail the request, not fall through to SGLang.
+
+    SGLang applies no URL policy: it fetches http(s) directly and resolves
+    file:// to a bare path. Returning None here restores the original URL, so a
+    refusal became an unvalidated fetch. Verified on GPU before the guard
+    existed -- a loopback URL the policy rejected was fetched anyway, and a
+    refused file:// path resolved to a readable local file.
+    """
+    from dynamo.common.http.url_validator import UrlValidationError
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(side_effect=UrlValidationError("blocked IP")),
+    )
+    fetch = AsyncMock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._maybe_nvdec_decoder(
+            "http://169.254.169.254/latest/meta-data"
+        )
+    fetch.assert_not_called()
+
+    # ...and it propagates through the batch builder rather than being mapped
+    # back to the URL there.
+    with pytest.raises(UrlValidationError):
+        await nvdec_handler._build_encode_inputs(
+            ["http://169.254.169.254/latest/meta-data"], "VIDEO"
+        )
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_still_falls_back_to_url(
+    nvdec_handler, monkeypatch
+) -> None:
+    """The refusal guard must not turn genuine decode failures into errors."""
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url",
+        AsyncMock(return_value="https://x/clip.mp4"),
+    )
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
+
+    def _boom(_data):
+        raise RuntimeError("NVDEC init failed")
+
+    monkeypatch.setattr(f"{_HANDLER_MOD}.NvdecVideoDecoder", _boom)
+    assert await nvdec_handler._maybe_nvdec_decoder("https://x/clip.mp4") is None
+    out = await nvdec_handler._build_encode_inputs(["https://x/clip.mp4"], "VIDEO")
+    assert out == ["https://x/clip.mp4"]
 
 
 @pytest.mark.asyncio
