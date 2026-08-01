@@ -18,3 +18,13 @@ when one exists.
   paths.
 - Do not use `FxHashMap` / `FxHashSet` for text keys or externally controlled
   values such as `request_id`; use the standard hash collections there.
+
+## Engine Hash Invariant
+
+- Within one indexer/hash domain, engine-published local block hashes and
+  external sequence hashes are deterministic and consistent across workers: a
+  unique local block chain maps to one unique external sequence-hash chain, and
+  vice versa.
+- Treat a violation as a producer, configuration, or protocol error. Do not
+  revalidate this invariant by scanning per-worker external-hash ownership on
+  request lookup or scheduling hot paths.
