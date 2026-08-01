@@ -166,6 +166,24 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
+{% if device == "rocm" %}
+{# vllm/distributed/nixl_utils.py imports `rixl._api` when current_platform.is_rocm().
+   RIXL is not the implementation here: this is a name-only namespace that
+   re-exports the upstream nixl_rocm built in wheel_builder. Asserting the
+   re-export resolves keeps a silently-broken KV path from shipping. #}
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    mkdir -p "${SITE_PACKAGES}/rixl" && \
+    printf 'from nixl_rocm import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/__init__.py" && \
+    printf 'from nixl_rocm._api import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_api.py" && \
+    printf 'from nixl_rocm._bindings import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_bindings.py" && \
+    python3 -c "import importlib.util, sys; \
+spec = importlib.util.find_spec('nixl_rocm'); \
+sys.exit('nixl_rocm not importable -- check -Dwheel_variant=rocm in wheel_builder') if spec is None else None" && \
+    python3 -c "from rixl._api import nixl_agent; from nixl_rocm._api import nixl_agent as direct; \
+assert nixl_agent is direct, 'rixl shim does not resolve to nixl_rocm'; \
+print('rixl -> nixl_rocm re-export OK')"
+{% endif %}
+
 {% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a

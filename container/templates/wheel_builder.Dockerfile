@@ -695,6 +695,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "rocm" ]; then \
         meson setup build/ --prefix=/opt/amd/amd_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx" \
+            -Drocm_path="/opt/rocm" \
+            -Dwheel_variant=rocm \
             -Denable_plugins="UCX,POSIX"; \
     elif [ "$DEVICE" = "cpu" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
@@ -746,7 +748,17 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /workspace/nixl && \
+{% if device == "rocm" %}
+{# Without this the meson-python build re-autodetects the variant from the CUDA
+   major and emits a module literally named nixl_cu12, so `import nixl_rocm`
+   fails even though the build is ROCm. Must match the meson setup above. #}
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION \
+        --config-setting=setup-args=-Dwheel_variant=rocm \
+        --config-setting=setup-args=-Denable_plugins=UCX,POSIX \
+        --config-setting=setup-args=-Ducx_path=/usr/local/ucx
+{% else %}
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+{% endif %}
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
