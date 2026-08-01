@@ -7,6 +7,7 @@ import pytest
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.paths import WORKSPACE_DIR
+from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -132,7 +133,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # works *given* a decoder, not that VP9 decodes in a shipped
                 # image -- it does not, until the opt-in decoders land.
                 env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
             # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
@@ -159,11 +160,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[
                     MmCase(
                         suffix="h264",
-                        payload=make_h264_video_payload(["red", "static", "still"]),
+                        payload=make_h264_video_payload(MULTIMODAL_VIDEO_EXPECTED),
                     ),
                     MmCase(
                         suffix="h265",
-                        payload=make_hevc_video_payload(["red", "static", "still"]),
+                        payload=make_hevc_video_payload(MULTIMODAL_VIDEO_EXPECTED),
                     ),
                 ],
             ),
@@ -247,7 +248,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # See agg_video: install the opencv backend decoder for this test
                 # only, so this is likewise a installs_extra_dependencies case.
                 env={"DYN_TEST_ONLY_PIP_INSTALL": "opencv-python-headless"},
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.post_merge],

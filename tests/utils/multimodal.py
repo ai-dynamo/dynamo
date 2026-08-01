@@ -22,8 +22,12 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
 from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
 
+# Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
+# local-file and NVDEC paths describe identical content and can assert the same
+# word. Keeping them different subjects is what let expectations drift from the
+# footage they were written against.
 LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+    WORKSPACE_DIR, "lib/llm/tests/data/media/triangle_240p_10.mp4"
 ).resolve()
 LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 

@@ -14,45 +14,65 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+# A yellow triangle sweeping left to right on a near-black background, 320x240,
+# 10 frames. Deliberately one unmistakable object rather than a test pattern: the
+# assertion below needs a word a vision model reliably reaches for.
+#
+# The three encodings come from ONE set of raw frames (see
+# lib/llm/tests/data/media/make_triangle_fixture.py), so VP9, H.264 and H.265 carry identical
+# content. That means every codec path can assert the same word, and a difference
+# in output points at decode rather than at phrasing. Measured round-trip against
+# the source: 1.59 / 1.68 / 1.63 mean absolute per-pixel difference -- within 0.1
+# of each other, so the decoded frames are directly comparable across codecs. The
+# previous fixtures differed by 17.77 between codecs, which made that impossible.
+#
+# The triangle moves, but do NOT read the motion as coverage of temporal
+# sampling. Asked to describe the clip, Qwen2.5-VL-3B returns "A yellow triangle
+# appears in the center of the screen. The triangle is static and does not move."
+# -- it reports the object reliably and the movement not at all. A regression
+# that collapsed frame selection to a single frame would therefore not show up in
+# the response text. Cross-codec frame comparison is the check to build on for
+# that, not the model's wording.
 MULTIMODAL_VIDEO_PATH = os.path.join(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+    WORKSPACE_DIR, "lib/llm/tests/data/media/triangle_240p_10.mp4"
 )
-# H.264/H.265 clips (same content as 240p_10.mp4) for the NVDEC hardware-decode
-# path. They MUST be fetched over http(s): the backends only route http(s) video
-# through NVDEC (file:// video isn't hardware-decoded, and the shipped images
-# carry no software H.264/H.265 decoder). Served by the image_server fixture.
+# The H.264/H.265 clips exercise the NVDEC hardware-decode path. They MUST be
+# fetched over http(s): the backends only route http(s) video through NVDEC
+# (file:// video isn't hardware-decoded, and the shipped images carry no software
+# H.264/H.265 decoder). Served by the image_server fixture.
 _MEDIA_DIR = os.path.join(WORKSPACE_DIR, "lib/llm/tests/data/media")
-_HTTP_SERVED_VIDEOS = ("240p_10.mp4", "240p_10_h264.mp4", "240p_10_h265.mp4")
-MULTIMODAL_VIDEO_H264_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h264.mp4"
-MULTIMODAL_VIDEO_H265_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h265.mp4"
+_HTTP_SERVED_VIDEOS = (
+    "triangle_240p_10.mp4",
+    "triangle_240p_10_h264.mp4",
+    "triangle_240p_10_h265.mp4",
+)
+MULTIMODAL_VIDEO_H264_URL = (
+    f"http://localhost:{IMAGE_SERVER_PORT}/triangle_240p_10_h264.mp4"
+)
+MULTIMODAL_VIDEO_H265_URL = (
+    f"http://localhost:{IMAGE_SERVER_PORT}/triangle_240p_10_h265.mp4"
+)
 # VP9 source clip over http, for backends whose video path needs a URL rather
 # than a local file. Prefer this over any third-party URL: a remote host is an
 # availability dependency the test does not control.
-MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10.mp4"
-# Content of the synthetic clips above, for expected_response assertions.
+MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/triangle_240p_10.mp4"
+# What the clip depicts, for expected_response assertions. The subject is chosen
+# so the answer is unambiguous: a model that decoded the frames says "triangle",
+# and one that did not cannot say it by luck.
 #
-# The clips are ffmpeg `testsrc2` output (see the regeneration command in
-# lib/llm/src/preprocessor/media/decoders/video.rs): colour bars with a burned-in
-# timecode. Measured on GPU, frame 0 is mean RGB [121, 126, 122] with a
-# column-mean spread of 41.5 and 6715 distinct colours -- vertical bars, nothing
-# red and nothing still. An earlier ["red", "static", "still"] therefore never
-# described this content; it passed only when the model happened to say "still".
+# Confirmed against the real deployment on both H.264 and H.265, which returned
+# the same sentence for each: "The video begins with a black screen. A yellow
+# triangle appears in the center of the screen." One noun, no hedging -- a much
+# wider margin than a word list over an abstract pattern.
 #
-# These terms are taken from real model responses to these clips, not guessed.
-# Two runs of the same clip at temperature=0.0 gave:
-#   "a test pattern or a color calibration screen ... timecode 00:00:06.000"
-#   "a digital or pixel art animation ... Color Scheme ... Shapes and Patterns"
-# "color" and "pattern" each appear in both. Matching is case-insensitive
-# substring with OR logic (tests/utils/payloads.py), so "color" covers "Color
-# Scheme" and "colorful".
+# Verified to be capable of failing, too: forcing an impossible expected value
+# makes the test fail, so a pass here is not vacuous.
 #
-# Kept deliberately narrow so the assertion still discriminates: frames that
-# failed to decode would be described as a blank or black screen and match none
-# of these. It is still a weak check -- it confirms the model saw something
-# colourful, not that it saw the right video. A follow-up replaces these clips
-# with one source encoded to VP9/H.264/H.265 showing a moving triangle, so every
-# codec path can assert the same unambiguous word.
-MULTIMODAL_VIDEO_EXPECTED = ["color", "colour", "pattern", "shapes", "geometric"]
+# This replaces an earlier ["red", "static", "still"] against testsrc2 colour
+# bars, which described content those clips never contained and passed only when
+# the model happened to use one of the words. Matching is case-insensitive
+# substring with OR logic (tests/utils/payloads.py).
+MULTIMODAL_VIDEO_EXPECTED = ["triangle"]
 
 
 def get_multimodal_test_image_bytes() -> bytes:
