@@ -74,6 +74,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
         cmake \
         protobuf-compiler \
+        libprotobuf-dev \
         pkg-config \
         clang \
         libclang-dev \
