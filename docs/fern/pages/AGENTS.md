@@ -35,7 +35,7 @@ differ for two of them — match on the directory.
 `kubernetes/` and `cli/` are **parallel guides for two different readers**, not a topic hierarchy.
 They share most section names:
 
-```
+```text
 kubernetes/  getting-started  installation  model-deployment  kv-aware-routing
              disaggregated-serving  kv-cache-offloading  operations
              fault-tolerance  auto-deployment        <- Kubernetes only
@@ -103,12 +103,17 @@ not.
 Two consequences:
 
 - Renaming a `- page:` label changes the URL even when the file does not move.
-- Moving a file between directories changes nothing unless the label or section changes.
+- Moving a file between directories changes nothing unless the label, section, or tab changes.
 
-Either way, add a **dev-scoped** redirect to `redirects:` in `docs/fern/docs.yml`
-(`/dynamo/dev/<old>` → `/dynamo/dev/<new>`). Do not redirect the unversioned or `/dynamo/latest/`
-forms — those serve a frozen release snapshot that `main` edits do not touch, and a redirect there
-breaks a working URL.
+Redirect only when the URL actually changes — a tab, section, label, or explicit `slug:` moved. A
+file-only `git mv` that leaves all four alone needs no redirect, and adding one produces a
+self-redirect or points at a slug that does not exist. When the URL does change, or when a page is
+deleted, add a **dev-scoped** redirect to `redirects:` in `docs/fern/docs.yml` (`/dynamo/dev/<old>`
+→ `/dynamo/dev/<new>`). Do not redirect the unversioned or `/dynamo/latest/` forms — those serve a
+frozen release snapshot that `main` edits do not touch, and a redirect there breaks a working URL.
+
+Deleting a page also orphans any redirect that already pointed at it. Before removing a page, grep
+`docs/fern/docs.yml` for its URL as a `destination:` and retarget every hit.
 
 ## Assets and translations
 
@@ -124,10 +129,12 @@ breaks a working URL.
 ## Validate
 
 ```bash
+python3 scripts/docs_lint.py --scan docs              # SPDX, frontmatter, links, nav coverage
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only
 ```
 
-`fern check` and `broken-links` mirror the pre-merge checks. The catalog validator is not wired into
-CI — run it by hand for any `_catalog/` change.
+The first three mirror the pre-merge jobs — `Docs Lint`, `Fern Configuration Check`, and
+`Fern Broken Links Check`. The catalog validator is not wired into CI — run it by hand for any
+`_catalog/` change.

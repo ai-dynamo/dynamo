@@ -26,10 +26,22 @@ For **where** a new page belongs in the tab structure, read
 - No internal/sensitive refs (NVBug/JIRA IDs, internal hosts, secrets, TODO/FIXME) in shipped docs.
 - Write for humans: no marketing/bombast, no filler, be concrete.
 
-`scripts/docs_lint.py` enforces the deterministic subset (SPDX, frontmatter, body `# H1`, link
-scope, dangling nav paths, internal references) as the `Docs Lint` job on every pull request, and
-`fern check` plus `fern docs broken-links` run alongside it. Reproduce all three locally before
-pushing (see [Validate](#validate)).
+`scripts/docs_lint.py` enforces the deterministic subset as the `Docs Lint` job on every pull
+request, and `fern check` plus `fern docs broken-links` run alongside it. Reproduce all three
+locally before pushing (see [Validate](#validate)).
+
+The linter separates the rules that fail the job from the ones it only reports:
+
+| | Rules |
+|---|---|
+| **Blocking** (job fails) | Missing or misplaced SPDX header; frontmatter with no YAML key; a relative link that breaks or escapes `docs/`; a dangling `path:` in `index.yml`; a tracker ID or NVBug reference |
+| **Advisory** (annotated, does not fail) | Body `# H1`; `TODO`/`FIXME`; internal-looking host; hardcoded `docs.nvidia.com` self-link; a page file missing from the nav |
+
+Two rules are advisory for a reason: the generated Kubernetes API reference carries a body `# H1`
+that comes from the `crd-ref-docs` template rather than the page, and a `TODO` sometimes marks a
+page whose fate is an open decision. Advisory does not mean optional — fix them in the pages you
+touch. The CI job scans `docs/` only; run the linter with its default `--scan docs,examples,recipes`
+before changing an example or recipe README.
 
 ## This directory
 
@@ -43,7 +55,6 @@ everything else here is machinery:
 | `docs.yml` | Site config, locales, landing page, versions, and `redirects:` |
 | `main.css` | Site styles, including the pure-CSS recipe target-picker vocabulary |
 | `components/` | React `.tsx` components used by `.mdx` pages |
-| `templates/` | Page skeletons for new backend, component, and feature docs |
 | `scripts/` | Build and sync tooling (callout conversion, translation links, snapshot rewrites) |
 | `translations/` | Locale mirrors of `pages/` (`zh-CN/pages/<same relative path>`) |
 | `assets/` | Images, diagrams, fonts |
@@ -59,6 +70,7 @@ Two gates on the machinery:
 
 ```bash
 python3 scripts/docs_lint.py --scan docs              # the `Docs Lint` pull request job
+python3 scripts/docs_lint.py                          # same rules over docs + examples + recipes
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only

@@ -157,7 +157,9 @@ Short intro paragraph stating what the page covers.
 > sections in the URL: `pages/developer-guide/advanced-customizations/building-from-source.md` serves
 > at `/dynamo/dev/advanced-customizations/building-from-source`. So **renaming a label changes the URL
 > even when the file doesn't move**, and moving a file between directories changes nothing unless its
-> label, section, or tab changes. Either way, add a
+> label, section, or tab changes. Add a redirect **only when the URL actually changes** — a file-only
+> `git mv` that leaves the tab, section, label, and explicit `slug:` alone needs none, and adding one
+> yields a self-redirect or a slug that doesn't exist. When the URL does change, add a
 > **dev-scoped** redirect to the `redirects:` list in `docs/fern/docs.yml`: `/dynamo/dev/<old>` →
 > `/dynamo/dev/<new>`. Editing `docs/fern/index.yml` regenerates only the `dev` nav, so do **not** redirect
 > the unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>` forms — those serve **Latest**, a frozen
@@ -166,12 +168,18 @@ Short intro paragraph stating what the page covers.
 
 ### Remove a Page
 
+Removing a page is destructive and breaks live URLs. Confirm with the user before step 2, and show
+them the incoming links and redirects you found in steps 1 and 2.
+
 1. Find incoming links: `grep -rn "<filename>" docs/`.
-2. `git rm docs/fern/pages/<tab-dir>/<subdirectory>/<filename>.md`.
-3. Remove the `- page:` block from `docs/fern/index.yml`. If it was the last page in a section, remove the
+2. Find redirects that already point at the page: grep its published URL in `docs/fern/docs.yml` as
+   a `destination:`. Each hit has to be retargeted, or it starts serving a 404.
+3. Remove the file, matching its real extension — pages are `.md` or `.mdx`:
+   `git rm docs/fern/pages/<tab-dir>/<subdirectory>/<filename>.<ext>`.
+4. Remove the `- page:` block from `docs/fern/index.yml`. If it was the last page in a section, remove the
    whole `- section:` block.
-4. Fix or remove every incoming link found in step 1, and add a `docs/fern/docs.yml` redirect if the page
-   had a stable URL.
+5. Fix or remove every incoming link found in step 1, retarget every redirect found in step 2, and add
+   a `docs/fern/docs.yml` redirect for the page's own URL if it had a stable one.
 
 ### Add a Recipe or Feature Benchmark Page
 
@@ -291,8 +299,9 @@ docs link to them with absolute GitHub URLs.
 
 - **Example** (`examples/<topic>/`): code-first directory with a `README.md`. Surface it from the
   relevant `*-examples.md` page (component-scoped ones live under `pages/developer-guide/`) or from
-  the topic page that needs it. `pages/reference/general/examples.md` is nav-reachable but currently
-  empty, so don't route readers there until it has content.
+  the topic page that needs it. There is no general Examples landing page — the empty
+  `pages/reference/general/examples.md` stub was removed, and `/dynamo/dev/reference/examples` now
+  redirects to the recipes catalog. Don't recreate it.
 - **Recipe** (`recipes/<model>/`): `README.md` + `model-cache/` + `<framework>/<mode>/deploy.yaml`
   (+ optional `perf.yaml`). Add a row to the right table in
   [`recipes/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/README.md) — **Feature
