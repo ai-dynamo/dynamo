@@ -99,18 +99,45 @@ python -m dynamo.frontend \
 
 In Kubernetes, TLS certificates are typically delivered by a certificate
 management system (e.g., cert-manager) and mounted into pods. Set the
-environment variables in the pod spec or via the Dynamo operator's
-`InfrastructureConfiguration`:
+environment variables on each component's pod template in the
+`DynamoGraphDeployment` spec:
 
 ```yaml
-env:
-  - name: DYN_TCP_TLS_CERT_PATH
-    value: /etc/certs/server/cert.pem
-  - name: DYN_TCP_TLS_KEY_PATH
-    value: /etc/certs/server/key.pem
-  - name: DYN_TCP_TLS_CA_CERT_PATH
-    value: /etc/certs/ca/ca.pem
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: DYN_TCP_TLS_CERT_PATH
+            value: /etc/certs/server/cert.pem
+          - name: DYN_TCP_TLS_KEY_PATH
+            value: /etc/certs/server/key.pem
+          - name: DYN_TCP_TLS_CA_CERT_PATH
+            value: /etc/certs/ca/ca.pem
+  - name: VllmWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: DYN_TCP_TLS_CERT_PATH
+            value: /etc/certs/server/cert.pem
+          - name: DYN_TCP_TLS_KEY_PATH
+            value: /etc/certs/server/key.pem
+          - name: DYN_TCP_TLS_CA_CERT_PATH
+            value: /etc/certs/ca/ca.pem
 ```
+
+Both components need the same TLS env vars because each acts as both TCP
+server and client depending on the stream direction.
+
+> **Note:** A future PR ([#10809](https://github.com/ai-dynamo/dynamo/issues/10809))
+> will add operator-level TLS configuration via `InfrastructureConfiguration`,
+> allowing TLS to be configured once at the platform level and auto-injected
+> into all DGD pods without per-component env var setup.
 
 ## Design notes
 
