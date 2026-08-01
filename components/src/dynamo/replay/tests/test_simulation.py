@@ -11,7 +11,6 @@ import json
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -22,8 +21,12 @@ pytest.importorskip(
 )
 
 from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.sweeper.replay import BackendDeploymentSpec, ReplaySpec
-from dynamo.replay import simulation
+from aisimulate.sweeper.replay import (
+    BackendDeploymentSpec,
+    ReplayOutputRequirements,
+    ReplaySpec,
+)
+from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
 _RUN_SWEEP_PATH = (
     Path(__file__).resolve().parents[5]
@@ -62,6 +65,27 @@ class _FakeRouterConfig:
         return json.loads(payload)
 
 
+def _report(summary: dict, *, total_ticks: int | None = None) -> ReplayReport:
+    planner = (
+        None if total_ticks is None else PlannerReplayDetails(total_ticks=total_ticks)
+    )
+    return ReplayReport(
+        summary=summary,
+        per_request=None,
+        coverage={},
+        planner=planner,
+    )
+
+
+def _detailed_report(summary: dict) -> ReplayReport:
+    return ReplayReport(
+        summary=summary,
+        per_request=[{"request_id": "request-1", "ttft_ms": 4.0}],
+        coverage={"captured_request_count": 1},
+        planner=None,
+    )
+
+
 def _agg_deployment() -> BackendDeploymentSpec:
     return BackendDeploymentSpec(
         deployment_mode="agg",
@@ -77,12 +101,12 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
 
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
-        return SimpleNamespace(
-            summary={
+        return _report(
+            {
                 "output_throughput_tok_s": 42.0,
                 "goodput_output_throughput_tok_s": 40.0,
             },
-            planner=SimpleNamespace(total_ticks=7),
+            total_ticks=7,
         )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
@@ -151,12 +175,45 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert report.metadata["planner_total_ticks"] == 7
 
 
+def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _detailed_report({"completed_requests": 1})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    report = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(0)
+        .run(
+            spec,
+            output_requirements=ReplayOutputRequirements(
+                include_raw_report=True,
+                capture_per_request=True,
+            ),
+        )
+    )
+
+    assert seen["capture_per_request"] is True
+    assert report.metadata["native_report"]["per_request"] == [
+        {"request_id": "request-1", "ttft_ms": 4.0}
+    ]
+
+
 def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     seen = {}
 
     def fake_run_synthetic_trace_replay(**kwargs):
         seen.update(kwargs)
-        return {"output_throughput_tok_s": 99.0}
+        return _report({"output_throughput_tok_s": 99.0})
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
@@ -202,6 +259,8 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["arrival_interval_ms"] is None
     assert seen["num_prefill_workers"] == 2
     assert seen["num_decode_workers"] == 4
+    assert seen["capture_per_request"] is False
+    assert seen["capture_planner_details"] is False
     assert report.metrics == {"output_throughput_tok_s": 99.0}
 
 
@@ -210,7 +269,7 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
 
     def fake_run_synthetic_trace_replay(**kwargs):
         seen.update(kwargs)
-        return {"output_throughput_tok_s": 99.0}
+        return _report({"output_throughput_tok_s": 99.0})
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
@@ -335,7 +394,7 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
     monkeypatch.setattr(
         simulation,
         "run_trace_replay",
-        lambda **kwargs: {"output_throughput_tok_s": 42.0},
+        lambda **kwargs: _report({"output_throughput_tok_s": 42.0}),
     )
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
