@@ -27,17 +27,32 @@ Implemented in ``lib/bindings/python/rust/push_egress.rs`` (``ResponseSender``,
 ``PythonPushEngine``) and selected in ``lib.rs::serve_endpoint``. Three things
 matter to this file, and all three are load-bearing:
 
-1. **Shape.** In push mode Rust calls the handler and ``await``s what comes
-   back::
+1. **Shape.** Rust drives BOTH paths through the same helper --
+   ``PythonPushEngine::generate`` calls ``engine::invoke_generator``, which ends
+   in ``demand_driven_python_stream``::
 
-       let coroutine = handler.call(py, (python_input,), Some(&kwargs))?;
-       pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
+       let anext = generator.getattr("__anext__")?.unbind();   // engine.rs:126
 
-   So the push path must return a **coroutine**, not an async generator -- an
-   async generator object is not awaitable. The pull path, unchanged, still
-   needs an **async generator** (it does ``getattr("__anext__")``). That is why
-   :func:`push_egress_capable` produces a plain ``def`` that returns one or the
-   other, rather than an ``async def``.
+   So **both** paths must return an **async generator**; the difference is only
+   how often it is advanced. Pull yields once per response. Push yields nothing
+   and is advanced ONCE per request: that single ``__anext__`` runs the whole
+   request (draining into ``response_sender``) and then raises
+   ``StopAsyncIteration``. Responses travel out of band on the sender.
+
+   .. warning::
+
+      Returning a **coroutine** here does not work and fails loudly: a coroutine
+      has no ``__anext__``, so every request dies with ``AttributeError:
+      'coroutine' object has no attribute '__anext__'`` plus a
+      ``RuntimeWarning: coroutine 'drive_push_egress' was never awaited``. This
+      is exactly how runs 339221/339222 failed -- this docstring previously
+      described an ``into_future_with_locals`` call on the Rust side that was
+      never written. Keep :func:`drive_push_egress_stream` (an async generator)
+      as the returned object, not :func:`drive_push_egress` (a coroutine).
+
+   Keeping the generator shape on both paths is deliberate on the Rust side
+   (``push_egress.rs:427-437``): registration, cancellation, and the graceful
+   fallback for a handler that yields anyway all stay untouched.
 
 2. **Opt-in by signature.** Rust enables push mode only when
    ``DYN_TRTLLM_PUSH_EGRESS=1`` *and* ``handler_supports_push()`` says the
@@ -201,6 +216,31 @@ async def drive_push_egress(
         _nvtx.end_range(egress_rng)
 
 
+async def drive_push_egress_stream(
+    stream: AsyncGenerator[Any, None], response_sender: Any
+) -> AsyncGenerator[Any, None]:
+    """Async-**generator** wrapper around :func:`drive_push_egress`.
+
+    This is what push mode returns to Rust. It exists purely for shape: Rust
+    drives the push path with ``demand_driven_python_stream``, which does
+    ``getattr("__anext__")``, so the object it receives must be an async
+    generator and not a coroutine (see "Shape" in the module docstring).
+
+    The unreachable ``yield`` below is load-bearing -- it is what makes Python
+    compile this as an async-generator function. Do not remove it, and do not
+    add a reachable one: yielding here would push the response back onto the
+    pull path via the Rust driver's fallback arm
+    (``pybridge.push_forward_yield``), reintroducing the per-response GIL
+    acquisition this whole change exists to remove.
+
+    Advanced exactly once per request: that call runs the request to completion,
+    then falls off the end and raises ``StopAsyncIteration``.
+    """
+    await drive_push_egress(stream, response_sender)
+    if False:  # pragma: no cover - never runs; makes this an async generator
+        yield
+
+
 def push_egress_capable(func):
     """Let an async-generator ``generate`` be driven by push OR by pull.
 
@@ -260,7 +300,10 @@ def push_egress_capable(func):
                 )
             return stream
 
-        return drive_push_egress(stream, response_sender)
+        # An async GENERATOR, not the `drive_push_egress` coroutine: Rust does
+        # `getattr("__anext__")` on whatever comes back. See the module
+        # docstring's "Shape" section.
+        return drive_push_egress_stream(stream, response_sender)
 
     # functools.wraps sets __wrapped__, and inspect.signature() follows it --
     # which would report the undecorated `generate(self, request, context)` and
