@@ -349,6 +349,18 @@ def test_kubernetes_source_path_note_points_at_a_real_file() -> None:
     assert quoted == str(K8S_SOURCE_MD.relative_to(REPO_ROOT))
 
 
+def test_kubernetes_prose_carries_no_literal_br_markers(
+    kubernetes_page: _KubernetesPage,
+) -> None:
+    """crd-ref-docs encodes the Go comments' hard line wraps as ``<br />``.
+    Escaping that marker for MDX turns it into visible ``&lt;br /&gt;`` text
+    in enum and field descriptions, so it must be collapsed first."""
+    _, mdx = kubernetes_page
+
+    assert "&lt;br" not in mdx
+    assert "<br" not in mdx
+
+
 def test_kubernetes_field_type_links_resolve(
     kubernetes_page: _KubernetesPage,
 ) -> None:

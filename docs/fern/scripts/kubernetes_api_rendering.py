@@ -28,7 +28,7 @@ from kubernetes_api_discovery import (
     KubernetesType,
     OperatorDefaults,
 )
-from markdown_rendering import escape_mdx_prose as _prose
+from markdown_rendering import escape_mdx_prose
 from markdown_rendering import mdx_attribute as _attr
 
 MDX_GENERATED_MARKER = (
@@ -36,6 +36,13 @@ MDX_GENERATED_MARKER = (
 )
 LOCAL_FRAGMENT_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\(#(?P<anchor>[^)]+)\)")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
+# crd-ref-docs preserves the hard line wraps of the Go doc comments as
+# literal ``<br />`` markers. Those wraps are ~80-column source formatting,
+# not authored line breaks, so keeping them would break sentences at
+# arbitrary points -- and escape_mdx_prose escapes the marker, surfacing
+# ``&lt;br /&gt;`` to the reader. Collapse them to a space, which is what
+# escape_mdx_table_cell already does for the same source text.
+BR_RE = re.compile(r"<br\s*/?>")
 # Repo paths, not links: this page, its generator, and the raw Markdown all
 # land in the same change, so a github.com/.../blob/main deep link to any of
 # them 404s until that change merges and fails the link checker.
@@ -69,6 +76,11 @@ _WARNING = (
     "only user-facing `v1beta1` fields. To edit the surface, change the Go "
     "types under `deploy/operator/api/` and let CI regenerate this page.\n"
 )
+
+
+def _prose(text: str) -> str:
+    """Escape crd-ref-docs prose for MDX, collapsing its ``<br />`` wraps."""
+    return escape_mdx_prose(BR_RE.sub(" ", text))
 
 
 def render_mdx(reference: KubernetesReference) -> str:
