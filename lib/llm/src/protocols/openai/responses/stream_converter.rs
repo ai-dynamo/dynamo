@@ -526,7 +526,8 @@ impl ResponseStreamConverter {
         }
 
         if should_finish_function_calls {
-            self.append_pending_function_call_done_events(events);
+            let output_status = self.output_status();
+            self.append_pending_function_call_done_events(events, output_status);
         }
     }
 
@@ -586,8 +587,8 @@ impl ResponseStreamConverter {
     fn append_pending_function_call_done_events(
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
+        output_status: OutputStatus,
     ) {
-        let output_status = self.output_status();
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let mut pending: Vec<_> = self
@@ -655,7 +656,10 @@ impl ResponseStreamConverter {
     }
 
     fn completed_output(&self) -> Vec<OutputItem> {
-        let output_status = self.output_status();
+        self.output_with_status(self.output_status())
+    }
+
+    fn output_with_status(&self, output_status: OutputStatus) -> Vec<OutputItem> {
         let mut output = Vec::new();
         if self.reasoning_started {
             output.push((
@@ -774,7 +778,7 @@ impl ResponseStreamConverter {
         self.close_open_message_item(events, output_status);
 
         // Fallback for backends that end the transport without a finish-reason chunk.
-        self.append_pending_function_call_done_events(events);
+        self.append_pending_function_call_done_events(events, output_status);
 
         let terminal_status = self.terminal_status();
         let response = self.make_response(terminal_status.clone(), self.completed_output());
@@ -805,12 +809,13 @@ impl ResponseStreamConverter {
         error: ErrorObject,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
-        let output_status = self.output_status();
+        let output_status = OutputStatus::Incomplete;
         self.append_reasoning_done_events(events, output_status);
         self.close_open_message_item(events, output_status);
-        self.append_pending_function_call_done_events(events);
+        self.append_pending_function_call_done_events(events, output_status);
 
-        let mut response = self.make_response(Status::Failed, self.completed_output());
+        let mut response =
+            self.make_response(Status::Failed, self.output_with_status(output_status));
         response.error = Some(error);
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
