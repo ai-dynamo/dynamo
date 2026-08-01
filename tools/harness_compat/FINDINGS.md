@@ -57,7 +57,8 @@ This is an evidence index for the exploratory campaign. It is not a nightly cont
 ## Codex native user-input capability
 
 - With `experimental_request_user_input = true`, Codex 0.144.0 advertised `request_user_input` in each captured Responses `tools` array. Dynamo accepted two complete Responses streams without a protocol or routing error: `/ephemeral/harness-compat-artifacts/20260801T0755Z-codex-request-user-input-tool-advertisement`.
-- MiniMax did not elect the native tool and produced no requested file, so this is `not_reached`, not a compatibility pass. The controller now recognizes `item/tool/requestUserInput` and replies with the documented option-id mapping when a model does reach it. Retain C1j as P2 discovery until a model produces the server request.
+- A second strict native probe completed the requested file effect without emitting `item/tool/requestUserInput`; MiniMax again bypassed the advertised tool rather than exercising the controller response: `/ephemeral/harness-compat-artifacts/20260801T1710Z-codex-request-user-input-rerun`.
+- MiniMax did not elect the native tool in either probe, so C1j remains `not_reached`, not a compatibility pass. The controller now recognizes `item/tool/requestUserInput` and replies with the documented option-id mapping when a model does reach it. Retain C1j as P2 discovery until a model produces the server request.
 
 ## First nightly distillation
 
