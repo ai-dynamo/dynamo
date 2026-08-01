@@ -4,6 +4,7 @@
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::BitOr;
 #[cfg(any(test, feature = "bench"))]
 use std::sync::Arc;
 
@@ -162,16 +163,10 @@ pub struct WorkerSelectionContext<'a> {
 
 pub struct WorkerCandidate {
     worker: WorkerWithDpRank,
-    effective_overlap_blocks: f64,
-    device_overlap_blocks: f64,
-    host_overlap_blocks: f64,
-    disk_overlap_blocks: f64,
-    shared_beyond: u32,
-    raw_prefill_blocks: f64,
-    active_prefill_tokens: usize,
-    decode_cost_blocks: f64,
-    active_requests: usize,
-    preferred_taint_multiplier: Option<f64>,
+    inputs: WorkerInputs,
+    cache: WorkerCacheInput,
+    load: WorkerLoadInput,
+    routing: WorkerRoutingInput,
 }
 
 pub struct DefaultWorkerScorer<C = KvRouterConfig> {
@@ -197,10 +192,69 @@ struct DefaultSoftmaxScratch {
 pub struct ScoredWorkerCandidate {
     worker: WorkerWithDpRank,
     cost: f64,
+}
+
+/// Optional worker-signal groups requested by scorers and pickers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkerInputs(u8);
+
+impl WorkerInputs {
+    pub const NONE: Self = Self(0);
+    pub const CACHE: Self = Self(1 << 0);
+    pub const LOAD: Self = Self(1 << 1);
+    pub const ROUTING: Self = Self(1 << 2);
+    pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::ROUTING.0);
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl BitOr for WorkerInputs {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct WorkerCacheInput {
     effective_overlap_blocks: f64,
+    device_overlap_blocks: f64,
+    host_overlap_blocks: f64,
+    disk_overlap_blocks: f64,
+    shared_beyond_device_blocks: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct WorkerLoadInput {
+    raw_prefill_blocks: f64,
+    active_prefill_tokens: usize,
+    decode_cost_blocks: f64,
+    active_requests: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct WorkerRoutingInput {
+    preferred_taint_multiplier: Option<f64>,
+}
+
+/// Borrowed, index-aligned view of one custom picker's requested worker inputs.
+#[derive(Clone, Copy)]
+pub struct WorkerInputView<'a> {
+    candidates: &'a [ScoredWorkerCandidate],
+    cache: Option<&'a [WorkerCacheInput]>,
+    load: Option<&'a [WorkerLoadInput]>,
+    routing: Option<&'a [WorkerRoutingInput]>,
 }
 
 pub trait WorkerScorer: Send {
+    /// Declare the worker-signal groups needed by this scorer.
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
     /// Return one finite, lower-is-better cost contribution for an eligible worker row.
     fn score(
         &mut self,
@@ -210,11 +264,16 @@ pub trait WorkerScorer: Send {
 }
 
 pub trait WorkerPicker: Send {
+    /// Declare the optional worker-signal columns needed by this picker.
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::NONE
+    }
+
     /// Return one row index from the host-owned eligible candidate table.
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[ScoredWorkerCandidate],
+        input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;
 }
 
@@ -245,6 +304,36 @@ impl WorkerCandidate {
         self.worker
     }
 
+    pub fn cache(&self) -> Option<&WorkerCacheInput> {
+        self.inputs
+            .contains(WorkerInputs::CACHE)
+            .then_some(&self.cache)
+    }
+
+    pub fn load(&self) -> Option<&WorkerLoadInput> {
+        self.inputs
+            .contains(WorkerInputs::LOAD)
+            .then_some(&self.load)
+    }
+
+    pub fn routing(&self) -> Option<&WorkerRoutingInput> {
+        self.inputs
+            .contains(WorkerInputs::ROUTING)
+            .then_some(&self.routing)
+    }
+}
+
+impl ScoredWorkerCandidate {
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.worker
+    }
+
+    pub fn cost(&self) -> f64 {
+        self.cost
+    }
+}
+
+impl WorkerCacheInput {
     pub fn effective_overlap_blocks(&self) -> f64 {
         self.effective_overlap_blocks
     }
@@ -261,10 +350,12 @@ impl WorkerCandidate {
         self.disk_overlap_blocks
     }
 
-    pub fn shared_beyond(&self) -> u32 {
-        self.shared_beyond
+    pub fn shared_beyond_device_blocks(&self) -> u32 {
+        self.shared_beyond_device_blocks
     }
+}
 
+impl WorkerLoadInput {
     pub fn raw_prefill_blocks(&self) -> f64 {
         self.raw_prefill_blocks
     }
@@ -280,23 +371,29 @@ impl WorkerCandidate {
     pub fn active_requests(&self) -> usize {
         self.active_requests
     }
+}
 
+impl WorkerRoutingInput {
     pub fn preferred_taint_multiplier(&self) -> Option<f64> {
         self.preferred_taint_multiplier
     }
 }
 
-impl ScoredWorkerCandidate {
-    pub fn worker(&self) -> WorkerWithDpRank {
-        self.worker
+impl<'a> WorkerInputView<'a> {
+    pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
+        self.candidates
     }
 
-    pub fn cost(&self) -> f64 {
-        self.cost
+    pub fn cache(self) -> Option<&'a [WorkerCacheInput]> {
+        self.cache
     }
 
-    pub fn effective_overlap_blocks(&self) -> f64 {
-        self.effective_overlap_blocks
+    pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
+        self.load
+    }
+
+    pub fn routing(self) -> Option<&'a [WorkerRoutingInput]> {
+        self.routing
     }
 }
 
@@ -314,7 +411,12 @@ enum WorkerSelectionPolicyStateRef<'a> {
 struct CustomWorkerSelectionState {
     scorers: Vec<Box<dyn WorkerScorer>>,
     picker: Box<dyn WorkerPicker>,
+    worker_inputs: WorkerInputs,
+    picker_inputs: WorkerInputs,
     candidates: Vec<ScoredWorkerCandidate>,
+    cache_inputs: Vec<WorkerCacheInput>,
+    load_inputs: Vec<WorkerLoadInput>,
+    routing_inputs: Vec<WorkerRoutingInput>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -334,13 +436,22 @@ impl WorkerSelectionPolicy {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
+        let picker_inputs = picker.required_worker_inputs();
+        let worker_inputs = scorers.iter().fold(picker_inputs, |inputs, scorer| {
+            inputs | scorer.required_worker_inputs()
+        });
         Self {
             kv_router_config,
             worker_type,
             state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
                 scorers,
                 picker,
+                worker_inputs,
+                picker_inputs,
                 candidates: Vec::new(),
+                cache_inputs: Vec::new(),
+                load_inputs: Vec::new(),
+                routing_inputs: Vec::new(),
             })),
         }
     }
@@ -471,8 +582,11 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let kv_router_config = self.kv_router_config.borrow();
         let weights = context.weights;
         let worker = row.worker;
-        let effective_overlap_blocks = row.effective_overlap_blocks;
-        let shared_overlap_blocks = weights.shared_cache_multiplier * row.shared_beyond as f64;
+        let cache = &row.cache;
+        let load = &row.load;
+        let effective_overlap_blocks = cache.effective_overlap_blocks;
+        let shared_overlap_blocks =
+            weights.shared_cache_multiplier * cache.shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -480,7 +594,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             && weights.overlap_score_credit_decay > 0.0
         {
             let excess_active_prefill_blocks =
-                row.active_prefill_tokens
+                load.active_prefill_tokens
                     .saturating_sub(context.min_active_prefill_tokens) as f64
                     / context.block_size as f64;
             let normalized_prefill_load =
@@ -490,13 +604,13 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             1.0
         };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * row.device_overlap_blocks
-            + kv_router_config.host_cache_hit_weight * row.host_overlap_blocks
-            + kv_router_config.disk_cache_hit_weight * row.disk_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit * cache.device_overlap_blocks
+            + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
+            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
-        let decode_cost_blocks = row.decode_cost_blocks;
+        let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
-            kv_router_config.decode_active_request_weight * row.active_requests as f64;
+            kv_router_config.decode_active_request_weight * load.active_requests as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
@@ -522,7 +636,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             return logit;
         }
 
-        let adjusted_prefill_blocks = (row.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let adjusted_prefill_blocks = (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
@@ -532,7 +646,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if row.shared_beyond > 0 {
+        if cache.shared_beyond_device_blocks > 0 {
             tracing::debug!(
                 request_id = context.request_id,
                 worker_type = self.worker_type,
@@ -544,8 +658,8 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                row.shared_beyond,
-                row.raw_prefill_blocks,
+                cache.shared_beyond_device_blocks,
+                load.raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
             );
@@ -560,7 +674,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                row.raw_prefill_blocks,
+                load.raw_prefill_blocks,
                 prefill_load_scale = weights.prefill_load_scale
             );
         }
@@ -571,7 +685,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     #[inline]
     fn worker_cost(&self, context: &WorkerSelectionContext<'_>, row: &WorkerCandidate) -> f64 {
         let base_score = self.worker_logit(context, row, "Formula");
-        match row.preferred_taint_multiplier {
+        match row.routing.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
             Some(multiplier) => base_score * multiplier,
@@ -633,73 +747,107 @@ impl<'a> WorkerSelectionInput<'a> {
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
+        inputs: WorkerInputs,
     ) -> WorkerCandidate {
-        let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
-        let device_overlap_blocks = self
-            .request
-            .overlap
-            .tier_overlap_blocks
-            .device
-            .get(&worker)
-            .copied()
-            .map(|blocks| blocks as f64)
-            .unwrap_or_else(|| {
-                if self.has_tier_overlap_blocks {
-                    0.0
-                } else {
-                    effective_overlap_blocks
-                }
-            });
-        let worker_load = self.request.worker_loads.get(&worker).copied();
-        let raw_prefill_tokens = if self.request.track_prefill_tokens {
-            let cached_tokens = self.request.effective_cached_tokens_for(worker);
-            match worker_load {
-                Some(load) => {
-                    // Preserve the legacy operation order when overlap exceeds the prompt.
-                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
-                        self.request.isl_tokens,
-                        cached_tokens,
-                    );
-                    let projected_tokens = load.active_prefill_tokens + uncached_tokens;
-                    projected_tokens.saturating_add(cached_tokens)
-                }
-                None => self.request.isl_tokens,
-            }
+        let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
+            || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
+        {
+            self.request.effective_cached_tokens_for(worker)
         } else {
             0
-        } as f64;
-        let worker_load = worker_load.unwrap_or_default();
-        let shared_beyond = self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
-            // `hits_beyond` expects the unweighted device prefix depth.
-            hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
-        });
+        };
+        let worker_load = if inputs.contains(WorkerInputs::LOAD) {
+            self.request.worker_loads.get(&worker).copied()
+        } else {
+            None
+        };
+        let cache = if inputs.contains(WorkerInputs::CACHE) {
+            let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
+            let device_overlap_blocks = self
+                .request
+                .overlap
+                .tier_overlap_blocks
+                .device
+                .get(&worker)
+                .copied()
+                .map(|blocks| blocks as f64)
+                .unwrap_or_else(|| {
+                    if self.has_tier_overlap_blocks {
+                        0.0
+                    } else {
+                        effective_overlap_blocks
+                    }
+                });
+            WorkerCacheInput {
+                effective_overlap_blocks,
+                device_overlap_blocks,
+                host_overlap_blocks: self
+                    .request
+                    .overlap
+                    .tier_overlap_blocks
+                    .host_pinned
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0) as f64,
+                disk_overlap_blocks: self
+                    .request
+                    .overlap
+                    .tier_overlap_blocks
+                    .disk
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0) as f64,
+                shared_beyond_device_blocks: self.request.shared_cache_hits.as_ref().map_or(
+                    0,
+                    |hits| {
+                        // `hits_beyond` expects the unweighted device prefix depth.
+                        hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+                    },
+                ),
+            }
+        } else {
+            WorkerCacheInput::default()
+        };
+        let load = if inputs.contains(WorkerInputs::LOAD) {
+            let raw_prefill_tokens = if self.request.track_prefill_tokens {
+                match worker_load {
+                    Some(load) => {
+                        // Preserve the legacy operation order when overlap exceeds the prompt.
+                        let uncached_tokens = super::prefill_load::effective_prefill_tokens(
+                            self.request.isl_tokens,
+                            cached_tokens,
+                        );
+                        let projected_tokens = load.active_prefill_tokens + uncached_tokens;
+                        projected_tokens.saturating_add(cached_tokens)
+                    }
+                    None => self.request.isl_tokens,
+                }
+            } else {
+                0
+            } as f64;
+            let worker_load = worker_load.unwrap_or_default();
+            WorkerLoadInput {
+                raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
+                active_prefill_tokens: worker_load.active_prefill_tokens,
+                decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
+                active_requests: worker_load.active_requests,
+            }
+        } else {
+            WorkerLoadInput::default()
+        };
 
         WorkerCandidate {
             worker,
-            effective_overlap_blocks,
-            device_overlap_blocks,
-            host_overlap_blocks: self
-                .request
-                .overlap
-                .tier_overlap_blocks
-                .host_pinned
-                .get(&worker)
-                .copied()
-                .unwrap_or(0) as f64,
-            disk_overlap_blocks: self
-                .request
-                .overlap
-                .tier_overlap_blocks
-                .disk
-                .get(&worker)
-                .copied()
-                .unwrap_or(0) as f64,
-            shared_beyond,
-            raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
-            active_prefill_tokens: worker_load.active_prefill_tokens,
-            decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
-            active_requests: worker_load.active_requests,
-            preferred_taint_multiplier,
+            inputs,
+            cache,
+            load,
+            routing: if inputs.contains(WorkerInputs::ROUTING) {
+                WorkerRoutingInput {
+                    preferred_taint_multiplier,
+                }
+            } else {
+                WorkerRoutingInput::default()
+            },
         }
     }
 }
@@ -789,6 +937,10 @@ impl<C> WorkerScorer for DefaultWorkerScorer<C>
 where
     C: Borrow<KvRouterConfig> + Send,
 {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::ALL
+    }
+
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -822,14 +974,26 @@ fn minimum_cost_index(
 }
 
 fn collect_custom_candidates<C: WorkerConfigLike>(
-    scorers: &mut [Box<dyn WorkerScorer>],
-    candidates: &mut Vec<ScoredWorkerCandidate>,
+    state: &mut CustomWorkerSelectionState,
     input: &WorkerSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Result<(), KvSchedulerError> {
+    let CustomWorkerSelectionState {
+        scorers,
+        worker_inputs,
+        picker_inputs,
+        candidates,
+        cache_inputs,
+        load_inputs,
+        routing_inputs,
+        ..
+    } = state;
     candidates.clear();
+    cache_inputs.clear();
+    load_inputs.clear();
+    routing_inputs.clear();
     let pinned = eligibility.pinned_worker().is_some();
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
@@ -840,7 +1004,7 @@ fn collect_custom_candidates<C: WorkerConfigLike>(
                 .routing_constraints
                 .preferred_taint_multiplier(config.taints())
         };
-        let candidate = input.row(worker, preferred_taint_multiplier);
+        let candidate = input.row(worker, preferred_taint_multiplier, *worker_inputs);
         let mut cost = 0.0;
         for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
             let contribution = match scorer.score(&input.context, &candidate) {
@@ -862,11 +1026,16 @@ fn collect_custom_candidates<C: WorkerConfigLike>(
                 return true;
             }
         }
-        candidates.push(ScoredWorkerCandidate {
-            worker,
-            cost,
-            effective_overlap_blocks: candidate.effective_overlap_blocks,
-        });
+        candidates.push(ScoredWorkerCandidate { worker, cost });
+        if picker_inputs.contains(WorkerInputs::CACHE) {
+            cache_inputs.push(candidate.cache);
+        }
+        if picker_inputs.contains(WorkerInputs::LOAD) {
+            load_inputs.push(candidate.load);
+        }
+        if picker_inputs.contains(WorkerInputs::ROUTING) {
+            routing_inputs.push(candidate.routing);
+        }
         false
     });
     match error {
@@ -884,8 +1053,9 @@ fn pick_default_worker<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Option<(WorkerWithDpRank, f64)> {
+    debug_assert_eq!(scorer.required_worker_inputs(), WorkerInputs::ALL);
     if let Some(worker) = eligibility.pinned_worker() {
-        let row = input.row(worker, None);
+        let row = input.row(worker, None, WorkerInputs::ALL);
         return Some((
             worker,
             scorer.worker_logit(&input.context, &row, "Pinned formula"),
@@ -902,7 +1072,7 @@ fn pick_default_worker<C: WorkerConfigLike>(
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
             &input.context,
-            &input.row(worker, preferred_taint_multiplier),
+            &input.row(worker, preferred_taint_multiplier, WorkerInputs::ALL),
         )
     };
 
@@ -1005,8 +1175,9 @@ impl WorkerPicker for DefaultWorkerPicker {
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[ScoredWorkerCandidate],
+        input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
+        let candidates = input.candidates();
         let temperature = context
             .router_temperature_override
             .unwrap_or(self.default_temperature);
@@ -1130,16 +1301,44 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
+            collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
-                scorers,
                 picker,
+                picker_inputs,
                 candidates,
+                cache_inputs,
+                load_inputs,
+                routing_inputs,
+                ..
             } = &mut *state;
-            collect_custom_candidates(scorers, candidates, &input, workers, request, eligibility)?;
             if candidates.is_empty() {
                 None
             } else {
-                let row = picker.pick(&input.context, candidates)?;
+                debug_assert!(
+                    !picker_inputs.contains(WorkerInputs::CACHE)
+                        || cache_inputs.len() == candidates.len()
+                );
+                debug_assert!(
+                    !picker_inputs.contains(WorkerInputs::LOAD)
+                        || load_inputs.len() == candidates.len()
+                );
+                debug_assert!(
+                    !picker_inputs.contains(WorkerInputs::ROUTING)
+                        || routing_inputs.len() == candidates.len()
+                );
+                let picker_input = WorkerInputView {
+                    candidates,
+                    cache: picker_inputs
+                        .contains(WorkerInputs::CACHE)
+                        .then_some(cache_inputs.as_slice()),
+                    load: picker_inputs
+                        .contains(WorkerInputs::LOAD)
+                        .then_some(load_inputs.as_slice()),
+                    routing: picker_inputs
+                        .contains(WorkerInputs::ROUTING)
+                        .then_some(routing_inputs.as_slice()),
+                };
+                let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
@@ -1254,7 +1453,11 @@ mod tests {
             weights,
         );
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
-            .worker_logit(&input.context, &input.row(worker, None), "test")
+            .worker_logit(
+                &input.context,
+                &input.row(worker, None, WorkerInputs::ALL),
+                "test",
+            )
     }
 
     fn worker_loads_with_active_decode(
@@ -2513,16 +2716,22 @@ mod tests {
     }
 
     #[test]
-    fn custom_picker_sees_effective_overlap() {
+    fn custom_picker_receives_requested_cache_inputs() {
         struct HighestOverlapPicker;
 
         impl WorkerPicker for HighestOverlapPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
             fn pick(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidates: &[ScoredWorkerCandidate],
+                input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
-                Ok(candidates
+                Ok(input
+                    .cache()
+                    .expect("requested cache inputs")
                     .iter()
                     .enumerate()
                     .max_by(|(_, left), (_, right)| {

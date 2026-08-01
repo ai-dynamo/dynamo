@@ -27,7 +27,7 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    ScoredWorkerCandidate, WorkerCandidate, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerCandidate, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
     WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
@@ -78,8 +78,9 @@ impl WorkerPicker for LowestCostPicker {
     fn pick(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: &[ScoredWorkerCandidate],
+        input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
+        let candidates = input.candidates();
         Ok(candidates
             .iter()
             .enumerate()
@@ -107,9 +108,9 @@ impl WorkerPicker for InvalidRowPicker {
     fn pick(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: &[ScoredWorkerCandidate],
+        input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        Ok(candidates.len())
+        Ok(input.candidates().len())
     }
 }
 
