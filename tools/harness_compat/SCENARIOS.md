@@ -36,7 +36,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C5b1 | Codex inline review | inline review emits entry/exit items, then the same thread completes a tool turn | reviewer-specific Responses stream leaves root-thread history valid for later coding | P1 weekly |
 | C6 | Codex active-turn steering | `turn/steer` accepted while turn is active | cancellation/final SSE semantics leave next user item valid | P0 |
 | C7 | Codex interruption | `turn/interrupt` accepted before completion | canceled stream terminates without corrupting follow-up turn | P0 |
-| C8 | Codex invalid lifecycle preconditions | deliberately stale turn ID rejected by app-server | no orphaned in-flight request or malformed retry | P2 |
+| C8 | Codex invalid lifecycle preconditions | deliberately stale turn ID rejected by app-server | no orphaned in-flight request or malformed retry | P1 weekly |
 | A1 | Claude ordinary tool loop | Bash/file tool result and follow-up model call | Anthropic Messages blocks, deltas, usage, and stop reason | P0 |
 | A1f | Claude stdio MCP tool | one-or-more native MCP tool uses plus a file derived from the fixed result | Messages tool-use/tool-result continuation from `--mcp-config` remains accepted | P1 |
 | A1g | Claude stdio MCP error then recovery | MCP error result reaches a following Messages request plus a shell recovery file | errored MCP `tool_result` continuation remains accepted | P1 |
