@@ -695,7 +695,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "rocm" ]; then \
         meson setup build/ --prefix=/opt/amd/amd_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx" \
-            -Drocm_path="/opt/rocm" \
             -Dwheel_variant=rocm \
             -Denable_plugins="UCX,POSIX"; \
     elif [ "$DEVICE" = "cpu" ]; then \
