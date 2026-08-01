@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -21,17 +21,13 @@ use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
-    WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
     WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelector,
-};
-use crate::scheduling::{
-    KvSchedulerError, RoutingEligibility, SchedulingRequest, WorkerSelectionPolicyError,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -49,46 +45,9 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
-struct HighestWorkerSelector {
-    calls: Arc<AtomicUsize>,
-    invalid_first: bool,
+struct HighestWorkerScorer {
+    calls: Cell<usize>,
 }
-
-impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
-        _request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        _block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.invalid_first && call == 0 {
-            return Ok(WorkerSelectionResult {
-                worker: WorkerWithDpRank::from_worker_id(WorkerId::MAX),
-                required_blocks: u64::MAX,
-                effective_overlap_blocks: f64::NAN,
-                cached_tokens: usize::MAX,
-                potential_decode_blocks: usize::MAX,
-            });
-        }
-        let mut selected = None;
-        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-            selected = selected.max(Some(worker));
-        });
-        let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
-        Ok(WorkerSelectionResult {
-            worker,
-            required_blocks: u64::MAX,
-            effective_overlap_blocks: f64::NAN,
-            cached_tokens: usize::MAX,
-            potential_decode_blocks: usize::MAX,
-        })
-    }
-}
-
-struct HighestWorkerScorer;
-
 impl WorkerScorer for HighestWorkerScorer {
     fn score(
         &mut self,
@@ -96,6 +55,7 @@ impl WorkerScorer for HighestWorkerScorer {
         candidates: WorkerCandidates<'_>,
         contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
+        self.calls.set(self.calls.get() + 1);
         for (row, worker) in candidates.workers().iter().enumerate() {
             contributions[row] = -2.0 * worker.worker_id as f64;
         }
@@ -315,23 +275,25 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
+async fn worker_selection_policy_factory_is_per_partition_and_books_selected_worker() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_rendezvous = Arc::new(FactoryRendezvous::default());
-    let selector_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&factory_calls);
     let rendezvous = Arc::clone(&factory_rendezvous);
-    let selections = Arc::clone(&selector_calls);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
-        .worker_selector_factory(Box::new(move || {
+        .worker_selection_policy_factory(move |config| {
             calls.fetch_add(1, Ordering::Relaxed);
             rendezvous.wait_for_peer();
-            Box::new(HighestWorkerSelector {
-                calls: Arc::clone(&selections),
-                invalid_first: false,
-            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
-        }))
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                "test",
+                vec![Box::new(HighestWorkerScorer {
+                    calls: Cell::new(0),
+                })],
+                Box::new(LowestCostPicker),
+            )
+        })
         .build()
         .await
         .expect("build selection service");
@@ -374,7 +336,6 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
     let reserved = response_json(reserved).await;
     assert_eq!(reserved["worker_id"], 2);
     assert_eq!(reserved["effective_prefill_tokens"], 4);
-    assert_eq!(selector_calls.load(Ordering::Relaxed), 1);
 
     let loads = app
         .clone()
@@ -399,50 +360,17 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
 }
 
 #[tokio::test]
-async fn invalid_custom_selection_does_not_stop_partition() {
-    let selector_calls = Arc::new(AtomicUsize::new(0));
-    let calls = Arc::clone(&selector_calls);
-    let service = SelectionServiceBuilder::new(test_config())
-        .indexer_threads(1)
-        .worker_selector_factory(Box::new(move || {
-            Box::new(HighestWorkerSelector {
-                calls: Arc::clone(&calls),
-                invalid_first: true,
-            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
-        }))
-        .build()
-        .await
-        .expect("build selection service");
-    let app = create_router(Arc::new(AppState {
-        service: Arc::new(service),
-    }));
-    assert_eq!(
-        register_worker(app.clone(), None).await.status(),
-        StatusCode::CREATED
-    );
-
-    let disallowed_pin = r#"{"model_name":"model","token_ids":[1,2,3,4],"pinned_worker":{"worker_id":1,"dp_rank":0},"allowed_worker_ids":[2]}"#;
-    assert_eq!(
-        post(app.clone(), "/select", disallowed_pin).await.status(),
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(selector_calls.load(Ordering::Relaxed), 0);
-
-    let body = r#"{"model_name":"model","token_ids":[1,2,3,4]}"#;
-    assert_eq!(
-        post(app.clone(), "/select", body).await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(post(app, "/select", body).await.status(), StatusCode::OK);
-    assert_eq!(selector_calls.load(Ordering::Relaxed), 2);
-}
-
-#[tokio::test]
 async fn native_worker_selection_policy_scores_picks_and_books() {
     let app = native_policy_app(|config| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            vec![Box::new(WorkerIdScorer), Box::new(HighestWorkerScorer)],
+            "test",
+            vec![
+                Box::new(WorkerIdScorer),
+                Box::new(HighestWorkerScorer {
+                    calls: Cell::new(0),
+                }),
+            ],
             Box::new(LowestCostPicker),
         )
     })
@@ -472,6 +400,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
     let app = native_policy_app(|config| {
         WorkerSelectionPolicy::new(
             config.clone(),
+            "test",
             vec![Box::new(NonFiniteScorer)],
             Box::new(LowestCostPicker),
         )
@@ -501,7 +430,12 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(|config| {
-        WorkerSelectionPolicy::new(config.clone(), Vec::new(), Box::new(InvalidRowPicker))
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            "test",
+            Vec::new(),
+            Box::new(InvalidRowPicker),
+        )
     })
     .await;
     assert_eq!(
