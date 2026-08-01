@@ -1059,6 +1059,41 @@ async def _run_scenario(
             "reached": turn["status"] == "completed" and handoff_marker_matches,
         }
 
+    if scenario == "inline_review":
+        review = await server.request(
+            "review/start",
+            {
+                "threadId": thread_id,
+                "delivery": "inline",
+                "target": {"type": "custom", "instructions": "Review adder.py for correctness and report concise findings."},
+            },
+        )
+        review_thread_id = review.get("reviewThreadId", thread_id)
+        review_turn = await _wait_turn(server, review_thread_id, review["turn"]["id"])
+        follow_up = await _start_turn(
+            server,
+            thread_id,
+            "Create inline_review_follow_up.txt containing REVIEW_CONTINUED, read it with a shell tool, and finish.",
+        )
+        follow_up_turn = await _wait_turn(server, thread_id, follow_up)
+        follow_up_file_exists = (workspace / "inline_review_follow_up.txt").exists()
+        entered = server.item_type_count(thread_id, "enteredReviewMode")
+        exited = server.item_type_count(thread_id, "exitedReviewMode")
+        return {
+            "review_thread_matches": review_thread_id == thread_id,
+            "review_turn_status": review_turn["status"],
+            "entered_review_mode": entered,
+            "exited_review_mode": exited,
+            "follow_up_status": follow_up_turn["status"],
+            "follow_up_file_exists": follow_up_file_exists,
+            "reached": review_thread_id == thread_id
+            and review_turn["status"] == "completed"
+            and entered >= 1
+            and exited >= 1
+            and follow_up_turn["status"] == "completed"
+            and follow_up_file_exists,
+        }
+
     if scenario == "detached_review":
         review = await server.request(
             "review/start",
@@ -1443,6 +1478,7 @@ def main() -> int:
             "thread_archive",
             "inject_items",
             "inject_agent_message",
+            "inline_review",
             "detached_review",
             "subagent_compact",
             "invalid_lifecycle",
