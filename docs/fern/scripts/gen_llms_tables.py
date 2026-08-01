@@ -600,8 +600,13 @@ def render_compatibility(data: dict) -> str:
 
 # Release kinds the human-facing support matrix covers: the lines a reader
 # can actually pull and run. Platform previews (-dev.N) and model-specific
-# builds are deliberately excluded -- CUDA_NOTES covers their toolkit support
-# in prose. CUDA_HISTORY happens to carry no preview or model-build rows
+# builds are deliberately excluded -- CUDA_NOTES documents the toolkit support
+# of those that have it, which is not all of them: v1.3.0-dev.1 and
+# v1.2.0-deepseek-v4-dev.2 have no note and no CUDA_HISTORY row, and no CUDA
+# version is recorded for them anywhere in the repo. The accordion caption is
+# therefore worded to promise coverage only for the builds a note names,
+# rather than to send readers of the others after information that is not
+# there. CUDA_HISTORY happens to carry no preview or model-build rows
 # today, so this filter is currently a no-op; it is expressed on kind anyway
 # so a future preview entry cannot leak into the matrix unnoticed.
 SUPPORT_MATRIX_KINDS = ("stable", "patch")
@@ -662,8 +667,9 @@ def render_support_matrix(data: dict) -> str:
         '<Accordion title="CUDA toolkit and minimum driver by release">',
         "Every released line — stable releases and their patches, grouped by "
         "minor line, newest first. Platform previews and model-specific "
-        "builds are not listed individually; the notes below cover their "
-        "toolkit support, and [Releases (machine-readable)](releases-machine-readable.mdx) "
+        "builds are not listed individually; those with a documented toolkit "
+        "requirement appear in the notes below, and "
+        "[Releases (machine-readable)](releases-machine-readable.mdx) "
         "has the full release inventory.",
     ]
     for line, line_versions in groups.items():
