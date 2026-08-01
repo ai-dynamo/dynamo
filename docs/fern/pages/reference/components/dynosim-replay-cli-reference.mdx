@@ -328,8 +328,8 @@ Shared constraints:
 Additional offline constraints:
 
 - offline `kv_router` requires `num_workers > 1`
-- single-worker offline mode is a dedicated fast path for `vllm`, `sglang`, and `trtllm`;
-  it supports flat request runs and workload-driven multi-turn runs
+- aggregated offline mode uses the shared event loop for one or more workers and supports
+  flat request runs and workload-driven multi-turn runs for `vllm`, `sglang`, and `trtllm`
 - offline disaggregated simulation is a separate two-stage runtime with prefill and decode worker pools
 
 Additional online constraints:
