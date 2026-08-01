@@ -8,8 +8,9 @@ docs/fern/pages/community/contributing/documentation/documentation-style-guide.m
 
   SPDX       header present + correct form for the file type (and not as a body H1)
   FRONTMATTER docs .md/.mdx have a real YAML key; no duplicate body `# H1`
-  LINK       relative links resolve; docs/ links must not escape docs/ (use a GitHub URL)
-  NAV        docs/fern/index.yml `path:` entries resolve (no dangling refs)
+  LINK       relative links resolve; docs/ links must not escape docs/ (use a GitHub URL);
+             no hardcoded docs.nvidia.com self-links
+  NAV        docs/fern/index.yml `path:` entries resolve, and every page file is in the nav
   INTERNAL   no NVBug/JIRA-style IDs, internal hosts, or TODO/FIXME in shipped docs
 
 Usage:
@@ -49,7 +50,13 @@ PUBLIC_NV_HOSTS = (
     "nvidia.com",
     "nvevents.nvidia.com",
 )
-JIRA_RE = re.compile(r"\b(DYN|DYNAMO|DIS|DEP|NSPECT|SCANNERAU|PLC)-\d+\b")
+JIRA_RE = re.compile(r"\b(DYN|DYNAMO|DIS|DEP|OPS|NSPECT|SCANNERAU|PLC)-\d+\b")
+# Hardcoded links back to this site. The style guide requires a relative path with the extension
+# for doc → doc links; an absolute URL also pins a release snapshot at whatever version it names.
+SELF_LINK_RE = re.compile(r"https?://docs\.nvidia\.com/dynamo/\S", re.I)
+# Dated archives — release notes and blog posts describe the site as it stood on a date, so their
+# absolute links are pinned deliberately and must not follow a version rewrite.
+SELF_LINK_EXEMPT = ("/blog/", "/reference/general/releases")
 NVBUG_RE = re.compile(r"(?i)\bnvbugs?\b[\s:#]*\d")  # require an actual bug number
 TODO_RE = re.compile(r"\b(TODO|FIXME|XXX):")  # real markers, not prose mentions
 NV_HOST_RE = re.compile(r"https?://([a-z0-9.-]+\.nvidia\.com)", re.I)
@@ -70,7 +77,8 @@ RULE_HELP = {
     "SPDX": "add the SPDX header (frontmatter `#` lines for Fern pages, HTML comment otherwise)",
     "FRONTMATTER": "frontmatter needs SPDX + one real YAML key; start the body at `##`",
     "LINK": "relative links stay inside docs/; link outside it with a github.com/ai-dynamo/dynamo URL",
-    "NAV": "every `path:` in docs/fern/index.yml must resolve to a real file",
+    "NAV": "every `path:` in docs/fern/index.yml must resolve to a real file, and every page "
+    "file needs a `path:` entry",
     "INTERNAL": "remove tracker IDs, internal hosts, and TODO/FIXME from shipped docs",
 }
 STYLE_GUIDE = (
@@ -121,7 +129,10 @@ def check_spdx(rel: str, text: str, out: list) -> None:
                 )
         else:
             head = "\n".join(text.splitlines()[:12])
-            if "SPDX-License-Identifier" not in head:
+            if (
+                "SPDX-License-Identifier" not in head
+                or "SPDX-FileCopyrightText" not in head
+            ):
                 out.append(
                     Finding(
                         rel,
@@ -131,20 +142,21 @@ def check_spdx(rel: str, text: str, out: list) -> None:
                         "missing SPDX header (HTML-comment block for frontmatter-less markdown)",
                     )
                 )
-        # SPDX accidentally in the body renders as an H1
-        for i, ln in (
-            enumerate(blank_code(body).splitlines(), 1) if fm is not None else []
-        ):
-            if re.match(r"^#\s+SPDX", ln):
-                out.append(
-                    Finding(
-                        rel,
-                        i,
-                        "SPDX",
-                        "error",
-                        "SPDX line in body renders as an H1 — move it into frontmatter",
+        # SPDX accidentally in the body renders as an H1. Line numbers are file-relative, so the
+        # frontmatter block the body starts after has to be added back.
+        if fm is not None:
+            body_offset = text[: len(text) - len(body)].count("\n")
+            for i, ln in enumerate(blank_code(body).splitlines(), 1):
+                if re.match(r"^#\s+SPDX", ln):
+                    out.append(
+                        Finding(
+                            rel,
+                            body_offset + i,
+                            "SPDX",
+                            "error",
+                            "SPDX line in body renders as an H1 — move it into frontmatter",
+                        )
                     )
-                )
     else:  # code / config
         head = "\n".join(text.splitlines()[:15])
         if (
@@ -205,9 +217,27 @@ def check_links(rel: str, abspath: str, text: str, repo: str, out: list) -> None
     body = blank_code(text)
     for m in LINK_RE.finditer(body):
         url = m.group(1).split("#", 1)[0]
+        line = body[: m.start()].count("\n") + 1
+        # Checked before the external-URL skip: a link to our own published site is not an
+        # external reference, it is a doc → doc link written the wrong way.
+        if (
+            in_docs
+            and not any(x in rel.replace(os.sep, "/") for x in SELF_LINK_EXEMPT)
+            and SELF_LINK_RE.match(m.group(1))
+        ):
+            out.append(
+                Finding(
+                    rel,
+                    line,
+                    "LINK",
+                    "warn",
+                    f"hardcoded docs.nvidia.com self-link ({url}) — use a relative path with the "
+                    "extension so version rewrites follow the reader",
+                )
+            )
+            continue
         if not url or url.startswith(("http://", "https://", "mailto:", "tel:", "/")):
             continue
-        line = body[: m.start()].count("\n") + 1
         target = os.path.normpath(os.path.join(os.path.dirname(abspath), url))
         if in_docs and not os.path.abspath(target).startswith(
             os.path.abspath(docs_root) + os.sep
@@ -228,7 +258,10 @@ def check_links(rel: str, abspath: str, text: str, repo: str, out: list) -> None
 
 
 def check_internal(rel: str, text: str, out: list) -> None:
-    for i, ln in enumerate(text.splitlines(), 1):
+    # Blank the whole file once: a fence spans several lines, so blanking a single line in
+    # isolation never sees the opening and closing markers and cannot exempt a code example.
+    blanked = blank_code(text).splitlines()
+    for i, (ln, blanked_ln) in enumerate(zip(text.splitlines(), blanked), 1):
         if NVBUG_RE.search(ln):
             out.append(
                 Finding(rel, i, "INTERNAL", "error", "NVBug reference in shipped docs")
@@ -243,7 +276,7 @@ def check_internal(rel: str, text: str, out: list) -> None:
                     f"tracker ID in shipped docs: {JIRA_RE.search(ln).group(0)}",
                 )
             )
-        if TODO_RE.search(blank_code(ln)):
+        if TODO_RE.search(blanked_ln):
             out.append(
                 Finding(rel, i, "INTERNAL", "warn", "TODO/FIXME in shipped docs")
             )
@@ -255,21 +288,52 @@ def check_internal(rel: str, text: str, out: list) -> None:
 
 
 def check_nav(repo: str, out: list) -> None:
-    """Every nav `path:` must resolve. Paths are relative to docs/fern/, not to docs/."""
+    """Nav and content must agree in both directions.
+
+    Forward: every `path:` resolves to a file (error — a dangling path breaks the build).
+    Reverse: every page file is referenced by some `path:` (warn — an unreferenced page is
+    unreachable, but the tree also holds legitimate non-page files).
+
+    Paths are relative to docs/fern/, not to docs/.
+    """
     index = os.path.join(repo, NAV_FILE)
     if not os.path.exists(index):
         out.append(Finding(NAV_FILE, 1, "NAV", "error", "navigation file not found"))
         return
     with open(index, encoding="utf-8") as f:
         content = f.read()
+    referenced = set()
     for m in PATH_RE.finditer(content):
         p = m.group(1).strip().strip("\"'")
+        referenced.add(p)
         target = os.path.join(repo, FERN_DIR, p)
         if not os.path.exists(target):
             line = content[: m.start()].count("\n") + 1
             out.append(
                 Finding(NAV_FILE, line, "NAV", "error", f"nav path has no file: {p}")
             )
+
+    pages_root = os.path.join(repo, FERN_DIR, "pages")
+    for dirpath, dirnames, names in os.walk(pages_root):
+        # `_catalog/`, `_assets/`, and the like hold source data and fragments, not pages.
+        dirnames[:] = [d for d in dirnames if not d.startswith("_")]
+        for n in names:
+            if not n.endswith((".md", ".mdx")) or n in NON_PAGE_FILES:
+                continue
+            rel = os.path.relpath(
+                os.path.join(dirpath, n), os.path.join(repo, FERN_DIR)
+            )
+            if rel not in referenced:
+                out.append(
+                    Finding(
+                        rel,
+                        1,
+                        "NAV",
+                        "warn",
+                        "page file has no `path:` entry in docs/fern/index.yml — unreachable "
+                        "on the site",
+                    )
+                )
 
 
 def gather(repo: str, scan: list) -> list:
