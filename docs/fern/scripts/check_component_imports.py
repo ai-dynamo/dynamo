@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Fail on imports that make Fern shell out to rolldown during a docs build.
 
 Fern's `experimental.mdx-components` bundler scans every .js/.jsx/.ts/.tsx file
@@ -48,8 +60,11 @@ from pathlib import Path
 
 FERN_ROOT = Path(__file__).resolve().parents[1]
 # Not FERN_ROOT.parents[1]: that raises IndexError at import time if the script
-# is ever run from a shallower path, before check_derivation can say why.
-REPO_ROOT = next(iter(FERN_ROOT.parents[1:2]), FERN_ROOT)
+# is ever run from a shallower path, before check_derivation can say why. Nor a
+# slice of .parents, which is 3.10+ only — this hook is `language: system`, so
+# it runs under whichever python3 is on PATH, and crashing on an older one turns
+# a gate that must fail loudly into a traceback.
+REPO_ROOT = FERN_ROOT.parent.parent
 COMPONENTS = FERN_ROOT / "components"
 FERN_CONFIG = FERN_ROOT / "fern.config.json"
 SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
