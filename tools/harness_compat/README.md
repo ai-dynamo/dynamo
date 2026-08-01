@@ -111,7 +111,6 @@ This is the first proposed subset, not an enabled CI job. It deliberately keeps 
 | Codex | `compact` | Covers explicit native compaction followed by a tool-using turn. | 180 s/turn |
 | Codex | `structured_output` | Detects drift in native `text.format` emission. | 180 s/turn |
 | Codex | `tool_failure` | Proves a native failed command result reaches the agent and the same turn recovers. | 180 s/turn |
-| Codex | `goal_lifecycle` | Covers native `create_goal`/`get_goal`/`update_goal` continuations and goal lifecycle notifications. | 300 s/turn |
 | Claude Code | `compact` | Covers a native compact boundary and the next Messages tool turn. | 420 s/run |
 | Claude Code | `structured_output` | Detects `output_config.format`/Messages translation drift. | 420 s/run |
 | Claude Code | `resume` | Covers persisted Messages history across a fresh CLI process. | 420 s/run |
@@ -120,7 +119,7 @@ This is the first proposed subset, not an enabled CI job. It deliberately keeps 
 
 Run the Codex subagent workflow weekly in discovery with an explicit turn cap, not as an initial nightly pass gate. The model can validly expand a one-child request into a deep graph; the parser regression itself is deterministic and already guarded by the unit test. Claude Agent, automatic compaction, and interactive terminal cancel/steer remain discovery-only until they have reproducible native reach signals.
 
-Run the live subset with `nightly.py --remote-http-port 20585 --remote-run-root /data/harness-compat-lab/runs/<deployment-run>`. It runs nine core cases plus the same endpoint-native status and one early/mid-stream SSE truncation through both Codex and Claude Code daily. `--fault-status 429` selects a specific status rotation member; `--dry-run` prints the exact invocations.
+Run the live subset with `nightly.py --remote-http-port 20585 --remote-run-root /data/harness-compat-lab/runs/<deployment-run>`. It runs eight core cases plus the same endpoint-native status and one early/mid-stream SSE truncation through both Codex and Claude Code daily. `--fault-status 429` selects a specific status rotation member; `--dry-run` prints the exact invocations. Run `goal_lifecycle` weekly through `live_scenario.py` until it has a clean serialized canary.
 
 After every successful native case, `nightly.py` compares its content-free protocol discriminator set to `protocol_baseline.json`. New headers, request fields, item/content types, advertised tool names/types, or output-format discriminators fail the run and are printed as a compact drift record; update the baseline only after triage.
 

@@ -16,7 +16,6 @@ CORE_CASES = (
     ("codex", "compact", ("--turn-timeout-s", "180")),
     ("codex", "structured_output", ("--turn-timeout-s", "180")),
     ("codex", "tool_failure", ("--turn-timeout-s", "180")),
-    ("codex", "goal_lifecycle", ("--turn-timeout-s", "300")),
     ("claude", "compact", ("--result-timeout-s", "420")),
     ("claude", "structured_output", ("--result-timeout-s", "420")),
     ("claude", "resume", ("--result-timeout-s", "420")),

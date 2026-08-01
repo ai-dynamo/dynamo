@@ -148,6 +148,25 @@ def _write_transport_summary(artifacts: Path) -> None:
     (artifacts / "transport.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_missing_driver_result(artifacts: Path, exit_code: int | None) -> None:
+    """Keep an interrupted native driver distinguishable from missing evidence."""
+    result_path = artifacts / "result.json"
+    if result_path.exists():
+        return
+    result_path.write_text(
+        json.dumps(
+            {
+                "outcome": "harness_failure",
+                "first_divergent_boundary": "native_driver_exit",
+                "driver_exit_code": exit_code,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _validate_model(upstream_url: str, model: str, artifacts: Path) -> None:
     """Fail before a native run if the live endpoint cannot serve the requested model."""
     with urlopen(f"{upstream_url.rstrip('/')}/v1/models", timeout=10) as response:
@@ -304,6 +323,7 @@ def main() -> int:
                 stdout, stderr = driver_process.communicate()
                 (artifacts / "driver.stdout.log").write_text(stdout, encoding="utf-8")
                 (artifacts / "driver.stderr.log").write_text(stderr, encoding="utf-8")
+                _write_missing_driver_result(artifacts, driver_process.returncode)
                 _write_transport_summary(artifacts)
                 if args.remote_run_root is not None:
                     _copy_remote_artifacts(args, artifacts)
@@ -312,6 +332,7 @@ def main() -> int:
         stdout, stderr = driver_process.communicate()
         (artifacts / "driver.stdout.log").write_text(stdout, encoding="utf-8")
         (artifacts / "driver.stderr.log").write_text(stderr, encoding="utf-8")
+        _write_missing_driver_result(artifacts, driver_process.returncode)
         _write_transport_summary(artifacts)
         if args.remote_run_root is not None:
             _copy_remote_artifacts(args, artifacts)
