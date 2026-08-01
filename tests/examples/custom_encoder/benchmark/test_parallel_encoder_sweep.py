@@ -234,6 +234,39 @@ def test_aiperf_validation_distinguishes_dummy_output(tmp_path: Path) -> None:
     assert result["request_throughput"] == 50
 
 
+def test_mixed_shape_aiperf_allows_variable_text_token_counts(tmp_path: Path) -> None:
+    artifact = tmp_path / "encoder"
+    artifact.mkdir()
+    (artifact / "command.txt").write_text(
+        "aiperf profile --concurrency 64 --streaming\n", encoding="utf-8"
+    )
+    document = {
+        "request_count": {"avg": 1000},
+        "error_summary": [],
+        "was_cancelled": False,
+        "input_config": {
+            "endpoint": {"streaming": True},
+            "loadgen": {"concurrency": 64},
+        },
+        "input_sequence_length": {"min": 320, "avg": 421.5, "max": 523},
+        "output_sequence_length": _metric(1),
+        "request_throughput": {"avg": 50},
+        "request_latency": _metric(20),
+        "time_to_first_token": _metric(20),
+    }
+    result_path = artifact / "profile_export_aiperf.json"
+    result_path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = validate_aiperf(
+        result_path,
+        ENCODER_ONLY_ROLE,
+        64,
+        require_fixed_client_isl=False,
+    )
+
+    assert result["accepted"]
+
+
 def test_arm_summary_uses_median_across_confirmations() -> None:
     timings = [
         {

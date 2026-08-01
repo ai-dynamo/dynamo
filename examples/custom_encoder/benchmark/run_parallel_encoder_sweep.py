@@ -919,7 +919,13 @@ def _metric(data: dict[str, Any], name: str, statistic: str = "avg") -> float | 
     return float(value[statistic])
 
 
-def validate_aiperf(path: Path, role: str, concurrency: int) -> dict[str, Any]:
+def validate_aiperf(
+    path: Path,
+    role: str,
+    concurrency: int,
+    *,
+    require_fixed_client_isl: bool = True,
+) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     failures: list[str] = []
     command_path = path.parent / "command.txt"
@@ -954,9 +960,8 @@ def validate_aiperf(path: Path, role: str, concurrency: int) -> dict[str, Any]:
             _metric(data, "input_sequence_length", statistic_name)
             for statistic_name in ("min", "avg", "max")
         ]
-        if (
-            any(value is None or value <= 0 for value in client_isl)
-            or len(set(client_isl)) != 1
+        if any(value is None or value <= 0 for value in client_isl) or (
+            require_fixed_client_isl and len(set(client_isl)) != 1
         ):
             failures.append("client_input_sequence_length")
     for metric_name in (
@@ -1464,7 +1469,12 @@ def run_patch_budget_sweep(
                         measured_artifact,
                     )
                 exported = measured_artifact / "profile_export_aiperf.json"
-                validation = validate_aiperf(exported, ENCODER_ONLY_ROLE, concurrency)
+                validation = validate_aiperf(
+                    exported,
+                    ENCODER_ONLY_ROLE,
+                    concurrency,
+                    require_fixed_client_isl=False,
+                )
                 if not validation["accepted"]:
                     raise AssertionError(
                         f"AIPerf validation failed for {name} run {repetition}: "
