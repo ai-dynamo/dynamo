@@ -4,9 +4,26 @@
 title: Mocker Engine Architecture
 ---
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Architecture](../../../concepts/simulation/dynosim-architecture.md) for the component-level design and [offline replay internals](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for implementation details.
+The mocker is organized into several cooperating components that mirror the internal architecture of
+production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block
+manager live inside the engine core. Multi-engine behavior — KV transfer simulation, KV router
+simulation, and Planner simulation — is added by the DynoSim run harness on top of multiple engine
+cores. See [DynoSim Architecture](../../../concepts/simulation/dynosim-architecture.md) for the
+component-level design.
 
 For task-oriented instructions, see [Simulate a Kubernetes Deployment](../../../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) or [Simulate a Local Deployment](../../../../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx); for the command-line flags referenced throughout this page, see the [Mocker CLI Reference](../../../../../reference/components/mocker-cli-reference.mdx).
+
+## Generalized Engine
+
+The `aisimulate-engine` crate owns the scheduler, native GPU KV accounting, preemption, timing, and
+attention data-parallel (DP) barrier. A logical engine contains either one rank or a fixed group of
+sibling ranks. Grouped execution starts a pass only when every sibling rank is ready and completes
+at the latest rank completion time.
+
+Offline replay and Live Mocker construct this same generalized engine. The AISimulate Replayer
+advances it with a virtual clock and deterministic event queue. Live Mocker advances it with Tokio
+and wall-clock timers, then publishes the resulting output, lifecycle, KV, and metrics effects
+through Dynamo transport.
 
 ## Scheduler
 
@@ -28,46 +45,37 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ## KV Block Manager
 
-The mocker's KV block manager is built on [`kvbm-logical::BlockManager<G1>`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
+The vLLM and TensorRT-LLM scheduler core owns a native physical block pool. Each slot records its
+content identity, request references, cache visibility, and last-use order. A request can reuse a
+contiguous cached prefix or allocate free slots. When the pool needs capacity, it evicts unreferenced
+cached slots in least-recently-used order.
 
-Blocks conceptually live in one of two pools:
+Blocks conceptually have two states:
 
-- **Active** — blocks currently held by at least one sequence. Partial (still-filling) blocks are held as `MutableBlock<G1>`; full blocks are held as `ImmutableBlock<G1>` clones (the clone vec length is the mocker's refcount, one per `Use`).
-- **Inactive** — blocks no longer referenced by any sequence but kept for prefix-cache reuse. Handled entirely by kvbm-logical's inactive pool; the mocker never tracks them manually.
+- **Active** — one or more requests reference the slot.
+- **Inactive** — no request references the slot, but prefix caching retains it for reuse.
 
-The lifecycle is RAII: dropping the last `ImmutableBlock` clone transitions the block from active to inactive (kvbm-logical's `reset` pool), with no explicit `deref`/`evict` bookkeeping on the mocker side. When a sequence completes or is preempted, the mocker simply drops its handles; kvbm-logical recovers the capacity.
+Releasing the last request reference makes a cached slot inactive. Eviction removes its hash mapping,
+returns the physical slot to the free pool, and emits a router-visible removal event. SGLang uses its
+own token-pool and radix-cache model instead of this block pool.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active : allocate + stage + register
-    Active --> Inactive : last handle dropped (RAII)
-    Inactive --> Active : match_blocks(PLH) reuse
-    Inactive --> Freed : evicted by backend
-    Active --> Freed : explicit Removed (Destroy)
+    [*] --> Active : allocate or reuse
+    Active --> Inactive : last reference released
+    Inactive --> Active : cached-prefix reuse
+    Inactive --> Freed : least-recently-used eviction
     Freed --> [*]
-
-    state Active {
-        [*] --> Partial : MutableBlock<G1>
-        Partial --> Full : promote (PLH / SequenceHash)
-        [*] --> Full : ImmutableBlock<G1> clones
-    }
 ```
 
-Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcount on an already-pinned block), `InactiveHit` (reactivate via `match_blocks(plh)`), and `NewStore` (fresh allocation). Only `NewStore` emits a `Stored` KV event — the router radix tree already knows about the other two and only forgets on explicit `Removed`.
-
-## Eviction Backends
-
-The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/common/protocols.rs):
-
-- **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the hand-rolled `LRUEvictor::push_front` used to provide.
-- **`Lru`** — plain recency-based LRU.
-- **`MultiLru`** — 4-tier frequency-aware LRU built on a TinyLFU tracker.
-
-All three give the same "suffix blocks evicted before shared prefixes" outcome that the previous evictor was designed to produce; `Lineage` does it structurally (via the block parent chain) rather than via monotonic counters.
+Fresh completed blocks emit `Stored` KV events. Reusing a visible cached block does not emit a second
+store event because the router already tracks it.
 
 ## Sequence Tracking
 
-Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (`MutableBlock<G1>`, still being filled) versus full (`ImmutableBlock<G1>`, complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based `SequenceHash` (or collapses onto an existing registered handle if the PLH is already present), enabling future cache hits from requests with matching prefixes.
+Each active request is tracked as a sequence with token-block identities and generation state. Completed
+blocks receive content-based hashes and become available for future prefix matches. Partial blocks
+remain request-local until they cross a block boundary.
 
 ## Performance Model
 
@@ -123,9 +131,8 @@ Each scheduler publishes metrics about its current state, including the number o
 
 The following features are not yet supported by the mocker:
 
-- **Multi-tier memory** - No support for offloading KV cache to CPU/disk or onboarding back to GPU; potential future integration with KVBM
+- **Multi-tier memory** - No support for offloading KV cache to CPU or disk, or onboarding it back to GPU
 - **Multimodal support** - Currently only simulates text token processing; no vision encoder or cross-attention simulation
-- **Native Rust reference counting** - Work in progress to use native Rc/Arc for block reference counting, enabling natural RAII patterns for simpler tracking
 
 ## See Also
 

@@ -16,10 +16,14 @@ AI Simulate is a standalone Python distribution in the Dynamo repository. Its fi
 specifications. The package does not depend on `ai-dynamo`.
 
 Sweeper accepts a replay `RunnerFactory` through its Python API. Optional feature adapters own
-their search spaces and runtime hooks. A backend-only sweep can use a Dynamo-free replay runner;
+their search spaces and runtime hooks. An engine-only sweep can use a Dynamo-free replay runner;
 a sweep configured with Dynamo Planner or Router adapters uses Dynamo's runner composition.
 
-Install AI Simulate by itself for backend-only development:
+For a Dynamo-integrated single replay run, use `python -m dynamo.replay`. For configuration
+search, call `Sweeper(runner_factory=...).run(config)` or start from an example under
+`aisimulate/examples/sweeper`.
+
+Install AI Simulate by itself for engine-only development:
 
 ```bash
 uv venv .venv
@@ -36,6 +40,10 @@ uv pip install --no-deps -e .
 uv pip install -r container/deps/requirements.planner.txt
 ```
 
+The `ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` Sweeper provider entry
+points. Its Dynamo runner composes the materialized runtime hooks with the shared AI Simulate
+Replayer.
+
 Run a sweep from Python with an explicit runner:
 
 ```python
@@ -51,7 +59,7 @@ candidates = Sweeper(
 The standalone module validates the backend-neutral core schema but intentionally has no implicit
 replay runtime. Adapter-owned search spaces are validated when the selected adapters are resolved
 by `Sweeper.run`.
-KVBM sweep fields have been removed; native G2 is their replacement.
+KVBM sweep fields have been removed and have no adapter migration.
 
 Read the canonical [Sweeper documentation](docs/sweeper/overview.md) for its configuration,
 search-space, and replay behavior. Backend-neutral and Dynamo integration examples live under
