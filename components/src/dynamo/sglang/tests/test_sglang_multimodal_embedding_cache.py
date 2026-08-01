@@ -550,7 +550,12 @@ def test_load_video_passthrough_patches_the_encode_server_binding() -> None:
     )
 
     # A pre-built decoder passes straight through instead of raising.
+    # __new__ skips __init__, so set _tmp_path explicitly: the finaliser reads it
+    # and would otherwise raise AttributeError during GC, which pytest surfaces
+    # as PytestUnraisableExceptionWarning -- an error under this repo's
+    # filterwarnings=error.
     sentinel = VideoDecoderWrapper.__new__(VideoDecoderWrapper)
+    sentinel._tmp_path = None
     assert patched(sentinel) is sentinel
 
     # Anything else still goes to the original implementation.
