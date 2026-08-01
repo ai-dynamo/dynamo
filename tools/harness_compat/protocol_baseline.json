@@ -9,7 +9,7 @@
     "top_level_keys": ["context_management", "max_tokens", "messages", "metadata", "model", "output_config", "stream", "system", "thinking", "tools"]
   },
   "codex": {
-    "header_names": ["accept", "authorization", "content-length", "content-type", "host", "originator", "session-id", "thread-id", "user-agent", "x-client-request-id", "x-codex-beta-features", "x-codex-turn-metadata", "x-codex-window-id"],
+    "header_names": ["accept", "authorization", "content-length", "content-type", "host", "originator", "session-id", "thread-id", "user-agent", "x-client-request-id", "x-codex-beta-features", "x-codex-parent-thread-id", "x-codex-turn-metadata", "x-codex-window-id", "x-openai-subagent"],
     "input_content_types": ["encrypted_content", "input_text", "null", "output_text"], "input_item_types": ["agent_message", "function_call", "function_call_output", "message"],
     "message_content_types": [], "message_roles": [], "output_config_keys": [], "request_paths": ["/v1/responses"],
     "shape_keys": ["input_items", "model", "stream", "text_keys", "tool_names", "tool_types", "top_level_keys"], "text_keys": ["format"],
