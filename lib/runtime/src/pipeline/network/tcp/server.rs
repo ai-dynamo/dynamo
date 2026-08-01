@@ -385,9 +385,7 @@ impl TcpStreamServer {
                 // Warn if the client side has TLS configured — mixing plaintext server with
                 // TLS client (or vice versa) results in failed connections that are hard to debug.
                 let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
-                    || std::env::var(env::DYN_TCP_TLS_INSECURE)
-                        .map(|v| v == "1" || v == "true")
-                        .unwrap_or(false);
+                    || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
                 if client_tls_set {
                     tracing::warn!(
                         "TCP server is running in plaintext mode but client TLS env vars are set. \
