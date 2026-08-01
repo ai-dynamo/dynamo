@@ -10,7 +10,7 @@
 use dynamo_tokens::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
-use smallvec::SmallVec;
+use std::collections::{VecDeque, hash_map::Entry};
 
 new_key_type! {
     pub(crate) struct BlockCopyId;
@@ -34,6 +34,71 @@ enum CopyState {
 #[derive(Debug)]
 struct BlockCopy {
     state: CopyState,
+}
+
+struct HashCopies {
+    primary: BlockCopyId,
+    // Keep the common one-copy value to two machine words; duplicate hashes
+    // pay the extra allocation only on the uncommon overflow path.
+    #[allow(clippy::box_collection)]
+    duplicates: Option<Box<VecDeque<BlockCopyId>>>,
+}
+
+enum CopyRemoval {
+    Last,
+    Remaining,
+    Missing,
+}
+
+impl HashCopies {
+    fn new(primary: BlockCopyId) -> Self {
+        Self {
+            primary,
+            duplicates: None,
+        }
+    }
+
+    fn push(&mut self, id: BlockCopyId) {
+        self.duplicates
+            .get_or_insert_with(|| Box::new(VecDeque::new()))
+            .push_back(id);
+    }
+
+    fn remove(&mut self, id: BlockCopyId) -> CopyRemoval {
+        if self.primary == id {
+            let Some(duplicates) = self.duplicates.as_mut() else {
+                return CopyRemoval::Last;
+            };
+            self.primary = duplicates
+                .pop_front()
+                .expect("duplicate-copy queue must not be empty");
+            if duplicates.is_empty() {
+                self.duplicates = None;
+            }
+            return CopyRemoval::Remaining;
+        }
+
+        let Some(duplicates) = self.duplicates.as_mut() else {
+            return CopyRemoval::Missing;
+        };
+        let Some(position) = duplicates.iter().position(|candidate| *candidate == id) else {
+            return CopyRemoval::Missing;
+        };
+        duplicates.remove(position);
+        if duplicates.is_empty() {
+            self.duplicates = None;
+        }
+        CopyRemoval::Remaining
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = BlockCopyId> + '_ {
+        std::iter::once(self.primary).chain(
+            self.duplicates
+                .iter()
+                .flat_map(|duplicates| duplicates.iter().copied()),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,7 +132,7 @@ pub(crate) struct ReserveOutcome {
 pub(crate) struct VllmBlockPool {
     capacity: usize,
     copies: SlotMap<BlockCopyId, BlockCopy>,
-    by_hash: FxHashMap<SequenceHash, SmallVec<[BlockCopyId; 1]>>,
+    by_hash: FxHashMap<SequenceHash, HashCopies>,
     /// Intrusive ordinary LRU: head is evicted first, tail was released last.
     inactive_head: Option<BlockCopyId>,
     inactive_tail: Option<BlockCopyId>,
@@ -284,7 +349,6 @@ impl VllmBlockPool {
     /// Make a request-private computed full block available for prefix reuse.
     /// Returns whether this is the first resident physical copy of `hash`.
     pub(crate) fn cache_private(&mut self, id: BlockCopyId, hash: SequenceHash) -> bool {
-        let became_visible = !self.by_hash.contains_key(&hash);
         let Some(copy) = self.copies.get_mut(id) else {
             panic!("attempted to cache an unknown block copy")
         };
@@ -299,8 +363,16 @@ impl VllmBlockPool {
             inactive_prev: None,
             inactive_next: None,
         };
-        self.by_hash.entry(hash).or_default().push(id);
-        became_visible
+        match self.by_hash.entry(hash) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(id);
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(HashCopies::new(id));
+                true
+            }
+        }
     }
 
     /// Release one request-owned reference. Private copies return capacity
@@ -372,10 +444,7 @@ impl VllmBlockPool {
     }
 
     fn first_copy(&self, hash: SequenceHash) -> Option<BlockCopyId> {
-        self.by_hash
-            .get(&hash)
-            .and_then(|copies| copies.first())
-            .copied()
+        self.by_hash.get(&hash).map(|copies| copies.primary)
     }
 
     fn is_inactive(&self, id: BlockCopyId) -> bool {
@@ -538,6 +607,8 @@ impl VllmBlockPool {
 
     #[cfg(test)]
     fn assert_lru_consistent(&self) {
+        self.assert_hash_index_consistent();
+
         let mut linked = FxHashSet::default();
         let mut previous = None;
         let mut cursor = self.inactive_head;
@@ -612,6 +683,34 @@ impl VllmBlockPool {
         }
     }
 
+    #[cfg(test)]
+    fn assert_hash_index_consistent(&self) {
+        let mut indexed = FxHashSet::default();
+        for (&expected_hash, copies) in &self.by_hash {
+            for id in copies.iter() {
+                assert!(indexed.insert(id), "copy is indexed by multiple hashes");
+                let Some(copy) = self.copies.get(id) else {
+                    panic!("hash index points to a missing copy")
+                };
+                let CopyState::Cached { hash, .. } = &copy.state else {
+                    panic!("hash index points to a private copy")
+                };
+                assert_eq!(*hash, expected_hash, "copy is indexed under the wrong hash");
+            }
+        }
+
+        for (id, copy) in self.copies.iter() {
+            match &copy.state {
+                CopyState::Private => {
+                    assert!(!indexed.contains(&id), "private copy is hash-indexed");
+                }
+                CopyState::Cached { .. } => {
+                    assert!(indexed.contains(&id), "cached copy is not hash-indexed");
+                }
+            }
+        }
+    }
+
     /// Evict one physical copy. A hash is returned only on its final copy.
     fn evict_one(&mut self) -> Option<SequenceHash> {
         let Some(id) = self.inactive_head else {
@@ -641,11 +740,13 @@ impl VllmBlockPool {
             let Some(copies) = self.by_hash.get_mut(&hash) else {
                 panic!("evicted cached hash is missing from its index")
             };
-            let Some(position) = copies.iter().position(|candidate| *candidate == id) else {
-                panic!("evicted copy is missing from its hash index")
-            };
-            copies.remove(position);
-            copies.is_empty()
+            match copies.remove(id) {
+                CopyRemoval::Last => true,
+                CopyRemoval::Remaining => false,
+                CopyRemoval::Missing => {
+                    panic!("evicted copy is missing from its hash index")
+                }
+            }
         };
         if remove_hash {
             self.by_hash.remove(&hash);
@@ -750,23 +851,75 @@ mod tests {
 
     #[test]
     fn removal_is_reported_only_for_the_last_physical_copy() {
-        let mut pool = VllmBlockPool::new(2);
+        let mut pool = VllmBlockPool::new(4);
         let mut first = reserve(&mut pool, &[], 1).reservation;
         let first_id = pool.allocate_private(&mut first);
         assert!(pool.cache_private(first_id, 3));
-        let mut second = reserve(&mut pool, &[], 1).reservation;
-        let second_id = pool.allocate_private(&mut second);
-        assert!(!pool.cache_private(second_id, 3));
+
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
         pool.release(first_id);
-        pool.release(second_id);
+        for &duplicate_id in &duplicate_ids {
+            pool.release(duplicate_id);
+        }
 
         let first_eviction = reserve(&mut pool, &[], 1);
         assert!(first_eviction.removed.is_empty());
         pool.cancel(first_eviction.reservation);
 
-        let second_eviction = reserve(&mut pool, &[], 2);
-        assert_eq!(second_eviction.removed, vec![3]);
-        pool.cancel(second_eviction.reservation);
+        let promoted = pool
+            .reserve_exact_prefix([3], 1)
+            .expect("promoted duplicate should remain reservable");
+        assert_eq!(promoted.reservation.prefix, vec![(3, duplicate_ids[0])]);
+        pool.cancel(promoted.reservation);
+
+        for fresh in [2, 3] {
+            let duplicate_eviction = reserve(&mut pool, &[], fresh);
+            assert!(duplicate_eviction.removed.is_empty());
+            pool.cancel(duplicate_eviction.reservation);
+        }
+
+        let final_eviction = reserve(&mut pool, &[], 4);
+        assert_eq!(final_eviction.removed, vec![3]);
+        pool.cancel(final_eviction.reservation);
+        pool.assert_lru_consistent();
+    }
+
+    #[test]
+    fn evicting_middle_duplicate_preserves_primary_lookup() {
+        let mut pool = VllmBlockPool::new(4);
+        let mut first = reserve(&mut pool, &[], 1).reservation;
+        let first_id = pool.allocate_private(&mut first);
+        assert!(pool.cache_private(first_id, 3));
+
+        let mut duplicate_ids = Vec::new();
+        for _ in 0..3 {
+            let mut duplicate = reserve(&mut pool, &[], 1).reservation;
+            let duplicate_id = pool.allocate_private(&mut duplicate);
+            assert!(!pool.cache_private(duplicate_id, 3));
+            duplicate_ids.push(duplicate_id);
+        }
+        let middle_id = duplicate_ids[1];
+        pool.release(middle_id);
+
+        let pressure = reserve(&mut pool, &[], 1);
+        assert!(pressure.removed.is_empty());
+        pool.cancel(pressure.reservation);
+        assert!(pool.copies.get(middle_id).is_none());
+
+        let primary = pool
+            .reserve_exact_prefix([3], 1)
+            .expect("primary copy should remain reservable");
+        assert_eq!(primary.reservation.prefix, vec![(3, first_id)]);
+        pool.cancel(primary.reservation);
+        pool.release(first_id);
+        pool.release(duplicate_ids[0]);
+        pool.release(duplicate_ids[2]);
         pool.assert_lru_consistent();
     }
 
