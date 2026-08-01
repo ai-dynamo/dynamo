@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 #[cfg(any(test, feature = "bench"))]
 use std::sync::Arc;
 
@@ -150,14 +152,17 @@ trait WorkerPicker<C: WorkerConfigLike, S: WorkerScorer> {
     fn pick(&self, scorer: &S, input: &WorkerSelectionInput<'_, C>) -> (WorkerWithDpRank, f64);
 }
 
-struct DefaultWorkerScorer<'a> {
-    selector: &'a DefaultWorkerSelector,
+struct DefaultWorkerScorer<C> {
+    kv_router_config: C,
+    worker_type: &'static str,
 }
 
 struct DefaultWorkerPicker<'a> {
-    selector: &'a DefaultWorkerSelector,
+    default_temperature: f64,
+    #[cfg(any(test, feature = "bench"))]
+    deterministic_rng: Option<&'a Arc<Mutex<fastrand::Rng>>>,
+    selector_lifetime: PhantomData<&'a DefaultWorkerSelector>,
 }
-
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
@@ -180,25 +185,37 @@ impl DefaultWorkerSelector {
             deterministic_rng: Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
         }
     }
+}
 
+impl<'a> DefaultWorkerScorer<&'a KvRouterConfig> {
+    fn from_selector(selector: &'a DefaultWorkerSelector) -> Self {
+        Self {
+            kv_router_config: &selector.kv_router_config,
+            worker_type: selector.worker_type,
+        }
+    }
+}
+
+impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     fn selection_weights(&self, request: &SchedulingRequest) -> LogitWeights {
+        let kv_router_config = self.kv_router_config.borrow();
         LogitWeights {
             overlap_score_credit: request
                 .router_config_override
                 .as_ref()
                 .and_then(|cfg| cfg.overlap_score_credit)
-                .unwrap_or(self.kv_router_config.overlap_score_credit),
-            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
+                .unwrap_or(kv_router_config.overlap_score_credit),
+            overlap_score_credit_decay: kv_router_config.overlap_score_credit_decay,
             prefill_load_scale: request
                 .router_config_override
                 .as_ref()
                 .and_then(|cfg| cfg.prefill_load_scale)
-                .unwrap_or(self.kv_router_config.prefill_load_scale),
+                .unwrap_or(kv_router_config.prefill_load_scale),
             shared_cache_multiplier: request
                 .router_config_override
                 .as_ref()
                 .and_then(|cfg| cfg.shared_cache_multiplier)
-                .unwrap_or(self.kv_router_config.shared_cache_multiplier),
+                .unwrap_or(kv_router_config.shared_cache_multiplier),
         }
     }
 
@@ -208,6 +225,7 @@ impl DefaultWorkerSelector {
         row: &WorkerSelectionRow,
         formula_name: &'static str,
     ) -> f64 {
+        let kv_router_config = self.kv_router_config.borrow();
         let weights = context.weights;
         let worker = row.worker;
         let effective_overlap_blocks = row.effective_overlap_blocks;
@@ -230,12 +248,12 @@ impl DefaultWorkerSelector {
         };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
         let overlap_credit_blocks = effective_overlap_score_credit * row.device_overlap_blocks
-            + self.kv_router_config.host_cache_hit_weight * row.host_overlap_blocks
-            + self.kv_router_config.disk_cache_hit_weight * row.disk_overlap_blocks
+            + kv_router_config.host_cache_hit_weight * row.host_overlap_blocks
+            + kv_router_config.disk_cache_hit_weight * row.disk_overlap_blocks
             + shared_overlap_blocks;
         let decode_cost_blocks = row.decode_cost_blocks;
         let active_request_cost_blocks =
-            self.kv_router_config.decode_active_request_weight * row.active_requests as f64;
+            kv_router_config.decode_active_request_weight * row.active_requests as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
@@ -305,6 +323,17 @@ impl DefaultWorkerSelector {
         }
 
         logit
+    }
+}
+
+impl<'a> DefaultWorkerPicker<'a> {
+    fn from_selector(selector: &'a DefaultWorkerSelector) -> Self {
+        Self {
+            default_temperature: selector.kv_router_config.router_temperature,
+            #[cfg(any(test, feature = "bench"))]
+            deterministic_rng: selector.deterministic_rng.as_ref(),
+            selector_lifetime: PhantomData,
+        }
     }
 }
 
@@ -425,9 +454,9 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     }
 }
 
-impl WorkerScorer for DefaultWorkerScorer<'_> {
+impl<C: Borrow<KvRouterConfig>> WorkerScorer for DefaultWorkerScorer<C> {
     fn score(&self, context: &WorkerSelectionContext<'_>, row: &WorkerSelectionRow) -> f64 {
-        let base_score = self.selector.worker_logit(context, row, "Formula");
+        let base_score = self.worker_logit(context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -450,7 +479,7 @@ where
             .router_config_override
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
-            .unwrap_or(self.selector.kv_router_config.router_temperature);
+            .unwrap_or(self.default_temperature);
         let get_score = |worker, config: &C| {
             let preferred_taint_multiplier = input
                 .request
@@ -463,7 +492,7 @@ where
         };
 
         #[cfg(any(test, feature = "bench"))]
-        let deterministic_choice = self.selector.deterministic_rng.as_ref().map(|rng| {
+        let deterministic_choice = self.deterministic_rng.as_ref().map(|rng| {
             let mut candidates = Vec::new();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 candidates.push(worker);
@@ -583,7 +612,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         // Borrowed, never allocated; bridges the winner row to `[ROUTING] Best`.
         let request_id = request.mode.request_id().unwrap_or("-");
 
-        let weights = self.selection_weights(request);
+        let scorer = DefaultWorkerScorer::from_selector(self);
+        let weights = scorer.selection_weights(request);
 
         if let Some(worker) = pinned_worker {
             match eligibility.validate_worker_rank(workers, worker) {
@@ -599,7 +629,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let input =
                 WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
             let row = input.row(worker, None);
-            let logit = self.worker_logit(&input.context, &row, "Pinned formula");
+            let logit = scorer.worker_logit(&input.context, &row, "Pinned formula");
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
@@ -624,8 +654,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         }
 
         let input = WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
-        let scorer = DefaultWorkerScorer { selector: self };
-        let picker = DefaultWorkerPicker { selector: self };
+        let picker = DefaultWorkerPicker::from_selector(self);
         let (best_worker, best_logit) = picker.pick(&scorer, &input);
 
         let best_host_pinned_overlap_blocks = request
@@ -779,7 +808,11 @@ mod tests {
             block_size,
             weights,
         );
-        selector.worker_logit(&input.context, &input.row(worker, None), "test")
+        DefaultWorkerScorer::from_selector(selector).worker_logit(
+            &input.context,
+            &input.row(worker, None),
+            "test",
+        )
     }
 
     fn worker_loads_with_active_decode(
