@@ -69,6 +69,14 @@ pub struct Context {
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
     span: Option<tracing::Span>,
+    /// Rust response sink for the flag-gated push egress path
+    /// (`DYN_TRTLLM_PUSH_EGRESS`, see `push_egress.rs`). The `Context` is the
+    /// delivery vehicle because it is the one per-request object every handler
+    /// already receives — passing the sender as an extra parameter would
+    /// require the bridge to introspect the handler's signature, which
+    /// `functools.wraps` on the Python side makes unreliable.
+    /// `None` on the default pull path.
+    response_sender: Option<Py<crate::push_egress::ResponseSender>>,
 }
 
 #[derive(Clone)]
@@ -185,7 +193,15 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             span: None,
+            response_sender: None,
         }
+    }
+
+    /// Attach this request's push-egress response sink. Only the push path
+    /// (`push_egress.rs`) calls this; the pull path leaves it `None`.
+    pub fn with_response_sender(mut self, sender: Py<crate::push_egress::ResponseSender>) -> Self {
+        self.response_sender = Some(sender);
+        self
     }
 
     /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
@@ -259,7 +275,18 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             span: None,
+            response_sender: None,
         }
+    }
+
+    /// This request's push-egress response sink, or `None` on the default pull
+    /// path. Python handlers use its presence to decide whether to push
+    /// responses or yield them.
+    #[getter]
+    fn response_sender(&self, py: Python<'_>) -> Option<Py<crate::push_egress::ResponseSender>> {
+        self.response_sender
+            .as_ref()
+            .map(|sender| sender.clone_ref(py))
     }
 
     /// Create a context with a fresh cancellation controller and request id.
@@ -276,6 +303,9 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             span: self.span.clone(),
+            // A detached context owns a fresh request: it must not be able to
+            // push into the originating request's response stream.
+            response_sender: None,
         }
     }
 

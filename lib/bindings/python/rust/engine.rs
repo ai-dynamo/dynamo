@@ -55,7 +55,7 @@ fn detect_has_context(generator: &PyObject) -> bool {
 
 /// Boxed Rust stream of items yielded by a Python async generator. Each
 /// item is either a `PyObject` frame or the `PyErr` the generator raised.
-type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
+pub(crate) type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 
 /// Invoke the Python `generate` callable and convert the async generator it
 /// returns into a Rust [`Stream`] of `PyObject` items.
@@ -71,28 +71,36 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// it can block for an unbounded time, which would park the tokio reactor.
 /// The returned stream polls `__anext__` only when its consumer requests an
 /// item, preventing Python from mutating a reused object before it is consumed.
-async fn invoke_generator<F, G>(
+pub(crate) async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     to_python_input: F,
-    to_python_context: Option<G>,
+    to_python_kwargs: Option<G>,
 ) -> Result<PyItemStream>
 where
     F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
-    G: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+    G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
-            let gen_result = match to_python_context {
-                Some(to_python_context) => {
-                    let py_ctx = to_python_context(py)?;
+            // The closure returns the FULL kwarg list rather than just the
+            // context, so a caller that needs several keyword arguments can
+            // build them under one GIL acquisition and share objects between
+            // them. The push-egress path relies on this: it hands the same
+            // `ResponseSender` to the handler both as `response_sender=` and on
+            // `context.response_sender`, and the two must be the same object.
+            let gen_result = match to_python_kwargs {
+                Some(to_python_kwargs) => {
+                    let kwargs = to_python_kwargs(py)?;
                     let kwarg = PyDict::new(py);
-                    kwarg.set_item("context", py_ctx)?;
+                    for (name, value) in kwargs {
+                        kwarg.set_item(name, value)?;
+                    }
                     generator.call(py, (python_input,), Some(&kwarg))
                 }
-                // Legacy: no `context` arg.
+                // Legacy: no keyword arguments at all.
                 None => generator.call1(py, (python_input,)),
             }?;
 
@@ -310,7 +318,7 @@ where
             let ctx = ctx.clone();
             move |py: Python<'_>| {
                 Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                    .map(|context| context.into_any())
+                    .map(|context| vec![("context", context.into_any())])
             }
         }),
     )
@@ -708,7 +716,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
                 let ctx = ctx.clone();
                 move |py: Python<'_>| {
                     Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                        .map(|c| c.into_any())
+                        .map(|c| vec![("context", c.into_any())])
                 }
             }),
         )

@@ -1362,6 +1362,13 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
+                        #
+                        # NOTE: this yield stays a yield even under
+                        # DYN_TRTLLM_PUSH_EGRESS. It is pure-Python generator
+                        # delegation up to Handler.generate -- one thread, no
+                        # GIL release, no bridge. The expensive hop is the
+                        # OUTERMOST one into Rust, and that is where the push
+                        # replaces the pull; see request_handlers/push_egress.py.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 
