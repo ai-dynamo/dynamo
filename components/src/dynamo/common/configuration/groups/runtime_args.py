@@ -266,7 +266,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT_TYPES",
             default="chat,completions",
             obsolete_flag="--dyn-endpoint-types",
-            help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Use 'completions' for models without chat templates.",
+            help="Comma-separated list of endpoint types to enable. Options: "
+            "'chat', 'completions', or 'none'. Use 'completions' for models "
+            "without chat templates. Use 'none' for topology-only workers "
+            "fronted by another Dynamo service.",
         )
 
         add_argument(
