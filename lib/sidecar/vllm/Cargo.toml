@@ -19,11 +19,6 @@ ignored = ["prost"]
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
-# Composition root: the OpenAI frontend with the vLLM direct-gRPC dispatch
-# provider registered. Keeps the generic ai-dynamo wheel free of vLLM/tonic.
-[[bin]]
-name = "dynamo-vllm-frontend"
-path = "src/bin/frontend.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }

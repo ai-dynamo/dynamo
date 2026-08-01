@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-direct-frontend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo OpenAI frontend that registers the TensorRT-LLM / vLLM / SGLang direct-gRPC dispatch providers (one composition root for all direct backends)."
+
+[[bin]]
+name = "dynamo-direct-frontend"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-trtllm-sidecar = { path = "../trtllm" }
+dynamo-vllm-sidecar = { path = "../vllm" }
+dynamo-sglang-sidecar = { path = "../sglang" }
+dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-runtime = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { workspace = true }

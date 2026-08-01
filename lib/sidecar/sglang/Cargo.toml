@@ -19,11 +19,6 @@ ignored = ["prost"]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
-# Composition root: the OpenAI frontend with the sglang direct-gRPC dispatch
-# provider registered. Keeps the generic ai-dynamo wheel free of sglang/tonic.
-[[bin]]
-name = "dynamo-sglang-frontend"
-path = "src/bin/frontend.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }

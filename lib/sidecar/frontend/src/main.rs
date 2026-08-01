@@ -1,19 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo OpenAI-compatible frontend with the vLLM direct-gRPC dispatch provider
-//! registered (the composition root).
-//!
-//! It discovers `dynamo-vllm-sidecar --direct` workers via etcd and — because
-//! their model cards advertise `runtime_data["direct_backend"] = "vllm"` —
-//! dispatches inference straight to each worker's `Generate` gRPC server,
-//! bypassing the request plane, while `PushRouter` keeps instance selection,
-//! fault detection, and migration.
-//!
-//! This is a thin composition root: it registers the provider, then delegates
-//! to the same `run_input(Input::Http, EngineConfig::Dynamic)` path the stock
-//! frontend uses. Keeping the registration here (rather than in the Python
-//! bindings) keeps the generic `ai-dynamo` wheel free of the vLLM/tonic dep.
+//! Unified Dynamo OpenAI frontend for the direct-gRPC path. It registers the
+//! TensorRT-LLM, vLLM, and SGLang direct-dispatch providers, then runs the
+//! standard `run_input(Input::Http, EngineConfig::Dynamic)` frontend. Each
+//! discovered model card's `runtime_data["direct_backend"]` selects the matching
+//! provider, so one binary serves all three engines' direct workers. Keeping the
+//! registration here keeps the generic `ai-dynamo` wheel free of the engine/tonic
+//! deps.
 
 use std::sync::Arc;
 
@@ -23,11 +17,10 @@ use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::{Input, run_input};
 use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_runtime::{DistributedRuntime, Runtime, logging};
-use dynamo_vllm_sidecar::VllmDirectDispatchProvider;
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Dynamo OpenAI frontend with the vLLM direct-gRPC dispatch provider registered"
+    about = "Dynamo OpenAI frontend with the trtllm/vLLM/SGLang direct-gRPC dispatch providers registered"
 )]
 struct Args {
     /// Dynamo namespace to discover workers in.
@@ -52,20 +45,24 @@ fn main() -> anyhow::Result<()> {
     logging::init();
     let args = Args::parse();
 
-    // Own the signal/runtime flow like the sidecar binaries (see
-    // dynamo_backend_common::run): build the runtime, drive on the secondary.
     let runtime = Runtime::from_settings()?;
     let secondary = runtime.secondary();
     secondary.block_on(async move {
-        // Composition root: register the vLLM provider BEFORE the discovery
-        // watcher builds any routing, so direct-backend models resolve to a
-        // GrpcDispatch instead of the request-plane router.
-        register_direct_dispatch_provider(Arc::new(VllmDirectDispatchProvider::new()));
+        // Composition root: register every direct-dispatch provider before the
+        // discovery watcher builds routing, so each `direct_backend` model card
+        // resolves to its engine's GrpcDispatch instead of the request plane.
+        register_direct_dispatch_provider(Arc::new(
+            dynamo_trtllm_sidecar::TrtllmDirectDispatchProvider::new(),
+        ));
+        register_direct_dispatch_provider(Arc::new(
+            dynamo_vllm_sidecar::VllmDirectDispatchProvider::new(),
+        ));
+        register_direct_dispatch_provider(Arc::new(
+            dynamo_sglang_sidecar::SglangDirectDispatchProvider::new(),
+        ));
 
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-        // In dynamic mode the LocalModel is a frontend config holder (namespace,
-        // http host/port); the served models come from etcd discovery.
         let local_model = LocalModelBuilder::default()
             .model_name(args.model_name)
             .http_host(args.http_host)

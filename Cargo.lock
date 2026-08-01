@@ -2483,6 +2483,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-direct-frontend"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sglang-sidecar",
+ "dynamo-trtllm-sidecar",
+ "dynamo-vllm-sidecar",
+ "tokio",
+]
+
+[[package]]
+name = "dynamo-direct-register"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+]
+
+[[package]]
 name = "dynamo-ext-proc"
 version = "1.4.0"
 dependencies = [

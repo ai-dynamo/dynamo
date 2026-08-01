@@ -29,6 +29,8 @@ members = [
     "lib/sidecar/sglang",
     "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
+    "lib/sidecar/frontend",
+    "lib/sidecar/register",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
