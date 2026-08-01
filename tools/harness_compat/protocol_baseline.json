@@ -13,7 +13,7 @@
     "input_content_types": ["encrypted_content", "input_text", "null", "output_text"], "input_item_types": ["agent_message", "function_call", "function_call_output", "message"],
     "message_content_types": [], "message_roles": [], "output_config_keys": [], "request_paths": ["/v1/responses"],
     "shape_keys": ["input_items", "model", "stream", "text_keys", "tool_names", "tool_types", "top_level_keys"], "text_keys": ["format"],
-    "tool_names": ["collaboration", "create_goal", "exec_command", "get_goal", "request_user_input", "update_goal", "update_plan", "view_image", "write_stdin"],
+    "tool_names": ["collaboration", "create_goal", "exec_command", "get_goal", "list_mcp_resource_templates", "list_mcp_resources", "mcp__fixture", "read_mcp_resource", "request_user_input", "update_goal", "update_plan", "view_image", "write_stdin"],
     "tool_types": ["function", "namespace", "web_search"],
     "top_level_keys": ["client_metadata", "include", "input", "instructions", "model", "parallel_tool_calls", "prompt_cache_key", "reasoning", "store", "stream", "text", "tool_choice", "tools"]
   }

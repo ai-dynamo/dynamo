@@ -664,13 +664,16 @@ async def _run_scenario(
 
     if scenario == "compact":
         before = stream.event_count()
-        await stream.user(baseline_prompt)
+        await stream.user(
+            "Use Bash to inspect README.md and adder.py. Create answer.txt containing only 42 followed by a newline, "
+            "read it back with Bash, then reply exactly DONE."
+        )
         first = await stream.result(before, result_timeout_s)
         second_before = stream.event_count()
         await stream.user("/compact")
         second = await stream.result(second_before, result_timeout_s)
         final_before = stream.event_count()
-        await stream.user("After compaction, use Bash to read answer.txt and state its contents.")
+        await stream.user("After compaction, use Bash to read answer.txt, then reply exactly 42.")
         final = await stream.result(final_before, result_timeout_s)
         compact_boundary = stream.has_compact_boundary()
         return {
