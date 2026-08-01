@@ -44,7 +44,7 @@ def test_enable_router_hint_support_publishes_single_dp_rank_endpoint():
     enable_router_hint_support(runtime_config, engine_args, WorkerType.Prefill)
 
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
+        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, json.dumps(True)
     )
     runtime_config.set_engine_specific.assert_any_call(
         ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("prefill")
