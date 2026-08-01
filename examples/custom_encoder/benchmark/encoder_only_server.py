@@ -1,21 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serve a custom vision encoder through the OpenAI chat-completions wire format."""
+"""Serve a custom vision encoder through a minimal multipart HTTP endpoint."""
 
 from __future__ import annotations
 
 import argparse
 import importlib
-import json
 import logging
 import os
 import time
-import uuid
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Protocol
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
 
-from aiohttp import ContentTypeError, web
+from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
@@ -24,23 +22,15 @@ DEFAULT_MAX_REQUEST_SIZE_MIB = 64
 DEFAULT_ENCODER_CLASS = (
     "examples.custom_encoder.qwen2_5_vl_benchmark_encoder." "Qwen2_5VLBenchmarkEncoder"
 )
-_DUMMY_CONTENT = "ok"
+DUMMY_RESPONSE = b"encoder-ok"
 
 
 class Encoder(Protocol):
-    async def encode(self, raws: list[str]) -> list[Any]:
+    async def encode(self, raws: list[bytes]) -> list[Any]:
         ...
 
     def shutdown(self) -> None:
         ...
-
-
-@dataclass(frozen=True)
-class EncoderRequest:
-    image_url: str
-    model: str
-    stream: bool
-    include_usage: bool
 
 
 class RequestValidationError(ValueError):
@@ -48,213 +38,60 @@ class RequestValidationError(ValueError):
 
 
 ENCODER_KEY = web.AppKey("encoder", Encoder)
-MODEL_KEY = web.AppKey("model", str)
 
 
-def _extract_image_url(messages: Any) -> str:
-    if not isinstance(messages, list) or not messages:
-        raise RequestValidationError("'messages' must be a non-empty array")
-
-    image_urls: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            raise RequestValidationError("every message must be an object")
-        content = message.get("content")
-        if isinstance(content, str) or content is None:
-            continue
-        if not isinstance(content, list):
-            raise RequestValidationError(
-                "message 'content' must be a string or content-part array"
-            )
-        for part in content:
-            if not isinstance(part, dict):
-                raise RequestValidationError("every content part must be an object")
-            if part.get("type") != "image_url":
-                continue
-            image_url = part.get("image_url")
-            if not isinstance(image_url, dict) or not isinstance(
-                image_url.get("url"), str
-            ):
-                raise RequestValidationError(
-                    "an image_url part must contain image_url.url"
-                )
-            image_urls.append(image_url["url"])
-
-    if len(image_urls) != 1:
-        raise RequestValidationError(
-            f"exactly one image_url is required; received {len(image_urls)}"
-        )
-
-    image_url = image_urls[0]
-    header, separator, payload = image_url.partition(",")
-    if (
-        not separator
-        or not header.startswith("data:image/")
-        or not header.endswith(";base64")
-        or not payload
-    ):
-        raise RequestValidationError(
-            "image_url.url must be an inline base64 image data URI"
-        )
-    return image_url
+def _error_response(message: str, status: int) -> web.Response:
+    return web.Response(text=message, status=status, content_type="text/plain")
 
 
-def parse_request(body: Any, default_model: str) -> EncoderRequest:
-    if not isinstance(body, dict):
-        raise RequestValidationError("request body must be a JSON object")
-
-    model = body.get("model", default_model)
-    if not isinstance(model, str) or not model:
-        raise RequestValidationError("'model' must be a non-empty string")
-
-    stream = body.get("stream", False)
-    if not isinstance(stream, bool):
-        raise RequestValidationError("'stream' must be a boolean")
-
-    stream_options = body.get("stream_options")
-    if stream_options is not None and not isinstance(stream_options, dict):
-        raise RequestValidationError("'stream_options' must be an object")
-    include_usage = bool(stream_options and stream_options.get("include_usage", False))
-
-    return EncoderRequest(
-        image_url=_extract_image_url(body.get("messages")),
-        model=model,
-        stream=stream,
-        include_usage=include_usage,
-    )
-
-
-def _usage() -> dict[str, int]:
-    return {"prompt_tokens": 0, "completion_tokens": 1, "total_tokens": 1}
-
-
-def _error_response(message: str, status: int, error_type: str) -> web.Response:
-    return web.json_response(
-        {
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": None,
-            }
-        },
-        status=status,
-    )
-
-
-def _completion_payload(request_id: str, created: int, model: str) -> dict[str, Any]:
-    return {
-        "id": request_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": _DUMMY_CONTENT},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": _usage(),
-    }
-
-
-def _stream_chunks(
-    request_id: str, created: int, model: str, include_usage: bool
-) -> list[dict[str, Any]]:
-    chunks = [
-        {
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": _DUMMY_CONTENT},
-                    "finish_reason": "stop",
-                }
-            ],
-        }
-    ]
-    if include_usage:
-        chunks.append(
-            {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [],
-                "usage": _usage(),
-            }
-        )
-    return chunks
-
-
-async def _write_stream(
-    request: web.Request,
-    request_id: str,
-    created: int,
-    encoder_request: EncoderRequest,
-) -> web.StreamResponse:
-    response = web.StreamResponse(
-        status=200,
-        headers={
-            "Cache-Control": "no-cache",
-            "Content-Type": "text/event-stream",
-            "X-Accel-Buffering": "no",
-        },
-    )
-    await response.prepare(request)
-    for chunk in _stream_chunks(
-        request_id,
-        created,
-        encoder_request.model,
-        encoder_request.include_usage,
-    ):
-        encoded = json.dumps(chunk, separators=(",", ":")).encode("utf-8")
-        await response.write(b"data: " + encoded + b"\n\n")
-    await response.write(b"data: [DONE]\n\n")
-    await response.write_eof()
-    return response
-
-
-async def handle_chat_completion(request: web.Request) -> web.StreamResponse:
+async def _read_jpeg(request: web.Request) -> bytes:
+    if request.content_type != "multipart/form-data":
+        raise RequestValidationError("request must use multipart/form-data")
     try:
-        body = await request.json()
-    except (ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
-        return _error_response(
-            "request body must contain valid JSON", 400, "invalid_request_error"
+        reader = await request.multipart()
+        part = await reader.next()
+    except (AssertionError, ValueError) as error:
+        raise RequestValidationError(
+            "request contains invalid multipart data"
+        ) from error
+    if part is None or part.name != "image":
+        raise RequestValidationError(
+            "exactly one multipart field named 'image' is required"
         )
+    content_type = part.headers.get("Content-Type", "").partition(";")[0].lower()
+    if content_type != "image/jpeg":
+        raise RequestValidationError("the 'image' field must use image/jpeg")
+    image = bytes(await part.read(decode=False))
+    if not image:
+        raise RequestValidationError("the 'image' field must not be empty")
+    if await reader.next() is not None:
+        raise RequestValidationError(
+            "exactly one multipart field named 'image' is required"
+        )
+    return image
 
+
+async def handle_encode(request: web.Request) -> web.Response:
     try:
-        encoder_request = parse_request(body, request.app[MODEL_KEY])
+        image = await _read_jpeg(request)
     except RequestValidationError as error:
-        return _error_response(str(error), 400, "invalid_request_error")
+        return _error_response(str(error), 400)
 
-    request_id = f"chatcmpl-encoder-{uuid.uuid4().hex}"
-    created = int(time.time())
-    start = time.perf_counter()
+    started = time.perf_counter()
     try:
-        outputs = await request.app[ENCODER_KEY].encode([encoder_request.image_url])
+        outputs = await request.app[ENCODER_KEY].encode([image])
         if len(outputs) != 1:
             raise RuntimeError(
                 f"custom encoder returned {len(outputs)} outputs for one image"
             )
     except Exception as error:
-        logger.exception("Custom encoder request %s failed", request_id)
-        return _error_response(str(error), 500, "server_error")
+        logger.exception("Custom encoder request failed")
+        return _error_response(str(error), 500)
     logger.debug(
-        "Custom encoder request %s completed in %.3f ms",
-        request_id,
-        (time.perf_counter() - start) * 1000,
+        "Custom encoder request completed in %.3f ms",
+        (time.perf_counter() - started) * 1000,
     )
-
-    if encoder_request.stream:
-        return await _write_stream(request, request_id, created, encoder_request)
-    return web.json_response(
-        _completion_payload(request_id, created, encoder_request.model)
-    )
+    return web.Response(body=DUMMY_RESPONSE, content_type="text/plain")
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -269,16 +106,14 @@ async def _encoder_lifecycle(app: web.Application) -> AsyncIterator[None]:
 
 def create_app(
     encoder: Encoder,
-    model: str = DEFAULT_MODEL,
     max_request_size_mib: int = DEFAULT_MAX_REQUEST_SIZE_MIB,
 ) -> web.Application:
     if max_request_size_mib <= 0:
         raise ValueError("max_request_size_mib must be positive")
     app = web.Application(client_max_size=max_request_size_mib * 1024**2)
     app[ENCODER_KEY] = encoder
-    app[MODEL_KEY] = model
     app.router.add_get("/health", handle_health)
-    app.router.add_post("/v1/chat/completions", handle_chat_completion)
+    app.router.add_post("/encode", handle_encode)
     app.cleanup_ctx.append(_encoder_lifecycle)
     return app
 
@@ -381,20 +216,17 @@ def main() -> None:
     )
     encoder.load(args.model)
     logger.info(
-        "Loaded custom encoder %s for %s; serving http://%s:%d",
+        "Loaded custom encoder %s for %s; serving http://%s:%d/encode",
         args.custom_encoder_class,
         args.model,
         args.host,
         args.port,
     )
-    try:
-        web.run_app(
-            create_app(encoder, args.model, args.max_request_size_mib),
-            host=args.host,
-            port=args.port,
-        )
-    finally:
-        encoder.shutdown()
+    web.run_app(
+        create_app(encoder, args.max_request_size_mib),
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":

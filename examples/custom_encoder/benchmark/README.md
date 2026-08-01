@@ -3,122 +3,102 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Custom encoder benchmark services
+# Paired custom-encoder HTTP benchmark
 
-The encoder-only service exposes the same OpenAI chat-completions request shape used
-by aiperf while running only `AsyncVisionEncoder`. It loads the Qwen2.5-VL benchmark
-vision tower, preprocesses exactly one inline image per request, executes the custom
-encoder, and returns the dummy assistant content `ok`. It does not start a language
-model or generate tokens.
+This benchmark runs the same unique JPEG through two services at once:
 
-## Start the service
+- the aggregated custom-encoder plus Qwen2.5-1.5B service;
+- a standalone custom encoder with no language model or OpenAI protocol.
 
-The defaults match the performance-only Qwen2.5 benchmark configuration. The full
-2048-wide vision output is computed and truncated to 1536 columns; this is not a
-trained projection and makes no quality claim.
+For concurrency `x`, the client owns `x` independent pair lanes. Each lane starts
+one request against each service and does not take its next image until both
+responses finish. There are therefore at most `x` requests at each endpoint and
+`2x` HTTP requests in flight overall.
+
+## Encoder-only service
+
+The encoder endpoint accepts one raw JPEG in the multipart field `image`:
+
+```text
+POST /encode
+Content-Type: multipart/form-data
+
+image: image/jpeg
+```
+
+After the vision encoder completes it returns the ten-byte plain-text body
+`encoder-ok`. It does not parse prompts, count tokens, generate text, or return an
+OpenAI response. The uploaded JPEG bytes are passed directly to the shared Qwen
+encoder loader, so this path has no JSON or base64 conversion.
+
+Start it on port 8001:
 
 ```bash
 python -m examples.custom_encoder.benchmark.encoder_only_server \
   --host 0.0.0.0 \
-  --port 8000 \
-  --model Qwen/Qwen2.5-1.5B-Instruct
+  --port 8001 \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --max-queue-delay-us 1000
 ```
 
-The server becomes reachable only after the encoder is loaded and warmed. Check it
-with `curl --fail http://localhost:8000/health`.
+The process is ready when `GET /health` returns `{"status":"ready"}`.
 
-Override the backend with `--custom-encoder-class module.ClassName`. Encoder tuning
-continues to use the backend's existing `DYN_QWEN2_VL_*` variables. The service also
-accepts `DYN_HTTP_HOST`, `DYN_HTTP_PORT`, `DYN_ENCODER_ONLY_MODEL`,
-`DYN_CUSTOM_ENCODER_CLASS`, `DYN_CUSTOM_ENCODER_MAX_QUEUE_DELAY_US`, and
-`DYN_HTTP_MAX_REQUEST_SIZE_MIB` (64 MiB by default, before base64 decoding).
+## Aggregated service
 
-## Run aiperf
-
-Generate the existing deterministic single-image workload, then point aiperf at the
-encoder-only endpoint:
+Start the existing performance-only Qwen2.5 stack on port 8000:
 
 ```bash
-export WORKLOAD_DIR=/dynamo-tmp/logs/encoder-only/workload
+export DYN_HTTP_PORT=8000
+export DYN_SYSTEM_PORT=8081
+export DYN_QWEN2_VL_ENCODER_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
+export DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE=1536
+export DYN_QWEN2_VL_PREPROCESS_CONCURRENCY=64
+export DYN_QWEN2_VL_MAX_BATCH_PATCHES=$((32 * 36 * 36))
+export DYN_QWEN2_VL_MAX_BATCH_ITEMS=64
+export DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS=1,2,4,8,16,32,64
+export DYN_QWEN2_VL_GRAPH_IMAGE_SIZES=300x300,500x500
+export DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE=0
+
+bash examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh \
+  --custom-encoder-max-queue-delay-us 1000 \
+  --gpu-memory-utilization 0.4 \
+  --no-enable-prefix-caching
+```
+
+## Workload
+
+Generate 1,000 unique, randomly mixed images with exact ISL 644 prompts:
+
+```bash
+export WORKLOAD_DIR=/dynamo-tmp/logs/paired-custom-encoder/workload
+
 python -m examples.custom_encoder.benchmark.safeguard_proxy_workload generate \
   --output-dir "$WORKLOAD_DIR" \
-  --image-size 500 \
-  --unique-images 1
+  --requests 1000 \
+  --image-size-count 300x300:500 \
+  --image-size-count 500x500:500 \
+  --concurrencies 64
+```
 
-aiperf profile \
-  --model Qwen/Qwen2.5-1.5B-Instruct \
-  --url http://localhost:8000 \
-  --endpoint-type chat \
-  --endpoint /v1/chat/completions \
+Generated 300x300 JPEGs are 7 KiB plus or minus 256 bytes. Generated 500x500
+JPEGs are 35 KiB plus or minus 256 bytes. No trailing padding is added.
+
+## Run
+
+```bash
+python -m examples.custom_encoder.benchmark.run_paired_http_benchmark \
   --input-file "$WORKLOAD_DIR/image_custom_1000_isl644.jsonl" \
-  --custom-dataset-type single_turn \
-  --concurrency 4 \
-  --conversation-num 100 \
-  --warmup-request-count 10 \
-  --extra-inputs "max_tokens:1" \
-  --extra-inputs "stream:true" \
-  --streaming \
-  --artifact-dir /dynamo-tmp/logs/encoder-only/aiperf \
-  --ui none \
-  --no-server-metrics
+  --concurrency 64 \
+  --encoder-url http://localhost:8001/encode \
+  --aggregated-url http://localhost:8000/v1/chat/completions \
+  --output-file /dynamo-tmp/logs/paired-custom-encoder/result.json
 ```
 
-Do not enable `--use-server-token-count`: the dummy response deliberately reports
-zero prompt tokens. Compare request latency, TTFT, and request throughput with the
-combined custom-encoder-plus-decoder service. ITL and generated-token throughput are
-not meaningful because the encoder-only service emits one dummy content chunk.
+The client loads and audits the entire workload before timing. Encoder-only
+requests use multipart JPEG bytes. Aggregated requests use the same bytes in an
+OpenAI image data URI and request exactly seven output tokens without streaming.
+Any failed pair invalidates the run; requests are never retried.
 
-## Run the parallel throughput sweep
-
-The paired sweep compares one AIPerf client against the combined service with two
-simultaneous clients: one against the same combined service and one against the
-encoder-only service. Both clients use the selected concurrency, and a parallel cell
-finishes only after both clients complete. The report keeps the clients separate and
-reports their completion-rate range as 1,000 requests divided by each client's wall
-time. It does not add unlike request streams into an aggregate request rate.
-
-Generate the synthetic images on the benchmark host. Each measured client receives
-1,000 unique 500×500 JPEGs. Pools are disjoint between concurrency values and between
-the two parallel clients; the control and parallel combined clients share a pool so
-their payloads are directly comparable.
-
-```bash
-export RUN_DIR=/dynamo-tmp/logs/$(date -u +%m-%d)/qwen25-parallel-encoder
-export WORKLOAD_DIR="$RUN_DIR/workload"
-
-python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
-  generate \
-  --workload-dir "$WORKLOAD_DIR" \
-  --concurrencies 8 16 32 64
-
-python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
-  validate-workload \
-  --workload-dir "$WORKLOAD_DIR" \
-  --concurrencies 8 16 32 64
-```
-
-Set immutable source and image provenance before starting the GPU run:
-
-```bash
-export DYNAMO_BENCHMARK_COMMIT="$(git rev-parse HEAD)"
-export DYNAMO_BENCHMARK_BRANCH="$(git branch --show-current)"
-export DYNAMO_BENCHMARK_IMAGE=<exact-container-image>
-export DYNAMO_BASE_IMAGE_COMMIT=<full-main-commit-used-to-build-the-image>
-
-python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
-  run \
-  --workload-dir "$WORKLOAD_DIR" \
-  --output-dir "$RUN_DIR/measured" \
-  --concurrencies 8 16 32 64 \
-  --confirmation-runs 3
-
-python -m examples.custom_encoder.benchmark.run_parallel_encoder_sweep \
-  summarize "$RUN_DIR/measured"
-```
-
-Every measured AIPerf client sends 1,000 streaming requests after a separate
-20-request warmup. Combined requests use exact ISL 644 and OSL 7. Encoder-only
-requests use the same calibrated input and return one dummy token. The harness uses
-separate AIPerf IPC directories and a process barrier, rejects any failed request,
-and records command lines, joint timing, latency percentiles, GPU utilization, and
-source/image provenance.
+The primary result is `paired_images_per_second`, calculated as the number of
+completed image pairs divided by total wall time. The report intentionally does
+not calculate `2,000 / wall_time` as a combined throughput.

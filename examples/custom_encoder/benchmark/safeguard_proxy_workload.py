@@ -34,6 +34,10 @@ TARGET_OSL = 7
 SEED = 42
 JPEG_MIN_BYTES = 50 * 1024
 JPEG_MAX_BYTES = 60 * 1024
+JPEG_SIZE_TARGETS = {
+    (300, 300): (7 * 1024, 256),
+    (500, 500): (35 * 1024, 256),
+}
 DEFAULT_IMAGE_SIZE = 500
 BENCHMARK_IMAGE_SIZE_COUNTS = ((300, 300, 500), (500, 500, 500))
 BASE_PROMPT = "Classify the image and briefly explain the label."
@@ -72,11 +76,15 @@ def _generate_jpeg(
     path: Path,
     seed: int,
     image_size: tuple[int, int] = (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE),
-    min_bytes: int = JPEG_MIN_BYTES,
-    max_bytes: int = JPEG_MAX_BYTES,
+    min_bytes: int | None = None,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     if min(image_size) < 1:
         raise ValueError("image dimensions must be positive")
+    if (min_bytes is None) != (max_bytes is None):
+        raise ValueError("min_bytes and max_bytes must be provided together")
+    if min_bytes is None or max_bytes is None:
+        min_bytes, max_bytes = _jpeg_size_bounds(image_size)
     pixels = np.random.default_rng(seed).integers(
         0, 256, (image_size[1], image_size[0], 3), dtype=np.uint8
     )
@@ -128,6 +136,14 @@ def _generate_jpeg(
         "encoded_sha256": hashlib.sha256(payload).hexdigest(),
         "decoded_rgb_sha256": decoded_hash,
     }
+
+
+def _jpeg_size_bounds(image_size: tuple[int, int]) -> tuple[int, int]:
+    target = JPEG_SIZE_TARGETS.get(image_size)
+    if target is None:
+        return JPEG_MIN_BYTES, JPEG_MAX_BYTES
+    target_bytes, tolerance_bytes = target
+    return target_bytes - tolerance_bytes, target_bytes + tolerance_bytes
 
 
 def _calculate_custom_isl_components(
@@ -345,6 +361,17 @@ def generate_workload(
         }
         for width, height, count in normalized_sizes
     ]
+    size_byte_bounds = {
+        f"{width}x{height}": {
+            "target_bytes": JPEG_SIZE_TARGETS.get(
+                (width, height),
+                ((JPEG_MIN_BYTES + JPEG_MAX_BYTES) // 2, 0),
+            )[0],
+            "min_bytes": _jpeg_size_bounds((width, height))[0],
+            "max_bytes": _jpeg_size_bounds((width, height))[1],
+        }
+        for width, height, _ in normalized_sizes
+    }
     manifest = {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
@@ -363,8 +390,7 @@ def generate_workload(
             "format": "JPEG",
             "quality": 85,
             "subsampling": "4:2:0",
-            "min_bytes": JPEG_MIN_BYTES,
-            "max_bytes": JPEG_MAX_BYTES,
+            "size_bytes_by_image_size": size_byte_bounds,
         },
         "file_size_bytes": {
             "min": min(sizes),
@@ -439,8 +465,8 @@ def validate_workload(
             f"{expected_unique_images}"
         )
     target_isl = int(manifest["target_isl"])
-    min_bytes = int(manifest["encoding"]["min_bytes"])
-    max_bytes = int(manifest["encoding"]["max_bytes"])
+    encoding = manifest["encoding"]
+    size_byte_bounds = encoding.get("size_bytes_by_image_size", {})
     input_path = Path(manifest["input"]["path"])
     rows = [
         json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines()
@@ -478,12 +504,17 @@ def validate_workload(
     for record in manifest["images"]:
         path = Path(record["path"])
         payload = path.read_bytes()
+        expected_dimensions = (int(record["width"]), int(record["height"]))
+        bounds = size_byte_bounds.get(
+            f"{expected_dimensions[0]}x{expected_dimensions[1]}"
+        )
+        min_bytes = int(bounds["min_bytes"] if bounds else encoding["min_bytes"])
+        max_bytes = int(bounds["max_bytes"] if bounds else encoding["max_bytes"])
         if not min_bytes <= len(payload) <= max_bytes:
             raise AssertionError(f"JPEG size out of range: {path}")
         encoded_hash = hashlib.sha256(payload).hexdigest()
         if encoded_hash != record["encoded_sha256"]:
             raise AssertionError(f"encoded hash mismatch: {path}")
-        expected_dimensions = (int(record["width"]), int(record["height"]))
         with Image.open(path) as encoded:
             if encoded.format != "JPEG" or encoded.size != expected_dimensions:
                 raise AssertionError(f"invalid JPEG shape or format: {path}")

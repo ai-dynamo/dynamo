@@ -6,16 +6,18 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
-import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import pytest
+from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
-from examples.custom_encoder.benchmark.encoder_only_server import create_app
+from examples.custom_encoder.benchmark.encoder_only_server import (
+    DUMMY_RESPONSE,
+    create_app,
+)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -26,22 +28,18 @@ pytestmark = [
     pytest.mark.multimodal,
 ]
 
-_IMAGE = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y"
-    "AAAAASUVORK5CYII="
-)
+_JPEG = b"\xff\xd8jpeg-bytes\xff\xd9"
 
 
 class _FakeEncoder:
     def __init__(self) -> None:
-        self.raws: list[list[str]] = []
+        self.raws: list[list[bytes]] = []
         self.failures_remaining = 0
         self.started: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
         self.shutdown_calls = 0
 
-    async def encode(self, raws: list[str]) -> list[object]:
+    async def encode(self, raws: list[bytes]) -> list[object]:
         self.raws.append(raws)
         if self.started is not None:
             self.started.set()
@@ -56,21 +54,28 @@ class _FakeEncoder:
         self.shutdown_calls += 1
 
 
-def _payload(*images: str, stream: bool = False) -> dict:
-    content = [{"type": "text", "text": "encode this image"}]
-    content.extend(
-        {"type": "image_url", "image_url": {"url": image}} for image in images
+def _form(
+    image: bytes = _JPEG,
+    *,
+    field_name: str = "image",
+    content_type: str = "image/jpeg",
+    extra: bool = False,
+) -> FormData:
+    form = FormData()
+    form.add_field(
+        field_name,
+        io.BytesIO(image),
+        filename="image.jpg",
+        content_type=content_type,
     )
-    return {
-        "model": "test-model",
-        "messages": [{"role": "user", "content": content}],
-        "stream": stream,
-    }
+    if extra:
+        form.add_field("metadata", "unexpected")
+    return form
 
 
 @asynccontextmanager
 async def _client(encoder: _FakeEncoder) -> AsyncIterator[TestClient]:
-    client = TestClient(TestServer(create_app(encoder, model="default-model")))
+    client = TestClient(TestServer(create_app(encoder)))
     await client.start_server()
     try:
         yield client
@@ -78,121 +83,77 @@ async def _client(encoder: _FakeEncoder) -> AsyncIterator[TestClient]:
         await client.close()
 
 
-async def test_nonstreaming_request_runs_one_encoder_call() -> None:
+async def test_multipart_request_forwards_raw_jpeg_and_returns_ten_bytes() -> None:
     encoder = _FakeEncoder()
     async with _client(encoder) as client:
         health = await client.get("/health")
-        response = await client.post("/v1/chat/completions", json=_payload(_IMAGE))
+        response = await client.post("/encode", data=_form())
+        body = await response.read()
 
         assert health.status == 200
         assert await health.json() == {"status": "ready"}
         assert response.status == 200
-        body = await response.json()
-        assert body["object"] == "chat.completion"
-        assert body["model"] == "test-model"
-        assert body["choices"][0]["message"]["content"] == "ok"
-        assert body["usage"] == {
-            "prompt_tokens": 0,
-            "completion_tokens": 1,
-            "total_tokens": 1,
-        }
-        assert encoder.raws == [[_IMAGE]]
+        assert response.content_type == "text/plain"
+        assert body == DUMMY_RESPONSE == b"encoder-ok"
+        assert len(body) == 10
+        assert encoder.raws == [[_JPEG]]
 
     assert encoder.shutdown_calls == 1
 
 
 async def test_request_larger_than_aiohttp_default_is_accepted() -> None:
     encoder = _FakeEncoder()
-    image = "data:image/png;base64," + base64.b64encode(b"\0" * 800_000).decode()
-    body = io.BytesIO(json.dumps(_payload(image)).encode())
+    image = b"x" * 2_000_000
     async with _client(encoder) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            data=body,
-            headers={"Content-Type": "application/json"},
-        )
+        response = await client.post("/encode", data=_form(image))
 
     assert response.status == 200
     assert encoder.raws == [[image]]
 
 
-async def test_stream_starts_after_encoder_and_reports_requested_usage() -> None:
-    encoder = _FakeEncoder()
-    encoder.started = asyncio.Event()
-    encoder.release = asyncio.Event()
-    payload = _payload(_IMAGE, stream=True)
-    payload["stream_options"] = {"include_usage": True}
-
-    async with _client(encoder) as client:
-        response_task = asyncio.create_task(
-            client.post("/v1/chat/completions", json=payload)
-        )
-        await encoder.started.wait()
-        assert not response_task.done()
-
-        encoder.release.set()
-        response = await response_task
-        events = [
-            line.removeprefix("data: ")
-            for line in (await response.text()).splitlines()
-            if line.startswith("data: ")
-        ]
-
-    assert response.status == 200
-    assert events[-1] == "[DONE]"
-    chunks = [json.loads(event) for event in events[:-1]]
-    assert chunks[0]["choices"][0]["delta"]["content"] == "ok"
-    assert chunks[0]["choices"][0]["finish_reason"] == "stop"
-    assert chunks[1]["choices"] == []
-    assert chunks[1]["usage"]["completion_tokens"] == 1
-
-
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("form", "message"),
     [
-        (_payload(), "exactly one image_url"),
-        (_payload(_IMAGE, _IMAGE), "exactly one image_url"),
-        (_payload("https://example.com/image.png"), "inline base64 image"),
-        ({**_payload(_IMAGE), "stream": "yes"}, "'stream' must be a boolean"),
+        (_form(field_name="photo"), "field named 'image'"),
+        (_form(content_type="image/png"), "must use image/jpeg"),
+        (_form(image=b""), "must not be empty"),
+        (_form(extra=True), "exactly one multipart field"),
     ],
 )
-async def test_invalid_requests_return_openai_error(
-    payload: dict, message: str
+async def test_invalid_multipart_requests_return_plain_errors(
+    form: FormData, message: str
 ) -> None:
     encoder = _FakeEncoder()
     async with _client(encoder) as client:
-        response = await client.post("/v1/chat/completions", json=payload)
-        body = await response.json()
+        response = await client.post("/encode", data=form)
+        body = await response.text()
 
     assert response.status == 400
-    assert message in body["error"]["message"]
-    assert body["error"]["type"] == "invalid_request_error"
+    assert response.content_type == "text/plain"
+    assert message in body
     assert encoder.raws == []
 
 
-async def test_malformed_json_returns_openai_error() -> None:
+async def test_non_multipart_request_is_rejected() -> None:
     encoder = _FakeEncoder()
     async with _client(encoder) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            data="{",
-            headers={"Content-Type": "application/json"},
-        )
-        body = await response.json()
+        response = await client.post("/encode", data=_JPEG)
+        body = await response.text()
 
     assert response.status == 400
-    assert body["error"]["type"] == "invalid_request_error"
+    assert "multipart/form-data" in body
+    assert encoder.raws == []
 
 
 async def test_encoder_failure_does_not_stop_later_requests() -> None:
     encoder = _FakeEncoder()
     encoder.failures_remaining = 1
     async with _client(encoder) as client:
-        failed = await client.post("/v1/chat/completions", json=_payload(_IMAGE))
-        failed_body = await failed.json()
-        succeeded = await client.post("/v1/chat/completions", json=_payload(_IMAGE))
+        failed = await client.post("/encode", data=_form())
+        failed_body = await failed.text()
+        succeeded = await client.post("/encode", data=_form())
 
     assert failed.status == 500
-    assert failed_body["error"]["type"] == "server_error"
+    assert failed_body == "encoder failed"
     assert succeeded.status == 200
     assert len(encoder.raws) == 2
