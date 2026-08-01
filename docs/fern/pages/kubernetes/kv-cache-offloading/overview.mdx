@@ -43,7 +43,7 @@ Each offloading backend uses the same `--kv-transfer-config` hook with a differe
 | Backend | `kv_connector` | Sizing | Best for |
 |---|---|---|---|
 | **KVBM** (KV Block Manager) | `DynamoConnector` (with `kv_connector_module_path: kvbm.vllm_integration.connector`) | `DYN_KVBM_CPU_CACHE_GB`, `DYN_KVBM_DISK_CACHE_GB` (env) | Dynamo-native CPU/disk tiering across vLLM and TensorRT-LLM |
-| **LMCache** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
+| **[LMCache](./lmcache.mdx)** | `LMCacheMPConnector` | LMCache server config | Prefill-once / reuse-everywhere across a fleet |
 | **FlexKV** | `FlexKVConnectorV1` | `DYNAMO_USE_FLEXKV=1`, `FLEXKV_CPU_CACHE_GB` (env) | Distributed KV offloading runtime |
 | **SGLang HiCache** | n/a — use `--enable-hierarchical-cache` and `DYN_SHARED_CACHE_TYPE` instead | `DYN_SHARED_CACHE_MULTIPLIER` | SGLang hierarchical cache with a tier-aware router |
 
@@ -110,6 +110,7 @@ After the worker is `Running`, send repeated requests that share a long prefix a
 These cover engine internals, the local-CLI workflow, and tuning for each backend:
 
 - [KVBM Guide](../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md) — KV Block Manager architecture and the full env-var reference.
+- [Deploy LMCache MP](./lmcache.mdx) — full LMCache MP deployment walkthrough (operator, `LMCacheEngine`, worker).
 - [Local KV Cache Offloading](../../cli/kv-cache-offloading/overview.mdx) — compare the available backends and run their local examples.
 - [Using HiCache](../../developer-guide/knowledge-base/modular-components/backends/sglang/hicache.md) — SGLang hierarchical cache.
 - [Publish KV Events](../../developer-guide/advanced-customizations/writing-custom-backends/publish-kv-events.md) — publish KV events from a custom engine.
