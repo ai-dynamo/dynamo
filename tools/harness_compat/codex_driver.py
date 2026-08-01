@@ -49,6 +49,7 @@ def _fingerprint(value: Any) -> Any:
                 result[key] = value[key][:12]
         params = value.get("params")
         if isinstance(params, dict):
+            result["params_keys"] = sorted(params)
             if isinstance(params.get("threadId"), str):
                 result["params_threadId"] = params["threadId"][:12]
             if isinstance(params.get("turnId"), str):
@@ -66,9 +67,12 @@ def _fingerprint(value: Any) -> Any:
                     result["turn_status"] = turn["status"]
             error = params.get("error")
             if isinstance(error, dict):
+                result["error_keys"] = sorted(error)
                 for key in ("code", "type"):
                     if isinstance(error.get(key), (str, int)):
                         result[f"error_{key}"] = error[key]
+            elif error is not None:
+                result["error_value_type"] = type(error).__name__
         return result
     if isinstance(value, list):
         return {"list_length": len(value), "items": [_fingerprint(item) for item in value[:8]]}
