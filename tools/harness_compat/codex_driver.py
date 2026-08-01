@@ -966,6 +966,35 @@ async def _run_scenario(
             and (workspace / "root_after_fork.txt").exists(),
         }
 
+    if scenario == "thread_archive":
+        first_turn = await _start_turn(server, thread_id, baseline_prompt)
+        first = await _wait_turn(server, thread_id, first_turn)
+        await server.request("thread/archive", {"threadId": thread_id})
+        await server.notification(
+            "thread/archived", lambda message: message.get("params", {}).get("threadId") == thread_id
+        )
+        await server.request("thread/unarchive", {"threadId": thread_id})
+        await server.notification(
+            "thread/unarchived", lambda message: message.get("params", {}).get("threadId") == thread_id
+        )
+        resume = await server.request("thread/resume", {"threadId": thread_id})
+        second_turn = await _start_turn(
+            server, thread_id, "Use a shell tool to read answer.txt, create archive_resumed.txt containing RESUMED, then read it back."
+        )
+        second = await _wait_turn(server, thread_id, second_turn)
+        resumed_file_exists = (workspace / "archive_resumed.txt").exists()
+        return {
+            "first_turn_status": first["status"],
+            "archived": True,
+            "unarchived": True,
+            "resume_result": _fingerprint(resume),
+            "second_turn_status": second["status"],
+            "resumed_file_exists": resumed_file_exists,
+            "reached": first["status"] == "completed"
+            and second["status"] == "completed"
+            and resumed_file_exists,
+        }
+
     if scenario == "detached_review":
         review = await server.request(
             "review/start",
@@ -1347,6 +1376,7 @@ def main() -> int:
             "rollback",
             "thread_fork",
             "thread_resume",
+            "thread_archive",
             "detached_review",
             "subagent_compact",
             "invalid_lifecycle",
