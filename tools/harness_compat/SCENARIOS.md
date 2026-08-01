@@ -29,6 +29,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C5a1 | Codex persisted-thread resume | fresh app-server process completes a later tool turn | stored Responses history remains accepted after process restart | P1 |
 | C5a2 | Codex archive/unarchive | archive and restore a completed thread, then resume it for a state-dependent tool turn | archival lifecycle notifications, stored Responses history, and subsequent rehydration remain accepted | P2 |
 | C5a3 | Codex injected Responses history | inject an assistant `output_text` item, then have a coding turn derive a file from it | app-server’s raw Responses history injection remains accepted by Dynamo and preserves assistant context | P2 |
+| C5a4 | Codex injected agent handoff | inject Codex `agent_message` with `encrypted_content`, then have a coding turn derive a file from it | agent handoff normalization is exercised through native app-server persistence and the Responses tool loop | P1 |
 | C5b | Codex detached review | detached review thread emits entry/exit review items | reviewer-specific Responses stream and lifecycle remain accepted | P1 |
 | C6 | Codex active-turn steering | `turn/steer` accepted while turn is active | cancellation/final SSE semantics leave next user item valid | P0 |
 | C7 | Codex interruption | `turn/interrupt` accepted before completion | canceled stream terminates without corrupting follow-up turn | P0 |
@@ -64,4 +65,4 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 
 ## First nightly distillation
 
-The initial nightlies should run `C1a`, `C1b`, `C5`, `C6` (with observed tool use), `A1a`, `A1b`, `A1d`, and `A4`, plus a rotation of `X1` and `X2`. The confirmed `C2` parser regression belongs in the Rust protocol unit test; keep the native child-agent workflow weekly because the model may choose unbounded additional delegation despite the one-child prompt. `A2`–`A5` remain discovery-only until their native reach signals become deterministic.
+The initial nightlies should run `C1a`, `C1b`, `C5`, `C5a4`, `C6` (with observed tool use), `A1a`, `A1b`, `A1d`, and `A4`, plus a rotation of `X1` and `X2`. The confirmed `C2` parser regression belongs in the Rust protocol unit test; `C5a4` adds a bounded native regression for its exact wire shape. Keep the model-directed child-agent workflow weekly because the model may choose unbounded additional delegation despite the one-child prompt. `A2`–`A5` remain discovery-only until their native reach signals become deterministic.

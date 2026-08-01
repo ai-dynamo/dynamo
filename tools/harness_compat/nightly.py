@@ -15,6 +15,7 @@ CORE_CASES = (
     ("codex", "steer_after_tool", ("--turn-timeout-s", "180")),
     ("codex", "compact", ("--turn-timeout-s", "180")),
     ("codex", "structured_output", ("--turn-timeout-s", "180")),
+    ("codex", "inject_agent_message", ("--turn-timeout-s", "180")),
     ("codex", "tool_failure", ("--turn-timeout-s", "180")),
     ("claude", "compact", ("--result-timeout-s", "420")),
     ("claude", "structured_output", ("--result-timeout-s", "420")),

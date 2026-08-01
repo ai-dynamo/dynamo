@@ -1026,6 +1026,39 @@ async def _run_scenario(
             "reached": turn["status"] == "completed" and injected_marker_matches,
         }
 
+    if scenario == "inject_agent_message":
+        injected = await server.request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "agent_message",
+                        "author": "harness",
+                        "recipient": "coding-agent",
+                        "content": [
+                            {"type": "encrypted_content", "encrypted_content": "opaque-handoff"},
+                            {"type": "input_text", "text": "The required marker is AGENT_HANDOFF."},
+                        ],
+                    }
+                ],
+            },
+        )
+        turn_id = await _start_turn(
+            server,
+            thread_id,
+            "Use the agent handoff already in this thread. Create agent_handoff.txt containing exactly its required marker, then read the file with a shell tool.",
+        )
+        turn = await _wait_turn(server, thread_id, turn_id)
+        handoff_file = workspace / "agent_handoff.txt"
+        handoff_marker_matches = handoff_file.exists() and handoff_file.read_text().strip() == "AGENT_HANDOFF"
+        return {
+            "inject_result": _fingerprint(injected),
+            "turn_status": turn["status"],
+            "handoff_marker_matches": handoff_marker_matches,
+            "reached": turn["status"] == "completed" and handoff_marker_matches,
+        }
+
     if scenario == "detached_review":
         review = await server.request(
             "review/start",
@@ -1409,6 +1442,7 @@ def main() -> int:
             "thread_resume",
             "thread_archive",
             "inject_items",
+            "inject_agent_message",
             "detached_review",
             "subagent_compact",
             "invalid_lifecycle",
