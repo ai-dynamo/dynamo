@@ -6,7 +6,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -21,17 +20,13 @@ use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
-    WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
+use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
     WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelector,
-};
-use crate::scheduling::{
-    KvSchedulerError, RoutingEligibility, SchedulingRequest, WorkerSelectionPolicyError,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -49,36 +44,9 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
-struct HighestWorkerSelector {
+struct HighestWorkerScorer {
     calls: Cell<usize>,
 }
-
-impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        self.calls.set(self.calls.get() + 1);
-        let mut selected = None;
-        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-            selected = selected.max(Some(worker));
-        });
-        let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
-        Ok(WorkerSelectionResult {
-            worker,
-            required_blocks: request.request_blocks(block_size),
-            effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-            cached_tokens: request.effective_cached_tokens_for(worker),
-            potential_decode_blocks: request
-                .potential_decode_blocks_after_admission(worker, block_size),
-        })
-    }
-}
-
-struct HighestWorkerScorer;
 
 impl WorkerScorer for HighestWorkerScorer {
     fn score(
@@ -87,6 +55,7 @@ impl WorkerScorer for HighestWorkerScorer {
         candidates: WorkerCandidates<'_>,
         contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
+        self.calls.set(self.calls.get() + 1);
         for (row, worker) in candidates.workers().iter().enumerate() {
             contributions[row] = -2.0 * worker.worker_id as f64;
         }
@@ -283,17 +252,22 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 }
 
 #[tokio::test]
-async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
+async fn worker_selection_policy_factory_is_per_partition_and_books_selected_worker() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&factory_calls);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
-        .worker_selector_factory(Box::new(move || {
+        .worker_selection_policy_factory(move |config| {
             calls.fetch_add(1, Ordering::Relaxed);
-            Box::new(HighestWorkerSelector {
-                calls: Cell::new(0),
-            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
-        }))
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                "test",
+                vec![Box::new(HighestWorkerScorer {
+                    calls: Cell::new(0),
+                })],
+                Box::new(LowestCostPicker),
+            )
+        })
         .build()
         .await
         .expect("build selection service");
@@ -359,7 +333,13 @@ async fn native_worker_selection_policy_scores_picks_and_books() {
     let app = native_policy_app(|config| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            vec![Box::new(WorkerIdScorer), Box::new(HighestWorkerScorer)],
+            "test",
+            vec![
+                Box::new(WorkerIdScorer),
+                Box::new(HighestWorkerScorer {
+                    calls: Cell::new(0),
+                }),
+            ],
             Box::new(LowestCostPicker),
         )
     })
@@ -389,6 +369,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
     let app = native_policy_app(|config| {
         WorkerSelectionPolicy::new(
             config.clone(),
+            "test",
             vec![Box::new(NonFiniteScorer)],
             Box::new(LowestCostPicker),
         )
@@ -418,7 +399,12 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
     let app = native_policy_app(|config| {
-        WorkerSelectionPolicy::new(config.clone(), Vec::new(), Box::new(InvalidRowPicker))
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            "test",
+            Vec::new(),
+            Box::new(InvalidRowPicker),
+        )
     })
     .await;
     assert_eq!(
