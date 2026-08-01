@@ -84,6 +84,19 @@ exceptions:
       owned and handled by its own component team and tracked separately rather
       than gated here. The glob covers the whole vendored dir so the libsw*
       companions are waived too, not just libavcodec.
+
+      Expected to narrow. DALI has since restricted its own ffmpeg build to drop
+      the software h264/hevc/aac decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352,
+      May 2026), keeping the mp4toannexb bitstream filters so hardware decode
+      still works -- the same split Dynamo's in-tree ffmpeg uses. The DALI build
+      vendored in the image we consume predates that change: enumerating
+      av_codec_iterate on its libavcodec still registers h264, hevc, aac,
+      aac_fixed and aac_latm (446 decoders total). Re-check with
+      container/compliance/enumerate_bundled_decoders.py when the vendored
+      version moves;
+      once a build carrying the trim is in place this waiver can be narrowed to
+      the non-codec companions, or dropped. Treat it as time-limited rather than
+      settled.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
