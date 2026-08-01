@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import dataclasses
-import importlib
 import inspect
 import json
 import logging
@@ -45,6 +43,7 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -101,107 +100,6 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         pass
-
-
-class RLMixin:
-    """Mixin providing generic tokenizer_manager passthrough for RL training.
-
-    Requires the host class to have ``self.engine`` with a
-    ``tokenizer_manager`` attribute.
-    """
-
-    engine: sgl.Engine  # provided by BaseWorkerHandler
-
-    def _resolve_arg(self, arg: Any) -> Any:
-        """Resolve a single argument from the generic call body.
-
-        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
-        treat it as a typed constructor: import the class from
-        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
-        Otherwise return the value as-is.
-        """
-        if isinstance(arg, dict) and len(arg) == 1:
-            key = next(iter(arg))
-            if isinstance(key, str) and key.startswith("io_struct."):
-                class_name = key[len("io_struct.") :]
-                module = importlib.import_module("sglang.srt.managers.io_struct")
-                cls = getattr(module, class_name)
-                return cls(**arg[key])
-        return arg
-
-    def _normalize_result(self, result: Any) -> dict:
-        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
-        if result is None:
-            return {"status": "ok"}
-        if isinstance(result, tuple):
-            if len(result) == 2:
-                return {"success": result[0], "message": result[1]}
-            if len(result) == 3:
-                return {
-                    "success": result[0],
-                    "message": result[1],
-                    "num_paused_requests": result[2],
-                }
-        if isinstance(result, list):
-            return {
-                "result": [
-                    (
-                        dataclasses.asdict(item)
-                        if dataclasses.is_dataclass(item) and not isinstance(item, type)
-                        else item
-                    )
-                    for item in result
-                ]
-            }
-        if dataclasses.is_dataclass(result) and not isinstance(result, type):
-            return dataclasses.asdict(result)
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, (str, int, float, bool)):
-            return {"result": result}
-        return {"result": str(result)}
-
-    async def call_tokenizer_manager(self, body: dict) -> dict:
-        """Generic passthrough to any tokenizer_manager method.
-
-        Body format::
-
-            {
-                "method": "method_name",
-                "args": [arg1, arg2, ...],
-                "kwargs": {"key": value, ...}
-            }
-
-        Each element in args/kwargs is either a plain value or a typed
-        constructor ``{"io_struct.ClassName": {kwargs}}``.
-        """
-        method_name = body["method"]
-        raw_args = body.get("args", [])
-        raw_kwargs = body.get("kwargs", {})
-
-        args = [self._resolve_arg(a) for a in raw_args]
-        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
-
-        tm = self.engine.tokenizer_manager
-        # Ensure the handle_loop task is running so communicator responses
-        # are received.  Several tokenizer_manager methods call this
-        # internally, but not all of them (e.g. flush_cache does not).
-        if hasattr(tm, "auto_create_handle_loop"):
-            tm.auto_create_handle_loop()
-
-        method = getattr(tm, method_name)
-        result = await method(*args, **kwargs)
-        return self._normalize_result(result)
-
-    def register_rl_engine_routes(self, runtime) -> None:
-        """Register RL-specific engine routes.
-
-        Args:
-            runtime: The DistributedRuntime instance to register routes on.
-        """
-        runtime.register_engine_route(
-            "call_tokenizer_manager", self.call_tokenizer_manager
-        )
 
 
 class LoraMixin:
@@ -629,7 +527,7 @@ class LoraMixin:
             yield {"status": "error", "message": str(e)}
 
 
-class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
+class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -961,34 +859,34 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("control/start_profile", self.start_profile)
-        runtime.register_engine_route("control/stop_profile", self.stop_profile)
-        runtime.register_engine_route(
-            "control/release_memory_occupation", self.release_memory_occupation
+        configured_routes = resolve_configured_engine_routes(
+            self.engine,
+            self.config.dynamo_args.engine_routes,
         )
-        runtime.register_engine_route(
-            "control/resume_memory_occupation", self.resume_memory_occupation
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_disk", self.update_weights_from_disk
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_tensor", self.update_weights_from_tensor
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_distributed",
-            self.update_weights_from_distributed,
-        )
-        runtime.register_engine_route(
-            "control/update_weights_from_ipc", self.update_weights_from_ipc
-        )
-        runtime.register_engine_route(
-            "control/update_weight_version", self.update_weight_version
-        )
-        if getattr(self.config, "dynamo_args", None) and getattr(
-            self.config.dynamo_args, "enable_rl", False
-        ):
-            self.register_rl_engine_routes(runtime)
+        built_in_routes = {
+            "control/start_profile": self.start_profile,
+            "control/stop_profile": self.stop_profile,
+            "control/release_memory_occupation": self.release_memory_occupation,
+            "control/resume_memory_occupation": self.resume_memory_occupation,
+            "control/update_weights_from_disk": self.update_weights_from_disk,
+            "control/update_weights_from_tensor": self.update_weights_from_tensor,
+            "control/update_weights_from_distributed": (
+                self.update_weights_from_distributed
+            ),
+            "control/update_weights_from_ipc": self.update_weights_from_ipc,
+            "control/update_weight_version": self.update_weight_version,
+        }
+        for path, _ in configured_routes:
+            if path in built_in_routes:
+                raise ValueError(
+                    f"Configured SGLang engine route /engine/{path} collides "
+                    "with a built-in route"
+                )
+
+        for path, handler in built_in_routes.items():
+            runtime.register_engine_route(path, handler)
+        for path, configured_handler in configured_routes:
+            runtime.register_engine_route(path, configured_handler)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

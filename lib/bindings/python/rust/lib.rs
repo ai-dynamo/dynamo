@@ -209,16 +209,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
-    #[cfg(feature = "aic-forward-pass")]
-    {
-        m.add_class::<llm::engine_perf::AicEngineConfig>()?;
-        m.add_class::<llm::engine_perf::EngineCapacity>()?;
-        m.add_class::<llm::engine_perf::EngineCapacityRequest>()?;
-        m.add_class::<llm::engine_perf::EnginePerfLimits>()?;
-        m.add_class::<llm::engine_perf::OptimizationTarget>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfModel>()?;
-        m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
-    }
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
