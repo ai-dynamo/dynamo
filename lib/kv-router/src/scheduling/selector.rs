@@ -197,6 +197,7 @@ struct DefaultSoftmaxScratch {
 pub struct ScoredWorkerCandidate {
     worker: WorkerWithDpRank,
     cost: f64,
+    effective_overlap_blocks: f64,
 }
 
 pub trait WorkerScorer: Send {
@@ -292,6 +293,10 @@ impl ScoredWorkerCandidate {
 
     pub fn cost(&self) -> f64 {
         self.cost
+    }
+
+    pub fn effective_overlap_blocks(&self) -> f64 {
+        self.effective_overlap_blocks
     }
 }
 
@@ -857,7 +862,11 @@ fn collect_custom_candidates<C: WorkerConfigLike>(
                 return true;
             }
         }
-        candidates.push(ScoredWorkerCandidate { worker, cost });
+        candidates.push(ScoredWorkerCandidate {
+            worker,
+            cost,
+            effective_overlap_blocks: candidate.effective_overlap_blocks,
+        });
         false
     });
     match error {
@@ -2418,5 +2427,49 @@ mod tests {
             actual.potential_decode_blocks,
             expected.potential_decode_blocks
         );
+    }
+
+    #[test]
+    fn custom_picker_sees_effective_overlap() {
+        struct HighestOverlapPicker;
+
+        impl WorkerPicker for HighestOverlapPicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                candidates: &[ScoredWorkerCandidate],
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(candidates
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| {
+                        left.effective_overlap_blocks()
+                            .total_cmp(&right.effective_overlap_blocks())
+                    })
+                    .map(|(row, _)| row)
+                    .expect("eligible candidate"))
+            }
+        }
+
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.overlap.effective_overlap_blocks =
+            HashMap::from([(worker0, 0.25), (worker1, 0.75)]);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(HighestOverlapPicker),
+        );
+
+        let selected = policy
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
+        assert_eq!(selected.worker, worker1);
     }
 }
