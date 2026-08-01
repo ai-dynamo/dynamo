@@ -27,7 +27,10 @@ use super::task::{
 
 pub(super) struct LiveRuntime {
     pending: std::collections::VecDeque<DirectRequest>,
+    // Worker-major rank handles: worker_idx * dp_size + dp_rank.
     engines: Arc<[LiveEngine]>,
+    num_workers: usize,
+    dp_size: usize,
     admission_rx: mpsc::UnboundedReceiver<ObservedAdmission>,
     start: Instant,
     mode: LiveReplayMode,
@@ -44,26 +47,42 @@ struct LiveRunSession {
     admission_task: tokio::task::JoinHandle<Result<()>>,
 }
 
+struct LiveRunSessionConfig {
+    engines: Arc<[LiveEngine]>,
+    num_workers: usize,
+    dp_size: usize,
+    router: Arc<ReplayRouter>,
+    start: Instant,
+    workload: Option<Arc<WorkloadDispatchState>>,
+    cancel: CancellationToken,
+}
+
 impl LiveRunSession {
     fn new(
-        engines: Arc<[LiveEngine]>,
-        router: Arc<ReplayRouter>,
+        config: LiveRunSessionConfig,
         admission_rx: mpsc::UnboundedReceiver<ObservedAdmission>,
-        start: Instant,
-        workload: Option<Arc<WorkloadDispatchState>>,
         recorder_options: OnlineRecorderOptions,
-        cancel: CancellationToken,
     ) -> Self {
-        let stats = Arc::new(SharedLiveRuntimeStats::default());
+        let LiveRunSessionConfig {
+            engines,
+            num_workers,
+            dp_size,
+            router,
+            start,
+            workload,
+            cancel,
+        } = config;
         let recorder = OnlineTraceRecorder::start(recorder_options);
         let recorder_tx = recorder.sender();
         let admission_task =
             tokio::spawn(forward_admissions(start, admission_rx, recorder.sender()));
         let task_ctx = RequestTaskContext {
             engines,
+            num_workers,
+            dp_size,
             router,
             recorder: recorder_tx.clone(),
-            stats,
+            stats: Arc::new(SharedLiveRuntimeStats::default()),
             workload,
             cancel,
             start,
@@ -143,7 +162,7 @@ impl LiveRunSession {
 }
 
 impl LiveRuntime {
-    /// Build the shared router and one request-scoped live engine per replay worker.
+    /// Build the shared router and one grouped live engine per logical replay worker.
     pub(super) fn new(
         config: OnlineReplayConfig,
         pending: std::collections::VecDeque<DirectRequest>,
@@ -186,6 +205,13 @@ impl LiveRuntime {
             gpus_per_worker: args.aic_gpus_per_worker(),
         };
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
+        let dp_size = usize::try_from(args.dp_size)
+            .map_err(|_| anyhow::anyhow!("attention-DP size does not fit into usize"))?;
+        anyhow::ensure!(
+            num_workers > 0,
+            "online replay requires at least one worker"
+        );
+        anyhow::ensure!(dp_size > 0, "online replay requires at least one DP rank");
         let router = Arc::new(ReplayRouter::new(
             router_mode,
             &args,
@@ -193,31 +219,33 @@ impl LiveRuntime {
             prefill_load_estimator,
             num_workers,
         )?);
-        let mut engines = Vec::with_capacity(num_workers);
+        let rank_handle_count = num_workers
+            .checked_mul(dp_size)
+            .ok_or_else(|| anyhow::anyhow!("online replay rank-handle count overflow"))?;
+        let mut engines = Vec::with_capacity(rank_handle_count);
         for worker_idx in 0..num_workers {
-            let options = LiveEngineOptions {
-                kv_event_publishers: router.sink(worker_idx as _),
-                admission_tx: Some(admission_tx.clone()),
-                fpm_publisher: FpmPublisher::default(),
-                request_output_capacity: None,
-                allow_zero_output: true,
-            };
-            let engine = match output_gate.as_ref() {
-                Some(gate) => LiveEngine::start_with_options_and_output_gate(
-                    args.clone(),
-                    0,
-                    options,
-                    gate.clone(),
-                )?,
-                None => LiveEngine::start_with_options(args.clone(), 0, options)?,
-            };
-            engines.push(engine);
+            let rank_options = (0..dp_size)
+                .map(|_| LiveEngineOptions {
+                    kv_event_publishers: router.sink(worker_idx as _),
+                    admission_tx: Some(admission_tx.clone()),
+                    fpm_publisher: FpmPublisher::default(),
+                    request_output_capacity: None,
+                    allow_zero_output: true,
+                })
+                .collect();
+            engines.extend(LiveEngine::start_grouped_with_options(
+                args.clone(),
+                rank_options,
+                output_gate.clone(),
+            )?);
         }
         drop(admission_tx);
 
         Ok(Self {
             pending,
             engines: Arc::from(engines),
+            num_workers,
+            dp_size,
             admission_rx,
             start: Instant::now(),
             mode,
@@ -242,6 +270,8 @@ impl LiveRuntime {
         let LiveRuntime {
             mut pending,
             engines,
+            num_workers,
+            dp_size,
             admission_rx,
             start,
             mode,
@@ -249,15 +279,16 @@ impl LiveRuntime {
             recorder_options,
             cancel,
         } = self;
-        let mut session = LiveRunSession::new(
+        let session_config = LiveRunSessionConfig {
             engines,
+            num_workers,
+            dp_size,
             router,
-            admission_rx,
-            start,
-            None,
-            recorder_options,
+            workload: None,
             cancel,
-        );
+            start,
+        };
+        let mut session = LiveRunSession::new(session_config, admission_rx, recorder_options);
 
         match mode {
             LiveReplayMode::Trace => {
@@ -338,6 +369,8 @@ impl LiveRuntime {
     ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
         let LiveRuntime {
             engines,
+            num_workers,
+            dp_size,
             admission_rx,
             start,
             mode,
@@ -352,15 +385,16 @@ impl LiveRuntime {
             wakeup: Notify::new(),
             start,
         });
-        let mut session = LiveRunSession::new(
+        let session_config = LiveRunSessionConfig {
             engines,
+            num_workers,
+            dp_size,
             router,
-            admission_rx,
-            start,
-            Some(Arc::clone(&workload)),
-            recorder_options,
+            workload: Some(Arc::clone(&workload)),
             cancel,
-        );
+            start,
+        };
+        let mut session = LiveRunSession::new(session_config, admission_rx, recorder_options);
 
         loop {
             if session.task_ctx.cancel.is_cancelled() {

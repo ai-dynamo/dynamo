@@ -19,8 +19,7 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
   insert an intermediate Mooncake file into that replay path.
   `request_trace_to_mooncake` is an opt-in export for Mooncake-compatible
   consumers.
-- Benchmarks here are CI-checked via clippy (`--all-targets -- -D warnings`)
-  and the dedicated `mooncake_trace` test under
-  `--features mocker-kvbm-offload`. Keep both green.
+- Benchmarks here are CI-checked via clippy (`--all-targets -- -D warnings`).
+  Keep that validation green.
 - This is a benchmark crate, not a library — keep public surface area
   minimal and treat the binaries as the primary product.

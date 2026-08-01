@@ -20,7 +20,6 @@ use crate::live::ObservedAdmission;
 use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
 use crate::replay::{ReplayRouterMode, ReplayTerminalStatus, SlaThresholds};
 
-use super::ReplayRouter;
 use super::entrypoints::{
     OnlineReplayConfig, OnlineReplayOptions, simulate_agentic_trace_workload,
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
@@ -33,6 +32,7 @@ use super::recorder::{
 };
 use super::state::{LiveReplayMode, WorkloadDispatchState, arrival_event};
 use super::task::wait_for_workload_progress;
+use super::{ReplayPlacement, ReplayRouter};
 
 fn replay_args() -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -389,10 +389,13 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
 
     assert_eq!(
         router
-            .select_worker(&request(1, 11, Some(0.0)), 1)
+            .select_worker(&request(1, 11, Some(0.0)), 1, 1)
             .await
             .unwrap(),
-        0
+        ReplayPlacement {
+            worker_idx: 0,
+            dp_rank: 0,
+        }
     );
     assert_eq!(
         router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
@@ -524,6 +527,35 @@ fn test_online_trace_replay_uses_round_robin_dispatch() {
             .unwrap();
 
     assert_eq!(stats.dispatch_history, vec![0, 1, 2, 0, 1]);
+}
+
+#[tokio::test]
+async fn test_online_trace_replay_uses_grouped_attention_dp_engine() {
+    let mut args = replay_args();
+    args.dp_size = 2;
+    let pending = VecDeque::from(vec![
+        request(1, 1, Some(0.0)),
+        request(2, 2, Some(1.0)),
+        request(3, 3, Some(2.0)),
+        request(4, 4, Some(3.0)),
+    ]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        pending,
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert_eq!(runtime.engines().len(), 2);
+    let (report, stats) = runtime.run().await.unwrap();
+    assert_eq!(report.request_counts.completed_requests, 4);
+    assert_eq!(stats.dispatch_history, vec![0, 0, 0, 0]);
 }
 
 #[tokio::test]

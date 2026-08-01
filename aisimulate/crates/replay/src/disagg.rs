@@ -3,63 +3,56 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
-use anyhow::{Result, anyhow, bail};
+use aisimulate_engine::{Backend, Command, CommandResult, LifecycleEvent};
+use anyhow::{Context, Result, anyhow, bail};
 use uuid::Uuid;
 
+#[cfg(test)]
+use super::components::NoReplayMetadata;
+#[cfg(test)]
 pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
 use super::components::{
-    AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator, WorkerScaleDelta,
+    AdmissionEvent, AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode,
+    ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator,
 };
+#[cfg(test)]
+use super::core::NoEngineEvents;
+#[cfg(test)]
 use super::core::round_robin::PoolRoundRobinPlacement;
 use super::core::{
-    AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
-    PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
+    AdmissionSource as CoreAdmissionSource, Placement, PlacementDecision, PlacementPolicy,
+    ReadyArrival, WorkerTopology,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
 use super::evidence::{
-    KvIngestBoundary, WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool,
-    WorkerPoolState, attach_pressure_references, drain_origin, lifecycle_capture_active,
-    record_lifecycle_operation, startup_origin,
-};
-#[cfg(test)]
-use super::extensions::kv_router::{
-    DisaggRuntime, ReplayKvRouterConfig, derive_decode_router_config, derive_prefill_router_config,
+    KvIngestBoundary, ReplayEvidenceCollector, WorkerLifecycleTransition,
+    WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState, common_origin,
 };
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_scaling_tick,
-    pop_ready_transfer_complete, pop_ready_worker_completions, pop_ready_worker_ready,
-    push_scaling_tick, push_transfer_complete, push_worker_completions, push_worker_ready,
+    next_timestamp as choose_next_timestamp, pop_ready_scaling_tick, pop_ready_transfer_complete,
+    pop_ready_worker_completions, pop_ready_worker_ready, push_scaling_tick,
+    push_transfer_complete, push_worker_completions, push_worker_ready,
 };
 use super::scaling::{LatestFpmBuffer, ReplayScalingPolicy, ReplayScalingSnapshot};
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
-use crate::common::handoff::{
+use crate::handoff::{
     HandoffAction, HandoffActionOutcome, HandoffCompletion, HandoffFact, HandoffId, HandoffOrder,
     IssuedHandoffAction, NormalizedHandoffConformance, NormalizedHandoffEvent,
     NormalizedStoredTiming,
 };
 #[cfg(test)]
-use crate::common::protocols::ForwardPassSnapshot;
-use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, OutputSignal};
-use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload, WorkloadDriver};
+use crate::loadgen::WorkloadDriver;
+use crate::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 #[cfg(test)]
-use crate::replay::ReplayRouterMode;
-use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayRequestPool, ReplayTerminalStatus, TraceCollector,
-};
-use crate::scheduler::{
-    AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
-};
-
-fn common_origin(mut origins: impl Iterator<Item = u64>) -> Option<u64> {
-    let first = origins.next()?;
-    origins.all(|origin| origin == first).then_some(first)
-}
+use crate::protocol::ForwardPassSnapshot;
+use crate::protocol::{DirectRequest, OutputSignal};
+use crate::replay::{OfflineDisaggReplayConfig, ReplayTerminalStatus, TraceCollector};
+use crate::{ReplayCaptureOptions, ReplayRequestPool};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +75,7 @@ pub(crate) enum DisaggTransition {
 
 #[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq)]
-pub(in crate::replay) struct DisaggRuntimeStats {
+pub(crate) struct DisaggRuntimeStats {
     request_snapshots: HashMap<Uuid, DisaggRequestSnapshot>,
     prefill_assignments: HashMap<Uuid, usize>,
     decode_assignments: HashMap<Uuid, usize>,
@@ -97,7 +90,7 @@ pub(in crate::replay) struct DisaggRuntimeStats {
 
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(in crate::replay) struct DisaggRuntimeStats;
+pub(crate) struct DisaggRuntimeStats;
 
 #[derive(Default)]
 struct HandoffConformanceCapture {
@@ -277,6 +270,7 @@ struct DisaggFlowState {
     requests: HashMap<Uuid, DisaggRequestState>,
     requests_by_handoff: HashMap<HandoffId, Uuid>,
     handoff_order: HandoffOrder,
+    handoff_latency_ms: f64,
     action_queues: DisaggActionQueues,
     logical_in_flight: usize,
     stale_transfer_events: usize,
@@ -295,11 +289,16 @@ struct ScheduledTransfer {
 }
 
 impl DisaggFlowState {
-    fn new(handoff_order: HandoffOrder, capture_conformance: bool) -> Self {
+    fn new(
+        handoff_order: HandoffOrder,
+        handoff_latency_ms: f64,
+        capture_conformance: bool,
+    ) -> Self {
         Self {
             requests: HashMap::new(),
             requests_by_handoff: HashMap::new(),
             handoff_order,
+            handoff_latency_ms,
             action_queues: DisaggActionQueues::default(),
             logical_in_flight: 0,
             stale_transfer_events: 0,
@@ -371,7 +370,7 @@ impl DisaggFlowState {
         traffic: &mut TrafficAccumulator,
         collector: &mut TraceCollector,
     ) -> Result<()> {
-        if let Some(sample) = placement.planner_cache_sample {
+        if let Some(sample) = placement.cache_sample {
             traffic.on_admission(sample.overlap_blocks, sample.isl_blocks);
         }
         let input_tokens = self.state(placement.request_id)?.input_length()?;
@@ -409,7 +408,7 @@ impl DisaggFlowState {
         uuid: Uuid,
         worker_idx: usize,
         action: IssuedHandoffAction,
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
@@ -452,7 +451,7 @@ impl DisaggFlowState {
         worker_idx: usize,
         action: IssuedHandoffAction,
         stored_hashes: &[u64],
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
@@ -533,14 +532,14 @@ impl DisaggFlowState {
     #[inline(never)]
     fn process_lifecycle_events(
         &mut self,
-        events: Vec<SchedulerLifecycleEvent>,
+        events: Vec<LifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         _stats: &mut DisaggRuntimeStats,
     ) -> Result<()> {
         for event in events {
             match event {
-                SchedulerLifecycleEvent::SourceHeld {
+                LifecycleEvent::SourceHeld {
                     handoff_id,
                     request_id,
                     transfer_timing,
@@ -567,7 +566,7 @@ impl DisaggFlowState {
                         collector,
                     )?;
                 }
-                SchedulerLifecycleEvent::DestinationReserved {
+                LifecycleEvent::DestinationReserved {
                     handoff_id,
                     request_id,
                     transferable_prompt_tokens,
@@ -617,15 +616,19 @@ impl DisaggFlowState {
         request.metadata_mut().arrival_timestamp_ms = Some(arrival_time_ms);
 
         collector.on_arrival(uuid, arrival_time_ms, input_length, output_length);
+        if let Some(context) = request.metadata().replay_context.as_ref() {
+            collector.on_request_context(uuid, context);
+        }
         if self.requests.contains_key(&uuid) {
             bail!("offline disagg replay request {uuid} is already active");
         }
-        let handoff_id = HandoffId::new();
+        let handoff_id = HandoffId::new(Uuid::new_v4());
         let mut state = DisaggRequestState::new(
             request,
             arrival_time_ms,
             handoff_id,
             self.handoff_order,
+            self.handoff_latency_ms,
             replay_hashes,
             session_id,
         );
@@ -712,7 +715,7 @@ impl DisaggFlowState {
         uuid: Uuid,
         action: IssuedHandoffAction,
         stored_hashes: &[u64],
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
@@ -759,7 +762,7 @@ impl DisaggFlowState {
         uuid: Uuid,
         action: IssuedHandoffAction,
         outcome: HandoffActionOutcome,
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         now_ms: f64,
         collector: &mut TraceCollector,
         stats: &mut DisaggRuntimeStats,
@@ -871,30 +874,15 @@ impl DisaggFlowState {
     }
 }
 
-pub(in crate::replay) trait PoolPlacement<Events, Metadata>:
-    PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Events> + Sized
-where
-    Events: EngineEventBatch,
-    Metadata: ReplayAdmissionMetadata,
-{
-    fn is_router(&self) -> bool;
-}
-
-impl<Events: EngineEventBatch> PoolPlacement<Events, ()> for PoolRoundRobinPlacement<Events> {
-    #[inline]
-    fn is_router(&self) -> bool {
-        false
-    }
-}
-
-pub(in crate::replay) type RoundRobinDisaggRuntime =
+#[cfg(test)]
+pub(crate) type RoundRobinDisaggRuntime =
     DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata>;
 
-pub(in crate::replay) struct DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
+pub(crate) struct DisaggRuntimeImpl<PlacementPolicyImpl, Observation, Metadata>
 where
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
-    PlacementPolicyImpl: PoolPlacement<Observation::Batch, Metadata>,
+    PlacementPolicyImpl: PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Observation::Batch>,
 {
     now_ms: f64,
     next_event_seq: u64,
@@ -906,6 +894,7 @@ where
     decode_placement: PlacementPolicyImpl,
     flow: DisaggFlowState,
     collector: TraceCollector,
+    evidence: ReplayEvidenceCollector,
     events: BinaryHeap<SimulationEvent<Observation::Batch>>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
@@ -926,8 +915,9 @@ where
     collect_fpm: bool,
 }
 
+#[cfg(test)]
 impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMetadata> {
-    pub(in crate::replay) fn new_round_robin(
+    pub(crate) fn new_round_robin(
         config: &OfflineDisaggReplayConfig,
         pending: VecDeque<DirectRequest>,
         mode: ReplayMode,
@@ -936,14 +926,16 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
             config,
             AdmissionQueue::new_requests(pending, mode),
             false,
-            false,
-            false,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |_, prefill_topology, _, decode_topology| {
+                Ok((
+                    PoolRoundRobinPlacement::new(prefill_topology),
+                    PoolRoundRobinPlacement::new(decode_topology),
+                ))
+            },
         )
     }
 
-    pub(in crate::replay) fn new_round_robin_workload(
+    pub(crate) fn new_round_robin_workload(
         config: &OfflineDisaggReplayConfig,
         driver: WorkloadDriver,
         mode: ReplayMode,
@@ -952,10 +944,12 @@ impl DisaggRuntimeImpl<PoolRoundRobinPlacement<()>, NoEngineEvents, NoReplayMeta
             config,
             AdmissionQueue::new_workload(driver, mode),
             false,
-            false,
-            false,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
+            |_, prefill_topology, _, decode_topology| {
+                Ok((
+                    PoolRoundRobinPlacement::new(prefill_topology),
+                    PoolRoundRobinPlacement::new(decode_topology),
+                ))
+            },
         )
     }
 }
@@ -965,31 +959,30 @@ impl<PlacementPolicyImpl, Observation, Metadata>
 where
     Observation: ReplayEngineObservation,
     Metadata: ReplayAdmissionMetadata,
-    PlacementPolicyImpl: PoolPlacement<Observation::Batch, Metadata>,
+    PlacementPolicyImpl: PlacementPolicy<ReplayRequestPayload, Metadata = Metadata, Observation = Observation::Batch>,
 {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::replay::offline) fn new_composed(
+    pub(crate) fn new_composed(
         config: &OfflineDisaggReplayConfig,
         admission: AdmissionQueue<Metadata>,
-        prefill_capture_raw: bool,
-        decode_capture_raw: bool,
         capture_conformance: bool,
-        create_prefill_placement: impl FnOnce(
-            &MockEngineArgs,
+        create_placements: impl FnOnce(
+            u32,
             Vec<WorkerTopology>,
-        ) -> Result<PlacementPolicyImpl>,
-        create_decode_placement: impl FnOnce(
-            &MockEngineArgs,
+            u32,
             Vec<WorkerTopology>,
-        ) -> Result<PlacementPolicyImpl>,
+        ) -> Result<(PlacementPolicyImpl, PlacementPolicyImpl)>,
     ) -> Result<Self> {
-        let handoff_order = match (
-            config.prefill_args.engine_type,
-            config.decode_args.engine_type,
-        ) {
-            (EngineType::Vllm, EngineType::Vllm) => HandoffOrder::SourceFirst,
-            (EngineType::Sglang, EngineType::Sglang) => HandoffOrder::DestinationFirst,
-            (EngineType::Trtllm, _) | (_, EngineType::Trtllm) => {
+        let prefill_factory = config.prefill_factory(Observation::capture_engine_kv_events(
+            crate::WorkerStage::Prefill,
+        ))?;
+        let decode_factory = config.decode_factory(Observation::capture_engine_kv_events(
+            crate::WorkerStage::Decode,
+        ))?;
+        let handoff_order = match (prefill_factory.backend(), decode_factory.backend()) {
+            (Backend::Vllm, Backend::Vllm) => HandoffOrder::SourceFirst,
+            (Backend::Sglang, Backend::Sglang) => HandoffOrder::DestinationFirst,
+            (Backend::Trtllm, _) | (_, Backend::Trtllm) => {
                 bail!("offline disaggregated replay does not support TRT-LLM")
             }
             _ => bail!("offline disaggregated replay requires matching backend engine types"),
@@ -998,46 +991,35 @@ where
             CoreAdmissionSource::total_requests(&admission),
             "offline disagg replay",
         );
-        let mut prefill_engine = EngineComponent::<Observation>::new(
+        let prefill_dp_size = prefill_factory.dp_size();
+        let decode_dp_size = decode_factory.dp_size();
+        let prefill_gpus = prefill_factory.gpus_per_worker()?;
+        let decode_gpus = decode_factory.gpus_per_worker()?;
+        let prefill_engine = EngineComponent::<Observation>::new_with_factory(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
-            (0..config.num_prefill_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        config.prefill_args.clone(),
-                        prefill_capture_raw,
-                    )
-                })
-                .collect(),
-        );
-        prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_raw);
-        let mut decode_engine = EngineComponent::<Observation>::new(
+            prefill_factory,
+            config.num_prefill_workers,
+            config.prefill_startup_time_ms(),
+        )?;
+        let decode_engine = EngineComponent::<Observation>::new_with_factory(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
-            (0..config.num_decode_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        config.decode_args.clone(),
-                        decode_capture_raw,
-                    )
-                })
-                .collect(),
-        );
-        decode_engine.set_scaling_args(config.decode_args.clone(), decode_capture_raw);
-        let prefill_placement =
-            create_prefill_placement(&config.prefill_args, prefill_engine.active_topology())?;
-        let decode_placement =
-            create_decode_placement(&config.decode_args, decode_engine.active_topology())?;
+            decode_factory,
+            config.num_decode_workers,
+            config.decode_startup_time_ms(),
+        )?;
+        let (prefill_placement, decode_placement) = create_placements(
+            prefill_dp_size,
+            prefill_engine.active_topology(),
+            decode_dp_size,
+            decode_engine.active_topology(),
+        )?;
 
         // Record each pool's GPUs/worker from its engine parallelism so the
         // report can express GPU-hours from the mocker's own config.
         let mut collector = TraceCollector::default();
-        collector.set_gpus_per_worker(
-            config.prefill_args.aic_gpus_per_worker(),
-            config.decode_args.aic_gpus_per_worker(),
-        );
+        collector.set_gpus_per_worker(prefill_gpus, decode_gpus);
 
         Ok(Self {
             now_ms: 0.0,
@@ -1048,8 +1030,13 @@ where
             decode_engine,
             prefill_placement,
             decode_placement,
-            flow: DisaggFlowState::new(handoff_order, capture_conformance),
+            flow: DisaggFlowState::new(
+                handoff_order,
+                config.handoff_latency_ms(),
+                capture_conformance,
+            ),
             collector,
+            evidence: ReplayEvidenceCollector::default(),
             events: BinaryHeap::new(),
             progress,
             #[cfg(test)]
@@ -1068,8 +1055,13 @@ where
     /// Toggle per-request record capture on the underlying collector. When
     /// `true`, the final `TraceSimulationReport` returned from `run()` will
     /// have `per_request` populated. Default `false` (cheap).
-    pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
+    pub(crate) fn with_per_request_records(mut self, capture: bool) -> Self {
         self.collector.set_capture_per_request(capture);
+        self
+    }
+
+    pub(crate) fn with_capture_options(mut self, options: ReplayCaptureOptions) -> Self {
+        self.evidence = ReplayEvidenceCollector::new(options);
         self
     }
 
@@ -1087,16 +1079,13 @@ where
     /// to one in-flight pass's duration. Enforcing a precise cap would
     /// require plumbing a deadline into the worker / engine core; not worth
     /// it for the calibration use case this exists to serve.
-    pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
+    pub(crate) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
         self.max_sim_time_ms = ms;
         self
     }
 
     /// Attach a scaling policy and enable tick-scoped FPM collection.
-    pub(in crate::replay) fn with_scaling_policy(
-        mut self,
-        policy: Box<dyn ReplayScalingPolicy>,
-    ) -> Self {
+    pub(crate) fn with_scaling_policy(mut self, policy: Box<dyn ReplayScalingPolicy>) -> Self {
         self.collect_fpm = true;
         let prefill_dp_size = self.prefill_engine.dp_size();
         for worker_id in self.prefill_engine.active_group_ids() {
@@ -1173,10 +1162,11 @@ where
         let (request, handoff_id) = self.flow.prepare_prefill_submission(uuid)?;
         let effects = match self.prefill_engine.apply_command(
             worker_idx,
-            SchedulerCommand::SubmitHandoffPrefill {
+            Command::SubmitHandoffPrefill {
                 handoff_id,
-                request,
+                request: direct_to_native(request)?,
             },
+            self.now_ms,
         ) {
             Ok(effects) => effects,
             Err(error) => {
@@ -1188,7 +1178,7 @@ where
                 return Ok(());
             }
         };
-        if !matches!(effects.result, SchedulerCommandResult::Submitted(id) if id == uuid) {
+        if !matches!(effects.result, CommandResult::Submitted(id) if id == uuid) {
             bail!("offline disagg replay prefill submission returned an unexpected result");
         }
         self.flow.finish_prefill_submission(
@@ -1212,10 +1202,11 @@ where
         let (request, handoff_id) = self.flow.prepare_destination_reservation(uuid)?;
         let effects = match self.decode_engine.apply_command(
             worker_idx,
-            SchedulerCommand::ReserveDestination {
+            Command::ReserveDestination {
                 handoff_id,
-                request,
+                request: direct_to_native(request)?,
             },
+            self.now_ms,
         ) {
             Ok(effects) => effects,
             Err(error) => {
@@ -1229,7 +1220,7 @@ where
         };
         if !matches!(
             effects.result,
-            SchedulerCommandResult::DestinationAccepted { request_id } if request_id == uuid
+            CommandResult::DestinationAccepted { request_id } if request_id == uuid
         ) {
             bail!("offline disagg replay destination acceptance returned an unexpected result");
         }
@@ -1239,6 +1230,7 @@ where
             .as_ref()
             .map(|_| Observation::stored_hashes(&effects.engine_events))
             .unwrap_or_default();
+        self.apply_decode_observations(effects.engine_events, KvIngestBoundary::SchedulerCommand)?;
         self.flow.finish_destination_reservation(
             uuid,
             worker_idx,
@@ -1331,8 +1323,7 @@ where
         self.dispatch_prefill_placements(effects.released)?;
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
-                let routed = self.prefill_placement.is_router();
-                self.state_mut(uuid)?.prefill_routed = routed;
+                self.state_mut(uuid)?.prefill_routed = true;
                 let (logical_worker_id, dp_rank) = self
                     .prefill_engine
                     .rank_identity(placement.scheduler_id)
@@ -1384,8 +1375,7 @@ where
         self.dispatch_decode_placements(effects.released)?;
         match effects.decision {
             PlacementDecision::Immediate(placement) => {
-                let routed = self.decode_placement.is_router();
-                self.state_mut(uuid)?.destination_routed = routed;
+                self.state_mut(uuid)?.destination_routed = true;
                 let (logical_worker_id, dp_rank) = self
                     .decode_engine
                     .rank_identity(placement.scheduler_id)
@@ -1508,9 +1498,10 @@ where
                 }
                 let effects = self.decode_engine.apply_command(
                     worker_idx,
-                    SchedulerCommand::ActivateDestination { handoff_id },
+                    Command::ActivateDestination { handoff_id },
+                    self.now_ms,
                 )?;
-                if effects.result != SchedulerCommandResult::Applied {
+                if effects.result != CommandResult::Applied {
                     self.acknowledge_action(
                         uuid,
                         issued,
@@ -1526,6 +1517,10 @@ where
                     .as_ref()
                     .map(|_| Observation::stored_hashes(&effects.engine_events))
                     .unwrap_or_default();
+                self.apply_decode_observations(
+                    effects.engine_events,
+                    KvIngestBoundary::SchedulerCommand,
+                )?;
                 self.flow.finish_destination_activation(
                     uuid,
                     issued,
@@ -1548,12 +1543,14 @@ where
                         worker_idx,
                     });
                 }
-                let effects = self
-                    .prefill_engine
-                    .apply_command(worker_idx, SchedulerCommand::ReleaseSource { handoff_id })?;
+                let effects = self.prefill_engine.apply_command(
+                    worker_idx,
+                    Command::ReleaseSource { handoff_id },
+                    self.now_ms,
+                )?;
                 let outcome = match effects.result {
-                    SchedulerCommandResult::Applied => HandoffActionOutcome::Applied,
-                    SchedulerCommandResult::Noop => HandoffActionOutcome::Noop,
+                    CommandResult::Applied => HandoffActionOutcome::Applied,
+                    CommandResult::Noop => HandoffActionOutcome::Noop,
                     _ => bail!("source release returned an unexpected result"),
                 };
                 self.flow.record_source_release(uuid, &mut self.stats);
@@ -1584,9 +1581,11 @@ where
                         worker_idx,
                     });
                 }
-                let effects = self
-                    .prefill_engine
-                    .apply_command(worker_idx, SchedulerCommand::CancelSource { handoff_id })?;
+                let effects = self.prefill_engine.apply_command(
+                    worker_idx,
+                    Command::CancelSource { handoff_id },
+                    self.now_ms,
+                )?;
                 let outcome = command_cleanup_outcome(effects.result)?;
                 self.apply_prefill_observations(
                     effects.engine_events,
@@ -1610,9 +1609,14 @@ where
                 }
                 let effects = self.decode_engine.apply_command(
                     worker_idx,
-                    SchedulerCommand::CancelDestination { handoff_id },
+                    Command::CancelDestination { handoff_id },
+                    self.now_ms,
                 )?;
                 let outcome = command_cleanup_outcome(effects.result)?;
+                self.apply_decode_observations(
+                    effects.engine_events,
+                    KvIngestBoundary::SchedulerCommand,
+                )?;
                 self.acknowledge_action(uuid, issued, outcome)?;
                 self.process_lifecycle_events(effects.lifecycle_events)?;
             }
@@ -1621,7 +1625,7 @@ where
         Ok(ActionExecution::Applied)
     }
 
-    fn process_lifecycle_events(&mut self, events: Vec<SchedulerLifecycleEvent>) -> Result<()> {
+    fn process_lifecycle_events(&mut self, events: Vec<LifecycleEvent>) -> Result<()> {
         self.flow.process_lifecycle_events(
             events,
             self.now_ms,
@@ -1775,22 +1779,10 @@ where
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        let next = choose_next_timestamp(
+        choose_next_timestamp(
             CoreAdmissionSource::next_ready_time_ms(&mut self.admission),
             next_event_ms,
-        );
-        #[cfg(feature = "kvbm-offload")]
-        {
-            let next_offload = choose_next_timestamp(
-                self.prefill_engine.earliest_offload_deadline(),
-                self.decode_engine.earliest_offload_deadline(),
-            );
-            choose_next_timestamp(next, next_offload)
-        }
-        #[cfg(not(feature = "kvbm-offload"))]
-        {
-            next
-        }
+        )
     }
 
     fn apply_prefill_observations(
@@ -1798,7 +1790,15 @@ where
         events: Observation::Batch,
         boundary: KvIngestBoundary,
     ) -> Result<()> {
-        Observation::record_ingestion(&events, WorkerPool::Prefill, boundary, self.now_ms)?;
+        if let Some(event_count) = Observation::kv_ingest_event_count(&events) {
+            self.evidence.record_kv_ingest(
+                WorkerPool::Prefill,
+                boundary,
+                self.now_ms,
+                event_count,
+                |encoder| Observation::encode_kv_ingest(&events, encoder),
+            )?;
+        }
         let placements = self.prefill_placement.observe(events, self.now_ms)?;
         self.dispatch_prefill_placements(placements)
     }
@@ -1808,29 +1808,17 @@ where
         events: Observation::Batch,
         boundary: KvIngestBoundary,
     ) -> Result<()> {
-        if let Some(capture) = self.flow.conformance_capture.as_mut() {
-            capture.record_after_activation(&Observation::stored_hashes(&events));
+        if let Some(event_count) = Observation::kv_ingest_event_count(&events) {
+            self.evidence.record_kv_ingest(
+                WorkerPool::Decode,
+                boundary,
+                self.now_ms,
+                event_count,
+                |encoder| Observation::encode_kv_ingest(&events, encoder),
+            )?;
         }
-        Observation::record_ingestion(&events, WorkerPool::Decode, boundary, self.now_ms)?;
         let placements = self.decode_placement.observe(events, self.now_ms)?;
         self.dispatch_decode_placements(placements)
-    }
-
-    #[cfg(feature = "kvbm-offload")]
-    fn tick_offload_engines(&mut self) -> Result<bool> {
-        let prefill = self.prefill_engine.tick_offload_engines(self.now_ms);
-        let decode = self.decode_engine.tick_offload_engines(self.now_ms);
-        let changed = prefill.progress.made_progress
-            || decode.progress.made_progress
-            || !prefill.lifecycle_events.is_empty()
-            || !decode.lifecycle_events.is_empty();
-        self.apply_prefill_observations(prefill.engine_events, KvIngestBoundary::OffloadTick)?;
-        if !decode.engine_events.is_empty() {
-            tracing::debug!("offline disagg replay dropping decode-side offload router events");
-        }
-        self.process_lifecycle_events(prefill.lifecycle_events)?;
-        self.process_lifecycle_events(decode.lifecycle_events)?;
-        Ok(changed)
     }
 
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
@@ -1845,45 +1833,46 @@ where
             PrefillSignalDisposition::Completed => {}
         }
 
-        if self.prefill_placement.is_router() {
-            let prefill_complete_placements = self
-                .prefill_placement
-                .prefill_completed(signal.uuid, self.now_ms)?;
-            #[cfg(test)]
-            {
-                self.stats.prefill_marked_count += 1;
-                self.stats
-                    .transition_log
-                    .push(DisaggTransition::PrefillMarkCompleted { uuid: signal.uuid });
-            }
-            self.record_router_pending();
-            self.dispatch_prefill_placements(prefill_complete_placements)?;
+        let prefill_complete_placements = self
+            .prefill_placement
+            .prefill_completed(signal.uuid, self.now_ms)?;
+        #[cfg(test)]
+        {
+            self.stats.prefill_marked_count += 1;
+            self.stats
+                .transition_log
+                .push(DisaggTransition::PrefillMarkCompleted { uuid: signal.uuid });
         }
+        self.record_router_pending();
+        self.dispatch_prefill_placements(prefill_complete_placements)?;
         Ok(())
     }
 
     /// Process one decode output signal, including decode router frees and request completion.
     fn process_decode_signal(&mut self, signal: OutputSignal) -> Result<()> {
+        if let Some(token_id) = signal.token_id {
+            CoreAdmissionSource::on_output_token(&mut self.admission, signal.uuid, token_id)?;
+            // Generalized-engine completion effects become visible at the
+            // attention-DP group boundary. Recording the token here therefore
+            // preserves the old EngineComponent::align_pass_token_times
+            // semantics without giving the engine ownership of report state.
+            self.collector.on_token(signal.uuid, self.now_ms);
+        }
         if !signal.completed {
             return Ok(());
         }
 
-        let placements = if self.decode_placement.is_router() {
-            let placements = self
-                .decode_placement
-                .request_terminal(signal.uuid, self.now_ms)?;
-            self.state_mut(signal.uuid)?.destination_routed = false;
-            #[cfg(test)]
-            {
-                self.stats.decode_router_freed_count += 1;
-                self.stats
-                    .transition_log
-                    .push(DisaggTransition::DecodeFree { uuid: signal.uuid });
-            }
-            placements
-        } else {
-            Vec::new()
-        };
+        let placements = self
+            .decode_placement
+            .request_terminal(signal.uuid, self.now_ms)?;
+        self.state_mut(signal.uuid)?.destination_routed = false;
+        #[cfg(test)]
+        {
+            self.stats.decode_router_freed_count += 1;
+            self.stats
+                .transition_log
+                .push(DisaggTransition::DecodeFree { uuid: signal.uuid });
+        }
         self.record_router_pending();
         self.flow.record_decode_terminal(
             &signal,
@@ -1902,7 +1891,7 @@ where
         _worker_idx: usize,
         _completed_requests: usize,
         output_signals: Vec<OutputSignal>,
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         engine_events: Observation::Batch,
     ) -> Result<()> {
         self.apply_prefill_observations(engine_events, KvIngestBoundary::PassEnd)?;
@@ -1917,11 +1906,14 @@ where
     fn process_decode_pass(
         &mut self,
         output_signals: Vec<OutputSignal>,
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
+        lifecycle_events: Vec<LifecycleEvent>,
         engine_events: Observation::Batch,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     ) -> Result<()> {
+        if let Some(capture) = self.flow.conformance_capture.as_mut() {
+            capture.record_after_activation(&Observation::stored_hashes(&engine_events));
+        }
         self.apply_decode_observations(engine_events, KvIngestBoundary::PassEnd)?;
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
@@ -1935,29 +1927,32 @@ where
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> Result<bool> {
         let mut changed = false;
-        while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
-            match completions {
-                ReadyWorkerCompletions::Single(payload) => {
-                    self.apply_worker_completion(payload)?;
+        while let Some(completion) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
+            let payloads = match completion.stage {
+                SimulationWorkerStage::Prefill => self
+                    .prefill_engine
+                    .on_scheduled_completion(completion, self.now_ms)?,
+                SimulationWorkerStage::Decode => self
+                    .decode_engine
+                    .on_scheduled_completion(completion, self.now_ms)?,
+                SimulationWorkerStage::Aggregated => {
+                    bail!("disaggregated replay received an aggregated completion")
                 }
-                ReadyWorkerCompletions::Batch(payloads) => {
-                    for payload in payloads {
-                        self.apply_worker_completion(payload)?;
-                    }
-                }
+            };
+            for payload in payloads {
+                self.process_worker_completion_payload(payload)?;
             }
             changed = true;
         }
         Ok(changed)
     }
 
-    fn apply_worker_completion(
+    fn process_worker_completion_payload(
         &mut self,
         payload: WorkerCompletionPayload<Observation::Batch>,
     ) -> Result<()> {
         match payload.stage {
             SimulationWorkerStage::Prefill => {
-                let payload = self.prefill_engine.on_scheduled_completion(payload)?;
                 self.wake_deferred_actions(SimulationWorkerStage::Prefill, payload.worker_idx);
                 if self.collect_fpm
                     && let Some(fpm) = payload.fpm
@@ -1974,7 +1969,6 @@ where
                 )
             }
             SimulationWorkerStage::Decode => {
-                let payload = self.decode_engine.on_scheduled_completion(payload)?;
                 self.wake_deferred_actions(SimulationWorkerStage::Decode, payload.worker_idx);
                 if self.collect_fpm
                     && let Some(fpm) = payload.fpm
@@ -2043,10 +2037,7 @@ where
     fn drive_prefill_workers(&mut self) -> Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self
-                .prefill_engine
-                .drive_ready(self.now_ms, &mut self.collector)?;
-            attach_pressure_references(&mut self.collector);
+            let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
             if effects.is_empty() {
                 return Ok(changed);
             }
@@ -2061,8 +2052,7 @@ where
         loop {
             let effects = self
                 .decode_engine
-                .drive_ready(self.now_ms, &mut self.collector)?;
-            attach_pressure_references(&mut self.collector);
+                .drive_ready(self.now_ms, Some(&mut self.collector))?;
             if effects.is_empty() {
                 #[cfg(test)]
                 self.stats
@@ -2080,9 +2070,18 @@ where
         effects: EngineEffects<Observation::Batch>,
     ) -> Result<()> {
         self.record_prefill_admissions(effects.admissions);
+        for pressure in effects.pressure_events {
+            self.evidence.record_native_pressure(
+                &mut self.collector,
+                WorkerPool::Prefill,
+                pressure.worker_id,
+                pressure.dp_rank,
+                pressure.event,
+            );
+        }
         self.apply_prefill_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {
-            self.apply_worker_completion(payload)?;
+            self.process_worker_completion_payload(payload)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
             push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
@@ -2092,20 +2091,30 @@ where
 
     fn record_prefill_admissions(&mut self, admissions: Vec<AdmissionEvent>) {
         for admission in admissions {
-            self.collector.on_prefill_pool_admit(
+            self.collector.on_prefill_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
+            );
+            self.evidence.record_pressure_readmission(
+                admission.uuid,
+                WorkerPool::Prefill,
+                self.now_ms,
             );
         }
     }
 
     fn record_decode_admissions(&mut self, admissions: Vec<AdmissionEvent>) -> Result<()> {
         for admission in admissions {
-            self.collector.on_decode_pool_admit(
+            self.collector.on_decode_admit(
                 admission.uuid,
                 self.now_ms,
                 admission.reused_input_tokens,
+            );
+            self.evidence.record_pressure_readmission(
+                admission.uuid,
+                WorkerPool::Decode,
+                self.now_ms,
             );
             match self.state(admission.uuid)?.phase {
                 DisaggPhase::ReadyDecode => {
@@ -2132,8 +2141,18 @@ where
         effects: EngineEffects<Observation::Batch>,
     ) -> Result<()> {
         self.record_decode_admissions(effects.admissions)?;
+        for pressure in effects.pressure_events {
+            self.evidence.record_native_pressure(
+                &mut self.collector,
+                WorkerPool::Decode,
+                pressure.worker_id,
+                pressure.dp_rank,
+                pressure.event,
+            );
+        }
+        self.apply_decode_observations(effects.pass_start_events, KvIngestBoundary::PassStart)?;
         for payload in effects.immediate_completions {
-            self.apply_worker_completion(payload)?;
+            self.process_worker_completion_payload(payload)?;
         }
         if let Some(scheduled) = effects.scheduled_completion {
             push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
@@ -2173,8 +2192,9 @@ where
                         let placements = self.prefill_placement.topology_settled(self.now_ms)?;
                         released.extend(placements.iter().map(|placement| placement.request_id));
                         self.dispatch_prefill_placements(placements)?;
-                        let origin = startup_origin(WorkerPool::Prefill, worker_id);
-                        record_lifecycle_operation(
+                        let origin = self.evidence.startup_origin(WorkerPool::Prefill, worker_id);
+                        let state = self.lifecycle_state(WorkerPool::Prefill);
+                        self.evidence.record_lifecycle_operation(
                             self.now_ms,
                             WorkerPool::Prefill,
                             "worker_ready_event",
@@ -2188,7 +2208,7 @@ where
                                 reason: None,
                                 origin_operation_ordinal: origin,
                             }],
-                            self.prefill_lifecycle_state(),
+                            state,
                             released,
                         );
                         self.wake_worker_waiters(SimulationWorkerStage::Prefill);
@@ -2222,8 +2242,9 @@ where
                         let placements = self.decode_placement.topology_settled(self.now_ms)?;
                         released.extend(placements.iter().map(|placement| placement.request_id));
                         self.dispatch_decode_placements(placements)?;
-                        let origin = startup_origin(WorkerPool::Decode, worker_id);
-                        record_lifecycle_operation(
+                        let origin = self.evidence.startup_origin(WorkerPool::Decode, worker_id);
+                        let state = self.lifecycle_state(WorkerPool::Decode);
+                        self.evidence.record_lifecycle_operation(
                             self.now_ms,
                             WorkerPool::Decode,
                             "worker_ready_event",
@@ -2237,7 +2258,7 @@ where
                                 reason: None,
                                 origin_operation_ordinal: origin,
                             }],
-                            self.decode_lifecycle_state(),
+                            state,
                             released,
                         );
                         self.wake_worker_waiters(SimulationWorkerStage::Decode);
@@ -2255,12 +2276,7 @@ where
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
-            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
             let mut changed = self.prune_stale_transfer_events();
-            #[cfg(feature = "kvbm-offload")]
-            {
-                changed |= self.tick_offload_engines()?;
-            }
             changed |= self.apply_worker_completions()?;
             changed |= self.apply_worker_ready_events()?;
             changed |= self.apply_transfer_completions()?;
@@ -2268,7 +2284,10 @@ where
             changed |= self.drive_pending_actions()?;
             changed |= self.drive_prefill_workers()?;
             changed |= self.drive_decode_workers()?;
-            let removed_prefill = self.prefill_engine.try_remove_drained();
+            let removed_prefill = self
+                .prefill_engine
+                .try_remove_drained()
+                .context("failed to remove drained prefill workers")?;
             let mut prefill_releases = Vec::new();
             for worker_id in &removed_prefill {
                 let placements = self.prefill_placement.worker_removed(
@@ -2282,34 +2301,39 @@ where
                 self.dispatch_prefill_placements(placements)?;
             }
             if !removed_prefill.is_empty() {
-                let origin = common_origin(
-                    removed_prefill
-                        .iter()
-                        .filter_map(|worker_id| drain_origin(WorkerPool::Prefill, *worker_id)),
-                );
-                record_lifecycle_operation(
+                let origin = common_origin(removed_prefill.iter().filter_map(|worker_id| {
+                    self.evidence.drain_origin(WorkerPool::Prefill, *worker_id)
+                }));
+                let transitions = removed_prefill
+                    .iter()
+                    .map(|worker_id| WorkerLifecycleTransition {
+                        worker_id: *worker_id,
+                        transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                        prior_state: Some("draining"),
+                        state: "removed",
+                        reason: None,
+                        origin_operation_ordinal: self
+                            .evidence
+                            .drain_origin(WorkerPool::Prefill, *worker_id),
+                    })
+                    .collect();
+                let state = self.lifecycle_state(WorkerPool::Prefill);
+                self.evidence.record_lifecycle_operation(
                     self.now_ms,
                     WorkerPool::Prefill,
                     "drain_settlement",
                     None,
                     origin,
-                    removed_prefill
-                        .iter()
-                        .map(|worker_id| WorkerLifecycleTransition {
-                            worker_id: *worker_id,
-                            transition: WorkerLifecycleTransitionKind::WorkerRemoved,
-                            prior_state: Some("draining"),
-                            state: "removed",
-                            reason: None,
-                            origin_operation_ordinal: drain_origin(WorkerPool::Prefill, *worker_id),
-                        })
-                        .collect(),
-                    self.prefill_lifecycle_state(),
+                    transitions,
+                    state,
                     prefill_releases,
                 );
             }
             changed |= !removed_prefill.is_empty();
-            let removed_decode = self.decode_engine.try_remove_drained();
+            let removed_decode = self
+                .decode_engine
+                .try_remove_drained()
+                .context("failed to remove drained decode workers")?;
             let mut decode_releases = Vec::new();
             for worker_id in &removed_decode {
                 let placements = self.decode_placement.worker_removed(
@@ -2323,29 +2347,31 @@ where
                 self.dispatch_decode_placements(placements)?;
             }
             if !removed_decode.is_empty() {
-                let origin = common_origin(
-                    removed_decode
-                        .iter()
-                        .filter_map(|worker_id| drain_origin(WorkerPool::Decode, *worker_id)),
-                );
-                record_lifecycle_operation(
+                let origin = common_origin(removed_decode.iter().filter_map(|worker_id| {
+                    self.evidence.drain_origin(WorkerPool::Decode, *worker_id)
+                }));
+                let transitions = removed_decode
+                    .iter()
+                    .map(|worker_id| WorkerLifecycleTransition {
+                        worker_id: *worker_id,
+                        transition: WorkerLifecycleTransitionKind::WorkerRemoved,
+                        prior_state: Some("draining"),
+                        state: "removed",
+                        reason: None,
+                        origin_operation_ordinal: self
+                            .evidence
+                            .drain_origin(WorkerPool::Decode, *worker_id),
+                    })
+                    .collect();
+                let state = self.lifecycle_state(WorkerPool::Decode);
+                self.evidence.record_lifecycle_operation(
                     self.now_ms,
                     WorkerPool::Decode,
                     "drain_settlement",
                     None,
                     origin,
-                    removed_decode
-                        .iter()
-                        .map(|worker_id| WorkerLifecycleTransition {
-                            worker_id: *worker_id,
-                            transition: WorkerLifecycleTransitionKind::WorkerRemoved,
-                            prior_state: Some("draining"),
-                            state: "removed",
-                            reason: None,
-                            origin_operation_ordinal: drain_origin(WorkerPool::Decode, *worker_id),
-                        })
-                        .collect(),
-                    self.decode_lifecycle_state(),
+                    transitions,
+                    state,
                     decode_releases,
                 );
             }
@@ -2456,10 +2482,9 @@ where
                 .expect("replay scaling tick ordinal overflow");
             // Borrow the policy out so the runtime stays mutably available for
             // apply_scaling; restore it before propagating any error.
-            let mut policy = self
-                .scaling_policy
-                .take()
-                .expect("scaling tick fired without a policy");
+            let Some(mut policy) = self.scaling_policy.take() else {
+                bail!("scaling tick fired without a policy");
+            };
             let decision = policy.on_tick(snapshot);
             self.scaling_policy = Some(policy);
             let decision = decision?;
@@ -2540,17 +2565,12 @@ where
     }
 
     #[cfg(test)]
-    pub(in crate::replay) fn active_decode_count(&self) -> usize {
-        self.decode_engine.active_worker_ids().len()
-    }
-
-    #[cfg(test)]
-    pub(in crate::replay) fn total_prefill_count(&self) -> usize {
+    pub(crate) fn total_prefill_count(&self) -> usize {
         self.prefill_engine.worker_count()
     }
 
     #[cfg(test)]
-    pub(in crate::replay) fn total_decode_count(&self) -> usize {
+    pub(crate) fn total_decode_count(&self) -> usize {
         self.decode_engine.worker_count()
     }
 
@@ -2564,7 +2584,7 @@ where
     /// Scale-down: the worker is removed from the router immediately so no
     /// new requests land on it while it drains in-flight work.
     #[cfg(test)]
-    pub(in crate::replay) fn apply_scaling(
+    pub(crate) fn apply_scaling(
         &mut self,
         target_prefill: usize,
         target_decode: usize,
@@ -2584,10 +2604,14 @@ where
             self.collector.clear_static_worker_count();
         }
         // -- prefill --
-        let delta = self.prefill_engine.apply_target_count(target_prefill);
-        let prefill_delay = self.prefill_engine.startup_time_ms();
+        let prefill_starting_before = self.prefill_engine.starting_group_ids();
         let mut prefill_releases = Vec::new();
-        for &id in &delta.added {
+        let (added, newly_marked, removed) = self
+            .prefill_engine
+            .apply_target_count(target_prefill)
+            .with_context(|| format!("failed to apply prefill worker target {target_prefill}"))?;
+        let prefill_delay = self.prefill_engine.startup_time_ms();
+        for &id in &added {
             match prefill_delay {
                 Some(delay) => {
                     push_worker_ready(
@@ -2617,7 +2641,7 @@ where
                 }
             }
         }
-        for &id in &delta.newly_draining {
+        for &id in &newly_marked {
             let topology = self
                 .prefill_engine
                 .worker_topology(id)
@@ -2631,7 +2655,7 @@ where
             prefill_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_prefill_placements(placements)?;
         }
-        for &id in &delta.removed {
+        for &id in &removed {
             let placements = self.prefill_placement.worker_removed(
                 WorkerTopology {
                     worker_id: id,
@@ -2647,20 +2671,27 @@ where
         self.dispatch_prefill_placements(placements)?;
         self.record_scale_lifecycle(
             WorkerPool::Prefill,
-            &delta,
+            &added,
+            &newly_marked,
+            &removed,
+            &prefill_starting_before,
             prefill_delay.is_some(),
             planner_tick_ordinal,
             prefill_releases,
         );
-        if !delta.added.is_empty() && prefill_delay.is_none() {
+        if !added.is_empty() && prefill_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Prefill);
         }
 
         // -- decode --
-        let delta = self.decode_engine.apply_target_count(target_decode);
-        let decode_delay = self.decode_engine.startup_time_ms();
+        let decode_starting_before = self.decode_engine.starting_group_ids();
         let mut decode_releases = Vec::new();
-        for &id in &delta.added {
+        let (added, newly_marked, removed) =
+            self.decode_engine
+                .apply_target_count(target_decode)
+                .with_context(|| format!("failed to apply decode worker target {target_decode}"))?;
+        let decode_delay = self.decode_engine.startup_time_ms();
+        for &id in &added {
             match decode_delay {
                 Some(delay) => {
                     push_worker_ready(
@@ -2689,7 +2720,7 @@ where
                 }
             }
         }
-        for &id in &delta.newly_draining {
+        for &id in &newly_marked {
             let topology = self
                 .decode_engine
                 .worker_topology(id)
@@ -2703,7 +2734,7 @@ where
             decode_releases.extend(placements.iter().map(|placement| placement.request_id));
             self.dispatch_decode_placements(placements)?;
         }
-        for &id in &delta.removed {
+        for &id in &removed {
             let placements = self.decode_placement.worker_removed(
                 WorkerTopology {
                     worker_id: id,
@@ -2719,112 +2750,103 @@ where
         self.dispatch_decode_placements(placements)?;
         self.record_scale_lifecycle(
             WorkerPool::Decode,
-            &delta,
+            &added,
+            &newly_marked,
+            &removed,
+            &decode_starting_before,
             decode_delay.is_some(),
             planner_tick_ordinal,
             decode_releases,
         );
-        if !delta.added.is_empty() && decode_delay.is_none() {
+        if !added.is_empty() && decode_delay.is_none() {
             self.wake_worker_waiters(SimulationWorkerStage::Decode);
         }
         self.record_router_pending();
         Ok(())
     }
 
-    fn prefill_lifecycle_state(&self) -> WorkerPoolState {
+    fn lifecycle_state(&self, pool: WorkerPool) -> WorkerPoolState {
+        let engine = match pool {
+            WorkerPool::Prefill => &self.prefill_engine,
+            WorkerPool::Decode => &self.decode_engine,
+            WorkerPool::Agg => unreachable!("disaggregated replay has no agg pool"),
+        };
         WorkerPoolState {
-            active: self.prefill_engine.active_group_ids(),
-            starting: self.prefill_engine.starting_group_ids(),
-            draining: self.prefill_engine.draining_group_ids(),
+            active: engine.active_group_ids(),
+            starting: engine.starting_group_ids(),
+            draining: engine.draining_group_ids(),
         }
     }
 
-    fn decode_lifecycle_state(&self) -> WorkerPoolState {
-        WorkerPoolState {
-            active: self.decode_engine.active_group_ids(),
-            starting: self.decode_engine.starting_group_ids(),
-            draining: self.decode_engine.draining_group_ids(),
-        }
-    }
-
+    #[allow(clippy::too_many_arguments)]
     fn record_scale_lifecycle(
-        &self,
+        &mut self,
         pool: WorkerPool,
-        delta: &WorkerScaleDelta,
+        added: &[usize],
+        newly_draining: &[usize],
+        removed: &[usize],
+        starting_before: &[usize],
         delayed_startup: bool,
         planner_tick_ordinal: Option<u64>,
         released: Vec<Uuid>,
     ) {
-        if !lifecycle_capture_active() {
+        if !self.evidence.options().capture_lifecycle_evidence {
             return;
         }
-        let mut transitions = Vec::new();
+        let mut transitions = added
+            .iter()
+            .map(|worker_id| WorkerLifecycleTransition {
+                worker_id: *worker_id,
+                transition: if delayed_startup {
+                    WorkerLifecycleTransitionKind::WorkerStarting
+                } else {
+                    WorkerLifecycleTransitionKind::WorkerReady
+                },
+                prior_state: None,
+                state: if delayed_startup {
+                    "starting"
+                } else {
+                    "active"
+                },
+                reason: None,
+                origin_operation_ordinal: None,
+            })
+            .collect::<Vec<_>>();
         transitions.extend(
-            delta
-                .added
+            newly_draining
                 .iter()
                 .map(|worker_id| WorkerLifecycleTransition {
                     worker_id: *worker_id,
-                    transition: if delayed_startup {
-                        WorkerLifecycleTransitionKind::WorkerStarting
-                    } else {
-                        WorkerLifecycleTransitionKind::WorkerReady
-                    },
-                    prior_state: None,
-                    state: if delayed_startup {
-                        "starting"
-                    } else {
-                        "active"
-                    },
+                    transition: WorkerLifecycleTransitionKind::WorkerDraining,
+                    prior_state: Some("active"),
+                    state: "draining",
                     reason: None,
                     origin_operation_ordinal: None,
                 }),
         );
-        transitions.extend(delta.cancelled_startups.iter().map(|worker_id| {
+        transitions.extend(removed.iter().map(|worker_id| {
+            let cancelled = starting_before.binary_search(worker_id).is_ok();
             WorkerLifecycleTransition {
                 worker_id: *worker_id,
                 transition: WorkerLifecycleTransitionKind::WorkerRemoved,
-                prior_state: Some("starting"),
+                prior_state: Some(if cancelled { "starting" } else { "draining" }),
                 state: "removed",
-                reason: Some("startup_cancelled"),
-                origin_operation_ordinal: startup_origin(pool, *worker_id),
+                reason: cancelled.then_some("startup_cancelled"),
+                origin_operation_ordinal: if cancelled {
+                    self.evidence.startup_origin(pool, *worker_id)
+                } else {
+                    self.evidence.drain_origin(pool, *worker_id)
+                },
             }
         }));
-        transitions.extend(delta.newly_draining.iter().map(|worker_id| {
-            WorkerLifecycleTransition {
-                worker_id: *worker_id,
-                transition: WorkerLifecycleTransitionKind::WorkerDraining,
-                prior_state: Some("active"),
-                state: "draining",
-                reason: None,
-                origin_operation_ordinal: None,
-            }
-        }));
-        transitions.extend(
-            delta
-                .removed
-                .iter()
-                .map(|worker_id| WorkerLifecycleTransition {
-                    worker_id: *worker_id,
-                    transition: WorkerLifecycleTransitionKind::WorkerRemoved,
-                    prior_state: Some("draining"),
-                    state: "removed",
-                    reason: None,
-                    origin_operation_ordinal: drain_origin(pool, *worker_id),
-                }),
-        );
-        let state_after_batch = match pool {
-            WorkerPool::Prefill => self.prefill_lifecycle_state(),
-            WorkerPool::Decode => self.decode_lifecycle_state(),
-            WorkerPool::Agg => unreachable!("disagg replay cannot mutate the agg pool"),
-        };
         let origin = common_origin(
-            delta
-                .cancelled_startups
+            removed
                 .iter()
-                .filter_map(|worker_id| startup_origin(pool, *worker_id)),
+                .filter(|worker_id| starting_before.binary_search(worker_id).is_ok())
+                .filter_map(|worker_id| self.evidence.startup_origin(pool, *worker_id)),
         );
-        record_lifecycle_operation(
+        let state = self.lifecycle_state(pool);
+        self.evidence.record_lifecycle_operation(
             self.now_ms,
             pool,
             if planner_tick_ordinal.is_some() {
@@ -2835,7 +2857,7 @@ where
             planner_tick_ordinal,
             origin,
             transitions,
-            state_after_batch,
+            state,
             released,
         );
     }
@@ -2911,6 +2933,16 @@ where
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {
+                if self.prefill_engine.has_runnable_worker()
+                    || self.decode_engine.has_runnable_worker()
+                    || self.prefill_engine.has_orphaned_in_flight()
+                    || self.decode_engine.has_orphaned_in_flight()
+                {
+                    bail!(
+                        "offline disagg replay encountered an effect-free zero-duration pass with {} in-flight requests remaining",
+                        self.cluster_in_flight()
+                    );
+                }
                 bail!(
                     "offline disagg replay reached a dead end with {} in-flight requests remaining",
                     self.cluster_in_flight()
@@ -2932,17 +2964,18 @@ where
     /// If `max_sim_time_ms` is set, exits gracefully when the next scheduled
     /// timestamp would exceed that cap; in-flight requests at that point are
     /// reported as incomplete.
-    pub(in crate::replay) fn run(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
+    pub(crate) fn run(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
         self.run_to_completion()?;
 
         self.progress.finish();
         self.finish_test_stats();
+        self.collector.set_runtime_evidence(self.evidence.finish());
         Ok((self.collector, self.stats))
     }
 
     pub(super) fn run_handoff_conformance(
         mut self,
-        engine_type: EngineType,
+        engine_type: Backend,
     ) -> Result<NormalizedHandoffConformance> {
         self.run_to_completion()?;
 
@@ -2985,12 +3018,23 @@ where
     }
 }
 
-fn command_cleanup_outcome(result: SchedulerCommandResult) -> Result<HandoffActionOutcome> {
+fn command_cleanup_outcome(result: CommandResult) -> Result<HandoffActionOutcome> {
     match result {
-        SchedulerCommandResult::Applied => Ok(HandoffActionOutcome::Applied),
-        SchedulerCommandResult::Noop => Ok(HandoffActionOutcome::Noop),
+        CommandResult::Applied => Ok(HandoffActionOutcome::Applied),
+        CommandResult::Noop => Ok(HandoffActionOutcome::Noop),
         _ => bail!("handoff cleanup returned an unexpected scheduler result"),
     }
+}
+
+fn direct_to_native(request: DirectRequest) -> Result<aisimulate_engine::Request> {
+    Ok(aisimulate_engine::Request {
+        request_id: request
+            .uuid
+            .ok_or_else(|| anyhow!("offline replay request must have a UUID before dispatch"))?,
+        tokens: request.tokens,
+        max_output_tokens: request.max_output_tokens,
+        output_token_ids: request.output_token_ids,
+    })
 }
 
 #[cfg(test)]

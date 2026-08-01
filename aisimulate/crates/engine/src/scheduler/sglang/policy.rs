@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use dynamo_kv_router::protocols::compute_next_seq_hash;
+use crate::common::hashing::compute_next_seq_hash;
 
 use crate::kv_manager::SglangKvManager;
 use rustc_hash::FxHashSet;

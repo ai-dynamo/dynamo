@@ -128,7 +128,6 @@ struct TurnRuntime {
     priority: i32,
     strict_priority: u32,
     policy_class: Option<String>,
-    #[cfg(any(test, feature = "replay-bench"))]
     deterministic_request_id: Option<Uuid>,
 }
 
@@ -306,7 +305,7 @@ pub struct WorkloadDriver {
 }
 
 impl WorkloadDriver {
-    pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
+    pub fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
@@ -316,7 +315,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_trace_without_replay_hashes(
+    pub fn new_trace_without_replay_hashes(
         trace: Trace,
         engine_block_size: usize,
         accumulate_session_deltas: bool,
@@ -336,10 +335,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_trace_accumulating_deltas(
-        trace: Trace,
-        engine_block_size: usize,
-    ) -> Result<Self> {
+    pub fn new_trace_accumulating_deltas(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
@@ -352,7 +348,7 @@ impl WorkloadDriver {
     /// Build a closed-loop concurrency driver. `max_in_flight` is the *session* cap
     /// (depth-first): a session holds its slot across all turns + think-time, and new
     /// sessions are admitted only while fewer than `max_in_flight` are active.
-    pub(crate) fn new_concurrency(
+    pub fn new_concurrency(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -366,7 +362,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_concurrency_without_replay_hashes(
+    pub fn new_concurrency_without_replay_hashes(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -387,7 +383,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_concurrency_accumulating_deltas(
+    pub fn new_concurrency_accumulating_deltas(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -401,11 +397,11 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_agentic_trace(trace: AgenticTrace, engine_block_size: usize) -> Result<Self> {
+    pub fn new_agentic_trace(trace: AgenticTrace, engine_block_size: usize) -> Result<Self> {
         Self::new_agentic_trace_with_replay_hashes(trace, engine_block_size, true)
     }
 
-    pub(crate) fn new_agentic_trace_without_replay_hashes(
+    pub fn new_agentic_trace_without_replay_hashes(
         trace: AgenticTrace,
         engine_block_size: usize,
     ) -> Result<Self> {
@@ -467,10 +463,6 @@ impl WorkloadDriver {
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
                     policy_class: turn.policy_class,
-                    #[cfg(feature = "replay-bench")]
-                    deterministic_request_id: crate::replay::canonical_replay_active()
-                        .then(|| Uuid::from_u128(session_index as u128 + 1)),
-                    #[cfg(all(test, not(feature = "replay-bench")))]
                     deterministic_request_id: None,
                 }],
                 cumulative_tokens: Vec::new(),
@@ -524,9 +516,6 @@ impl WorkloadDriver {
         let trace_block_size = trace.block_size;
         let is_concurrency = matches!(&policy, SchedulingPolicy::Concurrency(_));
         let mut output_rng = StdRng::seed_from_u64(SYNTHETIC_OUTPUT_SEED);
-        #[cfg(feature = "replay-bench")]
-        let mut next_deterministic_request_id =
-            crate::replay::canonical_replay_active().then_some(1_u128);
         let sessions: Vec<SessionRuntime> = trace
             .sessions
             .into_iter()
@@ -555,18 +544,6 @@ impl WorkloadDriver {
                             turn.max_output_tokens,
                             &mut output_rng,
                         ));
-                        #[cfg(feature = "replay-bench")]
-                        let deterministic_request_id = {
-                            next_deterministic_request_id.map(|next_id| {
-                                let request_id = Uuid::from_u128(next_id);
-                                next_deterministic_request_id = Some(
-                                    next_id
-                                        .checked_add(1)
-                                        .expect("deterministic replay request UUID overflow"),
-                                );
-                                request_id
-                            })
-                        };
                         Ok(TurnRuntime {
                             request_id: None,
                             prompt_tokens,
@@ -577,9 +554,6 @@ impl WorkloadDriver {
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
                             policy_class: turn.policy_class,
-                            #[cfg(feature = "replay-bench")]
-                            deterministic_request_id,
-                            #[cfg(all(test, not(feature = "replay-bench")))]
                             deterministic_request_id: None,
                         })
                     })
@@ -638,11 +612,14 @@ impl WorkloadDriver {
         Ok(driver)
     }
 
-    /// Use stable monotonically increasing UUIDs for replay parity fixtures.
-    /// This is unavailable in production builds so normal request identity and
-    /// randomness remain unchanged.
-    #[cfg(any(test, feature = "replay-bench"))]
+    /// Use stable monotonically increasing UUIDs for canonical replay.
+    /// Callers must opt in through [`crate::ReplayDeterminism::CanonicalV1`].
     pub fn with_deterministic_request_ids(mut self, first_id: u128) -> Self {
+        self.set_deterministic_request_ids(first_id);
+        self
+    }
+
+    pub(crate) fn set_deterministic_request_ids(&mut self, first_id: u128) {
         let mut next_id = first_id;
         for session in &mut self.sessions {
             for turn in &mut session.turns {
@@ -652,11 +629,9 @@ impl WorkloadDriver {
                     .expect("deterministic replay request UUID overflow");
             }
         }
-        self
     }
 
     fn request_uuid(&self, _session_index: usize, _turn_index: usize) -> Uuid {
-        #[cfg(any(test, feature = "replay-bench"))]
         if let Some(request_id) =
             self.sessions[_session_index].turns[_turn_index].deterministic_request_id
         {
@@ -666,7 +641,7 @@ impl WorkloadDriver {
         Uuid::new_v4()
     }
 
-    pub(crate) fn without_session_metadata(mut self) -> Self {
+    pub fn without_session_metadata(mut self) -> Self {
         self.emit_session_metadata = false;
         self
     }
@@ -693,7 +668,8 @@ impl WorkloadDriver {
             .collect()
     }
 
-    pub(crate) fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
+    #[doc(hidden)]
+    pub fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
         let effective_limit = self.policy.dispatch_limit(limit, self.in_flight.len());
         if effective_limit == 0 {
             return Vec::new();
@@ -742,10 +718,12 @@ impl WorkloadDriver {
                         output_token_ids: turn.output_token_ids.take(),
                         uuid: Some(request_uuid),
                         dp_rank: 0,
+                        preferred_dp_rank: None,
                         arrival_timestamp_ms,
                         priority: turn.priority,
                         strict_priority: turn.strict_priority,
                         policy_class: turn.policy_class.clone(),
+                        replay_context: None,
                     };
                     let request = ReplayRequestPayload::deferred(
                         request_metadata,
@@ -782,10 +760,12 @@ impl WorkloadDriver {
                         output_token_ids: turn.output_token_ids.clone(),
                         uuid: Some(request_uuid),
                         dp_rank: 0,
+                        preferred_dp_rank: None,
                         arrival_timestamp_ms,
                         priority: turn.priority,
                         strict_priority: turn.strict_priority,
                         policy_class: turn.policy_class.clone(),
+                        replay_context: None,
                     });
                     (request, replay_hashes)
                 }

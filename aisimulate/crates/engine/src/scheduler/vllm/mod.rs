@@ -7,15 +7,11 @@
 //! admission and preemption differences live in [`policy`].
 
 mod core;
-mod live;
 mod policy;
 mod request;
 
 pub(crate) use core::VllmCore;
-pub use live::{MockerMetrics, Scheduler};
 
-/// Re-exported for policy tests that assert on request status through
-/// [`VllmCore::state`]; only needed in test builds.
 #[cfg(test)]
 pub(crate) use core::RequestStatus;
 

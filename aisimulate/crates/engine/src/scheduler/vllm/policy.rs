@@ -4,7 +4,6 @@
 //! Engine-specific policy for the shared vLLM/TRT-LLM scheduler core.
 
 use crate::common::protocols::{PrefillCost, SchedulingPolicy};
-use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::G1Manager;
 use crate::scheduler::vllm::request::RequestKvState;
 
@@ -17,40 +16,6 @@ pub(super) trait PolicySequence {
     fn current_known_blocks(&self) -> usize;
     fn to_completion_blocks(&self) -> usize;
     fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost;
-}
-
-impl PolicySequence for ActiveSequence {
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    fn max_output_tokens(&self) -> usize {
-        self.max_output_tokens()
-    }
-
-    fn generated_tokens(&self) -> usize {
-        self.generated_tokens()
-    }
-
-    fn num_input_tokens(&self) -> usize {
-        self.num_input_tokens()
-    }
-
-    fn num_allocated_tokens(&self) -> usize {
-        self.num_allocated_tokens()
-    }
-
-    fn current_known_blocks(&self) -> usize {
-        self.current_known_blocks()
-    }
-
-    fn to_completion_blocks(&self) -> usize {
-        self.to_completion_blocks()
-    }
-
-    fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost {
-        kv_manager.get_prefill_cost(self)
-    }
 }
 
 impl PolicySequence for RequestKvState {
@@ -83,21 +48,13 @@ impl PolicySequence for RequestKvState {
     }
 
     fn prefill_cost(&self, kv_manager: &G1Manager) -> PrefillCost {
-        match self {
-            RequestKvState::Native { sequence, lease } => {
-                kv_manager.get_native_prefill_cost(sequence, lease)
-            }
-            RequestKvState::Kvbm(sequence) => kv_manager.get_prefill_cost(sequence),
-        }
+        kv_manager.get_native_prefill_cost(&self.sequence, &self.lease)
     }
 }
 
 #[derive(Debug)]
 pub(super) enum AdmissionDecision {
-    Admit {
-        prefill_cost: PrefillCost,
-        g1_cached_tokens: usize,
-    },
+    Admit { prefill_cost: PrefillCost },
     Wait,
     Reject,
 }
@@ -248,7 +205,6 @@ pub(super) fn decide_waiting_admission<'a, S: PolicySequence + 'a>(
     }
 
     let raw_prefill_cost = sequence.prefill_cost(kv_manager);
-    let g1_cached_tokens = raw_prefill_cost.cached_tokens;
     let prefill_cost = apply_prefix_recompute(
         policy,
         sequence.len(),
@@ -275,10 +231,7 @@ pub(super) fn decide_waiting_admission<'a, S: PolicySequence + 'a>(
     if needed > available {
         AdmissionDecision::Wait
     } else {
-        AdmissionDecision::Admit {
-            prefill_cost,
-            g1_cached_tokens,
-        }
+        AdmissionDecision::Admit { prefill_cost }
     }
 }
 

@@ -8,13 +8,11 @@
 mod config;
 mod core;
 mod decode;
-mod live;
 mod policy;
 mod prefill;
 mod request;
 
 pub(crate) use core::SglangCore;
-pub use live::SglangScheduler;
 
 #[cfg(test)]
 mod tests;

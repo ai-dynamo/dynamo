@@ -11,8 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DYN_MOCKER_KV_CACHE_TRACE: &str = "DYN_MOCKER_KV_CACHE_TRACE";
 
 /// Check the env var to enable KV cache allocation/eviction trace logs.
-pub static KV_CACHE_TRACE_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| dynamo_truthy::env_is_truthy(DYN_MOCKER_KV_CACHE_TRACE));
+pub static KV_CACHE_TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var(DYN_MOCKER_KV_CACHE_TRACE).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+});
 
 fn timestamp_ms() -> u64 {
     SystemTime::now()

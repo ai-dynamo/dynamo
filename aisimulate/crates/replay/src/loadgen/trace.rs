@@ -7,17 +7,6 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_data_gen::request_trace::{
-    agentic::lower_agentic_mooncake_rows,
-    load::{RequestTraceMode, load_request_trace_records},
-    mooncake::lower_mooncake_rows,
-};
-use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
-};
-use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashMap;
@@ -26,9 +15,9 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    AgenticTrace, AgenticTurnTrace, DelaySpec, DynamoRequestTrace, LengthSpec, ReplayRequestHashes,
-    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
-    Trace, TraceFileFormat, TurnTrace, effective_replay_key,
+    AgenticMooncakeRow, AgenticTrace, AgenticTurnTrace, DelaySpec, LengthSpec, MooncakeRow,
+    ReplayRequestHashes, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace,
+    TraceFileFormat, TurnTrace, effective_replay_key,
 };
 use super::{SYNTHETIC_OUTPUT_SEED, planned_output_token_ids};
 use crate::common::protocols::DirectRequest;
@@ -70,47 +59,6 @@ impl HashIdInterner {
     }
 }
 
-impl DynamoRequestTrace {
-    pub fn from_request_trace_files(
-        paths: &[PathBuf],
-        expected_block_size: Option<usize>,
-    ) -> Result<Self> {
-        validate_trace_files(TraceFileFormat::Dynamo, paths)?;
-
-        let loaded = load_request_trace_records(paths)?;
-        match loaded.mode()? {
-            RequestTraceMode::Standard => {
-                let mut builder = None;
-                let mut row_index = 0;
-                let block_size = lower_mooncake_rows(loaded.requests, |block_size, row| {
-                    let builder =
-                        builder.get_or_insert_with(|| MooncakeTraceBuilder::new(block_size));
-                    builder.push(row_index, row)?;
-                    row_index += 1;
-                    Ok(())
-                })?;
-                validate_dynamo_trace_block_size(expected_block_size, block_size)?;
-                let builder = builder.expect("request trace lowering must emit at least one row");
-                Ok(Self::Standard(builder.finish()))
-            }
-            RequestTraceMode::Agentic => {
-                let mut builder = None;
-                let mut row_index = 0;
-                let block_size = lower_agentic_mooncake_rows(loaded, |block_size, row| {
-                    let builder =
-                        builder.get_or_insert_with(|| AgenticTraceBuilder::new(block_size));
-                    builder.push(row_index, row)?;
-                    row_index += 1;
-                    Ok(())
-                })?;
-                validate_dynamo_trace_block_size(expected_block_size, block_size)?;
-                let builder = builder.expect("request trace lowering must emit at least one row");
-                Ok(Self::Agentic(builder.finish()?))
-            }
-        }
-    }
-}
-
 pub fn validate_trace_files(format: TraceFileFormat, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         bail!("trace replay requires at least one trace file");
@@ -125,23 +73,7 @@ pub fn validate_trace_files(format: TraceFileFormat, paths: &[PathBuf]) -> Resul
     Ok(())
 }
 
-fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) -> Result<()> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    if expected != embedded {
-        bail!(
-            "trace_block_size {expected} does not match embedded Dynamo request trace block size {embedded}"
-        );
-    }
-    Ok(())
-}
-
 fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
-    #[cfg(feature = "replay-bench")]
-    if crate::replay::canonical_replay_active() {
-        return Uuid::from_u128(_request_ordinal as u128 + 1);
-    }
     Uuid::new_v4()
 }
 
@@ -238,10 +170,12 @@ impl TurnTrace {
             output_token_ids: self.output_token_ids.clone(),
             uuid: Some(request_uuid),
             dp_rank: 0,
+            preferred_dp_rank: None,
             arrival_timestamp_ms,
             priority: self.priority,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
+            replay_context: None,
         })
     }
 
@@ -977,39 +911,6 @@ impl Trace {
         self.sessions.iter().all(|session| session.turns.len() == 1)
     }
 
-    pub fn to_router_sequences(
-        &self,
-        worker_id: WorkerId,
-        hash_mode: SequenceHashMode,
-    ) -> Result<Vec<RouterSequence>> {
-        let mut sequences = Vec::new();
-        for session in &self.sessions {
-            for turn in &session.turns {
-                let local_hashes = turn
-                    .hash_ids
-                    .iter()
-                    .map(|&hash_id| local_block_hash_from_id(hash_id, self.block_size))
-                    .collect::<Vec<_>>();
-                let external_hashes = match hash_mode {
-                    SequenceHashMode::Raw => local_hashes
-                        .iter()
-                        .map(|hash| ExternalSequenceBlockHash(hash.0))
-                        .collect(),
-                    SequenceHashMode::Cumulative => compute_seq_hash_for_block(&local_hashes)
-                        .into_iter()
-                        .map(ExternalSequenceBlockHash)
-                        .collect(),
-                };
-                sequences.push(RouterSequence {
-                    worker_id,
-                    local_hashes,
-                    external_hashes,
-                });
-            }
-        }
-        Ok(sequences)
-    }
-
     pub fn into_trace_driver(self) -> Result<WorkloadDriver> {
         self.validate_for_trace_mode()?;
         let engine_block_size = self.block_size;
@@ -1493,15 +1394,4 @@ fn sample_exponential_delay_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
     }
     let u = (1.0 - rng.random::<f64>()).clamp(f64::MIN_POSITIVE, 1.0);
     -mean_ms * u.ln()
-}
-
-fn local_block_hash_from_id(hash_id: u32, block_size: usize) -> LocalBlockHash {
-    let tokens: Vec<u32> = (0..block_size).map(|_| hash_id).collect();
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            tokens.as_ptr() as *const u8,
-            std::mem::size_of_val(tokens.as_slice()),
-        )
-    };
-    LocalBlockHash(compute_hash_v2(bytes, XXH3_SEED))
 }

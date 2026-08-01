@@ -1,4 +1,4 @@
-# Offline Replay Liveness
+# AISimulate Replay Liveness
 
 Offline replay is a discrete-event simulation. Real runtime scheduling must
 not be mistaken for virtual-time progress or quiescence.
@@ -36,9 +36,9 @@ before virtual time reaches the completion timestamp. Visibility is split:
 - All ranks in an attention-DP group, including ranks with no work in the
   current epoch, share the slowest-rank completion boundary.
 - Do not generalize this guarantee to the whole `EngineComponent` or to other
-  replay components. KVBM transport, disaggregated handoffs, worker startup,
-  planner actions, and router queues may have independent deadlines or
-  explicitly revocable events.
+  replay components. Disaggregated handoffs, worker startup, scaling actions,
+  and placement queues may have independent deadlines or explicitly revocable
+  events.
 - Preserve eager pass execution unless the modeled engine gains genuinely
   preemptive behavior. Do not add engine-core snapshotting, transactional
   rollback, or speculative-state recovery without a demonstrated semantic

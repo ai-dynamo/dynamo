@@ -3,11 +3,11 @@
 
 //! Shared components used across all engine implementations.
 
-pub mod handoff;
+pub(crate) mod hashing;
 pub mod kv_cache_trace;
 pub mod perf_model;
 pub mod protocols;
-pub mod running_mean;
+pub(crate) mod running_mean;
 pub mod sequence;
 pub(crate) mod speculative;
 pub mod utils;

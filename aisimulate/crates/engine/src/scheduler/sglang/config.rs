@@ -47,6 +47,12 @@ pub(super) struct SglangConfig {
 impl SglangConfig {
     pub(super) fn from_args(args: &MockEngineArgs) -> Self {
         let sglang = args.sglang.as_ref();
+        debug_assert!(
+            sglang
+                .and_then(|config| config.page_size)
+                .is_none_or(|page_size| page_size == args.block_size),
+            "materialized SGLang page size must match the scheduler block size"
+        );
         let schedule_conservativeness = sglang
             .and_then(|s| s.schedule_conservativeness)
             .unwrap_or(1.0);

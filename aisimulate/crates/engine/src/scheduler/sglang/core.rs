@@ -4,20 +4,17 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
 #[cfg(test)]
 use crate::cache::radix_cache::KvPageId;
-use crate::common::handoff::HandoffId;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::common::utils::prefill_handoff_transfer_timing;
 use crate::kv_manager::SglangKvManager;
 use crate::kv_manager::sglang_backend::SglangDestinationReservation;
-#[cfg(test)]
-use crate::replay::TraceCollector;
-use crate::replay::offline::evidence::record_pressure_readmission;
+use crate::trace::TraceCollector;
+use crate::{HandoffId, modeled_duration_ms};
 
 use super::config::SglangConfig;
 use super::decode::{
@@ -26,12 +23,14 @@ use super::decode::{
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
+#[cfg(test)]
+use crate::scheduler::accept_length_sample;
 use crate::scheduler::{
-    ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedRouterEventBuffer,
-    DestinationHolds, EnginePassResult, MockerMetrics, PendingDestinations, RemovedSource,
-    RouterEventVisibility, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
+    ActiveHandoffRequests, AdmissionInvariant, AdmissionStage, CapturedKvEventBuffer,
+    DestinationHolds, EnginePassResult, KvEventVisibility, MockerMetrics, PendingDestinations,
+    RemovedSource, SchedulerCommand, SchedulerCommandEffects, SchedulerCommandResult,
     SchedulerLifecycleEvent, SourceCompletion, SourceHolds, build_fpm_snapshot,
-    capture_router_event_sink,
+    capture_kv_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -43,7 +42,7 @@ pub(crate) struct SglangCore {
     pub(super) new_token_ratio: f64,
     pub(super) kv_manager: SglangKvManager,
     speculative_sampler: Option<SpeculativeDecodeSampler>,
-    kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    kv_event_buffer: Option<CapturedKvEventBuffer>,
     source_holds: SourceHolds<HeldSglangPrefill>,
     pending_destinations: PendingDestinations<SglangRequest>,
     destination_holds: DestinationHolds<ReservedSglangDecode>,
@@ -81,46 +80,39 @@ impl ReservedSglangDecode {
 }
 
 impl SglangCore {
+    #[cfg(test)]
     pub(crate) fn new(args: MockEngineArgs) -> Self {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: u64) -> Self {
         Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
     pub(crate) fn new_with_worker_rank(
         args: MockEngineArgs,
-        worker_id: WorkerId,
+        _worker_id: u64,
         dp_rank: u32,
         seed_offset: u64,
         capture_kv_events: bool,
     ) -> Self {
         let (buffer, publishers) = if capture_kv_events {
-            let (buffer, sink) = capture_router_event_sink(worker_id);
-            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+            let (buffer, sink) = capture_kv_event_sink();
+            (Some(buffer), KvEventPublishers::new(Some(sink)))
         } else {
             (None, KvEventPublishers::default())
         };
         Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
-    pub(super) fn new_with_sink(
-        args: MockEngineArgs,
-        dp_rank: u32,
-        kv_event_publishers: KvEventPublishers,
-    ) -> Self {
-        Self::new_internal(args, dp_rank, u64::from(dp_rank), None, kv_event_publishers)
-    }
-
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
         seed_offset: u64,
-        kv_event_buffer: Option<CapturedRouterEventBuffer>,
+        kv_event_buffer: Option<CapturedKvEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
-        let args = args.normalized().expect("invalid MockEngineArgs");
         let config = SglangConfig::from_args(&args);
         let total_tokens = args.num_gpu_blocks * args.block_size;
         let speculative_sampler = args.aic_nextn.map(|nextn| {
@@ -156,6 +148,7 @@ impl SglangCore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         match self
             .apply_command(SchedulerCommand::Submit(request))
@@ -166,6 +159,7 @@ impl SglangCore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_command(
         &mut self,
         command: SchedulerCommand,
@@ -188,16 +182,22 @@ impl SglangCore {
                 ))
             }
             SchedulerCommand::CancelRequest { request_id } => {
-                let result = if self.cancel_active_request(request_id) {
+                let retired = self.cancel_active_request(request_id);
+                let result = if retired {
                     SchedulerCommandResult::Applied
                 } else {
                     SchedulerCommandResult::Noop
                 };
-                if allow_destination_admission {
-                    Ok(self.effects_after_capacity_change(result))
+                let effects = if allow_destination_admission {
+                    self.effects_after_capacity_change(result)
                 } else {
-                    Ok(SchedulerCommandEffects::new(result))
-                }
+                    SchedulerCommandEffects::new(result)
+                };
+                Ok(if retired {
+                    effects.retire(request_id)
+                } else {
+                    effects
+                })
             }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
@@ -215,20 +215,32 @@ impl SglangCore {
                 ))
             }
             SchedulerCommand::ReleaseSource { handoff_id } => {
-                let result = if self.release_source(handoff_id) {
+                let (applied, retired) = self.release_source(handoff_id);
+                let result = if applied {
                     SchedulerCommandResult::Applied
                 } else {
                     SchedulerCommandResult::Noop
                 };
-                Ok(self.effects_after_capacity_change(result))
+                let effects = self.effects_after_capacity_change(result);
+                Ok(if let Some(request_id) = retired {
+                    effects.retire(request_id)
+                } else {
+                    effects
+                })
             }
             SchedulerCommand::CancelSource { handoff_id } => {
-                let result = if self.cancel_source(handoff_id) {
+                let (applied, retired) = self.cancel_source(handoff_id);
+                let result = if applied {
                     SchedulerCommandResult::Applied
                 } else {
                     SchedulerCommandResult::Noop
                 };
-                Ok(self.effects_after_capacity_change(result))
+                let effects = self.effects_after_capacity_change(result);
+                Ok(if let Some(request_id) = retired {
+                    effects.retire(request_id)
+                } else {
+                    effects
+                })
             }
             SchedulerCommand::ReserveDestination {
                 handoff_id,
@@ -280,21 +292,27 @@ impl SglangCore {
                 Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied))
             }
             SchedulerCommand::CancelDestination { handoff_id } => {
-                if self.pending_destinations.remove(handoff_id).is_some() {
+                if let Some((request_id, _)) = self.pending_destinations.remove(handoff_id) {
                     self.bump_capacity_generation();
-                    return Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied));
+                    return Ok(self
+                        .effects_after_capacity_change(SchedulerCommandResult::Applied)
+                        .retire(request_id));
                 }
-                if let Some((_, reservation)) = self.destination_holds.remove(handoff_id) {
+                if let Some((request_id, reservation)) = self.destination_holds.remove(handoff_id) {
                     reservation.cancel(&mut self.kv_manager);
                     self.bump_capacity_generation();
-                    return Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied));
+                    return Ok(self
+                        .effects_after_capacity_change(SchedulerCommandResult::Applied)
+                        .retire(request_id));
                 }
                 let Some(request_id) = self.active_destination_handoffs.remove_handoff(handoff_id)
                 else {
                     return Ok(SchedulerCommandEffects::new(SchedulerCommandResult::Noop));
                 };
                 self.cancel_active_request(request_id);
-                Ok(self.effects_after_capacity_change(SchedulerCommandResult::Applied))
+                Ok(self
+                    .effects_after_capacity_change(SchedulerCommandResult::Applied)
+                    .retire(request_id))
             }
         }
     }
@@ -421,30 +439,32 @@ impl SglangCore {
         }
     }
 
-    fn release_source(&mut self, handoff_id: HandoffId) -> bool {
+    fn release_source(&mut self, handoff_id: HandoffId) -> (bool, Option<Uuid>) {
         match self.source_holds.remove(handoff_id) {
             RemovedSource::Held(payload) => {
+                let request_id = payload.request.uuid;
                 self.cleanup_completed_prefill(payload);
                 self.bump_capacity_generation();
-                true
+                (true, Some(request_id))
             }
-            RemovedSource::Pending { .. } => true,
-            RemovedSource::Missing => false,
+            RemovedSource::Pending { .. } => (true, None),
+            RemovedSource::Missing => (false, None),
         }
     }
 
-    fn cancel_source(&mut self, handoff_id: HandoffId) -> bool {
+    fn cancel_source(&mut self, handoff_id: HandoffId) -> (bool, Option<Uuid>) {
         match self.source_holds.remove(handoff_id) {
             RemovedSource::Held(payload) => {
+                let request_id = payload.request.uuid;
                 self.cleanup_completed_prefill(payload);
                 self.bump_capacity_generation();
-                true
+                (true, Some(request_id))
             }
             RemovedSource::Pending { request_id } => {
                 self.cancel_active_request(request_id);
-                true
+                (true, Some(request_id))
             }
-            RemovedSource::Missing => false,
+            RemovedSource::Missing => (false, None),
         }
     }
 
@@ -515,6 +535,11 @@ impl SglangCore {
             && self.active_destination_handoffs.is_empty()
     }
 
+    pub(crate) fn waiting_for_external_command(&self) -> bool {
+        self.is_empty() && !self.is_drained()
+    }
+
+    #[cfg(test)]
     pub(crate) fn num_requests(&self) -> usize {
         self.waiting.len() + self.prebuilt_ready.len() + self.running.len()
     }
@@ -591,10 +616,10 @@ impl SglangCore {
             .expect("destination capacity generation overflow");
     }
 
-    pub(crate) fn drain_kv_events(&self) -> Vec<dynamo_kv_router::protocols::RouterEvent> {
+    pub(crate) fn drain_kv_events(&self) -> Vec<crate::KvEvent> {
         self.kv_event_buffer
             .as_ref()
-            .map(CapturedRouterEventBuffer::drain)
+            .map(CapturedKvEventBuffer::drain)
             .unwrap_or_default()
     }
 
@@ -604,27 +629,48 @@ impl SglangCore {
         collector: &mut TraceCollector,
         now_ms: f64,
     ) -> EnginePassResult {
-        let pass = self
-            .try_execute_pass(now_ms)
-            .expect("SGLang scheduler pass failed");
-        collector.on_scheduler_pass(&pass, now_ms, Some(pass.token_completion_ms));
-        pass
-    }
-
-    pub(crate) fn try_execute_pass(&mut self, now_ms: f64) -> anyhow::Result<EnginePassResult> {
-        self.try_execute_pass_internal(now_ms)
+        self.try_execute_pass(collector, now_ms)
+            .expect("SGLang scheduler pass failed")
     }
 
     #[cfg(test)]
-    pub(super) fn execute_pass_internal(&mut self, now_ms: f64) -> EnginePassResult {
-        self.try_execute_pass_internal(now_ms)
+    pub(crate) fn try_execute_pass(
+        &mut self,
+        collector: &mut TraceCollector,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(Some(collector), now_ms)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_hidden_pass(now_ms)
+            .expect("SGLang hidden scheduler pass failed")
+    }
+
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
+        self.try_execute_pass_internal(None, now_ms)
+    }
+
+    #[cfg(test)]
+    pub(super) fn execute_pass_internal(
+        &mut self,
+        collector: Option<&mut TraceCollector>,
+        now_ms: f64,
+    ) -> EnginePassResult {
+        self.try_execute_pass_internal(collector, now_ms)
             .expect("SGLang scheduler pass failed")
     }
 
     pub(super) fn try_execute_pass_internal(
         &mut self,
+        mut collector: Option<&mut TraceCollector>,
         now_ms: f64,
     ) -> anyhow::Result<EnginePassResult> {
+        let new_token_ratio_before = self.new_token_ratio;
         let mut admissions = self.promote_prebuilt_ready();
         let materialized_waiting = !self.prebuilt_ready.is_empty();
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
@@ -649,7 +695,9 @@ impl SglangCore {
 
         admissions.append(&mut admit.admissions);
         for admission in &admissions {
-            record_pressure_readmission(admission.uuid, now_ms);
+            if let Some(collector) = collector.as_deref_mut() {
+                collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
+            }
         }
 
         // Capture per-request prefill FPM data before dispersing can_run.
@@ -690,6 +738,14 @@ impl SglangCore {
 
         for request in decode.completed_requests.drain(..) {
             self.complete_source(request);
+        }
+
+        if let Some(collector) = collector {
+            for signal in &decode.output_signals {
+                if signal.token_id.is_some() {
+                    collector.on_token(signal.uuid, decode.end_ms);
+                }
+            }
         }
 
         for req in decode.requests.drain(..).rev() {
@@ -763,16 +819,18 @@ impl SglangCore {
             (decode.end_ms - now_ms) / 1000.0,
         );
 
-        let accept_length = decode.accept_length;
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(
-            (accept_length.output_tokens, accept_length.decode_forwards),
-            crate::scheduler::accept_length_sample(&decode.output_signals)
-        );
+        #[cfg(test)]
+        let (accept_length_output_tokens, accept_length_decode_forwards) =
+            accept_length_sample(&decode.output_signals);
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         Ok(EnginePassResult {
             end_ms: decode.end_ms,
-            token_completion_ms: decode.end_ms,
+            same_timestamp_retry: if self.new_token_ratio != new_token_ratio_before {
+                crate::generalized::SameTimestampRetry::Retry
+            } else {
+                crate::generalized::SameTimestampRetry::Exhausted
+            },
+            #[cfg(test)]
             completed_requests: decode
                 .output_signals
                 .iter()
@@ -780,18 +838,21 @@ impl SglangCore {
                 .count(),
             output_signals: decode.output_signals,
             admissions,
+            pressure_events: decode.pressure_events,
             lifecycle_events: std::mem::take(&mut self.lifecycle_events),
             mocker_metrics: self
                 .mocker_metrics_with_cache(sglang_cache_hit_tokens, sglang_cache_total_tokens),
-            router_event_visibility: RouterEventVisibility::PassEnd,
+            kv_event_visibility: KvEventVisibility::PassEnd,
             kv_events: self
                 .kv_event_buffer
                 .as_ref()
-                .map(CapturedRouterEventBuffer::drain)
+                .map(CapturedKvEventBuffer::drain)
                 .unwrap_or_default(),
             fpm: Some(fpm),
-            accept_length_output_tokens: accept_length.output_tokens,
-            accept_length_decode_forwards: accept_length.decode_forwards,
+            #[cfg(test)]
+            accept_length_output_tokens,
+            #[cfg(test)]
+            accept_length_decode_forwards,
         })
     }
 
@@ -831,15 +892,13 @@ fn simulate_prefill_duration(
     let prefill_time = config
         .perf_model
         .predict_prefill_time(batch_size, mean_isl, mean_prefix)?;
-    let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
-
-    if !apply_speedup || config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
-        return Ok(total_time);
-    }
-
-    Ok(Duration::from_secs_f64(
-        total_time.as_secs_f64() / config.speedup_ratio,
-    ))
+    let speedup_ratio = if apply_speedup {
+        config.speedup_ratio
+    } else {
+        0.0
+    };
+    let modeled_ms = modeled_duration_ms(prefill_time, speedup_ratio)?;
+    Ok(Duration::from_secs_f64(modeled_ms / 1_000.0))
 }
 
 fn debug_assert_sglang_scheduler_state(

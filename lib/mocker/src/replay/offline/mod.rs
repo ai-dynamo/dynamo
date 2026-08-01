@@ -3,30 +3,9 @@
 
 pub(crate) use crate::replay::normalize_trace_requests;
 
-pub(crate) mod agg;
-mod canonical;
-pub(crate) mod components;
-pub(crate) mod core;
-pub(crate) mod disagg;
 mod entrypoints;
-pub(crate) mod events;
-pub(crate) mod evidence;
-mod executor;
 pub(crate) mod extensions;
-mod progress;
-pub(crate) mod runtime_utils;
-pub(crate) mod scaling;
-pub(crate) mod single;
-pub(crate) mod state;
 
-pub use canonical::{
-    CANONICAL_RESULT_EXCLUSIONS, CANONICAL_SCHEMA_VERSION, CanonicalAicIdentity,
-    CanonicalAicImplementation, CanonicalDeterminismMetadata, CanonicalEngineConfig,
-    CanonicalExecutionMetadata, CanonicalReplayCoverage, CanonicalReplayMetadata,
-    CanonicalReplayRecord, CanonicalReplayTopology, CanonicalSemanticFeatures,
-    CanonicalSlaMetadata, CanonicalSyntheticSpec, CanonicalWorkloadMetadata,
-    canonical_engine_pool_metadata, canonical_topology,
-};
 pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
@@ -35,17 +14,9 @@ pub(crate) use entrypoints::{
     simulate_concurrency_workload_disagg_with_scaling_policy,
     simulate_concurrency_workload_with_scaling_policy, simulate_trace_disagg_with_scaling_policy,
     simulate_trace_with_scaling_policy, simulate_trace_workload_accumulating_deltas,
+    simulate_trace_workload_disagg_with_capture_options,
     simulate_trace_workload_disagg_with_scaling_policy,
-    simulate_trace_workload_with_scaling_policy,
-};
-pub use evidence::{
-    EnginePressureState, KvIngestBoundary, KvIngestBoundaryStats, KvIngestEvidence,
-    LifecycleOperation, OfflineRuntimeEvidence, PressureEvidence, PressureKind, PressureRecord,
-    WorkerLifecycleTransition, WorkerLifecycleTransitionKind, WorkerPool, WorkerPoolState,
-    with_runtime_evidence,
-};
-pub use extensions::kv_router::{
-    CanonicalReplayRouterMode, CanonicalRouterMetadata, canonical_router_metadata,
+    simulate_trace_workload_with_capture_options, simulate_trace_workload_with_scaling_policy,
 };
 
 #[cfg(test)]

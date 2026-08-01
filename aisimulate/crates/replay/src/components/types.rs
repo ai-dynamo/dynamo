@@ -4,35 +4,22 @@
 use uuid::Uuid;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
-use super::super::events::WorkerCompletionPayload;
-use super::super::evidence::{KvIngestBoundary, WorkerPool};
-use super::super::state::OfflineWorkerState;
-use crate::common::protocols::DirectRequest;
+use super::super::events::{EnginePassCompletion, WorkerCompletionPayload};
+use super::super::evidence::KvIngestEventEncoder;
+use crate::core::RequestIdentity;
 use crate::loadgen::ReplayRequestPayload;
-use crate::replay::offline::core::RequestIdentity;
-use crate::scheduler::{
-    AdmissionEvent, EnginePassResult, SchedulerCommandEffects, SchedulerCommandResult,
-    SchedulerLifecycleEvent,
+use crate::protocol::DirectRequest;
+use aisimulate_engine::{
+    CommandResult, KvEvent, LifecycleEvent, PressureEvent as EnginePressureEvent,
 };
-
-pub(in crate::replay) struct ObservedWorkerEvents<Events: EngineEventBatch> {
-    pub(in crate::replay::offline) events: Events,
-    pub(in crate::replay::offline) had_raw_observations: bool,
-}
-
-impl<Events: EngineEventBatch> ObservedWorkerEvents<Events> {
-    pub(in crate::replay) fn from_events(events: Events) -> Self {
-        let had_raw_observations = !events.is_empty();
-        Self {
-            events,
-            had_raw_observations,
-        }
-    }
-}
 
 impl RequestIdentity for DirectRequest {
     fn request_id(&self) -> Option<Uuid> {
         self.uuid
+    }
+
+    fn preferred_dp_rank(&self) -> Option<u32> {
+        self.preferred_dp_rank
     }
 }
 
@@ -40,41 +27,66 @@ impl RequestIdentity for ReplayRequestPayload {
     fn request_id(&self) -> Option<Uuid> {
         self.metadata().uuid
     }
+
+    fn preferred_dp_rank(&self) -> Option<u32> {
+        self.metadata().preferred_dp_rank
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::replay) enum ReplayMode {
+pub(crate) enum ReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::replay::offline) enum EnginePassMode {
+pub(crate) enum EnginePassMode {
     Visible,
     Hidden,
 }
 
-pub(in crate::replay) trait ReplayEngineObservation {
+#[doc(hidden)]
+pub trait ReplayEngineObservation {
     type Batch: EngineEventBatch;
 
-    const CAPTURE_RAW: bool;
+    /// Whether the engine should retain and publish neutral KV events.
+    const CAPTURE_ENGINE_KV_EVENTS: bool;
 
-    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch;
-    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch;
-    fn drain_worker_events(worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch>;
+    /// Whether this observation adapter needs engine KV events for one worker
+    /// stage. Most adapters use the same setting for every stage; adapters
+    /// whose prefill and decode policies observe different event streams may
+    /// override this method.
+    fn capture_engine_kv_events(_stage: crate::WorkerStage) -> bool {
+        Self::CAPTURE_ENGINE_KV_EVENTS
+    }
 
-    #[cfg(feature = "kvbm-offload")]
-    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch;
+    /// Convert native G1 observations at their original visibility boundary.
+    /// Dynamo Router adapters implement this without leaking RouterEvent into
+    /// the generalized engine crate.
+    fn observe_engine_events(
+        stage: crate::WorkerStage,
+        worker_id: usize,
+        dp_rank: u32,
+        events: Vec<KvEvent>,
+    ) -> Self::Batch;
 
     fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
         Vec::new()
     }
 
-    fn record_ingestion(
+    /// Return the number of events that should contribute to canonical
+    /// ingestion evidence. `None` means this observation adapter does not
+    /// expose an encodable KV stream.
+    fn kv_ingest_event_count(_events: &Self::Batch) -> Option<usize> {
+        None
+    }
+
+    /// Encode one batch into Replay's provider-neutral canonical digest.
+    /// Implementations live beside the concrete event type (for example the
+    /// Dynamo Router adapter), while Replay owns the accumulator and timing.
+    fn encode_kv_ingest(
         _events: &Self::Batch,
-        _pool: WorkerPool,
-        _boundary: KvIngestBoundary,
-        _at_ms: f64,
+        _encoder: &mut KvIngestEventEncoder<'_>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -83,86 +95,78 @@ pub(in crate::replay) trait ReplayEngineObservation {
 impl ReplayEngineObservation for NoEngineEvents {
     type Batch = ();
 
-    const CAPTURE_RAW: bool = false;
+    const CAPTURE_ENGINE_KV_EVENTS: bool = false;
 
     #[inline]
-    fn take_pass_events(pass: &mut EnginePassResult) -> Self::Batch {
-        pass.kv_events.clear();
-    }
-
-    #[inline]
-    fn take_command_events(effects: &mut SchedulerCommandEffects) -> Self::Batch {
-        effects.kv_events.clear();
-    }
-
-    #[inline]
-    fn drain_worker_events(_worker: &OfflineWorkerState) -> ObservedWorkerEvents<Self::Batch> {
-        ObservedWorkerEvents::from_events(())
-    }
-
-    #[cfg(feature = "kvbm-offload")]
-    #[inline]
-    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch {
-        effects.kv_events.clear();
+    fn observe_engine_events(
+        _stage: crate::WorkerStage,
+        _worker_id: usize,
+        _dp_rank: u32,
+        _events: Vec<KvEvent>,
+    ) -> Self::Batch {
     }
 }
 
-pub(in crate::replay) struct ObservedCommandEffects<Events: EngineEventBatch> {
-    pub(in crate::replay::offline) result: SchedulerCommandResult,
-    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub(in crate::replay::offline) engine_events: Events,
+#[derive(Debug, Clone)]
+pub(crate) struct AdmissionEvent {
+    pub(crate) uuid: Uuid,
+    pub(crate) reused_input_tokens: usize,
 }
 
-#[cfg(feature = "kvbm-offload")]
-pub(in crate::replay) struct ObservedOffloadEffects<Events: EngineEventBatch> {
-    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub(in crate::replay::offline) engine_events: Events,
-    pub(in crate::replay::offline) progress: EngineProgress,
+#[derive(Debug, Clone)]
+pub(crate) struct PressureEvent {
+    pub(crate) worker_id: u64,
+    pub(crate) dp_rank: u32,
+    pub(crate) event: EnginePressureEvent,
+}
+
+pub(crate) struct ObservedCommandEffects<Events: EngineEventBatch> {
+    pub(crate) result: CommandResult,
+    pub(crate) lifecycle_events: Vec<LifecycleEvent>,
+    pub(crate) engine_events: Events,
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct ScheduledWorkerCompletions<Events: EngineEventBatch = ()> {
-    pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) payloads: Vec<WorkerCompletionPayload<Events>>,
+pub(crate) struct ScheduledEngineCompletion<Events: EngineEventBatch = ()> {
+    pub(crate) at_ms: f64,
+    pub(crate) completion: EnginePassCompletion<Events>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ArtifactPassStart {
+    pub(crate) at_ms: f64,
+    pub(crate) kv_events: Box<[KvEvent]>,
 }
 
 #[derive(Debug, Default)]
-pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = ()> {
-    pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
-    pub(in crate::replay::offline) pass_start_events: Events,
-    pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
-    pub(in crate::replay::offline) scheduled_completion: Option<ScheduledWorkerCompletions<Events>>,
-    pub(in crate::replay::offline) progress: EngineProgress,
+pub(crate) struct EngineEffects<Events: EngineEventBatch = ()> {
+    pub(crate) admissions: Vec<AdmissionEvent>,
+    pub(crate) pressure_events: Vec<PressureEvent>,
+    pub(crate) pass_start_events: Events,
+    pub(crate) artifact_pass_start: Option<Box<ArtifactPassStart>>,
+    pub(crate) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
+    pub(crate) scheduled_completion: Option<ScheduledEngineCompletion<Events>>,
+    pub(crate) progress: EngineProgress,
 }
 
 impl<Events: EngineEventBatch> EngineEffects<Events> {
-    pub(in crate::replay::offline) fn schedule_completion(
+    pub(crate) fn schedule_completion(
         &mut self,
         at_ms: f64,
-        payload: WorkerCompletionPayload<Events>,
-        capacity_hint: usize,
+        completion: EnginePassCompletion<Events>,
     ) {
         assert!(
-            capacity_hint > 0,
-            "scheduled completion capacity hint must be non-zero"
+            self.scheduled_completion.is_none(),
+            "one drive may schedule at most one logical-engine pass"
         );
-        let scheduled =
-            self.scheduled_completion
-                .get_or_insert_with(|| ScheduledWorkerCompletions {
-                    at_ms,
-                    payloads: Vec::with_capacity(capacity_hint),
-                });
-        assert_eq!(
-            scheduled.at_ms.to_bits(),
-            at_ms.to_bits(),
-            "offline replay engine effects contain mismatched completion timestamps"
-        );
-        scheduled.payloads.push(payload);
+        self.scheduled_completion = Some(ScheduledEngineCompletion { at_ms, completion });
     }
 
-    pub(in crate::replay::offline) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.admissions.is_empty()
+            && self.pressure_events.is_empty()
             && self.pass_start_events.is_empty()
+            && self.artifact_pass_start.is_none()
             && self.immediate_completions.is_empty()
             && self.scheduled_completion.is_none()
             && !self.progress.made_progress
@@ -232,7 +236,7 @@ pub struct TrafficStats {
 /// ``overlap_blocks / isl_blocks`` sample to the running mean, so large
 /// requests don't get weighted more heavily than small ones.
 #[derive(Debug)]
-pub(in crate::replay::offline) struct TrafficAccumulator {
+pub(crate) struct TrafficAccumulator {
     window_start_ms: f64,
     offered_count: usize,
     total_isl: usize,
@@ -254,7 +258,7 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
 }
 
 impl TrafficAccumulator {
-    pub(in crate::replay::offline) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             window_start_ms: 0.0,
             offered_count: 0,
@@ -273,12 +277,12 @@ impl TrafficAccumulator {
     }
 
     /// Record one request offered to the replay runtime.
-    pub(in crate::replay::offline) fn on_arrival(&mut self) {
+    pub(crate) fn on_arrival(&mut self) {
         self.offered_count += 1;
     }
 
     /// Record one completed, non-rejected request with optional latency data.
-    pub(in crate::replay::offline) fn on_completion(
+    pub(crate) fn on_completion(
         &mut self,
         input_tokens: usize,
         output_tokens: usize,
@@ -307,11 +311,7 @@ impl TrafficAccumulator {
     /// Admissions with ``isl_blocks == 0`` are skipped (no meaningful
     /// ratio), mirroring ``RequestTracker::kv_hit_rate()`` returning
     /// ``None`` in that case.
-    pub(in crate::replay::offline) fn on_admission(
-        &mut self,
-        overlap_blocks: u32,
-        isl_blocks: u32,
-    ) {
+    pub(crate) fn on_admission(&mut self, overlap_blocks: u32, isl_blocks: u32) {
         if isl_blocks == 0 {
             return;
         }
@@ -323,7 +323,7 @@ impl TrafficAccumulator {
     /// scaling. ``visible_output_tokens`` is the numerator and
     /// ``decode_forwards`` is the number of requests that participated in the
     /// decode forward.
-    pub(in crate::replay::offline) fn on_accept_length_sample(
+    pub(crate) fn on_accept_length_sample(
         &mut self,
         visible_output_tokens: usize,
         decode_forwards: usize,
@@ -336,7 +336,7 @@ impl TrafficAccumulator {
     }
 
     /// Drain the accumulator at the given simulated time, resetting counters.
-    pub(in crate::replay::offline) fn drain(&mut self, now_ms: f64) -> TrafficStats {
+    pub(crate) fn drain(&mut self, now_ms: f64) -> TrafficStats {
         let duration_s = (now_ms - self.window_start_ms) / 1000.0;
         let num_req = self.offered_count;
         let avg_isl = if self.shape_count > 0 {

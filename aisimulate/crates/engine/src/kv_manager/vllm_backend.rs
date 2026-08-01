@@ -7,17 +7,14 @@
 //! manager owns KV-event metadata, while the pool owns occupancy, duplicate
 //! copies, prefix pins, and LRU eviction.
 
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
-};
-use dynamo_tokens::{BlockHash, SequenceHash};
 use uuid::Uuid;
 
 use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, ReserveOutcome, VllmBlockPool};
+use crate::common::hashing::{BlockHash, SequenceHash};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::{KvEventPublishers, PrefillCost};
-use crate::common::sequence::{NativeBlockIdentity, RequestSequence};
+use crate::common::sequence::{BlockIdentity, RequestSequence};
+use crate::{KvBlock, KvEvent, KvEventData, StoredBlocks};
 
 struct PendingStore {
     parent_hash: Option<SequenceHash>,
@@ -27,7 +24,7 @@ struct PendingStore {
 
 #[derive(Debug)]
 struct BlockLeaseEntry {
-    identity: NativeBlockIdentity,
+    identity: BlockIdentity,
     copy: Option<BlockCopyId>,
     /// Whether a freshly allocated full block still needs to become cache-visible.
     pending_cache: bool,
@@ -43,7 +40,7 @@ pub(crate) struct BlockRequestLease {
 }
 
 impl BlockRequestLease {
-    pub(crate) fn new(owner: Uuid, identities: Vec<NativeBlockIdentity>) -> Self {
+    pub(crate) fn new(owner: Uuid, identities: Vec<BlockIdentity>) -> Self {
         let mut entries = Vec::with_capacity(identities.capacity());
         entries.extend(identities.into_iter().map(|identity| BlockLeaseEntry {
             identity,
@@ -78,14 +75,13 @@ impl BlockRequestLease {
     }
 
     pub(crate) fn append_partial(&mut self) {
-        assert!(
-            self.entries
-                .last()
-                .is_none_or(|entry| entry.identity.sequence_hash.is_some()),
-            "native lease already has a partial tail"
-        );
+        // One scheduler decision can materialize more than one token (for
+        // example speculative decoding). In that case the previous partial
+        // block may already be logically complete but still await
+        // `finalize_lease_computed_prefix`, so its identity is intentionally
+        // unresolved while the next partial entry is opened.
         self.entries.push(BlockLeaseEntry {
-            identity: NativeBlockIdentity::partial(),
+            identity: BlockIdentity::partial(),
             copy: None,
             pending_cache: false,
         });
@@ -139,16 +135,16 @@ impl StoreGroup {
     }
 }
 
-pub(crate) struct NativeDecodeBlockReservation {
+pub(crate) struct DecodeBlockReservation {
     pool: BlockReservation,
 }
 
-pub(crate) struct NativeDestinationReservation {
+pub(crate) struct DestinationReservation {
     request_id: Uuid,
     pool: BlockReservation,
 }
 
-impl NativeDestinationReservation {
+impl DestinationReservation {
     pub(crate) fn transferable_prompt_tokens(&self, block_size: usize) -> usize {
         self.pool.fresh_len().saturating_mul(block_size)
     }
@@ -269,7 +265,7 @@ impl VllmKvManager {
         owner: Uuid,
         lease: &mut BlockRequestLease,
         cumulative_tokens: usize,
-        reservation: &mut NativeDecodeBlockReservation,
+        reservation: &mut DecodeBlockReservation,
     ) {
         lease.debug_assert_owner(owner);
         let previous_blocks = lease
@@ -380,7 +376,7 @@ impl VllmKvManager {
         sequence: &RequestSequence,
         lease: &BlockRequestLease,
         _eviction_now_ms: Option<f64>,
-    ) -> VllmAcquire<NativeDestinationReservation> {
+    ) -> VllmAcquire<DestinationReservation> {
         lease.debug_assert_owner(owner);
         assert_eq!(
             lease.resident_block_count(),
@@ -401,7 +397,7 @@ impl VllmKvManager {
             return VllmAcquire::CapacityExhausted;
         };
         self.publish_removed(outcome.removed);
-        VllmAcquire::Ready(NativeDestinationReservation {
+        VllmAcquire::Ready(DestinationReservation {
             request_id: owner,
             pool: outcome.reservation,
         })
@@ -412,7 +408,7 @@ impl VllmKvManager {
         owner: Uuid,
         sequence: &RequestSequence,
         lease: &mut BlockRequestLease,
-        mut reservation: NativeDestinationReservation,
+        mut reservation: DestinationReservation,
     ) {
         lease.debug_assert_owner(owner);
         debug_assert_eq!(
@@ -579,21 +575,21 @@ impl VllmKvManager {
     pub(crate) fn reserve_decode_blocks(
         &mut self,
         count: usize,
-    ) -> VllmAcquire<NativeDecodeBlockReservation> {
+    ) -> VllmAcquire<DecodeBlockReservation> {
         let Some(outcome) = self.pool.reserve(&[], count) else {
             return VllmAcquire::CapacityExhausted;
         };
         self.publish_removed(outcome.removed);
-        VllmAcquire::Ready(NativeDecodeBlockReservation {
+        VllmAcquire::Ready(DecodeBlockReservation {
             pool: outcome.reservation,
         })
     }
 
-    pub(crate) fn release_decode_reservation(&mut self, reservation: NativeDecodeBlockReservation) {
+    pub(crate) fn release_decode_reservation(&mut self, reservation: DecodeBlockReservation) {
         self.pool.cancel(reservation.pool);
     }
 
-    pub(crate) fn cancel_destination(&mut self, reservation: NativeDestinationReservation) {
+    pub(crate) fn cancel_destination(&mut self, reservation: DestinationReservation) {
         self.pool.cancel(reservation.pool);
     }
 
@@ -673,30 +669,25 @@ impl VllmKvManager {
         );
 
         let data = if is_store {
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+            KvEventData::Stored(StoredBlocks {
+                parent_hash,
                 start_position: None,
                 blocks: full_blocks
                     .into_iter()
                     .enumerate()
-                    .map(|(index, hash)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(hash),
-                        tokens_hash: LocalBlockHash(
-                            local_hashes.get(index).copied().unwrap_or_default(),
-                        ),
-                        mm_extra_info: None,
+                    .map(|(index, hash)| KvBlock {
+                        block_hash: hash,
+                        tokens_hash: local_hashes.get(index).copied().unwrap_or_default(),
+                        token_ids: token_ids.as_ref().and_then(|ids| ids.get(index).cloned()),
                     })
                     .collect(),
             })
         } else {
-            KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: full_blocks
-                    .into_iter()
-                    .map(ExternalSequenceBlockHash)
-                    .collect(),
-            })
+            KvEventData::Removed {
+                block_hashes: full_blocks,
+            }
         };
-        let event = KvCacheEvent {
+        let event = KvEvent {
             event_id: self.next_event_id,
             data,
             dp_rank: self.dp_rank,
@@ -717,28 +708,12 @@ impl VllmKvManager {
         self.pool.num_active()
     }
 
-    pub(crate) fn num_active_block_refs(&self) -> usize {
-        self.pool.num_active_refs()
-    }
-
     pub(crate) fn num_inactive_blocks(&self) -> usize {
         self.pool.num_inactive()
     }
 
-    pub(crate) fn get_active_perc(&self) -> f64 {
-        self.num_active_blocks() as f64 / self.max_capacity() as f64
-    }
-
     pub(crate) fn max_capacity(&self) -> usize {
         self.pool.capacity()
-    }
-
-    pub(crate) fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    pub(crate) fn dp_rank(&self) -> u32 {
-        self.dp_rank
     }
 }
 
@@ -747,21 +722,21 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::common::protocols::{RawKvEvent, RawKvEventSink};
+    use crate::common::protocols::KvCacheEventSink;
 
     #[derive(Default)]
-    struct CapturingRawSink {
-        events: Mutex<Vec<RawKvEvent>>,
+    struct CapturingNativeSink {
+        events: Mutex<Vec<KvEvent>>,
     }
 
-    impl CapturingRawSink {
-        fn take(&self) -> Vec<RawKvEvent> {
+    impl CapturingNativeSink {
+        fn take(&self) -> Vec<KvEvent> {
             std::mem::take(&mut *self.events.lock().unwrap())
         }
     }
 
-    impl RawKvEventSink for CapturingRawSink {
-        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
+    impl KvCacheEventSink for CapturingNativeSink {
+        fn publish(&self, event: KvEvent) -> anyhow::Result<()> {
             self.events.lock().unwrap().push(event);
             Ok(())
         }
@@ -777,7 +752,7 @@ mod tests {
         let identities = hashes
             .iter()
             .copied()
-            .map(|hash| NativeBlockIdentity {
+            .map(|hash| BlockIdentity {
                 sequence_hash: Some(hash),
                 local_hash: Some(hash + 100),
             })
@@ -940,11 +915,11 @@ mod tests {
 
     #[test]
     fn event_enabled_finalization_preserves_store_payload() {
-        let sink = Arc::new(CapturingRawSink::default());
-        let publishers = KvEventPublishers::new(None, Some(sink.clone()));
+        let sink = Arc::new(CapturingNativeSink::default());
+        let publishers = KvEventPublishers::new(Some(sink.clone()));
         let mut manager = VllmKvManager::new_with_event_sink(2, 4, true, publishers, 3);
         let owner = Uuid::from_u128(1);
-        let token_ids = vec![vec![4, 5, 6, 7]];
+        let token_ids = [vec![4, 5, 6, 7]];
         let (mut sequence, mut lease) = request(owner, &[6, 7], true);
         ready(manager.allocate_lease(owner, &mut lease, 8, 0));
         manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 4, 8);
@@ -952,15 +927,15 @@ mod tests {
         let mut events = sink.take();
         assert_eq!(events.len(), 1);
         let event = events.pop().unwrap();
-        assert_eq!(event.event.event_id, 0);
-        assert_eq!(event.event.dp_rank, 3);
-        assert_eq!(event.block_token_ids, Some(token_ids));
-        let KvCacheEventData::Stored(stored) = event.event.data else {
+        assert_eq!(event.event_id, 0);
+        assert_eq!(event.dp_rank, 3);
+        let KvEventData::Stored(stored) = event.data else {
             panic!("expected Stored event")
         };
-        assert_eq!(stored.parent_hash, Some(ExternalSequenceBlockHash(6)));
+        assert_eq!(stored.parent_hash, Some(6));
         assert_eq!(stored.blocks.len(), 1);
-        assert_eq!(stored.blocks[0].block_hash, ExternalSequenceBlockHash(7));
-        assert_eq!(stored.blocks[0].tokens_hash, LocalBlockHash(107));
+        assert_eq!(stored.blocks[0].block_hash, 7);
+        assert_eq!(stored.blocks[0].tokens_hash, 107);
+        assert_eq!(stored.blocks[0].token_ids, Some(token_ids[0].clone()));
     }
 }

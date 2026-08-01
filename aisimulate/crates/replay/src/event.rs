@@ -2,51 +2,75 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
+use std::marker::PhantomData;
+
+use aisimulate_engine::generalized::PassId;
+use aisimulate_engine::{KvEvent, LifecycleEvent};
 
 use super::core::{EngineEventBatch, EngineProgress};
-use crate::common::handoff::HandoffId;
-use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
-use crate::scheduler::SchedulerLifecycleEvent;
+use crate::protocol::{ForwardPassSnapshot, OutputSignal};
+use aisimulate_engine::HandoffId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::replay::offline) enum SimulationWorkerStage {
+pub(crate) enum SimulationWorkerStage {
     Aggregated,
     Prefill,
     Decode,
 }
 
-#[derive(Debug)]
-pub(in crate::replay::offline) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
-    pub(in crate::replay::offline) stage: SimulationWorkerStage,
-    pub(in crate::replay::offline) worker_idx: usize,
-    pub(in crate::replay::offline) completed_requests: usize,
-    pub(in crate::replay::offline) output_signals: Vec<OutputSignal>,
-    pub(in crate::replay::offline) lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub(in crate::replay::offline) engine_events: Events,
-    pub(in crate::replay::offline) progress: EngineProgress,
-    pub(in crate::replay::offline) fpm: Option<ForwardPassSnapshot>,
-    pub(in crate::replay::offline) accept_length_output_tokens: usize,
-    pub(in crate::replay::offline) accept_length_decode_forwards: usize,
+impl From<SimulationWorkerStage> for crate::WorkerStage {
+    fn from(stage: SimulationWorkerStage) -> Self {
+        match stage {
+            SimulationWorkerStage::Aggregated => Self::Aggregated,
+            SimulationWorkerStage::Prefill => Self::Prefill,
+            SimulationWorkerStage::Decode => Self::Decode,
+        }
+    }
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) enum SimulationEventKind<Events: EngineEventBatch = ()> {
-    WorkerCompletion {
-        stage: SimulationWorkerStage,
-        worker_idx: usize,
-        completed_requests: usize,
-        output_signals: Vec<OutputSignal>,
-        lifecycle_events: Vec<SchedulerLifecycleEvent>,
-        engine_events: Events,
-        made_progress: bool,
-        had_raw_observations: bool,
-        fpm: Option<Box<crate::common::protocols::ForwardPassSnapshot>>,
-        accept_length_output_tokens: usize,
-        accept_length_decode_forwards: usize,
-    },
-    WorkerCompletionBatch {
-        payloads: Box<[WorkerCompletionPayload<Events>]>,
-    },
+pub(crate) struct WorkerCompletionPayload<Events: EngineEventBatch = ()> {
+    pub(crate) stage: SimulationWorkerStage,
+    pub(crate) worker_idx: usize,
+    pub(crate) completed_requests: usize,
+    pub(crate) output_signals: Vec<OutputSignal>,
+    pub(crate) lifecycle_events: Vec<LifecycleEvent>,
+    pub(crate) engine_events: Events,
+    /// The grouped pass start is needed to normalize pass-end observations to
+    /// pass-start visibility in detailed replay artifacts.
+    pub(crate) pass_started_at_ms: f64,
+    /// Raw pass-end KV events retained only for optional replay artifacts.
+    pub(crate) artifact_pass_end_kv_events: Option<Box<[KvEvent]>>,
+    pub(crate) progress: EngineProgress,
+    pub(crate) fpm: Option<ForwardPassSnapshot>,
+    pub(crate) accept_length_output_tokens: usize,
+    pub(crate) accept_length_decode_forwards: usize,
+}
+
+/// One logical generalized-engine pass whose modeled completion boundary has
+/// become visible to the replay event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EnginePassCompletion<Events: EngineEventBatch = ()> {
+    pub(crate) stage: SimulationWorkerStage,
+    pub(crate) worker_id: usize,
+    pub(crate) pass_id: PassId,
+    events: PhantomData<fn() -> Events>,
+}
+
+impl<Events: EngineEventBatch> EnginePassCompletion<Events> {
+    pub(crate) fn new(stage: SimulationWorkerStage, worker_id: usize, pass_id: PassId) -> Self {
+        Self {
+            stage,
+            worker_id,
+            pass_id,
+            events: PhantomData,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SimulationEventKind<Events: EngineEventBatch = ()> {
+    EnginePassCompletion(EnginePassCompletion<Events>),
     TransferComplete {
         handoff_id: HandoffId,
     },
@@ -75,10 +99,10 @@ impl<Events: EngineEventBatch> SimulationEventKind<Events> {
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct SimulationEvent<Events: EngineEventBatch = ()> {
-    pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) seq_no: u64,
-    pub(in crate::replay::offline) kind: SimulationEventKind<Events>,
+pub(crate) struct SimulationEvent<Events: EngineEventBatch = ()> {
+    pub(crate) at_ms: f64,
+    pub(crate) seq_no: u64,
+    pub(crate) kind: SimulationEventKind<Events>,
 }
 
 impl<Events: EngineEventBatch> PartialEq for SimulationEvent<Events> {
