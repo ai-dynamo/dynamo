@@ -19,6 +19,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 
 class AggregatedHandler(HandlerBase):
@@ -37,6 +38,10 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
+    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
+    # inspects this signature for `response_sender`, and range_decorator
+    # needs to wrap a real async-generator function. See push_egress.py.
+    @push_egress_capable
     @_nvtx.range_decorator("trtllm:agg:generate", color="green")
     async def generate(
         self, request: dict, context: Context

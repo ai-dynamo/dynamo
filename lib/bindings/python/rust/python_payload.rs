@@ -150,6 +150,40 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
     }
 }
 
+/// Response encoder for the flag-gated push egress path (`push_egress.rs`).
+///
+/// The push path converts each response to an owned Rust value on the Python
+/// thread that produced it, so by the time a frame reaches here it holds no
+/// Python object: encoding is pure serde. No GIL, and — unlike the
+/// [`PythonResponseItem`] encoder above — no `spawn_blocking` hop either.
+impl IngressResponseEncoder<Annotated<serde_json::Value>> for PythonIngressPayloadAdapter {
+    async fn encode_response(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<Annotated<serde_json::Value>>,
+        complete_final: bool,
+    ) -> Result<EncodedResponseFrame, PipelineError> {
+        let is_error = response
+            .as_ref()
+            .is_some_and(|response| response.err().is_some());
+        let wrapper = NetworkStreamWrapper {
+            data: response,
+            complete_final,
+        };
+        let bytes = payload_codec.encode(&wrapper).map_err(|error| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} push-egress response: {error}",
+                payload_codec.name()
+            ))
+        })?;
+        Ok(EncodedResponseFrame {
+            bytes: bytes.into(),
+            is_error,
+            stop_stream: false,
+        })
+    }
+}
+
 fn encode_python_response(
     payload_codec: RequestPlanePayloadCodec,
     response: PythonResponseItem,
