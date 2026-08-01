@@ -97,6 +97,8 @@ class AppServer:
         self._approval_request_count = 0
         self._dynamic_tool_request_count = 0
         self._dynamic_tool_success = True
+        self._dynamic_tool_schema_expected = False
+        self._dynamic_tool_schema_valid = False
         self._user_input_request_count = 0
         self._mcp_elicitation_request_count = 0
         self.turn_timeout_s = turn_timeout_s
@@ -165,6 +167,10 @@ class AppServer:
     async def _accept_dynamic_tool_call(self, message: dict[str, Any]) -> None:
         if message.get("method") != "item/tool/call":
             return
+        params = message.get("params")
+        arguments = params.get("arguments") if isinstance(params, dict) else None
+        if self._dynamic_tool_schema_expected:
+            self._dynamic_tool_schema_valid = isinstance(arguments, dict) and arguments == {"left": 20, "right": 22}
         assert self._process and self._process.stdin
         response = {
             "jsonrpc": "2.0",
@@ -342,6 +348,12 @@ class AppServer:
 
     def set_dynamic_tool_success(self, success: bool) -> None:
         self._dynamic_tool_success = success
+
+    def expect_dynamic_tool_schema(self) -> None:
+        self._dynamic_tool_schema_expected = True
+
+    def dynamic_tool_schema_valid(self) -> bool:
+        return self._dynamic_tool_schema_valid
 
     def notification_count(self, method: str) -> int:
         return sum(message.get("method") == method for message in self._notifications)
@@ -579,9 +591,21 @@ async def _run_scenario(
             "reached": turn["status"] == "completed" and answer_exists,
         }
 
-    if scenario in {"dynamic_tool", "dynamic_namespace_tool", "dynamic_tool_failure"}:
-        tool_name = "fixture.answer" if scenario == "dynamic_namespace_tool" else "fixture_answer"
-        result_path = workspace / ("dynamic_tool_failure_recovered.txt" if scenario == "dynamic_tool_failure" else "dynamic_tool.txt")
+    if scenario in {"dynamic_tool", "dynamic_namespace_tool", "dynamic_tool_failure", "dynamic_tool_schema"}:
+        tool_name = (
+            "fixture.answer"
+            if scenario == "dynamic_namespace_tool"
+            else "fixture_sum"
+            if scenario == "dynamic_tool_schema"
+            else "fixture_answer"
+        )
+        result_path = workspace / (
+            "dynamic_tool_failure_recovered.txt"
+            if scenario == "dynamic_tool_failure"
+            else "dynamic_tool_schema.txt"
+            if scenario == "dynamic_tool_schema"
+            else "dynamic_tool.txt"
+        )
         prompt = (
             f"Use the {tool_name} dynamic tool exactly once. Then use a shell tool to create {result_path.name} containing "
             "the tool result, read that file back, and finish."
@@ -590,6 +614,11 @@ async def _run_scenario(
             prompt = (
                 "Use the fixture_answer dynamic tool exactly once. After it reports failure, use a shell tool to create "
                 "dynamic_tool_failure_recovered.txt containing RECOVERED, read that file back, and finish."
+            )
+        if scenario == "dynamic_tool_schema":
+            prompt = (
+                "Use the fixture_sum dynamic tool exactly once with left=20 and right=22. Then use a shell tool to create "
+                "dynamic_tool_schema.txt containing its result, read that file back, and finish."
             )
         turn_id = await _start_turn(
             server,
@@ -601,10 +630,12 @@ async def _run_scenario(
         return {
             "turn_status": turn["status"],
             "dynamic_tool_requests": server.dynamic_tool_request_count(),
+            "schema_arguments_valid": server.dynamic_tool_schema_valid() if scenario == "dynamic_tool_schema" else None,
             "dynamic_tool_items": server.item_type_count(thread_id, "dynamicToolCall"),
             "result_file_exists": file_exists,
             "reached": turn["status"] == "completed"
             and server.dynamic_tool_request_count() == 1
+            and (scenario != "dynamic_tool_schema" or server.dynamic_tool_schema_valid())
             and file_exists,
         }
 
@@ -1115,6 +1146,7 @@ async def run(args: argparse.Namespace) -> int:
             "dynamic_tool",
             "dynamic_namespace_tool",
             "dynamic_tool_failure",
+            "dynamic_tool_schema",
             "approval_auto_review",
             "mcp_tool",
             "mcp_tool_failure",
@@ -1139,7 +1171,7 @@ async def run(args: argparse.Namespace) -> int:
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
-        if args.scenario in {"dynamic_tool", "dynamic_namespace_tool", "dynamic_tool_failure"}:
+        if args.scenario in {"dynamic_tool", "dynamic_namespace_tool", "dynamic_tool_failure", "dynamic_tool_schema"}:
             if args.scenario in {"dynamic_tool", "dynamic_tool_failure"}:
                 thread_start_params["dynamicTools"] = [
                     {
@@ -1147,6 +1179,20 @@ async def run(args: argparse.Namespace) -> int:
                         "name": "fixture_answer",
                         "description": "Return the fixed arithmetic fixture answer.",
                         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                    }
+                ]
+            elif args.scenario == "dynamic_tool_schema":
+                thread_start_params["dynamicTools"] = [
+                    {
+                        "type": "function",
+                        "name": "fixture_sum",
+                        "description": "Add two integers and return their sum.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"left": {"type": "integer"}, "right": {"type": "integer"}},
+                            "required": ["left", "right"],
+                            "additionalProperties": False,
+                        },
                     }
                 ]
             else:
@@ -1217,6 +1263,8 @@ async def run(args: argparse.Namespace) -> int:
         else:
             if args.scenario == "dynamic_tool_failure":
                 server.set_dynamic_tool_success(False)
+            if args.scenario == "dynamic_tool_schema":
+                server.expect_dynamic_tool_schema()
             collaboration_update: dict[str, Any] | None = None
             if args.scenario == "collaboration_plan":
                 collaboration_update = await server.request(
@@ -1280,6 +1328,7 @@ def main() -> int:
             "dynamic_tool",
             "dynamic_namespace_tool",
             "dynamic_tool_failure",
+            "dynamic_tool_schema",
             "approval_auto_review",
             "mcp_tool",
             "mcp_tool_failure",

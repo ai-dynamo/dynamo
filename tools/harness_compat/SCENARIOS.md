@@ -10,6 +10,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C1d | Codex client-owned dynamic tool | app-server dynamic-tool callback plus a file derived from its result | dynamic Responses tool call/result continuation remains accepted | P2 |
 | C1e | Codex dynamic-tool namespace | namespaced app-server callback plus a file derived from its result | namespace tool declaration and result continuation remain accepted | P2 |
 | C1f | Codex dynamic-tool failure | failed app-server callback followed by a shell recovery effect | dynamic tool-error continuation remains accepted | P2 |
+| C1f1 | Codex typed dynamic tool | native callback receives an exact two-integer argument object, then a file derives from its result | dynamic-tool JSON-schema declaration, argument delivery, and result continuation remain accepted | P2 |
 | C1g | Codex automatic approval reviewer | reviewer-agent lifecycle before a read-only write escalation | `codex-auto-review` must be registered as a Dynamo model alias; reviewer subagent traffic and resumed Responses tool loop remain accepted | P2 |
 | C1h | Codex stdio MCP tool | one native `mcpToolCall` start/completion pair plus a file derived from its fixed result | MCP tool declaration and function-call output continuation remain accepted | P1 |
 | C1i | Codex stdio MCP error then recovery | one native MCP error result plus a shell recovery effect | MCP error continuation remains accepted and the same turn can recover | P1 |
