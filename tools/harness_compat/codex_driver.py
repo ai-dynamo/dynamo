@@ -116,6 +116,7 @@ class AppServer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self._environment,
+            limit=1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
@@ -1094,6 +1095,31 @@ async def _run_scenario(
             and follow_up_file_exists,
         }
 
+    if scenario == "skill_input":
+        skill_path = workspace / "compat_skill.md"
+        skill_path.write_text(
+            "# Compatibility skill\n\nCreate skill_applied.txt containing exactly SKILL_APPLIED, then read it with a shell tool.\n",
+            encoding="utf-8",
+        )
+        turn = await server.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [
+                    {"type": "text", "text": "$compat-skill Follow the provided skill exactly and finish."},
+                    {"type": "skill", "name": "compat-skill", "path": str(skill_path)},
+                ],
+            },
+        )
+        completed = await _wait_turn(server, thread_id, turn["turn"]["id"])
+        skill_file = workspace / "skill_applied.txt"
+        skill_file_matches = skill_file.exists() and skill_file.read_text().strip() == "SKILL_APPLIED"
+        return {
+            "turn_status": completed["status"],
+            "skill_file_matches": skill_file_matches,
+            "reached": completed["status"] == "completed" and skill_file_matches,
+        }
+
     if scenario == "detached_review":
         review = await server.request(
             "review/start",
@@ -1479,6 +1505,7 @@ def main() -> int:
             "inject_items",
             "inject_agent_message",
             "inline_review",
+            "skill_input",
             "detached_review",
             "subagent_compact",
             "invalid_lifecycle",
