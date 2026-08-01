@@ -1393,9 +1393,12 @@ def run_patch_budget_sweep(
         raise AssertionError("measured workload must contain exactly 890,000 patches")
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
-        "dynamo_commit": _command_output(["git", "rev-parse", "HEAD"]),
-        "dynamo_branch": _command_output(["git", "branch", "--show-current"]),
+        "dynamo_commit": os.environ.get("DYNAMO_BENCHMARK_COMMIT")
+        or _command_output(["git", "rev-parse", "HEAD"]),
+        "dynamo_branch": os.environ.get("DYNAMO_BENCHMARK_BRANCH")
+        or _command_output(["git", "branch", "--show-current"]),
         "container_image": os.environ.get("DYNAMO_BENCHMARK_IMAGE"),
+        "base_image_dynamo_commit": os.environ.get("DYNAMO_BASE_IMAGE_COMMIT"),
         "gpu": _command_output(
             [
                 "nvidia-smi",
