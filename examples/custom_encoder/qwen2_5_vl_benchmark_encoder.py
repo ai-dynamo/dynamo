@@ -379,7 +379,9 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
     max_batch_cost = _parse_positive_int_env(
         "DYN_QWEN2_VL_MAX_BATCH_PATCHES", 64 * 36 * 36
     )
-    max_batch_items = _GRAPH_BATCH_BUCKETS[-1]
+    max_batch_items = _parse_positive_int_env(
+        "DYN_QWEN2_VL_MAX_BATCH_ITEMS", _GRAPH_BATCH_BUCKETS[-1]
+    )
 
     def __init__(self) -> None:
         self._device: torch.device
@@ -413,6 +415,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             raise
 
     def _build(self, model_id: str) -> None:
+        self._validate_batch_limits()
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         cache_size = int(os.environ.get("DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE", "0"))
         self._configure_preprocess_cache(cache_size)
@@ -477,11 +480,19 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             del outputs, warmup_item
         logger.info(
             "[Qwen2_5VLBenchmarkEncoder] warmup complete: buckets=%s "
-            "max_batch_patches=%d graphs=%d",
+            "max_batch_patches=%d max_batch_items=%d graphs=%d",
             self.buckets,
             self.max_batch_cost,
+            self.max_batch_items,
             len(self._graphs),
         )
+
+    def _validate_batch_limits(self) -> None:
+        if self.buckets and self.max_batch_items > self.buckets[-1]:
+            raise ValueError(
+                "DYN_QWEN2_VL_MAX_BATCH_ITEMS must not exceed the largest "
+                f"CUDA-graph batch bucket {self.buckets[-1]}"
+            )
 
     @staticmethod
     def _validate_visual_architecture(visual: Any) -> None:
