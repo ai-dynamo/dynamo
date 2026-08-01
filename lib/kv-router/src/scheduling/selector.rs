@@ -112,26 +112,30 @@ struct LogitWeights {
     shared_cache_multiplier: f64,
 }
 
+struct WorkerSelectionInput<'a, C> {
+    workers: &'a HashMap<WorkerId, C>,
+    request: &'a SchedulingRequest,
+    eligibility: RoutingEligibility<'a>,
+    block_size: u32,
+    weights: LogitWeights,
+    min_active_prefill_tokens: usize,
+}
+
 trait WorkerScorer<C: WorkerConfigLike> {
-    fn score(&self, worker: WorkerWithDpRank, config: &C) -> f64;
+    fn score(
+        &self,
+        input: &WorkerSelectionInput<'_, C>,
+        worker: WorkerWithDpRank,
+        config: &C,
+    ) -> f64;
 }
 
 trait WorkerPicker<C: WorkerConfigLike, S: WorkerScorer<C>> {
-    fn pick(
-        &self,
-        scorer: &S,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-    ) -> (WorkerWithDpRank, f64);
+    fn pick(&self, scorer: &S, input: &WorkerSelectionInput<'_, C>) -> (WorkerWithDpRank, f64);
 }
 
 struct DefaultWorkerScorer<'a> {
     selector: &'a DefaultWorkerSelector,
-    request: &'a SchedulingRequest,
-    block_size: u32,
-    min_active_prefill_tokens: usize,
-    weights: LogitWeights,
 }
 
 struct DefaultWorkerPicker<'a> {
@@ -350,12 +354,11 @@ impl DefaultWorkerSelector {
     }
 }
 
-impl<'a> DefaultWorkerScorer<'a> {
-    fn new<C: WorkerConfigLike>(
-        selector: &'a DefaultWorkerSelector,
-        workers: &HashMap<WorkerId, C>,
+impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
+    fn new(
+        workers: &'a HashMap<WorkerId, C>,
         request: &'a SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
+        eligibility: RoutingEligibility<'a>,
         block_size: u32,
         weights: LogitWeights,
     ) -> Self {
@@ -371,8 +374,9 @@ impl<'a> DefaultWorkerScorer<'a> {
                 0
             };
         Self {
-            selector,
+            workers,
             request,
+            eligibility,
             block_size,
             min_active_prefill_tokens,
             weights,
@@ -381,16 +385,21 @@ impl<'a> DefaultWorkerScorer<'a> {
 }
 
 impl<C: WorkerConfigLike> WorkerScorer<C> for DefaultWorkerScorer<'_> {
-    fn score(&self, worker: WorkerWithDpRank, config: &C) -> f64 {
+    fn score(
+        &self,
+        input: &WorkerSelectionInput<'_, C>,
+        worker: WorkerWithDpRank,
+        config: &C,
+    ) -> f64 {
         let base_score = self.selector.worker_logit(
-            self.request,
+            input.request,
             worker,
-            self.block_size,
-            self.min_active_prefill_tokens,
-            self.weights,
+            input.block_size,
+            input.min_active_prefill_tokens,
+            input.weights,
             "Formula",
         );
-        match self
+        match input
             .request
             .routing_constraints
             .preferred_taint_multiplier(config.taints())
@@ -408,19 +417,16 @@ where
     C: WorkerConfigLike,
     S: WorkerScorer<C>,
 {
-    fn pick(
-        &self,
-        scorer: &S,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-    ) -> (WorkerWithDpRank, f64) {
+    fn pick(&self, scorer: &S, input: &WorkerSelectionInput<'_, C>) -> (WorkerWithDpRank, f64) {
+        let workers = input.workers;
+        let request = input.request;
+        let eligibility = input.eligibility;
         let temperature = request
             .router_config_override
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.selector.kv_router_config.router_temperature);
-        let get_score = |worker, config: &C| scorer.score(worker, config);
+        let get_score = |worker, config: &C| scorer.score(input, worker, config);
 
         #[cfg(any(test, feature = "bench"))]
         let deterministic_choice = self.selector.deterministic_rng.as_ref().map(|rng| {
@@ -588,10 +594,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             });
         }
 
-        let scorer =
-            DefaultWorkerScorer::new(self, workers, request, eligibility, block_size, weights);
+        let input = WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
+        let scorer = DefaultWorkerScorer { selector: self };
         let picker = DefaultWorkerPicker { selector: self };
-        let (best_worker, best_logit) = picker.pick(&scorer, workers, request, eligibility);
+        let (best_worker, best_logit) = picker.pick(&scorer, &input);
 
         let best_host_pinned_overlap_blocks = request
             .overlap
