@@ -83,7 +83,7 @@ def test_agg_backend_deployment_preserves_engine_payload():
         "max_num_batched_tokens": 16384,
         "max_num_seqs": 512,
         "block_size": 64,
-        "gpu_memory_utilization": 0.9,
+        "free_gpu_memory_fraction": 0.9,
         "enable_prefix_caching": True,
     }
 
@@ -141,6 +141,31 @@ def test_engine_type_tracks_swept_backend(backend):
 
     assert engine["engine_type"] == backend
     assert engine["aic_backend"] == backend
+
+
+@pytest.mark.parametrize(
+    ("backend", "memory_field"),
+    [
+        ("vllm", "gpu_memory_utilization"),
+        ("sglang", "mem_fraction_static"),
+        ("trtllm", "free_gpu_memory_fraction"),
+    ],
+)
+def test_memory_fraction_uses_the_backend_native_field(backend, memory_field):
+    engine = _agg_deployment(selection=_agg_selection(backend=backend)).agg_engine_args
+
+    assert engine[memory_field] == 0.9
+    assert (
+        len(
+            {
+                "gpu_memory_utilization",
+                "mem_fraction_static",
+                "free_gpu_memory_fraction",
+            }
+            & engine.keys()
+        )
+        == 1
+    )
 
 
 def test_optional_backend_runtime_values_are_forwarded():

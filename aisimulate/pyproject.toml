@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
 
 [project]
 name = "aisimulate"
@@ -55,17 +55,13 @@ test = [
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 Documentation = "https://github.com/ai-dynamo/dynamo/tree/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/aisimulate"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/LICENSE",
-    "/README.md",
-    "/pyproject.toml",
-    "/src",
-    "/tests",
-]
+[tool.maturin]
+exclude = ["**/__pycache__/**", "**/*.pyc"]
+features = ["extension-module"]
+manifest-path = "crates/python/Cargo.toml"
+module-name = "aisimulate._runtime"
+profile = "release"
+python-source = "src"
 
 [tool.pytest.ini_options]
 minversion = "8.0"

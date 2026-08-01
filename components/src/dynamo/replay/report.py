@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Report models used by the Dynamo replay API."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass

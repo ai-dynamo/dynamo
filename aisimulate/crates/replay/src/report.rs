@@ -29,8 +29,8 @@ pub struct TraceSimulationReport {
     /// Per-request records, one per admitted request. Populated by
     /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
     /// JSON (see custom `Serialize` impl below) — consumers that want per-
-    /// request granularity should access this field directly and serialize
-    /// it themselves (e.g., the `--report-jsonl` CLI path).
+    /// request granularity should access this field directly and serialize it
+    /// themselves.
     pub per_request: Vec<PerRequestRecord>,
     /// Execution-owned planner/lifecycle/pressure evidence. This is excluded
     /// from the compact summary serializer and consumed explicitly by
@@ -537,10 +537,10 @@ pub enum ReplayTerminalStatus {
     Failed,
 }
 
-/// Flat per-request record for `--report-jsonl` emission. One JSON line per
-/// request in the JSONL output; consumed by external analysis tools that want
-/// per-request granularity (TTFT vs. ISL scatter, worker-residency analysis,
-/// bypass classification, etc.).
+/// Flat per-request record for optional JSONL emission. One JSON line per
+/// request is consumed by external analysis tools that want per-request
+/// granularity (TTFT vs. ISL scatter, worker-residency analysis, bypass
+/// classification, etc.).
 #[derive(Debug, Clone, Serialize)]
 pub struct PerRequestRecord {
     /// Authored request identity from ReplaySpec. Legacy runtime inputs that
@@ -1207,9 +1207,9 @@ impl TraceCollector {
 
         // Build per-request records before we move `self.requests` into the
         // summary aggregation below. Gated on `capture_per_request` — the
-        // ~100ms terminal pass + ~30MB allocation only runs when a caller
-        // (e.g. CLI `--report-jsonl`) asked for it. The summary report is
-        // unaffected either way (custom Serialize impl skips `per_request`).
+        // ~100ms terminal pass + ~30MB allocation only runs when a caller asks
+        // for per-request output. The summary report is unaffected either way
+        // (custom Serialize impl skips `per_request`).
         let per_request = if self.capture_per_request {
             self.per_request_records()
         } else {
@@ -1359,8 +1359,8 @@ impl TraceCollector {
     }
 
     /// Flatten each retained request into a serializable `PerRequestRecord`.
-    /// Used by the `--report-jsonl` CLI path to emit one JSON object per
-    /// request to the JSONL file, mirroring AIPerf's per-request output shape.
+    /// Used to emit one JSON object per request to a JSONL file, mirroring
+    /// AIPerf's per-request output shape.
     ///
     /// Only requests with a terminal outcome are emitted. Requests truncated
     /// by a simulation-time cap have no terminal outcome and remain omitted.
@@ -2011,9 +2011,9 @@ mod tests {
         assert_eq!(arrivals, vec![0.0, 10.0, 30.0]);
     }
 
-    /// Each record must round-trip cleanly to JSON — this is the format we
-    /// emit to `--report-jsonl`. Guards against accidental serde regressions
-    /// (e.g., adding a non-serializable field to `PerRequestRecord`).
+    /// Each record must round-trip cleanly to JSON. Guards against accidental
+    /// serde regressions (e.g., adding a non-serializable field to
+    /// `PerRequestRecord`).
     #[test]
     fn per_request_record_serializes_to_json_object() {
         let mut collector = TraceCollector::default();
