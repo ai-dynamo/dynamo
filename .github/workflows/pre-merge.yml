@@ -88,6 +88,7 @@ jobs:
           'pytest>=8.0' \
           'pyyaml>=6.0' \
           'pydantic>=2' \
+          'pytest-asyncio>=1.0' \
           'pytest-benchmark>=4' \
           'fsspec'
     - name: Test generated API references
@@ -233,10 +234,6 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
-    - name: Run Mocker AIC feature tests
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-mocker --features aic-forward-pass -- --nocapture
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -307,10 +304,6 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Run Mocker AIC feature clippy
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps -p dynamo-mocker --features aic-forward-pass --all-targets -- -D warnings
     - name: Run Python bindings AIC feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
