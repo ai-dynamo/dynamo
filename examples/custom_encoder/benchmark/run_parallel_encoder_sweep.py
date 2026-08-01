@@ -543,7 +543,9 @@ def run_barrier_pair(
     return results
 
 
-def _run_single(command: list[str], artifact_dir: Path) -> ProcessResult:
+def _run_single(
+    command: list[str], artifact_dir: Path, role: str = COMBINED_ROLE
+) -> ProcessResult:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     (artifact_dir / "command.txt").write_text(
         shlex.join(command) + "\n", encoding="utf-8"
@@ -564,7 +566,7 @@ def _run_single(command: list[str], artifact_dir: Path) -> ProcessResult:
             f"{artifact_dir / 'aiperf.log'}"
         )
     return ProcessResult(
-        role=COMBINED_ROLE,
+        role=role,
         returncode=process.returncode,
         released_ns=start_ns,
         finished_ns=finish_ns,
@@ -701,7 +703,10 @@ def _run_cell(
     return _write_timing(arm, concurrency, run_number, cell_dir, results)
 
 
-def _base_env() -> dict[str, str]:
+def _base_env(
+    max_batch_patches: int = 64 * 36 * 36,
+    max_batch_items: int = 64,
+) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -713,8 +718,8 @@ def _base_env() -> dict[str, str]:
             "DYN_QWEN2_VL_ENCODER_MODEL": ENCODER_MODEL,
             "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE": "1536",
             "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY": "64",
-            "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(64 * 36 * 36),
-            "DYN_QWEN2_VL_MAX_BATCH_ITEMS": "64",
+            "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(max_batch_patches),
+            "DYN_QWEN2_VL_MAX_BATCH_ITEMS": str(max_batch_items),
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,4,8,16,32,64",
             "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": "300x300,500x500",
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
@@ -724,8 +729,15 @@ def _base_env() -> dict[str, str]:
     return env
 
 
-def _combined_service(output_root: Path, arm: str) -> ServiceProcess:
-    env = _base_env()
+def _combined_service(
+    output_root: Path,
+    arm: str,
+    *,
+    max_batch_patches: int = 64 * 36 * 36,
+    max_batch_items: int = 64,
+    log_path: Path | None = None,
+) -> ServiceProcess:
+    env = _base_env(max_batch_patches, max_batch_items)
     env.update({"DYN_HTTP_PORT": str(COMBINED_PORT), "DYN_SYSTEM_PORT": "8081"})
     workflow = REPO_ROOT / "examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh"
     command = [
@@ -742,13 +754,20 @@ def _combined_service(output_root: Path, arm: str) -> ServiceProcess:
         command,
         env,
         f"http://localhost:{COMBINED_PORT}/v1/models",
-        output_root / arm / "combined_server.log",
+        log_path or output_root / arm / "combined_server.log",
         ready_text=DECODER_MODEL,
     )
 
 
-def _encoder_service(output_root: Path) -> ServiceProcess:
-    env = _base_env()
+def _encoder_service(
+    output_root: Path,
+    arm: str = PARALLEL_ARM,
+    *,
+    max_batch_patches: int = 64 * 36 * 36,
+    max_batch_items: int = 64,
+    log_path: Path | None = None,
+) -> ServiceProcess:
+    env = _base_env(max_batch_patches, max_batch_items)
     command = [
         sys.executable,
         "-m",
@@ -767,7 +786,7 @@ def _encoder_service(output_root: Path) -> ServiceProcess:
         command,
         env,
         f"http://localhost:{ENCODER_ONLY_PORT}/health",
-        output_root / PARALLEL_ARM / "encoder_only_server.log",
+        log_path or output_root / arm / "encoder_only_server.log",
         ready_text='"ready"',
     )
 
