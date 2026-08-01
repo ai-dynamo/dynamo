@@ -7,9 +7,7 @@ use std::collections::HashMap;
 #[cfg(any(test, feature = "bench"))]
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "bench"))]
 use parking_lot::Mutex;
-#[cfg(test)]
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
@@ -60,12 +58,11 @@ fn softmax_sample_with_sample(
     softmax_sample_entries(entries, temperature, sample)
 }
 
-#[cfg(test)]
-fn softmax_sample_entries(
-    entries: Vec<(WorkerWithDpRank, f64)>,
+fn softmax_sample_entries<T: Copy>(
+    entries: Vec<(T, f64)>,
     temperature: f64,
     sample: f64,
-) -> (WorkerWithDpRank, f64) {
+) -> (T, f64) {
     assert!(!entries.is_empty(), "Empty logits for softmax sampling");
 
     let (min_val, max_val) = entries
@@ -101,63 +98,57 @@ fn softmax_sample_entries(
     *entries.last().unwrap()
 }
 
-fn minimum_cost_index(costs: &[f64], mut random_index: impl FnMut(usize) -> usize) -> usize {
-    let mut best_row = 0;
-    let mut best_cost = f64::INFINITY;
-    let mut tie_count = 0;
-    for (row, &cost) in costs.iter().enumerate() {
-        if cost < best_cost {
-            best_row = row;
-            best_cost = cost;
-            tie_count = 1;
-        } else if cost == best_cost {
-            tie_count += 1;
-            if random_index(tie_count) == 0 {
-                best_row = row;
-            }
-        }
-    }
-    best_row
-}
-
-fn softmax_sample_cost_index(costs: &[f64], temperature: f64, sample: f64) -> usize {
-    let (min_cost, max_cost) = costs
+fn softmax_sample_scratch(
+    scratch: &mut DefaultSoftmaxScratch,
+    temperature: f64,
+    sample: f64,
+) -> (WorkerWithDpRank, f64) {
+    scratch.entries.clear();
+    scratch
+        .entries
+        .extend(scratch.costs.iter().map(|(worker, cost)| (*worker, *cost)));
+    let (min_cost, max_cost) = scratch
+        .entries
         .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &cost| {
-            (lo.min(cost), hi.max(cost))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, cost)| {
+            (lo.min(*cost), hi.max(*cost))
         });
 
+    scratch.probabilities.clear();
     if min_cost == max_cost {
-        let threshold = sample * costs.len() as f64;
-        return (0..costs.len())
-            .find(|row| threshold <= (*row + 1) as f64)
-            .unwrap_or(costs.len() - 1);
+        scratch
+            .probabilities
+            .resize(scratch.entries.len(), 1.0 / scratch.entries.len() as f64);
+    } else {
+        let scale = -1.0 / ((max_cost - min_cost) * temperature);
+        let max_scaled = min_cost * scale;
+        scratch.probabilities.extend(
+            scratch
+                .entries
+                .iter()
+                .map(|(_, cost)| (cost * scale - max_scaled).exp()),
+        );
     }
 
-    let scale = -1.0 / ((max_cost - min_cost) * temperature);
-    let max_scaled = min_cost * scale;
-    let sum: f64 = costs
-        .iter()
-        .map(|cost| (cost * scale - max_scaled).exp())
-        .sum();
-    let threshold = sample * sum;
+    let sum: f64 = scratch.probabilities.iter().sum();
+    for probability in &mut scratch.probabilities {
+        *probability /= sum;
+    }
     let mut cumulative = 0.0;
-    for (row, cost) in costs.iter().enumerate() {
-        cumulative += (cost * scale - max_scaled).exp();
-        if threshold <= cumulative {
-            return row;
+    for (row, probability) in scratch.probabilities.iter().enumerate() {
+        cumulative += probability;
+        if sample <= cumulative {
+            return scratch.entries[row];
         }
     }
-    costs.len() - 1
+    *scratch.entries.last().unwrap()
 }
 
 /// Default implementation matching the Python _cost_function.
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
     pub worker_type: &'static str,
-    #[cfg(any(test, feature = "bench"))]
-    deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    policy: WorkerSelectionPolicy,
+    picker: DefaultWorkerPicker,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,7 +174,7 @@ pub struct WorkerSelectionContext<'a> {
     router_temperature_override: Option<f64>,
 }
 
-struct WorkerSelectionRow {
+pub struct WorkerCandidate {
     worker: WorkerWithDpRank,
     effective_overlap_blocks: f64,
     device_overlap_blocks: f64,
@@ -204,42 +195,45 @@ pub struct DefaultWorkerScorer<C = KvRouterConfig> {
 
 pub struct DefaultWorkerPicker {
     default_temperature: f64,
+    // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
+    softmax_scratch: Box<Mutex<DefaultSoftmaxScratch>>,
     #[cfg(any(test, feature = "bench"))]
     deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 
+#[derive(Default)]
+struct DefaultSoftmaxScratch {
+    costs: FxHashMap<WorkerWithDpRank, f64>,
+    entries: Vec<(WorkerWithDpRank, f64)>,
+    probabilities: Vec<f64>,
+}
+
 #[derive(Clone, Copy)]
 pub struct WorkerCandidates<'a> {
-    workers: &'a [WorkerWithDpRank],
-    effective_overlap_blocks: &'a [f64],
-    device_overlap_blocks: &'a [f64],
-    host_overlap_blocks: &'a [f64],
-    disk_overlap_blocks: &'a [f64],
-    shared_beyond: &'a [u32],
-    raw_prefill_blocks: &'a [f64],
-    active_prefill_tokens: &'a [usize],
-    decode_cost_blocks: &'a [f64],
-    active_requests: &'a [usize],
-    preferred_taint_multipliers: &'a [Option<f64>],
+    entries: &'a [ScoredWorkerCandidate],
+}
+
+#[derive(Clone, Copy)]
+struct ScoredWorkerCandidate {
+    worker: WorkerWithDpRank,
+    cost: f64,
 }
 
 pub trait WorkerScorer: Send {
-    /// Write one finite, lower-is-better cost contribution per candidate row.
+    /// Return one finite, lower-is-better cost contribution for an eligible worker row.
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-        contributions: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError>;
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError>;
 }
 
 pub trait WorkerPicker: Send {
-    /// Return an index into `candidates`.
+    /// Return one row index from the host-owned eligible candidate table.
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        costs: &[f64],
     ) -> Result<usize, WorkerSelectionPolicyError>;
 }
 
@@ -265,154 +259,95 @@ impl WorkerSelectionContext<'_> {
     }
 }
 
-impl<'a> WorkerCandidates<'a> {
-    pub fn len(&self) -> usize {
-        self.workers.len()
+impl WorkerCandidate {
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.worker
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.workers.is_empty()
-    }
-
-    pub fn workers(&self) -> &'a [WorkerWithDpRank] {
-        self.workers
-    }
-
-    pub fn effective_overlap_blocks(&self) -> &'a [f64] {
+    pub fn effective_overlap_blocks(&self) -> f64 {
         self.effective_overlap_blocks
     }
 
-    pub fn device_overlap_blocks(&self) -> &'a [f64] {
+    pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
     }
 
-    pub fn host_overlap_blocks(&self) -> &'a [f64] {
+    pub fn host_overlap_blocks(&self) -> f64 {
         self.host_overlap_blocks
     }
 
-    pub fn disk_overlap_blocks(&self) -> &'a [f64] {
+    pub fn disk_overlap_blocks(&self) -> f64 {
         self.disk_overlap_blocks
     }
 
-    pub fn shared_beyond(&self) -> &'a [u32] {
+    pub fn shared_beyond(&self) -> u32 {
         self.shared_beyond
     }
 
-    pub fn raw_prefill_blocks(&self) -> &'a [f64] {
+    pub fn raw_prefill_blocks(&self) -> f64 {
         self.raw_prefill_blocks
     }
 
-    pub fn active_prefill_tokens(&self) -> &'a [usize] {
+    pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
     }
 
-    pub fn decode_cost_blocks(&self) -> &'a [f64] {
+    pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
     }
 
-    pub fn active_requests(&self) -> &'a [usize] {
+    pub fn active_requests(&self) -> usize {
         self.active_requests
     }
 
-    pub fn preferred_taint_multipliers(&self) -> &'a [Option<f64>] {
-        self.preferred_taint_multipliers
-    }
-
-    fn row(&self, row: usize) -> WorkerSelectionRow {
-        WorkerSelectionRow {
-            worker: self.workers[row],
-            effective_overlap_blocks: self.effective_overlap_blocks[row],
-            device_overlap_blocks: self.device_overlap_blocks[row],
-            host_overlap_blocks: self.host_overlap_blocks[row],
-            disk_overlap_blocks: self.disk_overlap_blocks[row],
-            shared_beyond: self.shared_beyond[row],
-            raw_prefill_blocks: self.raw_prefill_blocks[row],
-            active_prefill_tokens: self.active_prefill_tokens[row],
-            decode_cost_blocks: self.decode_cost_blocks[row],
-            active_requests: self.active_requests[row],
-            preferred_taint_multiplier: self.preferred_taint_multipliers[row],
-        }
+    pub fn preferred_taint_multiplier(&self) -> Option<f64> {
+        self.preferred_taint_multiplier
     }
 }
 
-#[derive(Default)]
-struct WorkerCandidateColumns {
-    workers: Vec<WorkerWithDpRank>,
-    effective_overlap_blocks: Vec<f64>,
-    device_overlap_blocks: Vec<f64>,
-    host_overlap_blocks: Vec<f64>,
-    disk_overlap_blocks: Vec<f64>,
-    shared_beyond: Vec<u32>,
-    raw_prefill_blocks: Vec<f64>,
-    active_prefill_tokens: Vec<usize>,
-    decode_cost_blocks: Vec<f64>,
-    active_requests: Vec<usize>,
-    preferred_taint_multipliers: Vec<Option<f64>>,
-}
-
-impl WorkerCandidateColumns {
-    fn clear(&mut self) {
-        self.workers.clear();
-        self.effective_overlap_blocks.clear();
-        self.device_overlap_blocks.clear();
-        self.host_overlap_blocks.clear();
-        self.disk_overlap_blocks.clear();
-        self.shared_beyond.clear();
-        self.raw_prefill_blocks.clear();
-        self.active_prefill_tokens.clear();
-        self.decode_cost_blocks.clear();
-        self.active_requests.clear();
-        self.preferred_taint_multipliers.clear();
+impl<'a> WorkerCandidates<'a> {
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
-    fn push(&mut self, row: WorkerSelectionRow) {
-        self.workers.push(row.worker);
-        self.effective_overlap_blocks
-            .push(row.effective_overlap_blocks);
-        self.device_overlap_blocks.push(row.device_overlap_blocks);
-        self.host_overlap_blocks.push(row.host_overlap_blocks);
-        self.disk_overlap_blocks.push(row.disk_overlap_blocks);
-        self.shared_beyond.push(row.shared_beyond);
-        self.raw_prefill_blocks.push(row.raw_prefill_blocks);
-        self.active_prefill_tokens.push(row.active_prefill_tokens);
-        self.decode_cost_blocks.push(row.decode_cost_blocks);
-        self.active_requests.push(row.active_requests);
-        self.preferred_taint_multipliers
-            .push(row.preferred_taint_multiplier);
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
-    fn candidates(&self) -> WorkerCandidates<'_> {
-        WorkerCandidates {
-            workers: &self.workers,
-            effective_overlap_blocks: &self.effective_overlap_blocks,
-            device_overlap_blocks: &self.device_overlap_blocks,
-            host_overlap_blocks: &self.host_overlap_blocks,
-            disk_overlap_blocks: &self.disk_overlap_blocks,
-            shared_beyond: &self.shared_beyond,
-            raw_prefill_blocks: &self.raw_prefill_blocks,
-            active_prefill_tokens: &self.active_prefill_tokens,
-            decode_cost_blocks: &self.decode_cost_blocks,
-            active_requests: &self.active_requests,
-            preferred_taint_multipliers: &self.preferred_taint_multipliers,
-        }
+    pub fn worker(&self, row: usize) -> WorkerWithDpRank {
+        self.entries[row].worker
+    }
+
+    pub fn cost(&self, row: usize) -> f64 {
+        self.entries[row].cost
     }
 }
 
-struct WorkerSelectionPolicyInner {
-    kv_router_config: KvRouterConfig,
-    worker_type: &'static str,
+#[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+enum WorkerSelectionPolicyState {
+    Default(DefaultWorkerPicker),
+    Custom(Box<RefCell<CustomWorkerSelectionState>>),
+}
+
+enum WorkerSelectionPolicyStateRef<'a> {
+    Default(&'a DefaultWorkerPicker),
+    Custom(&'a RefCell<CustomWorkerSelectionState>),
+}
+
+struct CustomWorkerSelectionState {
     scorers: Vec<Box<dyn WorkerScorer>>,
     picker: Box<dyn WorkerPicker>,
-    candidates: WorkerCandidateColumns,
-    costs: Vec<f64>,
-    contributions: Vec<f64>,
-    #[cfg(any(test, feature = "bench"))]
-    deterministic_candidates: bool,
+    candidates: Vec<ScoredWorkerCandidate>,
 }
 
-/// Opt-in native scorer/picker composition for [`WorkerSelector`].
+/// Native scorer/picker composition for [`WorkerSelector`].
+///
+/// SelectionService constructs the concrete default state unless a caller explicitly supplies
+/// custom scorer and picker implementations through [`Self::new`].
 pub struct WorkerSelectionPolicy {
-    inner: RefCell<WorkerSelectionPolicyInner>,
+    kv_router_config: KvRouterConfig,
+    worker_type: &'static str,
+    state: WorkerSelectionPolicyState,
 }
 
 impl WorkerSelectionPolicy {
@@ -423,44 +358,34 @@ impl WorkerSelectionPolicy {
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
         Self {
-            inner: RefCell::new(WorkerSelectionPolicyInner {
-                kv_router_config,
-                worker_type,
-                scorers,
-                picker,
-                candidates: WorkerCandidateColumns::default(),
-                costs: Vec::new(),
-                contributions: Vec::new(),
-                #[cfg(any(test, feature = "bench"))]
-                deterministic_candidates: false,
-            }),
+            kv_router_config,
+            worker_type,
+            state: WorkerSelectionPolicyState::Custom(Box::new(RefCell::new(
+                CustomWorkerSelectionState {
+                    scorers,
+                    picker,
+                    candidates: Vec::new(),
+                },
+            ))),
         }
     }
 
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
     pub(crate) fn default(
         kv_router_config: KvRouterConfig,
         worker_type: &'static str,
         #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
-        let scorer = DefaultWorkerScorer::new(kv_router_config.clone(), worker_type);
-        #[cfg(any(test, feature = "bench"))]
-        let deterministic_candidates = deterministic_rng.is_some();
-        let picker = DefaultWorkerPicker {
-            default_temperature: kv_router_config.router_temperature,
+        let picker = DefaultWorkerPicker::from_parts(
+            kv_router_config.router_temperature,
             #[cfg(any(test, feature = "bench"))]
             deterministic_rng,
-        };
-        let policy = Self::new(
+        );
+        Self {
             kv_router_config,
             worker_type,
-            vec![Box::new(scorer)],
-            Box::new(picker),
-        );
-        #[cfg(any(test, feature = "bench"))]
-        {
-            policy.inner.borrow_mut().deterministic_candidates = deterministic_candidates;
+            state: WorkerSelectionPolicyState::Default(picker),
         }
-        policy
     }
 }
 
@@ -476,11 +401,13 @@ impl std::fmt::Debug for DefaultWorkerSelector {
 
 impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
+        #[cfg(any(test, feature = "bench"))]
+        let deterministic_rng = self.picker.deterministic_rng.clone();
         Self::from_parts(
             self.kv_router_config.clone(),
             self.worker_type,
             #[cfg(any(test, feature = "bench"))]
-            self.deterministic_rng.clone(),
+            deterministic_rng,
         )
     }
 }
@@ -513,18 +440,15 @@ impl DefaultWorkerSelector {
         worker_type: &'static str,
         #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
-        let policy = WorkerSelectionPolicy::default(
-            kv_router_config.clone(),
-            worker_type,
+        let picker = DefaultWorkerPicker::from_parts(
+            kv_router_config.router_temperature,
             #[cfg(any(test, feature = "bench"))]
-            deterministic_rng.clone(),
+            deterministic_rng,
         );
         Self {
             kv_router_config,
             worker_type,
-            policy,
-            #[cfg(any(test, feature = "bench"))]
-            deterministic_rng,
+            picker,
         }
     }
 }
@@ -566,7 +490,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
         context: &WorkerSelectionContext<'_>,
-        row: &WorkerSelectionRow,
+        row: &WorkerCandidate,
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
@@ -669,7 +593,8 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         logit
     }
 
-    fn worker_cost(&self, context: &WorkerSelectionContext<'_>, row: &WorkerSelectionRow) -> f64 {
+    #[inline]
+    fn worker_cost(&self, context: &WorkerSelectionContext<'_>, row: &WorkerCandidate) -> f64 {
         let base_score = self.worker_logit(context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
@@ -682,11 +607,11 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 
 impl DefaultWorkerPicker {
     pub fn new(default_temperature: f64) -> Self {
-        Self {
+        Self::from_parts(
             default_temperature,
             #[cfg(any(test, feature = "bench"))]
-            deterministic_rng: None,
-        }
+            None,
+        )
     }
 }
 
@@ -730,7 +655,7 @@ impl<'a> WorkerSelectionInput<'a> {
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
-    ) -> WorkerSelectionRow {
+    ) -> WorkerCandidate {
         let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
         let has_tier_overlap_blocks = !self.request.overlap.tier_overlap_blocks.device.is_empty()
             || !self
@@ -779,7 +704,7 @@ impl<'a> WorkerSelectionInput<'a> {
             hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
         });
 
-        WorkerSelectionRow {
+        WorkerCandidate {
             worker,
             effective_overlap_blocks,
             device_overlap_blocks,
@@ -809,21 +734,6 @@ impl<'a> WorkerSelectionInput<'a> {
     }
 }
 
-fn collect_candidates<C: WorkerConfigLike>(
-    candidates: &mut WorkerCandidateColumns,
-    input: &WorkerSelectionInput<'_>,
-    workers: &HashMap<WorkerId, C>,
-    request: &SchedulingRequest,
-    eligibility: RoutingEligibility<'_>,
-) {
-    eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
-        let preferred_taint_multiplier = request
-            .routing_constraints
-            .preferred_taint_multiplier(config.taints());
-        candidates.push(input.row(worker, preferred_taint_multiplier));
-    });
-}
-
 fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
@@ -845,9 +755,9 @@ fn log_selection<C: WorkerConfigLike>(
     worker: WorkerWithDpRank,
     worker_type: &'static str,
     cost: f64,
+    effective_overlap_blocks: f64,
 ) {
     let request_id = request.mode.request_id().unwrap_or("-");
-    let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
     let host_pinned_blocks = request
         .overlap
         .tier_overlap_blocks
@@ -912,14 +822,215 @@ where
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-        contributions: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        debug_assert_eq!(candidates.len(), contributions.len());
-        for (row, contribution) in contributions.iter_mut().enumerate() {
-            *contribution = self.worker_cost(context, &candidates.row(row));
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        Ok(self.worker_cost(context, candidate))
+    }
+}
+
+fn minimum_cost_index(
+    candidates: WorkerCandidates<'_>,
+    mut random_index: impl FnMut(usize) -> usize,
+) -> usize {
+    let mut best_row = 0;
+    let mut best_cost = f64::INFINITY;
+    let mut tie_count = 0;
+    for row in 0..candidates.len() {
+        let cost = candidates.cost(row);
+        if cost < best_cost {
+            best_row = row;
+            best_cost = cost;
+            tie_count = 1;
+        } else if cost == best_cost {
+            tie_count += 1;
+            if random_index(tie_count) == 0 {
+                best_row = row;
+            }
         }
-        Ok(())
+    }
+    best_row
+}
+
+fn softmax_sample_cost_index(
+    candidates: WorkerCandidates<'_>,
+    temperature: f64,
+    sample: f64,
+) -> usize {
+    let entries = candidates
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(row, candidate)| (row, candidate.cost))
+        .collect();
+    softmax_sample_entries(entries, temperature, sample).0
+}
+
+fn collect_custom_candidates<C: WorkerConfigLike>(
+    scorers: &mut [Box<dyn WorkerScorer>],
+    candidates: &mut Vec<ScoredWorkerCandidate>,
+    input: &WorkerSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+) -> Result<(), KvSchedulerError> {
+    candidates.clear();
+    let pinned = eligibility.pinned_worker().is_some();
+    let mut error = None;
+    eligibility.any_eligible_worker_rank(workers, |worker, config| {
+        let preferred_taint_multiplier = if pinned {
+            None
+        } else {
+            request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints())
+        };
+        let candidate = input.row(worker, preferred_taint_multiplier);
+        let mut cost = 0.0;
+        for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+            let contribution = match scorer.score(&input.context, &candidate) {
+                Ok(contribution) => contribution,
+                Err(policy_error) => {
+                    error = Some(policy_error.into());
+                    return true;
+                }
+            };
+            cost += contribution;
+            if !contribution.is_finite() || !cost.is_finite() {
+                error = Some(
+                    WorkerSelectionPolicyError::NonFiniteCost {
+                        scorer_index,
+                        row: candidates.len(),
+                    }
+                    .into(),
+                );
+                return true;
+            }
+        }
+        candidates.push(ScoredWorkerCandidate { worker, cost });
+        false
+    });
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[inline(always)]
+fn pick_default_worker<C: WorkerConfigLike>(
+    scorer: &DefaultWorkerScorer<&KvRouterConfig>,
+    picker: &DefaultWorkerPicker,
+    input: &WorkerSelectionInput<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+) -> Option<(WorkerWithDpRank, f64)> {
+    if let Some(worker) = eligibility.pinned_worker() {
+        let row = input.row(worker, None);
+        return Some((
+            worker,
+            scorer.worker_logit(&input.context, &row, "Pinned formula"),
+        ));
+    }
+
+    let temperature = input
+        .context
+        .router_temperature_override
+        .unwrap_or(picker.default_temperature);
+    let get_score = |worker, config: &C| {
+        let preferred_taint_multiplier = request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints());
+        scorer.worker_cost(
+            &input.context,
+            &input.row(worker, preferred_taint_multiplier),
+        )
+    };
+
+    #[cfg(any(test, feature = "bench"))]
+    if let Some(rng) = &picker.deterministic_rng {
+        let mut candidates = Vec::new();
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| candidates.push(worker));
+        candidates.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let mut rng = rng.lock();
+        let get_candidate_score = |worker| get_score(worker, &workers[&worker.worker_id]);
+        if temperature == 0.0 {
+            let mut best_worker = None;
+            let mut best_cost = f64::INFINITY;
+            let mut tie_count = 0;
+            for worker in candidates {
+                let cost = get_candidate_score(worker);
+                if cost < best_cost {
+                    best_worker = Some(worker);
+                    best_cost = cost;
+                    tie_count = 1;
+                } else if cost == best_cost {
+                    tie_count += 1;
+                    if rng.usize(0..tie_count) == 0 {
+                        best_worker = Some(worker);
+                    }
+                }
+            }
+            return best_worker.map(|worker| (worker, best_cost));
+        }
+
+        let entries = candidates
+            .into_iter()
+            .map(|worker| (worker, get_candidate_score(worker)))
+            .collect();
+        return Some(softmax_sample_entries(entries, temperature, rng.f64()));
+    }
+
+    if temperature == 0.0 {
+        let mut best_worker = None;
+        let mut best_cost = f64::INFINITY;
+        let mut tie_count = 0;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+            let cost = get_score(worker, config);
+            if cost < best_cost {
+                best_worker = Some(worker);
+                best_cost = cost;
+                tie_count = 1;
+            } else if cost == best_cost {
+                tie_count += 1;
+                if fastrand::usize(0..tie_count) == 0 {
+                    best_worker = Some(worker);
+                }
+            }
+        });
+        return best_worker.map(|worker| (worker, best_cost));
+    }
+
+    let mut scratch = picker.softmax_scratch.lock();
+    scratch.costs.clear();
+    eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+        scratch.costs.insert(worker, get_score(worker, config));
+    });
+    if scratch.costs.is_empty() {
+        None
+    } else {
+        Some(softmax_sample_scratch(
+            &mut scratch,
+            temperature,
+            fastrand::f64(),
+        ))
+    }
+}
+
+impl DefaultWorkerPicker {
+    fn from_parts(
+        default_temperature: f64,
+        #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
+    ) -> Self {
+        Self {
+            default_temperature,
+            softmax_scratch: Box::default(),
+            #[cfg(any(test, feature = "bench"))]
+            deterministic_rng,
+        }
     }
 }
 
@@ -928,18 +1039,12 @@ impl WorkerPicker for DefaultWorkerPicker {
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        costs: &[f64],
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        debug_assert_eq!(candidates.len(), costs.len());
-        if costs.is_empty() {
+        if candidates.is_empty() {
             return Err(WorkerSelectionPolicyError::rejected(
                 "picker received an empty candidate table",
             ));
         }
-        if costs.len() == 1 {
-            return Ok(0);
-        }
-
         let temperature = context
             .router_temperature_override
             .unwrap_or(self.default_temperature);
@@ -947,21 +1052,21 @@ impl WorkerPicker for DefaultWorkerPicker {
         if let Some(rng) = &self.deterministic_rng {
             let mut rng = rng.lock();
             return Ok(if temperature == 0.0 {
-                minimum_cost_index(costs, |count| rng.usize(0..count))
+                minimum_cost_index(candidates, |count| rng.usize(0..count))
             } else {
-                softmax_sample_cost_index(costs, temperature, rng.f64())
+                softmax_sample_cost_index(candidates, temperature, rng.f64())
             });
         }
-
         Ok(if temperature == 0.0 {
-            minimum_cost_index(costs, |count| fastrand::usize(0..count))
+            minimum_cost_index(candidates, |count| fastrand::usize(0..count))
         } else {
-            softmax_sample_cost_index(costs, temperature, fastrand::f64())
+            softmax_sample_cost_index(candidates, temperature, fastrand::f64())
         })
     }
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    #[inline(always)]
     fn select_worker(
         &self,
         workers: &HashMap<WorkerId, C>,
@@ -969,119 +1074,28 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        assert!(request.isl_tokens > 0);
-        eligibility.validate_pinned_worker_allowed()?;
-
-        if let Some(worker) = eligibility.pinned_worker() {
-            match eligibility.validate_worker_rank(workers, worker) {
-                Ok(_) => {}
-                Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
-                    return Err(KvSchedulerError::PinnedWorkerOverloaded {
-                        worker_id: worker.worker_id,
-                    });
-                }
-                Err(_) => return Err(KvSchedulerError::NoEndpoints),
+        let state = match &self.state {
+            WorkerSelectionPolicyState::Default(picker) => {
+                WorkerSelectionPolicyStateRef::Default(picker)
             }
-        } else if !eligibility.has_eligible_worker(
-            workers
-                .iter()
-                .map(|(&worker_id, config)| (worker_id, config)),
-        ) {
-            if eligibility.has_eligible_worker_ignoring_overload(
-                workers
-                    .iter()
-                    .map(|(&worker_id, config)| (worker_id, config)),
-            ) {
-                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            WorkerSelectionPolicyState::Custom(state) => {
+                WorkerSelectionPolicyStateRef::Custom(state)
             }
-            return Err(KvSchedulerError::NoEndpoints);
-        }
-
-        let mut inner = self.inner.borrow_mut();
-        let weights = selection_weights(&inner.kv_router_config, request);
-        let input = WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
-        inner.candidates.clear();
-        #[cfg(any(test, feature = "bench"))]
-        if inner.deterministic_candidates {
-            let mut eligible_workers = Vec::new();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                eligible_workers.push(worker);
-            });
-            eligible_workers.sort_unstable_by_key(|worker| (worker.worker_id, worker.dp_rank));
-            for worker in eligible_workers {
-                let config = &workers[&worker.worker_id];
-                let preferred_taint_multiplier = request
-                    .routing_constraints
-                    .preferred_taint_multiplier(config.taints());
-                inner
-                    .candidates
-                    .push(input.row(worker, preferred_taint_multiplier));
-            }
-        } else {
-            collect_candidates(&mut inner.candidates, &input, workers, request, eligibility);
-        }
-        #[cfg(not(any(test, feature = "bench")))]
-        collect_candidates(&mut inner.candidates, &input, workers, request, eligibility);
-
-        let WorkerSelectionPolicyInner {
-            worker_type,
-            scorers,
-            picker,
-            candidates,
-            costs,
-            contributions,
-            ..
-        } = &mut *inner;
-        costs.resize(candidates.workers.len(), 0.0);
-        costs.fill(0.0);
-        contributions.resize(candidates.workers.len(), 0.0);
-        let candidate_view = candidates.candidates();
-        if let [scorer] = scorers.as_mut_slice() {
-            scorer.score(&input.context, candidate_view, costs)?;
-            if let Some(row) = costs.iter().position(|cost| !cost.is_finite()) {
-                return Err(WorkerSelectionPolicyError::NonFiniteCost {
-                    scorer_index: 0,
-                    row,
-                }
-                .into());
-            }
-        } else {
-            for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
-                contributions.fill(0.0);
-                scorer.score(&input.context, candidate_view, contributions)?;
-                for (row, (cost, contribution)) in
-                    costs.iter_mut().zip(contributions.iter()).enumerate()
-                {
-                    *cost += *contribution;
-                    if !contribution.is_finite() || !cost.is_finite() {
-                        return Err(WorkerSelectionPolicyError::NonFiniteCost {
-                            scorer_index,
-                            row,
-                        }
-                        .into());
-                    }
-                }
-            }
-        }
-
-        let row = picker.pick(&input.context, candidate_view, costs)?;
-        let Some(&worker) = candidate_view.workers().get(row) else {
-            return Err(WorkerSelectionPolicyError::InvalidPickerRow {
-                row,
-                candidate_count: candidate_view.len(),
-            }
-            .into());
         };
-        eligibility
-            .validate_worker_rank(workers, worker)
-            .map_err(|_| KvSchedulerError::NoEndpoints)?;
-        log_selection(workers, request, worker, worker_type, costs[row]);
-
-        Ok(selection_result(request, worker, block_size))
+        select_worker_with_policy(
+            &self.kv_router_config,
+            self.worker_type,
+            state,
+            workers,
+            request,
+            eligibility,
+            block_size,
+        )
     }
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+    #[inline(always)]
     fn select_worker(
         &self,
         workers: &HashMap<WorkerId, C>,
@@ -1089,9 +1103,101 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        self.policy
-            .select_worker(workers, request, eligibility, block_size)
+        select_worker_with_policy(
+            &self.kv_router_config,
+            self.worker_type,
+            WorkerSelectionPolicyStateRef::Default(&self.picker),
+            workers,
+            request,
+            eligibility,
+            block_size,
+        )
     }
+}
+
+#[inline(always)]
+// DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
+// dispatched; eligibility outcomes and result construction stay host-owned and shared.
+fn select_worker_with_policy<C: WorkerConfigLike>(
+    kv_router_config: &KvRouterConfig,
+    worker_type: &'static str,
+    state: WorkerSelectionPolicyStateRef<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    block_size: u32,
+) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    assert!(request.isl_tokens > 0);
+    eligibility.validate_pinned_worker_allowed()?;
+
+    if let Some(worker) = eligibility.pinned_worker() {
+        match eligibility.validate_worker_rank(workers, worker) {
+            Ok(_) => {}
+            Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
+                return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                    worker_id: worker.worker_id,
+                });
+            }
+            Err(_) => return Err(KvSchedulerError::NoEndpoints),
+        }
+    }
+
+    let weights = selection_weights(kv_router_config, request);
+    let input = WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
+    let selected = match state {
+        WorkerSelectionPolicyStateRef::Default(picker) => {
+            let scorer = DefaultWorkerScorer {
+                kv_router_config,
+                worker_type,
+            };
+            pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+        }
+        WorkerSelectionPolicyStateRef::Custom(state) => {
+            let mut state = state.borrow_mut();
+            let CustomWorkerSelectionState {
+                scorers,
+                picker,
+                candidates,
+            } = &mut *state;
+            collect_custom_candidates(scorers, candidates, &input, workers, request, eligibility)?;
+            if candidates.is_empty() {
+                None
+            } else {
+                let candidate_view = WorkerCandidates {
+                    entries: candidates,
+                };
+                let row = picker.pick(&input.context, candidate_view)?;
+                let Some(candidate) = candidate_view.entries.get(row) else {
+                    return Err(WorkerSelectionPolicyError::InvalidPickerRow {
+                        row,
+                        candidate_count: candidate_view.len(),
+                    }
+                    .into());
+                };
+                Some((candidate.worker, candidate.cost))
+            }
+        }
+    };
+    let Some((worker, cost)) = selected else {
+        if eligibility.has_eligible_worker_ignoring_overload(
+            workers
+                .iter()
+                .map(|(&worker_id, config)| (worker_id, config)),
+        ) {
+            return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+        }
+        return Err(KvSchedulerError::NoEndpoints);
+    };
+    let result = selection_result(request, worker, block_size);
+    log_selection(
+        workers,
+        request,
+        worker,
+        worker_type,
+        cost,
+        result.effective_overlap_blocks,
+    );
+    Ok(result)
 }
 
 #[cfg(test)]
