@@ -142,6 +142,7 @@ class _CapturedVisionGraph:
     host_pixel_values: torch.Tensor
     static_pixel_values: torch.Tensor
     static_output: torch.Tensor
+    patches_per_item: int
     tokens_per_item: int
 
 
@@ -376,8 +377,9 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
     )
     buckets = None if _DISABLE_CUDA_GRAPHS else _GRAPH_BATCH_BUCKETS
     max_batch_cost = _parse_positive_int_env(
-        "DYN_QWEN2_VL_MAX_BATCH_COST", _GRAPH_BATCH_BUCKETS[-1]
+        "DYN_QWEN2_VL_MAX_BATCH_PATCHES", 64 * 36 * 36
     )
+    max_batch_items = _GRAPH_BATCH_BUCKETS[-1]
 
     def __init__(self) -> None:
         self._device: torch.device
@@ -467,11 +469,15 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         else:
             warmup_image = Image.new("RGB", (500, 500), color=(127, 127, 127))
             warmup_item = self._process_image(warmup_image)
-            outputs = self.forward_batch([warmup_item] * self.max_batch_cost)
+            warmup_count = min(
+                self.max_batch_items,
+                max(1, self.max_batch_cost // self._patch_count(warmup_item)),
+            )
+            outputs = self.forward_batch([warmup_item] * warmup_count)
             del outputs, warmup_item
         logger.info(
             "[Qwen2_5VLBenchmarkEncoder] warmup complete: buckets=%s "
-            "max_batch_cost=%d graphs=%d",
+            "max_batch_patches=%d graphs=%d",
             self.buckets,
             self.max_batch_cost,
             len(self._graphs),
@@ -559,7 +565,11 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
                 f"image grid {grid_key} has no captured CUDA graph; configure "
                 "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES before startup"
             )
-        return Preprocessed(item=item, cost=1)
+        return Preprocessed(
+            item=item,
+            cost=self._patch_count(item),
+            bucket_key=grid_key,
+        )
 
     def _process_image(self, image: Image.Image) -> Qwen2VLImageInputs:
         processor = self._require_processor()
@@ -578,6 +588,32 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             )
         temporal, height, width = item.image_grid_thw[0].tolist()
         return int(temporal), int(height), int(width)
+
+    @classmethod
+    def _patch_count(cls, item: Qwen2VLImageInputs) -> int:
+        temporal, height, width = cls._grid_key(item)
+        if min(temporal, height, width) < 1:
+            raise ValueError(
+                "Qwen2.5-VL grid dimensions must be positive: "
+                f"{temporal, height, width}"
+            )
+        if height % 2 or width % 2:
+            raise ValueError(
+                "Qwen2.5-VL spatial grid dimensions must be divisible by the "
+                f"2x2 merger: {temporal, height, width}"
+            )
+        grid_patch_count = temporal * height * width
+        pixel_patch_count = int(item.pixel_values.shape[0])
+        if pixel_patch_count != grid_patch_count:
+            raise ValueError(
+                "Qwen2.5-VL pixel rows must match grid_thw patch count; "
+                f"rows={pixel_patch_count}, grid_patches={grid_patch_count}"
+            )
+        return grid_patch_count
+
+    @classmethod
+    def _batch_patch_cost(cls, items: List[Qwen2VLImageInputs]) -> int:
+        return sum(cls._patch_count(item) for item in items)
 
     def _capture_cuda_graphs(self) -> None:
         if not self.buckets:
@@ -647,6 +683,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
                     host_pixel_values=host_pixel_values,
                     static_pixel_values=static_pixel_values,
                     static_output=static_output,
+                    patches_per_item=patches_per_item,
                     tokens_per_item=tokens_per_item,
                 )
                 logger.info(
@@ -676,9 +713,16 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         """Run one eager batch or replay a same-grid padded CUDA graph."""
         if not items:
             raise ValueError("forward_batch requires at least one image")
-        if len(items) > self.max_batch_cost:
+        patch_cost = self._batch_patch_cost(items)
+        if len(items) > self.max_batch_items:
             raise ValueError(
-                f"batch size {len(items)} exceeds max_batch_cost={self.max_batch_cost}"
+                f"batch size {len(items)} exceeds "
+                f"max_batch_items={self.max_batch_items}"
+            )
+        if patch_cost > self.max_batch_cost:
+            raise ValueError(
+                f"batch patch cost {patch_cost} exceeds "
+                f"max_batch_cost={self.max_batch_cost}"
             )
         if target_bucket is not None and len(items) > target_bucket:
             raise ValueError(
@@ -747,13 +791,18 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         # as read-only: siblings intentionally alias that fresh base allocation.
         host_embeds = image_embeds.to(dtype=torch.bfloat16).cpu()
         outputs = list(torch.split(host_embeds, split_sizes))
+        patch_cost = self._batch_patch_cost(items)
         self._dispatch_counts[("eager", len(items), None)] += 1
         if _DISPATCH_LOG_ENABLED:
             logger.info(
-                "custom_encoder_dispatch mode=eager batch_size=%d bucket=None",
+                "custom_encoder_dispatch mode=eager batch_size=%d bucket=None "
+                "patch_cost=%d padded_patch_cost=%d grids=%s",
                 len(items),
+                patch_cost,
+                patch_cost,
+                [self._grid_key(item) for item in items],
             )
-        self._log_cuda_timings(events, len(items), None, len(items))
+        self._log_cuda_timings(events, len(items), None, patch_cost)
         logger.debug(
             "[Qwen2_5VLBenchmarkEncoder] forward_batch n=%d tokens=%s",
             len(items),
@@ -803,16 +852,20 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
         real_output = entry.static_output[: len(items) * entry.tokens_per_item]
         host_output = real_output.to(dtype=torch.bfloat16).cpu()
         outputs = list(torch.split(host_output, entry.tokens_per_item))
+        patch_cost = len(items) * entry.patches_per_item
+        padded_patch_cost = target_bucket * entry.patches_per_item
         self._dispatch_counts[("graph", len(items), target_bucket)] += 1
         if _DISPATCH_LOG_ENABLED:
             logger.info(
                 "custom_encoder_dispatch mode=graph batch_size=%d bucket=%d "
-                "grid=%dx%dx%d",
+                "grid=%dx%dx%d patch_cost=%d padded_patch_cost=%d",
                 len(items),
                 target_bucket,
                 *grid_key,
+                patch_cost,
+                padded_patch_cost,
             )
-        self._log_cuda_timings(events, len(items), target_bucket, len(items))
+        self._log_cuda_timings(events, len(items), target_bucket, patch_cost)
         logger.debug(
             "[Qwen2_5VLBenchmarkEncoder] replayed CUDA graph: "
             "grid=%s actual_batch=%d bucket=%d",

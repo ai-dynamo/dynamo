@@ -162,6 +162,58 @@ def test_forward_batch_selects_smallest_compatible_graph(monkeypatch) -> None:
     assert torch.all(outputs[0] == 2)
 
 
+def test_forward_batch_rejects_above_graph_item_cap() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
+    encoder.buckets = (1, 2, 4)
+    encoder.max_batch_items = 4
+    item = _item((1, 4, 4))
+
+    with pytest.raises(ValueError, match="max_batch_items"):
+        encoder.forward_batch([item] * 5)
+
+
+def test_patch_count_matches_pixel_rows_and_grid() -> None:
+    item = _item((1, 22, 22))
+    assert Qwen2_5VLBenchmarkEncoder._patch_count(item) == 484
+
+    bad_item = Qwen2VLImageInputs(
+        pixel_values=item.pixel_values[:-1],
+        image_grid_thw=item.image_grid_thw,
+    )
+    with pytest.raises(ValueError, match="pixel rows must match"):
+        Qwen2_5VLBenchmarkEncoder._patch_count(bad_item)
+
+    with pytest.raises(ValueError, match="2x2 merger"):
+        Qwen2_5VLBenchmarkEncoder._patch_count(_item((1, 21, 22)))
+
+
+def test_forward_batch_rejects_patch_budget_overflow() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
+    encoder.max_batch_cost = 483
+
+    with pytest.raises(ValueError, match="batch patch cost 484"):
+        encoder.forward_batch([_item((1, 22, 22))])
+
+
+def test_preprocess_uses_patch_cost_and_grid_compatibility_key(monkeypatch) -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    item = _item((1, 22, 22))
+    monkeypatch.setattr(encoder, "_load_image", lambda _raw: object())
+    monkeypatch.setattr(encoder, "_process_image", lambda _image: item)
+
+    result = encoder._preprocess_uncached("image")
+
+    assert result.item is item
+    assert result.cost == 484
+    assert result.bucket_key == (1, 22, 22)
+
+
 def test_installs_vllm_attention_without_replacing_hf_projections(
     cpu_vllm_config: None,
 ) -> None:
@@ -206,7 +258,7 @@ def test_vllm_attention_receives_packed_sequence_boundaries(
     ("items", "target_bucket", "message"),
     [
         ([], None, "at least one"),
-        ([_item((1, 4, 4))] * 65, None, "max_batch_cost"),
+        ([_item((1, 36, 36))] * 65, None, "max_batch_items"),
         ([_item((1, 4, 4))], 8, "target_bucket"),
     ],
 )
@@ -344,9 +396,9 @@ def test_positive_integer_configuration(monkeypatch) -> None:
 def test_positive_integer_configuration_rejects_invalid_values(
     monkeypatch, value: str
 ) -> None:
-    monkeypatch.setenv("DYN_QWEN2_VL_MAX_BATCH_COST", value)
-    with pytest.raises(ValueError, match="DYN_QWEN2_VL_MAX_BATCH_COST"):
-        _parse_positive_int_env("DYN_QWEN2_VL_MAX_BATCH_COST", 64)
+    monkeypatch.setenv("DYN_QWEN2_VL_MAX_BATCH_PATCHES", value)
+    with pytest.raises(ValueError, match="DYN_QWEN2_VL_MAX_BATCH_PATCHES"):
+        _parse_positive_int_env("DYN_QWEN2_VL_MAX_BATCH_PATCHES", 64 * 36 * 36)
 
 
 def test_decoder_hidden_size_supports_text_and_text_only_configs() -> None:

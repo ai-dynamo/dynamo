@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +87,15 @@ def test_workload_validation_rejects_requested_image_count_mismatch(
 def test_workload_generation_records_selected_concurrencies(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    class FakeImageProcessor:
+        merge_size = 2
+
+        def __call__(self, *, images: list, return_tensors: str) -> dict:
+            assert return_tensors == "pt"
+            width, _height = images[0].size
+            grid = 22 if width == 300 else 36
+            return {"image_grid_thw": torch.tensor([[1, grid, grid]])}
+
     monkeypatch.setattr(
         "examples.custom_encoder.benchmark.safeguard_proxy_workload."
         "AutoTokenizer.from_pretrained",
@@ -94,7 +104,7 @@ def test_workload_generation_records_selected_concurrencies(
     monkeypatch.setattr(
         "examples.custom_encoder.benchmark.safeguard_proxy_workload."
         "AutoProcessor.from_pretrained",
-        lambda _model: SimpleNamespace(image_processor=object()),
+        lambda _model: SimpleNamespace(image_processor=FakeImageProcessor()),
     )
     monkeypatch.setattr(
         "examples.custom_encoder.benchmark.safeguard_proxy_workload."
@@ -115,6 +125,70 @@ def test_workload_generation_records_selected_concurrencies(
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["concurrencies"] == [4, 8, 16, 24, 32]
+    assert manifest["images"][0]["raw_patch_rows"] == 484
+
+
+def test_workload_generation_supports_balanced_unique_mixed_sizes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeImageProcessor:
+        merge_size = 2
+
+        def __call__(self, *, images: list, return_tensors: str) -> dict:
+            assert return_tensors == "pt"
+            width, _height = images[0].size
+            grid = 22 if width == 300 else 36
+            return {"image_grid_thw": torch.tensor([[1, grid, grid]])}
+
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoTokenizer.from_pretrained",
+        lambda _model: object(),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "AutoProcessor.from_pretrained",
+        lambda _model: SimpleNamespace(image_processor=FakeImageProcessor()),
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "_calculate_custom_isl_components",
+        lambda *_args: 644,
+    )
+    monkeypatch.setattr(
+        "examples.custom_encoder.benchmark.safeguard_proxy_workload."
+        "_calibrate_prompt",
+        lambda target, calculate: (f"prompt-{calculate('probe')}", target),
+    )
+
+    manifest_path = generate_workload(
+        tmp_path,
+        requests=4,
+        image_size_counts=((300, 300, 2), (500, 500, 2)),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "image_custom_4_isl644.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert manifest["unique_images"] == 4
+    assert manifest["unique_encoded_sha256"] == 4
+    assert manifest["unique_decoded_rgb_sha256"] == 4
+    assert [entry["requests"] for entry in manifest["image_size_counts"]] == [2, 2]
+    assert Counter(record["raw_patch_rows"] for record in manifest["images"]) == {
+        484: 2,
+        1296: 2,
+    }
+    assert len({row["image"] for row in rows}) == 4
+    audit = validate_workload(
+        tmp_path,
+        expected_unique_images=4,
+        expected_image_size_counts=((300, 300, 2), (500, 500, 2)),
+    )
+    assert audit["raw_patch_rows"] == 3560
+    assert audit["merged_visual_tokens"] == 890
 
 
 def test_custom_isl_replaces_one_placeholder_with_image_tokens() -> None:
@@ -152,7 +226,8 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
         (1, 2, 3),
         tmp_path / "output",
         smoke=False,
-        image_size=(300, 300),
+        image_sizes=((300, 300),),
+        max_batch_patches=8 * 484,
     )
     assert config.request_rates is None
     assert config.concurrencies == [1, 2, 3]
@@ -160,7 +235,7 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     assert config.warmup_count == 20
     assert config.osl == 7
     assert config.env["DYN_QWEN2_VL_PREPROCESS_CONCURRENCY"] == "4"
-    assert config.env["DYN_QWEN2_VL_MAX_BATCH_COST"] == "8"
+    assert config.env["DYN_QWEN2_VL_MAX_BATCH_PATCHES"] == str(8 * 484)
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,3,4,5,6,7,8"
     assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300"
     assert config.env["DYN_CUSTOM_ENCODER_DISPATCH_LOG"] == "1"
@@ -174,7 +249,8 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
         (4,),
         tmp_path / "smoke",
         smoke=True,
-        image_size=(300, 300),
+        image_sizes=((300, 300),),
+        max_batch_patches=8 * 484,
     )
     assert smoke_config.concurrencies == [4]
     assert smoke_config.conversation_num == 4

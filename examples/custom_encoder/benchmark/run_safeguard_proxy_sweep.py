@@ -106,16 +106,28 @@ def _gpu_metadata() -> str | None:
     return _command_output(command)
 
 
-def _workload_image_size(workload_dir: Path) -> tuple[int, int]:
+def _workload_image_sizes(workload_dir: Path) -> tuple[tuple[int, int], ...]:
     manifest = json.loads(
         (workload_dir / "workload_manifest.json").read_text(encoding="utf-8")
     )
-    decoded_image = manifest["decoded_image"]
-    width = int(decoded_image["width"])
-    height = int(decoded_image["height"])
-    if width < 1 or height < 1:
+    if "image_size_counts" in manifest:
+        entries = manifest["image_size_counts"]
+    else:
+        entries = [manifest["decoded_image"]]
+    sizes = tuple((int(entry["width"]), int(entry["height"])) for entry in entries)
+    if not sizes or any(min(size) < 1 for size in sizes):
         raise ValueError("workload image dimensions must be positive")
-    return width, height
+    return sizes
+
+
+def _workload_max_patch_rows(workload_dir: Path) -> int:
+    manifest = json.loads(
+        (workload_dir / "workload_manifest.json").read_text(encoding="utf-8")
+    )
+    patch_rows = [int(record["raw_patch_rows"]) for record in manifest["images"]]
+    if not patch_rows or min(patch_rows) < 1:
+        raise ValueError("workload raw patch counts must be positive")
+    return max(patch_rows)
 
 
 def _workload_unique_images(workload_dir: Path) -> int:
@@ -134,7 +146,8 @@ def _metadata(
     workload_dir: Path,
 ) -> dict[str, Any]:
     manifest_path = workload_dir / "workload_manifest.json"
-    width, height = _workload_image_size(workload_dir)
+    image_sizes = _workload_image_sizes(workload_dir)
+    max_batch_patches = 8 * _workload_max_patch_rows(workload_dir)
     unique_images = _workload_unique_images(workload_dir)
     return {
         "axis": "concurrency",
@@ -154,14 +167,14 @@ def _metadata(
         ),
         "settings": {
             "preprocess_concurrency": 4,
-            "max_batch_cost": 8,
+            "max_batch_patches": max_batch_patches,
             "graph_buckets": list(range(1, 9)),
-            "graph_image_sizes": [f"{width}x{height}"],
+            "graph_image_sizes": [f"{width}x{height}" for width, height in image_sizes],
             "unique_images": unique_images,
             "preprocess_cache_size": 0,
             "batching_policy": (
                 "drain immediately available work, then hold up to the configured "
-                "deadline unless max_batch_cost is reached"
+                "deadline unless max_batch_patches or max_batch_items is reached"
             ),
             "queue_delays_us": list(RUNTIME_DELAYS_US.values()),
             "max_num_seqs": 64,
@@ -195,7 +208,10 @@ def build_config(
     concurrencies: tuple[int, ...],
     output_dir: Path,
     smoke: bool,
-    image_size: tuple[int, int] = (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE),
+    image_sizes: tuple[tuple[int, int], ...] = (
+        (DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SIZE),
+    ),
+    max_batch_patches: int = 8 * 36 * 36,
 ) -> SweepConfig:
     workflow = REPO_ROOT / (
         "examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh"
@@ -232,9 +248,11 @@ def build_config(
             "DYN_QWEN2_VL_ENCODER_MODEL": ENCODER_MODEL,
             "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE": "1536",
             "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY": "4",
-            "DYN_QWEN2_VL_MAX_BATCH_COST": "8",
+            "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(max_batch_patches),
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,3,4,5,6,7,8",
-            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": (f"{image_size[0]}x{image_size[1]}"),
+            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": ",".join(
+                f"{width}x{height}" for width, height in image_sizes
+            ),
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
             "DYN_CUSTOM_ENCODER_DISPATCH_LOG": "1",
         },
@@ -262,13 +280,15 @@ def run_matrix(
         metadata_path.write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
         )
-    image_size = _workload_image_size(workload_dir)
+    image_sizes = _workload_image_sizes(workload_dir)
+    max_batch_patches = 8 * _workload_max_patch_rows(workload_dir)
     config = build_config(
         workload_dir / INPUT_NAME,
         concurrencies,
         output_dir,
         smoke,
-        image_size=image_size,
+        image_sizes=image_sizes,
+        max_batch_patches=max_batch_patches,
     )
     config.validate(repo_root=REPO_ROOT)
     run_sweep(config, repo_root=REPO_ROOT)
