@@ -337,6 +337,30 @@ def test_kubernetes_page_is_self_contained(kubernetes_page: _KubernetesPage) -> 
     assert not (K8S_DIR / "api-reference.data.ts").exists()
 
 
+def test_kubernetes_source_path_note_points_at_a_real_file() -> None:
+    """The rendered page tells readers where the raw crd-ref-docs Markdown
+    lives. That path is emitted as inline code rather than a link, so the
+    broken-link checker cannot catch it when the source file moves -- as it
+    did when the reference was relocated under ``pages/reference/``."""
+    quoted = kubernetes_api_rendering.SOURCE_PATH_MD
+    missing = f"SOURCE_PATH_MD does not exist on disk: {quoted}"
+
+    assert (REPO_ROOT / quoted).is_file(), missing
+    assert quoted == str(K8S_SOURCE_MD.relative_to(REPO_ROOT))
+
+
+def test_kubernetes_prose_carries_no_literal_br_markers(
+    kubernetes_page: _KubernetesPage,
+) -> None:
+    """crd-ref-docs encodes the Go comments' hard line wraps as ``<br />``.
+    Escaping that marker for MDX turns it into visible ``&lt;br /&gt;`` text
+    in enum and field descriptions, so it must be collapsed first."""
+    _, mdx = kubernetes_page
+
+    assert "&lt;br" not in mdx
+    assert "<br" not in mdx
+
+
 def test_kubernetes_field_type_links_resolve(
     kubernetes_page: _KubernetesPage,
 ) -> None:
