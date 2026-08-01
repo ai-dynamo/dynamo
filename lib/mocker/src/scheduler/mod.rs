@@ -379,7 +379,10 @@ pub(crate) enum LiveEngineEvent {
 #[derive(Clone)]
 pub(crate) enum SchedulerEventSender {
     Outputs(SchedulerOutputSender),
-    Ordered(mpsc::Sender<LiveEngineEvent>),
+    Ordered {
+        tx: mpsc::Sender<LiveEngineEvent>,
+        forward_admissions: bool,
+    },
 }
 
 pub(crate) enum SchedulerEventSendError {
@@ -400,7 +403,11 @@ impl SchedulerEventSender {
                 // Legacy output-only consumers do not have an admission event sink.
                 Ok(())
             }
-            Self::Ordered(tx) => tx
+            Self::Ordered {
+                forward_admissions: false,
+                ..
+            } => Ok(()),
+            Self::Ordered { tx, .. } => tx
                 .send(LiveEngineEvent::Admissions(admissions.to_vec()))
                 .await
                 .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
@@ -416,7 +423,7 @@ impl SchedulerEventSender {
                 .send(signals)
                 .await
                 .map_err(SchedulerEventSendError::OutputClosed),
-            Self::Ordered(tx) => tx
+            Self::Ordered { tx, .. } => tx
                 .send(LiveEngineEvent::Outputs(signals))
                 .await
                 .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
