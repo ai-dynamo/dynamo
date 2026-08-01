@@ -462,6 +462,16 @@ const REFERENCE_CSS = `
     line-height: 1;
 }
 
+/* InteractionStatus sets tabIndex={0} on cells that carry a note, so the
+   wrapping Fern <Tooltip> can be reached from the keyboard. Without a ring
+   that stop reads as a dead tab step: focus lands on a cell that shows
+   nothing new. Same treatment as .dynref-rsm-line-summary:focus-visible. */
+.dynref-interaction:focus-visible {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: 2px;
+    border-radius: 3px;
+}
+
 .dynref-interaction--yes { color: var(--dynref-green-fg); }
 .dynref-interaction--wip {
     color: var(--dynref-amber-fg);

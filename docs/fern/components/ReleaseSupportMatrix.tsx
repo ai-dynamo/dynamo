@@ -202,7 +202,7 @@ const RSM_CSS = `
 
 .dynref-rsm-backend-row {
     display: grid;
-    grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.8fr);
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.85fr) minmax(0, 0.75fr) minmax(0, 0.85fr) minmax(0, 0.75fr);
     align-items: baseline;
     gap: 4px 12px;
     padding: 6px 0;
@@ -286,8 +286,9 @@ const RSM_CSS = `
 `;
 
 // Only stable and patch releases carry CUDA_HISTORY rows and belong in the
-// support matrix. Platform previews and model-specific builds are covered
-// by the CUDA_NOTES prose below and by the machine-readable releases page.
+// support matrix. Platform previews and model-specific builds are excluded;
+// CUDA_NOTES calls out the ones whose toolkit support differs, and the
+// machine-readable releases page carries the full inventory.
 const SUPPORT_KINDS: ReadonlySet<Release["kind"]> = new Set(["stable", "patch"]);
 
 // CUDA majors the matrix knows how to render, in display order. A toolkit
@@ -336,12 +337,14 @@ interface ReleaseBlock {
   release: Release;
   version: string; // bare (no leading v)
   blocks: MajorBlock[]; // only majors that ship rows for this release
+  postTrains: string[]; // bare versions inheriting this release's CUDA support
 }
 
 interface MinorGroup {
   minor: string; // e.g. "1.2.x"
   releases: ReleaseBlock[];
   majors: CudaMajor[]; // unique across all releases in the line, ordered
+  releaseCount: number; // every stable/patch in the line, post trains included
 }
 
 function bareVersion(version: string): string {
@@ -354,6 +357,21 @@ function minorLine(version: string): string {
     throw new Error(`ReleaseSupportMatrix: cannot minor-group version ${version}`);
   }
   return `${major}.${minor}.x`;
+}
+
+/* '0.7.0.post1' -> '0.7.0'; anything else unchanged. Post trains republish
+ * images or wheels off an existing release and carry no CUDA_HISTORY row --
+ * CUDA_NOTES states they have the same CUDA support as their base. They are
+ * therefore listed on their base's card rather than given one of their own. */
+function postTrainBase(version: string): string {
+  const cut = version.indexOf(".post");
+  return cut === -1 ? version : version.slice(0, cut);
+}
+
+function supportedReleases(): string[] {
+  return RELEASES.filter((rel) => SUPPORT_KINDS.has(rel.kind)).map((rel) =>
+    bareVersion(rel.version),
+  );
 }
 
 function releaseIndex(): Map<string, Release> {
@@ -395,17 +413,19 @@ function buildReleaseBlock(
   version: string,
   release: Release,
   rows: CudaRow[],
+  postTrains: string[],
 ): ReleaseBlock {
   const blocks: MajorBlock[] = [];
   for (const major of CUDA_MAJORS) {
     const block = buildMajorBlock(release, rows, major);
     if (block.lines.length > 0) blocks.push(block);
   }
-  return { release, version, blocks };
+  return { release, version, blocks, postTrains };
 }
 
 function groupByMinorLine(): MinorGroup[] {
   const releases = releaseIndex();
+  const supported = supportedReleases();
   const groups = new Map<string, MinorGroup>();
   const seenVersions = new Set<string>();
   for (const row of CUDA_HISTORY) {
@@ -415,8 +435,19 @@ function groupByMinorLine(): MinorGroup[] {
     seenVersions.add(version);
     const line = minorLine(version);
     const versionRows = CUDA_HISTORY.filter((r) => r.version === version);
-    const block = buildReleaseBlock(version, release, versionRows);
-    const group = groups.get(line) ?? { minor: line, releases: [], majors: [] };
+    const postTrains = supported.filter(
+      (v) => v !== version && postTrainBase(v) === version,
+    );
+    const block = buildReleaseBlock(version, release, versionRows, postTrains);
+    const group = groups.get(line) ?? {
+      minor: line,
+      releases: [],
+      majors: [],
+      // Counted from RELEASES, not from the cards: a post train shares its
+      // base's card, so counting cards would report 0.8.x as two releases
+      // when the line actually shipped five.
+      releaseCount: supported.filter((v) => minorLine(v) === line).length,
+    };
     group.releases.push(block);
     for (const b of block.blocks) {
       if (!group.majors.includes(b.major)) group.majors.push(b.major);
@@ -454,6 +485,15 @@ function BackendRow({ line }: { line: BackendLine }) {
       <span className="dynref-rsm-backend-cell">
         <span className="dynref-rsm-cell-label">Toolkit</span>
         <span className="dynref-rsm-cell-value dynref-mono">{line.toolkit}</span>
+      </span>
+      {/* Per-backend, not per-block: within one CUDA major the backends can
+          sit on different toolkits and therefore different driver floors
+          (v0.7.1 pairs SGLang/12.8 with 570.xx+ and vLLM/12.9 with 575.xx+).
+          The block header summarises both, so the floor that applies to a
+          reader's backend has to be readable on its own row. */}
+      <span className="dynref-rsm-backend-cell">
+        <span className="dynref-rsm-cell-label">Driver</span>
+        <span className="dynref-rsm-cell-value dynref-mono">{line.minDriver}</span>
       </span>
       <span className="dynref-rsm-backend-cell">
         <span className="dynref-rsm-cell-label">NIXL</span>
@@ -499,6 +539,13 @@ function ReleaseCard({ block }: { block: ReleaseBlock }) {
         {block.release.date && (
           <span className="dynref-rsm-release-meta">{block.release.date}</span>
         )}
+        {block.postTrains.length > 0 && (
+          <span className="dynref-rsm-release-meta">
+            Post trains{" "}
+            <span className="dynref-mono">v{block.postTrains.join(", v")}</span>{" "}
+            share this CUDA support
+          </span>
+        )}
         <span className="dynref-rsm-release-ucx">
           <span className="dynref-rsm-cell-label">UCX</span>
           {ucx ? (
@@ -518,7 +565,7 @@ function ReleaseCard({ block }: { block: ReleaseBlock }) {
 }
 
 function MinorLineSummary({ group }: { group: MinorGroup }) {
-  const releaseCount = group.releases.length;
+  const releaseCount = group.releaseCount;
   return (
     <summary className="dynref-rsm-line-summary">
       <span className="dynref-rsm-line-title">{group.minor}</span>
