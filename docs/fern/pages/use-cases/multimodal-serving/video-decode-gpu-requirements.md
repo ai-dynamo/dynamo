@@ -49,20 +49,45 @@ NVDEC links `libnvcuvid` at runtime, which the NVIDIA container runtime only mou
 the **`video` driver capability** is requested. Without it, `import PyNvVideoCodec` fails
 and Dynamo falls back to software decode.
 
-Dynamo's runtime images already set this:
+Dynamo's runtime images already declare it:
 
 ```dockerfile
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ```
 
-When running the image yourself, request the capability explicitly:
+With Docker that is usually enough, because the toolkit reads the capability from the
+image. To be explicit, or when overriding the variable for other reasons:
 
 ```bash
-docker run --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video ...
+docker run --gpus all -e NVIDIA_DRIVER_CAPABILITIES=video,compute,utility ...
 ```
 
-On Kubernetes, confirm your device plugin or `runtimeClass` does not drop `video` from
-the capability list.
+### Kubernetes
+
+> [!IMPORTANT]
+> On Kubernetes the image's `ENV` is **not** reliably sufficient. Set the variable on the
+> container spec as well. Dynamo's own GPU test runners shipped images carrying the `ENV`
+> and still had no hardware decode until the pod spec set it explicitly.
+
+Add it to the container that runs the worker:
+
+```yaml
+spec:
+  containers:
+    - name: worker
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: video,compute,utility
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+```
+
+If it still does not take effect, the capability is being dropped below the pod. Check
+`supported-driver-capabilities` in `/etc/nvidia-container-runtime/config.toml` on the
+node, and — if the cluster runs in CDI mode — whether the generated device spec includes
+the video libraries, since in that mode capabilities come from the spec rather than the
+environment variable.
 
 > [!WARNING]
 > Missing the `video` capability is the most common cause of hardware decode being
@@ -82,6 +107,18 @@ print('NVDEC available:', nvdec_available())
 `video` driver capability, that `PyNvVideoCodec` is installed, and that
 `DYN_DISABLE_NVDEC` is unset.
 
+To distinguish "capability missing" from every other cause, look for the decode library
+itself. It is mounted by the container runtime, not installed by the image, so its absence
+points squarely at the capability:
+
+```bash
+ldconfig -p | grep -i nvcuvid
+```
+
+Expect `libnvcuvid.so.1`. Nothing means the `video` capability did not reach this
+container. If it is present on the node but not inside, the capability is being dropped
+between the two.
+
 ## Behavior when NVDEC is unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
@@ -92,6 +129,18 @@ to the software decode path.
 > decode H.264 or H.265. If NVDEC is unavailable in one of these images, those formats
 > have no decoder and the request fails with an unsupported-codec error. Install the
 > optional software decoders (`DYN_ENABLE_MEDIA_DECODERS`) or fix the `video` capability.
+
+## Hardware encode (NVENC)
+
+There is nothing to enable. Dynamo does not use NVENC on any path.
+
+Video **output** — the generation path — encodes VP9 on the CPU with the in-tree FFmpeg.
+That is deliberate and works everywhere: no datacenter GPU ships an encoder, so a
+hardware encode path would be unavailable on exactly the parts most deployments run. On
+workstation parts that do have NVENC (L4, L40S, RTX 6000 Ada) it simply stays unused.
+
+The same `video` driver capability governs both engines, so a container configured for
+NVDEC as above needs no additional change. Encode performance does not depend on it.
 
 ## Configuration
 
