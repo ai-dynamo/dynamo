@@ -212,7 +212,7 @@ pub struct MockerBackend {
     disaggregation_mode: DisaggregationMode,
     cancel: CancellationToken,
     active: Arc<DashMap<Uuid, ActiveEntry>>,
-    request_tx: OnceCell<mpsc::UnboundedSender<DirectRequest>>,
+    request_tx: OnceCell<mpsc::Sender<DirectRequest>>,
     /// Held for its lifetime side-effect only: the scheduler's internal
     /// `CancelGuard` fires on drop, so keeping the handle alive keeps
     /// the scheduler tasks running for the engine's lifetime.
@@ -305,7 +305,8 @@ impl LLMEngine for MockerBackend {
             KvEventPublishers::default(),
             Some(self.cancel.clone()),
             FpmPublisher::default(),
-        );
+        )
+        .map_err(|error| engine_shutdown(format!("failed to start Mocker scheduler: {error:#}")))?;
 
         // The `initialized()` check + these `set()` calls are not atomic,
         // so concurrent `start()` callers could both pass the check and
@@ -445,7 +446,7 @@ impl LLMEngine for MockerBackend {
             },
         );
 
-        if request_tx.send(direct).is_err() {
+        if request_tx.send(direct).await.is_err() {
             self.active.remove(&uuid);
             return Err(engine_shutdown("scheduler is not accepting requests"));
         }

@@ -7,7 +7,7 @@
 //! the pool models occupancy, reference/pin state, and LRU eviction without
 //! reproducing vLLM's numeric block IDs or null block.
 
-use dynamo_tokens::SequenceHash;
+use crate::common::hashing::SequenceHash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
 use std::collections::{VecDeque, hash_map::Entry};
@@ -335,7 +335,7 @@ impl VllmBlockPool {
     }
 
     /// Allocate a transferred/computed full block directly into the cache.
-    /// Returns whether the hash became router-visible (`0 -> 1`).
+    /// Returns whether the hash became observer-visible (`0 -> 1`).
     pub(crate) fn allocate_cached(
         &mut self,
         reservation: &mut BlockReservation,
@@ -417,16 +417,6 @@ impl VllmBlockPool {
 
     pub(crate) fn num_active(&self) -> usize {
         self.copies.len() - self.inactive_len + self.reserved
-    }
-
-    pub(crate) fn num_active_refs(&self) -> usize {
-        self.copies
-            .values()
-            .map(|copy| match &copy.state {
-                CopyState::Private => 1,
-                CopyState::Cached { refs, .. } => *refs,
-            })
-            .sum()
     }
 
     pub(crate) fn num_inactive(&self) -> usize {

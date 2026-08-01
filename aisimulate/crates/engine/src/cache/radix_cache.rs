@@ -5,7 +5,9 @@
 //!
 //! Reference: sglang/python/sglang/srt/mem_cache/radix_cache.py
 
-use dynamo_kv_router::protocols::{BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq};
+use crate::common::hashing::LocalBlockHash;
+#[cfg(test)]
+use crate::common::hashing::compute_block_hash_for_seq;
 use rustc_hash::FxHashMap;
 use slotmap::{SlotMap, new_key_type};
 use std::collections::BTreeSet;
@@ -116,25 +118,6 @@ impl PagePool {
         true
     }
 
-    #[cfg(test)]
-    pub fn expand_pages(&self, pages: &[KvPageId], token_count: usize) -> Vec<usize> {
-        assert!(
-            token_count <= pages.len() * self.page_size,
-            "cannot expand {token_count} tokens from {} pages of size {}",
-            pages.len(),
-            self.page_size
-        );
-        let mut indices = Vec::with_capacity(token_count);
-        for (page_idx, page) in pages.iter().copied().enumerate() {
-            let take = token_count
-                .saturating_sub(page_idx * self.page_size)
-                .min(self.page_size);
-            let start = page.first_token_index(self.page_size);
-            indices.extend(start..start + take);
-        }
-        indices
-    }
-
     pub fn free_pages(&mut self, pages: &[KvPageId]) {
         self.free.extend_from_slice(pages);
     }
@@ -242,6 +225,7 @@ impl RadixCache {
     pub fn page_size(&self) -> usize {
         self.page_size
     }
+    #[cfg(test)]
     pub fn num_nodes(&self) -> usize {
         self.nodes.len()
     }
@@ -310,8 +294,9 @@ impl RadixCache {
         self.evictable_leaves.contains(&self.evictable_key(id))
     }
 
+    #[cfg(test)]
     pub(crate) fn page_hashes(&self, tokens: &[u32]) -> Vec<LocalBlockHash> {
-        compute_block_hash_for_seq(tokens, self.page_size as u32, BlockHashOptions::default())
+        compute_block_hash_for_seq(tokens, self.page_size)
     }
 
     #[cfg(test)]
@@ -339,12 +324,14 @@ impl RadixCache {
         key0.iter().zip(key1).take_while(|(a, b)| a == b).count()
     }
 
+    #[cfg(test)]
     pub fn match_prefix(&mut self, key: &[u32]) -> (usize, NodeId) {
         let page_keys = self.page_hashes(key);
         self.match_prefix_hashes(&page_keys)
     }
 
     /// Match a prefix using page hashes already owned by the request.
+    #[cfg(test)]
     pub(crate) fn match_prefix_hashes(&mut self, page_keys: &[LocalBlockHash]) -> (usize, NodeId) {
         self.match_prefix_hashes_impl(page_keys, false)
     }
@@ -426,6 +413,7 @@ impl RadixCache {
 
     /// Read-only prefix match length (does not mutate timestamps or split nodes).
     /// Used for LPM scheduling scoring.
+    #[cfg(test)]
     pub fn prefix_match_len(&self, key: &[u32]) -> usize {
         let page_keys = self.page_hashes(key);
         self.prefix_match_hashes_len(&page_keys)

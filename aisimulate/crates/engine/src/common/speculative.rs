@@ -6,7 +6,11 @@ use rand::{Rng, SeedableRng};
 
 const DEFAULT_CONDITIONAL_ACCEPT_RATES: [f64; 5] = [0.85, 0.3, 0.0, 0.0, 0.0];
 
-pub(crate) fn normalize_conditional_accept_rates(
+/// Parse and normalize MTP/EAGLE conditional draft-token acceptance rates.
+///
+/// The result always has exactly `nextn` entries. Missing trailing rates are
+/// zero-filled and extra entries are ignored, matching scheduler semantics.
+pub fn normalize_conditional_accept_rates(
     nextn: usize,
     rates: Option<&str>,
 ) -> anyhow::Result<Vec<f64>> {
@@ -35,18 +39,6 @@ pub(crate) fn normalize_conditional_accept_rates(
 
     parsed.resize(nextn, 0.0);
     Ok(parsed)
-}
-
-pub(crate) fn format_accept_rates(rates: &[f64]) -> String {
-    rates
-        .iter()
-        .map(|rate| rate.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-pub(crate) fn undiscounted_aic_accept_rates(nextn: Option<usize>) -> Option<String> {
-    nextn.map(|nextn| vec!["0"; nextn].join(","))
 }
 
 pub(crate) struct SpeculativeDecodeSampler {

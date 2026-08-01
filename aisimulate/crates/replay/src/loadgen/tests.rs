@@ -3,9 +3,6 @@
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
-};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
@@ -21,32 +18,6 @@ fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
     file
 }
 
-fn request_trace_row(
-    request_id: &str,
-    block_size: usize,
-    agent_context: Option<serde_json::Value>,
-) -> serde_json::Value {
-    let mut row = serde_json::json!({
-        "schema": "dynamo.request.trace.v1",
-        "event_type": "request_end",
-        "event_time_unix_ms": 1_100,
-        "request": {
-            "request_id": request_id,
-            "request_received_ms": 1_000,
-            "output_tokens": 4,
-            "replay": {
-                "trace_block_size": block_size,
-                "input_length": block_size,
-                "input_sequence_hashes": [11],
-            }
-        }
-    });
-    if let Some(agent_context) = agent_context {
-        row["agent_context"] = agent_context;
-    }
-    row
-}
-
 #[test]
 fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
     let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
@@ -60,76 +31,17 @@ fn trace_synthesis_rejects_capacity_overflow() {
 }
 
 #[test]
-fn dynamo_trace_input_validation_errors_are_clear() {
-    enum ValidationCase {
-        Validate(TraceFileFormat, Vec<std::path::PathBuf>),
-        Load(Vec<std::path::PathBuf>, Option<usize>),
-    }
+fn trace_file_cardinality_validation_is_format_neutral() {
+    let empty = validate_trace_files(TraceFileFormat::Mooncake, &[]).unwrap_err();
+    assert!(empty.to_string().contains("at least one trace file"));
 
-    let mixed = write_trace(&[
-        request_trace_row(
-            "contextual",
-            2,
-            Some(serde_json::json!({"session_id": "root"})),
-        ),
-        request_trace_row("context-free", 2, None),
-    ]);
-    let inconsistent = write_trace(&[
-        request_trace_row("block-2", 2, None),
-        request_trace_row("block-4", 4, None),
-    ]);
-    let block_size = write_trace(&[request_trace_row("block-2", 2, None)]);
-    let extra = write_trace(&[serde_json::json!({
-        "timestamp": 0,
-        "input_length": 2,
-        "output_length": 1,
-        "hash_ids": [1],
-    })]);
-
-    let cases = [
-        (
-            "empty",
-            ValidationCase::Validate(TraceFileFormat::Dynamo, vec![]),
-            "at least one trace file",
-        ),
-        (
-            "mixed context",
-            ValidationCase::Load(vec![mixed.path().to_path_buf()], None),
-            "cannot mix requests with and without agent_context",
-        ),
-        (
-            "inconsistent block size",
-            ValidationCase::Load(vec![inconsistent.path().to_path_buf()], None),
-            "mixed replay trace_block_size values",
-        ),
-        (
-            "explicit block size mismatch",
-            ValidationCase::Load(vec![block_size.path().to_path_buf()], Some(4)),
-            "does not match embedded Dynamo request trace block size 2",
-        ),
-        (
-            "multiple non-Dynamo files",
-            ValidationCase::Validate(
-                TraceFileFormat::Mooncake,
-                vec![block_size.path().to_path_buf(), extra.path().to_path_buf()],
-            ),
-            "requires exactly one trace file",
-        ),
-    ];
-
-    for (name, case, expected) in cases {
-        let error = match case {
-            ValidationCase::Validate(format, paths) => validate_trace_files(format, &paths),
-            ValidationCase::Load(paths, block_size) => {
-                DynamoRequestTrace::from_request_trace_files(&paths, block_size).map(|_| ())
-            }
-        }
-        .expect_err(name);
-        assert!(
-            error.to_string().contains(expected),
-            "{name}: unexpected error: {error:#}"
-        );
-    }
+    let paths = vec!["first.jsonl".into(), "second.jsonl".into()];
+    let multiple = validate_trace_files(TraceFileFormat::Mooncake, &paths).unwrap_err();
+    assert!(
+        multiple
+            .to_string()
+            .contains("requires exactly one trace file")
+    );
 }
 
 #[test]
@@ -547,13 +459,9 @@ fn test_turn_replay_hashes_match_full_blocks_only() {
         .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
         .unwrap();
     let replay_hashes = turn.to_replay_hashes(4, 4).unwrap();
-    let expected_local =
-        compute_block_hash_for_seq(&request.tokens, 4, BlockHashOptions::default());
-
-    assert_eq!(replay_hashes.local_block_hashes, expected_local);
     assert_eq!(
-        replay_hashes.sequence_hashes,
-        compute_seq_hash_for_block(&expected_local)
+        replay_hashes,
+        ReplayRequestHashes::from_tokens(&request.tokens, 4)
     );
     assert_eq!(replay_hashes.local_block_hashes.len(), 1);
 }
@@ -572,13 +480,9 @@ fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
         .to_direct_request(4, Uuid::from_u128(2), Some(5.0))
         .unwrap();
     let replay_hashes = turn.to_replay_hashes(4, 2).unwrap();
-    let expected_local =
-        compute_block_hash_for_seq(&request.tokens, 2, BlockHashOptions::default());
-
-    assert_eq!(replay_hashes.local_block_hashes, expected_local);
     assert_eq!(
-        replay_hashes.sequence_hashes,
-        compute_seq_hash_for_block(&expected_local)
+        replay_hashes,
+        ReplayRequestHashes::from_tokens(&request.tokens, 2)
     );
     assert_eq!(replay_hashes.local_block_hashes.len(), 3);
 }

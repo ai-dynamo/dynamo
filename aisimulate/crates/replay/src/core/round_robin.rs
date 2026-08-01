@@ -14,21 +14,21 @@ use super::{
 };
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct AggregatedRoundRobin {
+pub struct AggregatedRoundRobin {
     next_worker: usize,
     next_rank_by_worker: FxHashMap<usize, u32>,
     dp_size: u32,
 }
 
 #[derive(Debug)]
-pub(in crate::replay) struct AggregatedRoundRobinPlacement<Events: EngineEventBatch> {
+pub struct AggregatedRoundRobinPlacement<Events: EngineEventBatch> {
     counter: AggregatedRoundRobin,
     workers: BTreeMap<usize, Vec<usize>>,
     events: PhantomData<Events>,
 }
 
 impl<Events: EngineEventBatch> AggregatedRoundRobinPlacement<Events> {
-    pub(in crate::replay) fn new(dp_size: u32, workers: Vec<WorkerTopology>) -> Self {
+    pub fn new(dp_size: u32, workers: Vec<WorkerTopology>) -> Self {
         let mut counter = AggregatedRoundRobin::new(dp_size);
         for worker in &workers {
             counter.worker_ready(worker.worker_id);
@@ -41,11 +41,6 @@ impl<Events: EngineEventBatch> AggregatedRoundRobinPlacement<Events> {
                 .collect(),
             events: PhantomData,
         }
-    }
-
-    #[cfg(test)]
-    pub(in crate::replay::offline) fn tracked_workers(&self) -> &FxHashMap<usize, u32> {
-        self.counter.tracked_workers()
     }
 }
 
@@ -68,20 +63,22 @@ where
         let request_id = request
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
-        let scheduler_id = self
-            .counter
-            .next(self.workers.keys().copied(), |worker_id, rank| {
+        let scheduler_id = self.counter.next(
+            self.workers.keys().copied(),
+            request.preferred_dp_rank(),
+            |worker_id, rank| {
                 self.workers
                     .get(&worker_id)
                     .and_then(|ranks| ranks.get(rank as usize))
                     .copied()
-            });
+            },
+        )?;
         Ok(PlacementEffects {
             decision: PlacementDecision::Immediate(Placement {
                 request_id,
                 scheduler_id,
                 reported_overlap_tokens: 0,
-                planner_cache_sample: None,
+                cache_sample: None,
             }),
             released: Vec::new(),
         })
@@ -135,14 +132,14 @@ where
 }
 
 #[derive(Debug)]
-pub(in crate::replay) struct PoolRoundRobinPlacement<Events: EngineEventBatch> {
+pub struct PoolRoundRobinPlacement<Events: EngineEventBatch> {
     next: usize,
     workers: BTreeMap<usize, Vec<usize>>,
     events: PhantomData<Events>,
 }
 
 impl<Events: EngineEventBatch> PoolRoundRobinPlacement<Events> {
-    pub(in crate::replay) fn new(workers: Vec<WorkerTopology>) -> Self {
+    pub fn new(workers: Vec<WorkerTopology>) -> Self {
         Self {
             next: 0,
             workers: workers
@@ -173,6 +170,9 @@ where
             .request_id()
             .ok_or_else(|| anyhow!("round-robin placement requires a request UUID"))?;
         let active_count = self.workers.values().map(Vec::len).sum::<usize>();
+        if active_count == 0 {
+            return Err(anyhow!("no active workers for round-robin placement"));
+        }
         let index = self.next % active_count;
         let scheduler_id = self
             .workers
@@ -186,7 +186,7 @@ where
                 request_id,
                 scheduler_id,
                 reported_overlap_tokens: 0,
-                planner_cache_sample: None,
+                cache_sample: None,
             }),
             released: Vec::new(),
         })
@@ -233,7 +233,7 @@ where
 }
 
 impl AggregatedRoundRobin {
-    pub(in crate::replay::offline) fn new(dp_size: u32) -> Self {
+    pub fn new(dp_size: u32) -> Self {
         Self {
             next_worker: 0,
             next_rank_by_worker: FxHashMap::default(),
@@ -241,37 +241,46 @@ impl AggregatedRoundRobin {
         }
     }
 
-    pub(in crate::replay::offline) fn next(
+    pub(crate) fn next(
         &mut self,
         mut active_workers: impl ExactSizeIterator<Item = usize>,
+        preferred_rank: Option<u32>,
         rank_id: impl FnOnce(usize, u32) -> Option<usize>,
-    ) -> usize {
-        debug_assert!(
-            active_workers.len() > 0,
-            "no active workers for round-robin"
-        );
+    ) -> Result<usize> {
+        if active_workers.len() == 0 {
+            return Err(anyhow!("no active workers for round-robin placement"));
+        }
         let index = self.next_worker % active_workers.len();
         self.next_worker = index + 1;
         let worker_id = active_workers
             .nth(index)
             .expect("active round-robin worker must exist at the selected index");
-        let next_rank = self.next_rank_by_worker.entry(worker_id).or_default();
-        let rank = *next_rank % self.dp_size;
-        *next_rank = rank + 1;
-        rank_id(worker_id, rank).expect("active worker must contain every configured DP rank")
+        let rank = match preferred_rank {
+            Some(rank) if rank >= self.dp_size => {
+                return Err(anyhow!(
+                    "preferred attention-DP rank {rank} is out of range for dp_size {}",
+                    self.dp_size
+                ));
+            }
+            Some(rank) => rank,
+            None => {
+                let next_rank = self.next_rank_by_worker.entry(worker_id).or_default();
+                let rank = *next_rank % self.dp_size;
+                *next_rank = rank + 1;
+                rank
+            }
+        };
+        rank_id(worker_id, rank).ok_or_else(|| {
+            anyhow!("logical worker {worker_id} does not expose preferred attention-DP rank {rank}")
+        })
     }
 
-    pub(in crate::replay::offline) fn worker_removed(&mut self, worker_id: usize) {
+    pub(crate) fn worker_removed(&mut self, worker_id: usize) {
         self.next_rank_by_worker.remove(&worker_id);
     }
 
     fn worker_ready(&mut self, worker_id: usize) {
         self.next_rank_by_worker.entry(worker_id).or_default();
-    }
-
-    #[cfg(test)]
-    pub(in crate::replay::offline) fn tracked_workers(&self) -> &FxHashMap<usize, u32> {
-        &self.next_rank_by_worker
     }
 }
 
@@ -285,6 +294,22 @@ mod tests {
     impl RequestIdentity for TestRequest {
         fn request_id(&self) -> Option<Uuid> {
             Some(self.0)
+        }
+    }
+
+    #[derive(Debug)]
+    struct RankedTestRequest {
+        id: Uuid,
+        preferred_dp_rank: u32,
+    }
+
+    impl RequestIdentity for RankedTestRequest {
+        fn request_id(&self) -> Option<Uuid> {
+            Some(self.id)
+        }
+
+        fn preferred_dp_rank(&self) -> Option<u32> {
+            Some(self.preferred_dp_rank)
         }
     }
 
@@ -337,5 +362,63 @@ mod tests {
         .unwrap();
 
         assert_eq!(scheduler_id(&mut policy, 5), 11);
+    }
+
+    #[test]
+    fn empty_pool_returns_an_error_instead_of_dividing_by_zero() {
+        let mut policy = PoolRoundRobinPlacement::<()>::new(Vec::new());
+        let error = PlacementPolicy::<TestRequest>::place(
+            &mut policy,
+            &TestRequest(Uuid::from_u128(1)),
+            (),
+            None,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no active workers"));
+    }
+
+    #[test]
+    fn aggregated_round_robin_honors_authored_dp_rank_within_each_worker() {
+        let mut policy = AggregatedRoundRobinPlacement::<()>::new(
+            2,
+            vec![
+                WorkerTopology {
+                    worker_id: 0,
+                    scheduler_ids: vec![10, 11],
+                },
+                WorkerTopology {
+                    worker_id: 1,
+                    scheduler_ids: vec![20, 21],
+                },
+            ],
+        );
+
+        let place = |policy: &mut AggregatedRoundRobinPlacement<()>, ordinal, rank| {
+            let effects = PlacementPolicy::<RankedTestRequest>::place(
+                policy,
+                &RankedTestRequest {
+                    id: Uuid::from_u128(ordinal),
+                    preferred_dp_rank: rank,
+                },
+                (),
+                None,
+                0.0,
+            )?;
+            let PlacementDecision::Immediate(placement) = effects.decision else {
+                panic!("round-robin placement must be immediate");
+            };
+            Ok::<_, anyhow::Error>(placement.scheduler_id)
+        };
+
+        assert_eq!(place(&mut policy, 1, 1).unwrap(), 11);
+        assert_eq!(place(&mut policy, 2, 1).unwrap(), 21);
+        assert!(
+            place(&mut policy, 3, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("out of range")
+        );
     }
 }

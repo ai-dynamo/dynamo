@@ -5,11 +5,9 @@ use ddsketchy::DDSketch;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use serde_json::Value;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
-
-use crate::common::protocols::OutputSignal;
-use crate::scheduler::EnginePassResult;
 
 // 0.1% relative quantile error. The enlarged store covers latency/rate values
 // spanning roughly 10^28 within one sign while remaining bounded (~512 KiB for
@@ -32,8 +30,12 @@ pub struct TraceSimulationReport {
     /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
     /// JSON (see custom `Serialize` impl below) — consumers that want per-
     /// request granularity should access this field directly and serialize
-    /// it themselves (e.g., the `--per-request-jsonl` CLI path).
+    /// it themselves (e.g., the `--report-jsonl` CLI path).
     pub per_request: Vec<PerRequestRecord>,
+    /// Execution-owned planner/lifecycle/pressure evidence. This is excluded
+    /// from the compact summary serializer and consumed explicitly by
+    /// canonical-report and planner adapters.
+    pub runtime_evidence: crate::OfflineRuntimeEvidence,
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +61,8 @@ pub struct TraceThroughputStats {
     /// scale-down drain tail, unlike a snapshot of the active/serving count.
     /// Populated on the collector by the runtime: `add_worker_seconds` accrues
     /// the integral each clock advance (agg / disagg), and
-    /// `set_static_worker_count` covers the single-worker path; 0.0 otherwise.
+    /// `set_static_worker_count` covers externally clocked runtimes that do not
+    /// integrate worker counts on each clock advance; 0.0 otherwise.
     /// Multiply by GPUs-per-worker for GPU-seconds (/3600 for GPU-hours).
     /// Aggregated replay reports through `decode_worker_seconds`, leaving
     /// `prefill_worker_seconds` at 0.0.
@@ -356,6 +359,8 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    authored_id: Option<String>,
+    metadata: Value,
     detail: Option<Box<PerRequestDetail>>,
 }
 
@@ -484,7 +489,7 @@ pub enum ReplayRequestPool {
 }
 
 impl ReplayRequestPool {
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Self::Agg => 0,
             Self::Prefill => 1,
@@ -532,12 +537,16 @@ pub enum ReplayTerminalStatus {
     Failed,
 }
 
-/// Flat per-request record for `--per-request-jsonl` emission. One JSON line per
+/// Flat per-request record for `--report-jsonl` emission. One JSON line per
 /// request in the JSONL output; consumed by external analysis tools that want
 /// per-request granularity (TTFT vs. ISL scatter, worker-residency analysis,
 /// bypass classification, etc.).
 #[derive(Debug, Clone, Serialize)]
 pub struct PerRequestRecord {
+    /// Authored request identity from ReplaySpec. Legacy runtime inputs that
+    /// only carry an internal UUID leave this unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// Session identifier from the trace, when present. Mirrors AIPerf's
     /// `conversation_id` field for the same purpose: bucket per-request
     /// records by multi-turn session. Placed first in the serialized output
@@ -546,6 +555,9 @@ pub struct PerRequestRecord {
     pub session_id: Option<String>,
     /// Zero-based turn index within `session_id`, when present.
     pub turn_index: Option<usize>,
+    /// Authored provider-neutral metadata retained for correlation.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
     pub uuid: String,
     pub arrival_time_ms: f64,
     pub first_admit_ms: Option<f64>,
@@ -602,7 +614,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
 /// Only the thresholds that are set are checked, so an e2e-only SLA gates on
 /// e2e and a ttft+itl SLA gates on both. All-`None` (the default) means "no
 /// SLA", which suppresses goodput entirely.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct SlaThresholds {
     pub ttft_ms: Option<f64>,
     pub itl_ms: Option<f64>,
@@ -610,8 +622,29 @@ pub struct SlaThresholds {
 }
 
 impl SlaThresholds {
-    pub(crate) fn is_set(&self) -> bool {
+    pub fn is_set(&self) -> bool {
         self.ttft_ms.is_some() || self.itl_ms.is_some() || self.e2e_ms.is_some()
+    }
+
+    pub(crate) fn is_unset(&self) -> bool {
+        !self.is_set()
+    }
+
+    pub(crate) fn validate(&self) -> crate::ReplayResult<()> {
+        for (name, value) in [
+            ("sla.ttft_ms", self.ttft_ms),
+            ("sla.itl_ms", self.itl_ms),
+            ("sla.e2e_ms", self.e2e_ms),
+        ] {
+            if let Some(value) = value
+                && (!value.is_finite() || value < 0.0)
+            {
+                return Err(crate::ReplayError::InvalidSpec(format!(
+                    "{name} must be finite and non-negative, got {value}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Whether a completed request satisfies the SLA. Each *set* threshold must
@@ -653,8 +686,9 @@ impl SlaThresholds {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Default)]
-pub(crate) struct TraceCollector {
+pub struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
     /// Global per-token distributions are folded in as requests terminate, so
     /// completed requests no longer retain one timestamp per emitted token.
@@ -676,15 +710,16 @@ pub(crate) struct TraceCollector {
     /// count varies with startup / drain / scaling.
     prefill_worker_seconds: f64,
     decode_worker_seconds: f64,
-    /// Static provisioned worker counts `(prefill, decode)` for runtimes with a
-    /// fixed worker (the single-worker path, which has no event loop to
-    /// integrate). When `Some`, `finish()` derives worker-seconds as
-    /// `count × duration_s` instead of using the accumulator.
+    /// Static provisioned worker counts `(prefill, decode)` for externally
+    /// clocked runtimes with a fixed deployment size. When `Some`, `finish()`
+    /// derives worker-seconds as `count × duration_s` instead of using the
+    /// accumulator.
     static_worker_count: Option<(usize, usize)>,
     /// GPUs per worker per role, from the mocker engine parallelism. Used in
     /// `finish()` to turn worker-seconds into gpu_hours.
     prefill_gpus_per_worker: usize,
     decode_gpus_per_worker: usize,
+    runtime_evidence: crate::OfflineRuntimeEvidence,
 }
 
 impl TraceRequestStats {
@@ -769,19 +804,19 @@ impl TraceRequestStats {
 
 impl TraceCollector {
     /// Defer token-timeline folding until the entire replay has ended.
-    pub(crate) fn set_defer_token_timeline_finalization(&mut self, value: bool) {
+    pub fn set_defer_token_timeline_finalization(&mut self, value: bool) {
         self.defer_token_timeline_finalization = value;
     }
 
     /// Toggle whether `finish()` should build per-request records. Off by
     /// default; the runtimes flip it on when the caller asks for JSONL output.
-    pub(crate) fn set_capture_per_request(&mut self, value: bool) {
+    pub fn set_capture_per_request(&mut self, value: bool) {
         self.capture_per_request = value;
     }
 
     /// Set the SLA thresholds used to classify goodput in `finish()`. With no
     /// SLA set (the default), the report's `goodput` field stays `None`.
-    pub(crate) fn set_sla_thresholds(&mut self, sla: SlaThresholds) {
+    pub fn set_sla_thresholds(&mut self, sla: SlaThresholds) {
         self.sla = sla;
     }
 
@@ -796,10 +831,11 @@ impl TraceCollector {
         self.decode_worker_seconds += decode;
     }
 
-    /// Declare a fixed `(prefill, decode)` provisioned worker count for a runtime
-    /// with no event loop to integrate (the single-worker path). `finish()` then
-    /// reports `count × duration_s` worker-seconds.
-    pub(crate) fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
+    /// Declare a fixed `(prefill, decode)` provisioned worker count for an
+    /// externally clocked runtime that does not integrate worker counts on
+    /// each clock advance. `finish()` then reports `count × duration_s`
+    /// worker-seconds.
+    pub fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
         self.static_worker_count = Some((prefill, decode));
     }
 
@@ -809,12 +845,16 @@ impl TraceCollector {
 
     /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
     /// in `finish()` to derive gpu_hours from the worker-seconds.
-    pub(crate) fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
+    pub fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
         self.prefill_gpus_per_worker = prefill;
         self.decode_gpus_per_worker = decode;
     }
 
-    pub(crate) fn on_arrival(
+    pub(crate) fn set_runtime_evidence(&mut self, evidence: crate::OfflineRuntimeEvidence) {
+        self.runtime_evidence = evidence;
+    }
+
+    pub fn on_arrival(
         &mut self,
         uuid: Uuid,
         arrival_time_ms: f64,
@@ -836,6 +876,8 @@ impl TraceCollector {
                 decode_worker_idx: None,
                 session_id: None,
                 turn_index: None,
+                authored_id: None,
+                metadata: Value::Null,
                 first_admission_reused_input_tokens: 0,
                 detail: self
                     .capture_per_request
@@ -848,12 +890,7 @@ impl TraceCollector {
     /// runtimes when the workload driver provides it (multi-turn traces).
     /// Idempotent — set-once semantics, so calling on the same uuid more than
     /// once is a no-op after the first.
-    pub(crate) fn on_session_metadata(
-        &mut self,
-        uuid: Uuid,
-        session_id: String,
-        turn_index: usize,
-    ) {
+    pub fn on_session_metadata(&mut self, uuid: Uuid, session_id: String, turn_index: usize) {
         if !self.capture_per_request {
             return;
         }
@@ -862,6 +899,20 @@ impl TraceCollector {
         {
             stats.session_id = Some(session_id);
             stats.turn_index = Some(turn_index);
+        }
+    }
+
+    /// Retain the ReplaySpec correlation fields before the request crosses
+    /// placement and engine boundaries.
+    pub fn on_request_context(&mut self, uuid: Uuid, context: &crate::ReplayRequestContext) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.authored_id = Some(context.authored_id.clone());
+            stats.session_id = context.session_id.clone().or(stats.session_id.take());
+            stats.turn_index = context.turn_index.or(stats.turn_index);
+            stats.metadata = context.metadata.clone();
         }
     }
 
@@ -880,7 +931,7 @@ impl TraceCollector {
     /// Record that `uuid` was dispatched to `worker_idx` on the decode pool
     /// (offline disagg replay), or to the only pool (aggregated replay).
     /// Idempotent.
-    pub(crate) fn on_decode_assigned(&mut self, uuid: Uuid, worker_idx: usize) {
+    pub fn on_decode_assigned(&mut self, uuid: Uuid, worker_idx: usize) {
         if let Some(stats) = self.requests.get_mut(&uuid)
             && stats.decode_worker_idx.is_none()
         {
@@ -888,7 +939,7 @@ impl TraceCollector {
         }
     }
 
-    pub(crate) fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
+    pub fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
             if stats.first_admit_ms.is_none() {
                 stats.first_admission_reused_input_tokens = reused_input_tokens;
@@ -898,7 +949,6 @@ impl TraceCollector {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn on_prefill_admit(
         &mut self,
         uuid: Uuid,
@@ -906,15 +956,6 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
-        self.on_prefill_pool_admit(uuid, admit_time_ms, reused_input_tokens);
-    }
-
-    pub(crate) fn on_prefill_pool_admit(
-        &mut self,
-        uuid: Uuid,
-        admit_time_ms: f64,
-        reused_input_tokens: usize,
-    ) {
         self.on_pool_admission(
             uuid,
             ReplayRequestPool::Prefill,
@@ -932,7 +973,6 @@ impl TraceCollector {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn on_decode_admit(
         &mut self,
         uuid: Uuid,
@@ -940,15 +980,6 @@ impl TraceCollector {
         reused_input_tokens: usize,
     ) {
         self.on_admit(uuid, admit_time_ms, reused_input_tokens);
-        self.on_decode_pool_admit(uuid, admit_time_ms, reused_input_tokens);
-    }
-
-    pub(crate) fn on_decode_pool_admit(
-        &mut self,
-        uuid: Uuid,
-        admit_time_ms: f64,
-        reused_input_tokens: usize,
-    ) {
         self.on_pool_admission(
             uuid,
             ReplayRequestPool::Decode,
@@ -1105,12 +1136,7 @@ impl TraceCollector {
         }
     }
 
-    pub(crate) fn on_terminal(
-        &mut self,
-        uuid: Uuid,
-        terminal_time_ms: f64,
-        status: ReplayTerminalStatus,
-    ) {
+    pub fn on_terminal(&mut self, uuid: Uuid, terminal_time_ms: f64, status: ReplayTerminalStatus) {
         let Self {
             requests,
             itl_distribution,
@@ -1140,77 +1166,11 @@ impl TraceCollector {
         self.requests.get_mut(&uuid)?.detail.as_deref_mut()
     }
 
-    pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
+    pub fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.get_mut(&uuid)
             && let TokenTimeline::Recording(times) = &mut stats.token_timeline
         {
             times.push(token_time_ms);
-        }
-    }
-
-    /// Record the generic collector effects of one scheduler pass. A hidden
-    /// pass supplies no token boundary but still records admissions at its
-    /// epoch start; topology-specific pool state remains with the caller.
-    #[inline]
-    pub(crate) fn on_scheduler_pass(
-        &mut self,
-        pass: &EnginePassResult,
-        admit_time_ms: f64,
-        token_completion_ms: Option<f64>,
-    ) {
-        for admission in &pass.admissions {
-            self.on_admit(admission.uuid, admit_time_ms, admission.reused_input_tokens);
-        }
-        if let Some(token_completion_ms) = token_completion_ms {
-            self.on_output_signals(
-                &pass.output_signals,
-                token_completion_ms,
-                pass.accept_length_output_tokens > pass.accept_length_decode_forwards,
-            );
-        }
-    }
-
-    /// Record tokens emitted by one scheduler pass at its externally visible
-    /// completion boundary.
-    pub(crate) fn on_output_signals(
-        &mut self,
-        output_signals: &[OutputSignal],
-        completion_time_ms: f64,
-        has_bursts: bool,
-    ) {
-        if !has_bursts {
-            for signal in output_signals {
-                if !signal.rejected && signal.token_id.is_some() {
-                    self.on_token(signal.uuid, completion_time_ms);
-                }
-            }
-            return;
-        }
-
-        let mut signal_idx = 0;
-        while signal_idx < output_signals.len() {
-            let uuid = output_signals[signal_idx].uuid;
-            let mut run_end = signal_idx;
-            let mut emitted_tokens = 0;
-            while run_end < output_signals.len() && output_signals[run_end].uuid == uuid {
-                let signal = &output_signals[run_end];
-                emitted_tokens += usize::from(!signal.rejected && signal.token_id.is_some());
-                run_end += 1;
-            }
-            if emitted_tokens == 0 {
-                signal_idx = run_end;
-                continue;
-            }
-            if let Some(stats) = self.requests.get_mut(&uuid)
-                && let TokenTimeline::Recording(times) = &mut stats.token_timeline
-            {
-                if emitted_tokens == 1 {
-                    times.push(completion_time_ms);
-                } else {
-                    times.resize(times.len() + emitted_tokens, completion_time_ms);
-                }
-            }
-            signal_idx = run_end;
         }
     }
 
@@ -1229,7 +1189,7 @@ impl TraceCollector {
             .map(TraceRequestStats::actual_output_length)
     }
 
-    pub(crate) fn finish(mut self) -> TraceSimulationReport {
+    pub fn finish(mut self) -> TraceSimulationReport {
         let Self {
             requests,
             itl_distribution,
@@ -1248,7 +1208,7 @@ impl TraceCollector {
         // Build per-request records before we move `self.requests` into the
         // summary aggregation below. Gated on `capture_per_request` — the
         // ~100ms terminal pass + ~30MB allocation only runs when a caller
-        // (e.g. CLI `--per-request-jsonl`) asked for it. The summary report is
+        // (e.g. CLI `--report-jsonl`) asked for it. The summary report is
         // unaffected either way (custom Serialize impl skips `per_request`).
         let per_request = if self.capture_per_request {
             self.per_request_records()
@@ -1261,6 +1221,7 @@ impl TraceCollector {
         let accumulated_decode_worker_seconds = self.decode_worker_seconds;
         let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
         let decode_gpus_per_worker = self.decode_gpus_per_worker;
+        let runtime_evidence = self.runtime_evidence;
         let itl_distribution = self.itl_distribution.finish();
         let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
         let requests = self.requests;
@@ -1329,8 +1290,8 @@ impl TraceCollector {
         }
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
-        // Provisioned worker-seconds: static count × duration for the
-        // single-worker path, else the runtime-integrated accumulator.
+        // Provisioned worker-seconds: static count × duration for an externally
+        // clocked runtime, else the runtime-integrated accumulator.
         let (prefill_worker_seconds, decode_worker_seconds) = match static_worker_count {
             Some((prefill, decode)) => (prefill as f64 * duration_s, decode as f64 * duration_s),
             None => (
@@ -1393,11 +1354,12 @@ impl TraceCollector {
             },
             goodput,
             per_request,
+            runtime_evidence,
         }
     }
 
     /// Flatten each retained request into a serializable `PerRequestRecord`.
-    /// Used by the `--per-request-jsonl` CLI path to emit one JSON object per
+    /// Used by the `--report-jsonl` CLI path to emit one JSON object per
     /// request to the JSONL file, mirroring AIPerf's per-request output shape.
     ///
     /// Only requests with a terminal outcome are emitted. Requests truncated
@@ -1417,8 +1379,10 @@ impl TraceCollector {
             let first_token_ms = stats.first_token_ms();
             let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
+                request_id: stats.authored_id.clone(),
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
+                metadata: stats.metadata.clone(),
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
                 first_admit_ms: stats.first_admit_ms,
@@ -1740,79 +1704,6 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_output_runs_exclude_rejected_tokens_and_share_the_boundary() {
-        let mut collector = TraceCollector::default();
-        let first = Uuid::from_u128(1);
-        let second = Uuid::from_u128(2);
-        collector.on_arrival(first, 0.0, 4, 3);
-        collector.on_arrival(second, 0.0, 4, 1);
-        let pass = EnginePassResult {
-            end_ms: 42.0,
-            token_completion_ms: 42.0,
-            completed_requests: 2,
-            admissions: vec![
-                crate::scheduler::AdmissionEvent {
-                    uuid: first,
-                    reused_input_tokens: 2,
-                },
-                crate::scheduler::AdmissionEvent {
-                    uuid: second,
-                    reused_input_tokens: 1,
-                },
-            ],
-            output_signals: vec![
-                OutputSignal {
-                    uuid: first,
-                    token_id: Some(10),
-                    completed: false,
-                    rejected: false,
-                    cached_tokens: None,
-                    handoff_delay_ms: None,
-                },
-                OutputSignal {
-                    uuid: first,
-                    token_id: Some(11),
-                    completed: false,
-                    rejected: false,
-                    cached_tokens: None,
-                    handoff_delay_ms: None,
-                },
-                OutputSignal {
-                    uuid: first,
-                    token_id: Some(12),
-                    completed: true,
-                    rejected: true,
-                    cached_tokens: None,
-                    handoff_delay_ms: None,
-                },
-                OutputSignal {
-                    uuid: second,
-                    token_id: Some(20),
-                    completed: true,
-                    rejected: false,
-                    cached_tokens: None,
-                    handoff_delay_ms: None,
-                },
-            ],
-            lifecycle_events: Vec::new(),
-            mocker_metrics: crate::scheduler::vllm::MockerMetrics::default(),
-            router_event_visibility: crate::scheduler::RouterEventVisibility::PassEnd,
-            kv_events: Vec::new(),
-            fpm: None,
-            accept_length_output_tokens: 3,
-            accept_length_decode_forwards: 2,
-        };
-        collector.on_scheduler_pass(&pass, 5.0, Some(42.0));
-
-        let first_times = &collector.requests[&first].token_timeline;
-        let second_times = &collector.requests[&second].token_timeline;
-        assert_eq!(collector.requests[&first].first_admit_ms, Some(5.0));
-        assert_eq!(collector.requests[&second].first_admit_ms, Some(5.0));
-        assert!(matches!(first_times, TokenTimeline::Recording(times) if times == &[42.0, 42.0]));
-        assert!(matches!(second_times, TokenTimeline::Recording(times) if times == &[42.0]));
-    }
-
-    #[test]
     fn token_before_simulation_cap_does_not_count_as_completion() {
         let mut collector = TraceCollector::default();
         let uuid = Uuid::from_u128(100);
@@ -1946,21 +1837,7 @@ mod tests {
         // Note: NOT calling set_capture_per_request — capture stays false.
         let uuid = Uuid::from_u128(1);
         collector.on_arrival(uuid, 0.0, 100, 2);
-        collector.on_session_metadata(uuid, "session".to_string(), 0);
-        collector.on_prefill_route_overlap(uuid, 48);
-        collector.on_decode_route_overlap(uuid, 24);
-        collector.on_route_immediate(uuid, ReplayRequestPool::Prefill, 7, 14, 1, 48);
-        collector.on_route_queued(uuid, ReplayRequestPool::Decode, 1.0);
-        collector.on_route_released(uuid, ReplayRequestPool::Decode, 2.0, 8, 15, 2, 24);
-        collector.on_prefill_admit(uuid, 3.0, 48);
-        collector.on_decode_admit(uuid, 5.0, 24);
-        collector.on_pool_admission(uuid, ReplayRequestPool::Decode, 6.0, 24);
-        collector.on_pressure_reference(uuid, 9);
-        collector.on_source_held(uuid, 3.5);
-        collector.on_destination_reserved(uuid, 4.0);
-        collector.on_destination_activated(uuid, 4.5);
-        collector.on_source_released(uuid, 5.0);
-        collector.on_prefill_assigned(uuid, 14);
+        collector.on_admit(uuid, 5.0, 0);
         collector.on_decode_assigned(uuid, 0);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
@@ -2065,7 +1942,7 @@ mod tests {
     }
 
     /// Worker-seconds: the accumulator (agg/disagg) sums runtime contributions;
-    /// the static path (single worker) reports `count × duration_s`.
+    /// an externally clocked static runtime reports `count × duration_s`.
     #[test]
     fn worker_seconds_accumulated_and_static() {
         let mut accumulated = TraceCollector::default();
@@ -2076,12 +1953,23 @@ mod tests {
         assert!((report.throughput.prefill_worker_seconds - 2.0).abs() < 1e-9);
         assert!((report.throughput.decode_worker_seconds - 5.0).abs() < 1e-9);
 
-        let mut static_single = TraceCollector::default();
-        static_single.set_static_worker_count(0, 1);
-        add_completed(&mut static_single, 1, 0.0, 2, &[100.0, 200.0]); // duration = 0.2s
-        let report = static_single.finish();
+        let mut static_runtime = TraceCollector::default();
+        static_runtime.set_static_worker_count(0, 1);
+        add_completed(&mut static_runtime, 1, 0.0, 2, &[100.0, 200.0]); // duration = 0.2s
+        let report = static_runtime.finish();
         assert!(report.throughput.prefill_worker_seconds.abs() < 1e-9);
         assert!((report.throughput.decode_worker_seconds - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compact_summary_excludes_execution_evidence() {
+        let mut collector = TraceCollector::default();
+        add_completed(&mut collector, 1, 0.0, 2, &[10.0, 20.0]);
+        let mut report = collector.finish();
+        report.runtime_evidence.pressure = Some(crate::PressureEvidence::default());
+
+        let summary = serde_json::to_value(&report).unwrap();
+        assert!(summary.get("runtime_evidence").is_none());
     }
 
     /// gpu_hours derives from worker-seconds x the per-role GPUs/worker that the
@@ -2124,7 +2012,7 @@ mod tests {
     }
 
     /// Each record must round-trip cleanly to JSON — this is the format we
-    /// emit to `--per-request-jsonl`. Guards against accidental serde regressions
+    /// emit to `--report-jsonl`. Guards against accidental serde regressions
     /// (e.g., adding a non-serializable field to `PerRequestRecord`).
     #[test]
     fn per_request_record_serializes_to_json_object() {
