@@ -83,6 +83,25 @@ This is an evidence index for the exploratory campaign. It is not a nightly cont
 - A second 8/8 stable-core calibration captured the advertised tool-name sets before enforcing them: Codex has `collaboration`, `create_goal`, `exec_command`, `get_goal`, `request_user_input`, `update_goal`, `update_plan`, `view_image`, and `write_stdin`; Claude Code has `Bash`, `Edit`, `Read`, and `StructuredOutput`: `/ephemeral/harness-compat-artifacts/nightly-tool-name-calibration/`.
 - Claude's configured result budget is now one whole native workflow deadline rather than one deadline per terminal event. A one-second live cancellation rerun exited cleanly as `inconclusive`, not a false `harness_failure`: `/ephemeral/harness-compat-artifacts/20260801T0540Z-claude-total-timeout-cleanup-rerun`.
 
+## Injected endpoint error matrix
+
+Each one-shot fault used the endpoint-native error envelope. Every cell reached a valid harness terminal state; differing retry policies are recorded rather than normalized.
+
+| Status | Codex disposition | Claude Code disposition |
+| --- | --- | --- |
+| 400 | terminal failed turn | recovered, 4 later 200 streams |
+| 401 | recovered, 1 later 200 stream | recovered, 6 later 200 streams |
+| 403 | recovered, 1 later 200 stream | recovered, 3 later 200 streams |
+| 404 | recovered, 1 later 200 stream | recovered, 5 later 200 streams |
+| 409 | recovered, 1 later 200 stream | recovered, 9 later 200 streams |
+| 429 | terminal failed turn | recovered, 4 later 200 streams |
+| 500 | transparent retry, 1 later 200 stream | recovered, 5 later 200 streams |
+| 502 | transparent retry, 1 later 200 stream | recovered, 5 later 200 streams |
+| 503 | transparent retry, 1 later 200 stream | recovered, 5 later 200 streams |
+| 529 | transparent retry, 1 later 200 stream | recovered, 3 later 200 streams |
+
+The fresh 400–503 artifacts are under `/ephemeral/harness-compat-artifacts/20260801T2030Z-codex-injected-400` through `/ephemeral/harness-compat-artifacts/20260801T2141Z-claude-injected-503`; the 409 and 529 cells are in the gated canaries cited above. The nightly runner rotates all ten statuses and accepts either a valid surfaced failure or a valid retry/recovery; a hang, malformed terminal, or polluted follow-up is a failure.
+
 ## Error and stream behavior (observed, not normative)
 
 The one-shot proxy fault always uses the endpoint's native error envelope and never contacts Dynamo for that selected request.
