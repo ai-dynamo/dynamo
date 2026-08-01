@@ -20,13 +20,7 @@ def create_custom_encoder_adapter(
     backend: VisionEncoderBackend,
     model_config: Any,
     engine_args: Any,
-    vllm_config: Any | None = None,
 ) -> CustomEncoderAdapter:
-    """Create the adapter selected by the resolved downstream decoder.
+    """Create the adapter selected by the resolved downstream decoder."""
 
-    The first slice supports text-only decoders. ``vllm_config`` is accepted at
-    this stable factory boundary for model-specific adapters added later.
-    """
-
-    del vllm_config
     return LinearEmbedsAdapter(backend, model_config, engine_args)

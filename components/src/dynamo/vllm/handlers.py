@@ -1148,7 +1148,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             backend,
             self.model_config,
             config.engine_args,
-            self.engine_client.vllm_config,
         )
         encoder = AsyncVisionEncoder(backend)
         encoder.load(config.model)
