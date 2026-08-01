@@ -47,7 +47,7 @@ def test_enable_router_hint_support_publishes_single_dp_rank_endpoint():
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
     )
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill"
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("prefill")
     )
     runtime_config.set_engine_specific.assert_any_call(
         ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -75,7 +75,7 @@ def test_enable_router_hint_support_publishes_aggregated_worker_type():
     enable_router_hint_support(runtime_config, engine_args, WorkerType.Aggregated)
 
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "aggregated"
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("aggregated")
     )
 
 
@@ -99,7 +99,7 @@ def test_enable_router_hint_support_publishes_decode_worker_type():
     enable_router_hint_support(runtime_config, engine_args, WorkerType.Decode)
 
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "decode"
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps("decode")
     )
 
 
