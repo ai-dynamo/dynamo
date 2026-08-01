@@ -31,8 +31,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
@@ -376,6 +380,27 @@ struct TcpConnection {
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
+/// Cached TLS connector for the request plane. Built once from env vars.
+static REQUEST_PLANE_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnector>> =
+    once_cell::sync::OnceCell::new();
+
+fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
+    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(|| {
+        use crate::config::environment_names::tcp_response_stream::tls as env;
+        let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+        let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+        let tls_requested = ca_cert_path.is_some() || insecure;
+        if !tls_requested {
+            return Ok(None);
+        }
+        let tls_config = crate::tls_utils::client_tls_config(
+            ca_cert_path.as_deref().map(std::path::Path::new),
+            insecure,
+        )?;
+        Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
+    })
+}
+
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
@@ -386,7 +411,28 @@ impl TcpConnection {
         // Configure socket for lower latency
         Self::configure_socket(&stream)?;
 
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) =
+            get_request_plane_tls_connector()?
+        {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let server_name = match std::env::var(env::DYN_TCP_TLS_SERVER_NAME) {
+                Ok(name) => rustls::pki_types::ServerName::try_from(name)
+                    .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?,
+                Err(_) => rustls::pki_types::ServerName::IpAddress(addr.ip().into()),
+            };
+            let tls_stream = tokio::time::timeout(
+                crate::tls_utils::handshake_timeout(),
+                connector.connect(server_name, stream),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Request plane TLS handshake timed out to {}", addr))?
+            .map_err(|e| anyhow::anyhow!("Request plane TLS handshake failed to {}: {e}", addr))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            (Box::new(r), Box::new(w))
+        };
 
         let submit_queue = Arc::new(SegQueue::new());
         let response_queue = Arc::new(SegQueue::new());
@@ -557,7 +603,7 @@ impl TcpConnection {
     /// - If a response races back before waiters are queued, the reader's
     ///   existing spin-wait covers that small handoff window
     async fn writer_task(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         submit_queue: Arc<SegQueue<PendingRequest>>,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
@@ -698,7 +744,7 @@ impl TcpConnection {
     /// On exit (clean close or error), sets `healthy=false` and wakes the writer
     /// via `writer_notify` so it can detect reader death and drain pending callers.
     async fn reader_task(
-        read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: BoxRead,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         healthy: Arc<AtomicBool>,
         writer_notify: Arc<tokio::sync::Notify>,
