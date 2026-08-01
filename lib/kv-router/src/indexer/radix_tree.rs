@@ -216,18 +216,7 @@ impl RadixTree {
         }
 
         if let Some(block_hashes) = router_hint_root_chain {
-            details.retain_router_hint_root_candidates_with_filter(
-                block_hashes,
-                |worker, blocks, hashes| {
-                    self.lookup.get(&worker).map_or(0, |lookup| {
-                        hashes
-                            .iter()
-                            .take(blocks)
-                            .take_while(|hash| lookup.contains_key(hash))
-                            .count()
-                    })
-                },
-            );
+            details.retain_router_hint_root_candidates(block_hashes);
         }
 
         details
@@ -812,10 +801,7 @@ mod tests {
 
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
-    use crate::test_utils::{
-        create_store_event, make_store_event, router_event, snapshot_events,
-        stored_blocks_with_sequence_hashes,
-    };
+    use crate::test_utils::{create_store_event, make_store_event, snapshot_events};
 
     #[test]
     fn rejects_self_referencing_store() {
@@ -882,65 +868,6 @@ mod tests {
                 (WorkerWithDpRank::new(7, 0), 2),
                 (WorkerWithDpRank::new(8, 0), 3),
             ]
-        );
-    }
-
-    #[test]
-    fn router_hint_candidates_exclude_divergent_external_hash_owner() {
-        let mut tree = RadixTree::new();
-        tree.apply_event(router_event(
-            7,
-            0,
-            0,
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                start_position: None,
-                blocks: stored_blocks_with_sequence_hashes(
-                    &[LocalBlockHash(11), LocalBlockHash(12)],
-                    &[101, 102],
-                ),
-            }),
-        ))
-        .unwrap();
-        tree.apply_event(router_event(
-            8,
-            1,
-            0,
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                start_position: None,
-                blocks: stored_blocks_with_sequence_hashes(
-                    &[LocalBlockHash(11), LocalBlockHash(12)],
-                    &[201, 202],
-                ),
-            }),
-        ))
-        .unwrap();
-
-        let details = tree.find_match_details_with_options(
-            vec![LocalBlockHash(11), LocalBlockHash(12)],
-            false,
-            true,
-        );
-
-        assert_eq!(
-            details.overlap_scores.scores,
-            FxHashMap::from_iter([
-                (WorkerWithDpRank::new(7, 0), 2),
-                (WorkerWithDpRank::new(8, 0), 2),
-            ])
-        );
-        let candidates = details.router_hint_root_candidates.unwrap();
-        assert_eq!(
-            candidates.block_hashes,
-            vec![
-                ExternalSequenceBlockHash(101),
-                ExternalSequenceBlockHash(102)
-            ]
-        );
-        assert_eq!(
-            candidates.owner_prefix_blocks,
-            vec![(WorkerWithDpRank::new(7, 0), 2)]
         );
     }
 
