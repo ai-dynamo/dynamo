@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -103,8 +104,13 @@ async def test_nonstreaming_request_runs_one_encoder_call() -> None:
 async def test_request_larger_than_aiohttp_default_is_accepted() -> None:
     encoder = _FakeEncoder()
     image = "data:image/png;base64," + base64.b64encode(b"\0" * 800_000).decode()
+    body = io.BytesIO(json.dumps(_payload(image)).encode())
     async with _client(encoder) as client:
-        response = await client.post("/v1/chat/completions", json=_payload(image))
+        response = await client.post(
+            "/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
 
     assert response.status == 200
     assert encoder.raws == [[image]]
