@@ -657,6 +657,33 @@ def parse_driver_floor(min_driver: str) -> int:
     return int(match.group(1))
 
 
+def post_train_base(version: str) -> str:
+    """'0.7.0.post1' -> '0.7.0'; every other version is returned unchanged.
+
+    Post trains republish images or wheels off an existing release and carry
+    no CUDA_HISTORY row of their own -- CUDA_NOTES states they have the same
+    CUDA support as their base version.
+    """
+    return version.split(".post", 1)[0]
+
+
+def newest_release_per_base(data: dict) -> dict[str, str]:
+    """Base CUDA_HISTORY version -> the newest released version it covers.
+
+    RELEASES is maintained newest-first, so the first released entry that
+    resolves to a base is the newest thing a reader can pull for that base's
+    CUDA profile. Without this, a table keyed on CUDA_HISTORY names v0.7.0
+    while v0.7.0.post1 is the newest release that actually runs there.
+    """
+    newest: dict[str, str] = {}
+    for rel in data["RELEASES"]:
+        if rel.get("kind") not in SUPPORT_MATRIX_KINDS:
+            continue
+        bare = rel["version"].removeprefix("v")
+        newest.setdefault(post_train_base(bare), bare)
+    return newest
+
+
 def driver_floor_table(data: dict) -> str:
     """Driver floor -> the newest release each backend can run on that driver.
 
@@ -666,9 +693,11 @@ def driver_floor_table(data: dict) -> str:
     exactly that floor.
 
     Floors and backends both come from CUDA_HISTORY, so a fourth floor or a
-    fourth backend appears here the moment it is added to the data.
+    fourth backend appears here the moment it is added to the data. Cells name
+    the newest release including post trains, which inherit their base row.
     """
     versions = released_versions(data)
+    newest_per_base = newest_release_per_base(data)
     rows = [row for row in data["CUDA_HISTORY"] if row["version"] in versions]
     if not rows:
         raise TSParseError(
@@ -695,7 +724,9 @@ def driver_floor_table(data: dict) -> str:
                 ),
                 None,
             )
-            cells.append(runnable or "None")
+            cells.append(
+                newest_per_base.get(runnable, runnable) if runnable else "None"
+            )
         table_rows.append(cells)
     return md_table(["Driver", *backends], table_rows)
 

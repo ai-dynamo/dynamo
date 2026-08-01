@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the generated tables in gen_llms_tables.py.
 
-Run: python3 -m pytest docs/fern/scripts/test_gen_llms_tables.py
+Run: pytest -c docs/fern/scripts/pytest.ini docs/fern/scripts/test_gen_llms_tables.py
+
+CI runs this through the `gen-llms-tables` pre-commit hook. The repo-root
+pytest config ignores docs/, so the standalone pytest.ini beside this file
+supplies the marker registrations.
 """
 
 import sys
@@ -14,12 +18,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import gen_llms_tables as gen  # noqa: E402
 
+# Pure-Python table rendering: no GPU, no engine, no network. Registered in
+# pyproject.toml even though the root pytest run ignores docs/ -- the gate that
+# runs this file is the `gen-llms-tables` pre-commit hook.
+pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
 
 def data(cuda_rows: list[dict], versions: list[str]) -> dict:
-    """A minimal parsed-module stand-in carrying only what the table reads."""
+    """A minimal parsed-module stand-in carrying only what the table reads.
+
+    ``versions`` is in RELEASES order (newest first). A ``.postN`` entry is
+    recorded as a patch, matching how releases.data.ts classifies post trains.
+    """
     return {
         "CUDA_HISTORY": cuda_rows,
-        "RELEASES": [{"version": f"v{v}", "kind": "stable"} for v in versions],
+        "RELEASES": [
+            {"version": f"v{v}", "kind": "patch" if ".post" in v else "stable"}
+            for v in versions
+        ],
     }
 
 
@@ -131,6 +147,38 @@ class TestDriverFloorTable:
                     ["1.3.0"],
                 )
             )
+
+
+class TestPostTrainInheritance:
+    """Post trains carry no CUDA_HISTORY row; CUDA_NOTES says they inherit."""
+
+    def test_a_post_train_stands_in_for_its_base(self):
+        table = gen.driver_floor_table(
+            data(
+                [{"version": "0.7.0", "backend": "vLLM", "minDriver": "570.xx+"}],
+                ["0.7.0.post1", "0.7.0"],
+            )
+        )
+        assert "0.7.0.post1" in table
+
+    def test_the_newest_post_train_wins(self):
+        table = gen.driver_floor_table(
+            data(
+                [{"version": "0.8.1", "backend": "vLLM", "minDriver": "575.xx+"}],
+                ["0.8.1.post3", "0.8.1.post2", "0.8.1.post1", "0.8.1"],
+            )
+        )
+        assert "0.8.1.post3" in table
+        assert "0.8.1.post2" not in table
+
+    def test_a_base_without_post_trains_is_left_alone(self):
+        table = gen.driver_floor_table(
+            data(
+                [{"version": "1.3.0", "backend": "vLLM", "minDriver": "580.xx+"}],
+                ["1.3.0"],
+            )
+        )
+        assert "| 1.3.0 |" in table
 
 
 class TestAgainstRealData:
