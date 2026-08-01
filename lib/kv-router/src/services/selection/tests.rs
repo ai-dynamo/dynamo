@@ -5,6 +5,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
@@ -43,7 +44,9 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
-struct HighestWorkerSelector;
+struct HighestWorkerSelector {
+    calls: Cell<usize>,
+}
 
 impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
     fn select_worker(
@@ -53,6 +56,7 @@ impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        self.calls.set(self.calls.get() + 1);
         let mut selected = None;
         eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
             selected = selected.max(Some(worker));
@@ -169,8 +173,9 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
         .indexer_threads(1)
         .worker_selector_factory(Box::new(move || {
             calls.fetch_add(1, Ordering::Relaxed);
-            Box::new(HighestWorkerSelector)
-                as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync>
+            Box::new(HighestWorkerSelector {
+                calls: Cell::new(0),
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
         }))
         .build()
         .await

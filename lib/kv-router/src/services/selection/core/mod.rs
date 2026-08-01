@@ -47,7 +47,7 @@ use super::types::{
 };
 
 pub(crate) type SelectionWorkerSelectorFactory = Box<
-    dyn Fn() -> Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync + 'static>
+    dyn Fn() -> Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + 'static>
         + Send
         + Sync
         + 'static,
@@ -57,7 +57,7 @@ pub(crate) type SelectionWorkerSelectorFactory = Box<
 #[allow(clippy::large_enum_variant)]
 enum SelectionWorkerSelector {
     Default(DefaultWorkerSelector),
-    Custom(Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync + 'static>),
+    Custom(Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + 'static>),
 }
 
 impl WorkerSelector<SelectionWorkerConfig> for SelectionWorkerSelector {
