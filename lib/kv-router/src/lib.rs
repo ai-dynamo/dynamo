@@ -72,7 +72,8 @@ pub use scheduling::{
     WorkerSelectionPolicyError,
 };
 pub use selector::{
-    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, WorkerCandidates,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
+    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, WorkerCandidate,
+    WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelector,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
