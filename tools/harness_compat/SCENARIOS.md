@@ -43,6 +43,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | A1h | Claude MCP elicitation control boundary | stdio fixture requests an MCP form response during a native tool call | stream-json `control_request` is retained; noninteractive input cannot answer it | P3 |
 | A1i | Claude MCP progress | stdio fixture sends one standards-compliant progress notification during a native tool call | progress-token negotiation and the subsequent Messages tool/result loop remain accepted | P2 |
 | A1j | Claude MCP roots | stdio fixture requests `roots/list` during a native tool call | advertised roots capability, client response, and subsequent Messages tool/result loop remain accepted | P2 |
+| A1k | Claude input close after tool loop | native stream-json stdin closes after a completed Bash/file task | Messages stream terminates and the CLI exits cleanly without corrupting completed history | P1 weekly |
 | A1a | Claude JSON-schema final output | tool-created file plus terminal result | Messages output-config discriminator remains accepted | P1 |
 | A1e | Claude prompt suggestions | native `prompt_suggestion` event after a successful tool turn | any prompt-suggestions Messages request/header remains accepted | P1 |
 | A1d | Claude failed shell tool then recovery | `tool_result.is_error` reaches next Messages request plus recovery file | error tool-result block remains accepted and the agent can continue | P1 |
