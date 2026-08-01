@@ -23,6 +23,13 @@ pub struct VllmSidecarEngine {
     transport: GrpcTransportConfig,
     client: OnceCell<VllmClient>,
     cancel: CancellationToken,
+    /// When true, `start` surfaces this engine's gRPC endpoint + backend name in
+    /// `EngineConfig.runtime_data` so the `--direct` registrar advertises a
+    /// `TransportType::Grpc` instance for direct frontend→gRPC dispatch.
+    is_direct: bool,
+    /// Address the frontend dials, when it differs from the local `--vllm-endpoint`
+    /// the sidecar connects to (multi-node). `None` advertises the local endpoint.
+    advertise_grpc_endpoint: Option<String>,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
@@ -46,6 +53,8 @@ impl VllmSidecarEngine {
             transport,
             client: OnceCell::new(),
             cancel: CancellationToken::new(),
+            is_direct: false,
+            advertise_grpc_endpoint: None,
         }
     }
 
@@ -86,6 +95,13 @@ impl VllmSidecarEngine {
                 "route-to-encoder is not supported by the vLLM sidecar",
             ));
         }
+        if args.sidecar.common.is_direct
+            && args.sidecar.common.disaggregation_mode != DisaggregationMode::Aggregated
+        {
+            return Err(client::invalid_argument(
+                "--direct supports aggregated serving only for the vLLM sidecar",
+            ));
+        }
 
         let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
         let transport = args.sidecar.grpc.config();
@@ -93,7 +109,7 @@ impl VllmSidecarEngine {
             source: args.model_path,
         };
         let mode = args.sidecar.common.disaggregation_mode;
-        let engine = Self::new(endpoint, model.clone(), mode, transport);
+        let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
             (None, None)
         } else {
@@ -125,8 +141,13 @@ impl VllmSidecarEngine {
             enable_kv_routing: false,
             disaggregation_mode: mode,
             route_to_encoder: false,
+            is_direct: args.sidecar.common.is_direct,
             ..Default::default()
         };
+        // Mirror the single config flag so `start()` can surface the direct-gRPC
+        // facts without threading WorkerConfig into the engine.
+        engine.is_direct = config.is_direct;
+        engine.advertise_grpc_endpoint = args.sidecar.common.advertise_grpc_endpoint;
         Ok((engine, config))
     }
 }
@@ -158,7 +179,26 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC transport connected"
         );
-        Ok(self.model.engine_config())
+        let mut engine_config = self.model.engine_config();
+        if self.is_direct {
+            // Advertise the backend name (frontend selects the vLLM gRPC
+            // dispatcher) and the address the frontend dials — the
+            // --advertise-grpc-endpoint override for multi-node, else the local
+            // endpoint the sidecar connects to.
+            let advertised = self
+                .advertise_grpc_endpoint
+                .clone()
+                .unwrap_or_else(|| self.endpoint.as_str().to_string());
+            engine_config.runtime_data.insert(
+                dynamo_llm::discovery::DIRECT_BACKEND_KEY.to_string(),
+                serde_json::Value::String(crate::direct::VLLM_BACKEND.to_string()),
+            );
+            engine_config.runtime_data.insert(
+                dynamo_backend_common::DIRECT_GRPC_ENDPOINT_KEY.to_string(),
+                serde_json::Value::String(advertised),
+            );
+        }
+        Ok(engine_config)
     }
 
     async fn generate(
@@ -230,6 +270,19 @@ impl LLMEngine for VllmSidecarEngine {
                 }
             }
         }))
+    }
+
+    async fn health_check(&self) -> Result<(), DynamoError> {
+        // Direct-mode liveness for the `--direct` orchestrator's health loop.
+        // vLLM's gRPC exposes no health or model-info RPC (both HealthCheck and
+        // grpc.health return UNIMPLEMENTED), so probe with a cheap fresh channel
+        // connect: it succeeds while the engine is listening and fails fast once
+        // it dies, letting the orchestrator unregister and re-register on
+        // recovery. Not started yet is a failure, same as the other engines.
+        if !self.client.initialized() {
+            return Err(client::engine_shutdown("vLLM sidecar is not started"));
+        }
+        client::probe_liveness(&self.endpoint, self.transport).await
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

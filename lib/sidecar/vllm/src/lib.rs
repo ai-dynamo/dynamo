@@ -6,6 +6,7 @@
 mod args;
 mod client;
 mod convert;
+mod direct;
 mod engine;
 mod json;
 mod model;
@@ -15,6 +16,7 @@ mod model;
 #[doc(hidden)]
 pub mod proto;
 
+pub use direct::{GrpcDispatch, VllmDirectDispatchProvider};
 pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]

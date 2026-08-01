@@ -19,8 +19,16 @@ ignored = ["prost"]
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
+# Composition root: the OpenAI frontend with the vLLM direct-gRPC dispatch
+# provider registered. Keeps the generic ai-dynamo wheel free of vLLM/tonic.
+[[bin]]
+name = "dynamo-vllm-frontend"
+path = "src/bin/frontend.rs"
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }
@@ -28,6 +36,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
