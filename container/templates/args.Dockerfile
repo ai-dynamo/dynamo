@@ -19,7 +19,15 @@ ARG DEVICE={{ device }}
    propagates to every included template, not just this one. #}
 
 # Python/CUDA configuration
+{# Per-device override, mirroring nixl_ref/enable_kvbm below. The wheel_builder
+   venv is created with this interpreter, so it must match the runtime image or
+   the NIXL wheel it produces is unusable there (e.g. a cp312 wheel cannot install
+   into the Python 3.10 sglang ROCm image). #}
+{% if "python_version" in context[framework].get(device_key, {}) -%}
+ARG PYTHON_VERSION={{ context[framework][device_key].python_version }}
+{% else -%}
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
+{% endif -%}
 {% if device == "cuda" -%}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
