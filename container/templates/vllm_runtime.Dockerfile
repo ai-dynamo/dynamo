@@ -200,8 +200,12 @@ RUN set -eux; \
         jq; \
     rm -rf /var/lib/apt/lists/*
 
+{% if device != "rocm" %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
+{# Skipped on rocm: vllm_omni_ref is pinned to a build that monkeypatches
+   vllm.v1.request.Request for vLLM 0.23's positional construction, while the
+   rocm runtime image ships vLLM 0.26. Layering it would break every worker. #}
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -209,6 +213,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
