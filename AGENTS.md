@@ -79,8 +79,8 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`). Read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing, and [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) before adding a page |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -88,7 +88,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
+devcontainer are covered in [the contribution guide](docs/fern/pages/community/contributing/overview.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -146,13 +146,18 @@ cargo fmt --all && cargo clippy --workspace
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
+See [the contribution guide](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) and the
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+
+The docs site is tab-based: `docs/fern/pages/` splits into `kubernetes/` and `cli/` (parallel
+guides for two readers), plus `use-cases/`, `recipes/`, `developer-guide/`, `reference/`, `blog/`,
+and `community/`. Read [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) to pick the right
+tab before adding a page — a misplaced page costs a move plus a redirect.
