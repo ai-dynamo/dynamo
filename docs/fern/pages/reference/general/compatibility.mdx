@@ -29,7 +29,7 @@ Driver already installed? Read across from your version — each cell is the new
 
 | Driver | SGLang | TensorRT-LLM | vLLM |
 | --- | --- | --- | --- |
-| 570.xx+ | 0.7.1 | None | 0.7.0 |
+| 570.xx+ | 0.7.1 | None | 0.7.0.post1 |
 | 575.xx+ | 1.2.1 | None | 1.2.1 |
 | 580.xx+ | 1.3.0 | 1.3.0 | 1.3.0 |
 
@@ -278,7 +278,7 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
 | **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap: Dynamo probes the engine once at startup for the `mm_hashes` argument and drops image identity from the routing key when it is absent. ([Source][mm-kv-routing])
+> 1. **Multimodal + KV-Aware Routing**: Supported on Dynamo's SGLang image, which carries the upstream hash-forwarding patch. A custom SGLang build without that patch still serves the request, but routing degrades to text-prefix overlap. The worker probes `engine.async_generate` once at startup and stops forwarding `mm_hashes` when the build does not accept it; the frontend keeps deriving image-aware routing keys regardless, so the worker's internally computed hashes never line up with them and only the text prefix overlaps. Expect image-blind cache hits on such a build rather than an error. ([Source][mm-kv-routing])
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source][mm-sglang])
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source][sglang-readme])
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
