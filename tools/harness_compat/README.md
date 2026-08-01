@@ -32,7 +32,7 @@ python3 tools/harness_compat/nightly.py \
   --endpoint-url http://127.0.0.1:8000
 ```
 
-For a loopback-only endpoint on another machine, replace `--endpoint-url` with `--remote-http-port <port>`. Add `--remote-run-root <run-dir>` only when the deployment exposes the standard run logs and you want them copied into every artifact. `nightly.py --dry-run` prints the exact individual invocations.
+For a loopback-only endpoint on another machine, replace `--endpoint-url` with `--remote-http-port <port>`. Add `--remote-run-root <run-dir>` only when the deployment exposes the standard run logs and you want them copied into every artifact. Each run requires 2 GiB free on the local artifact filesystem before it starts; use `--min-artifact-free-gib 0` only when you deliberately accept that the client may exhaust local evidence storage. `nightly.py --dry-run` prints the exact individual invocations.
 
 Use `SCENARIOS.md` to choose a workflow, and `python3 tools/harness_compat/codex_driver.py --help` or `python3 tools/harness_compat/claude_driver.py --help` to list its exact `--scenario` names. No venv, package install, or deployment-specific configuration is required for a direct endpoint run.
 
@@ -123,7 +123,7 @@ This is the first proposed subset, not an enabled CI job. It deliberately keeps 
 
 Run the Codex subagent workflow weekly in discovery with an explicit turn cap, not as an initial nightly pass gate. The model can validly expand a one-child request into a deep graph; the parser regression itself is deterministic and already guarded by the unit test. Claude Agent, automatic compaction, and interactive terminal cancel/steer remain discovery-only until they have reproducible native reach signals.
 
-Run the live subset with `nightly.py --remote-http-port 20585 --remote-run-root /data/harness-compat-lab/runs/<deployment-run>`. It runs nine core cases plus the same endpoint-native status and one early/mid-stream SSE truncation through both Codex and Claude Code daily (13 invocations total). Add `--include-weekly` for the four stable P1 lifecycle sentinels: Codex inline review, detached review, stale-lifecycle recovery, and Claude input close. `--fault-status 429` selects a specific status rotation member; `--dry-run` prints the exact invocations. Run `goal_lifecycle` weekly through `live_scenario.py` until it has a clean serialized canary.
+Run the live subset with `nightly.py --remote-http-port 20585 --remote-run-root /data/harness-compat-lab/runs/<deployment-run>`. It runs nine core cases plus the same endpoint-native status and one early/mid-stream SSE truncation through both Codex and Claude Code daily (13 invocations total). Add `--include-weekly` for five stable lifecycle and MCP sentinels: Codex inline review, detached review, stale-lifecycle recovery, MCP roots, and Claude input close. `--fault-status 429` selects a specific status rotation member; `--dry-run` prints the exact invocations. Run `goal_lifecycle` weekly through `live_scenario.py` until it has a clean serialized canary.
 
 After every successful native case, `nightly.py` compares its content-free protocol discriminator set to `protocol_baseline.json`. New headers, request fields, item/content types, advertised tool names/types, or output-format discriminators fail the run and are printed as a compact drift record; update the baseline only after triage.
 

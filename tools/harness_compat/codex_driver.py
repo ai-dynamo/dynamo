@@ -103,6 +103,10 @@ class AppServer:
         self._mcp_elicitation_request_count = 0
         self.turn_timeout_s = turn_timeout_s
 
+    @property
+    def artifact_dir(self) -> Path:
+        return self._artifact_dir
+
     def _record(self, direction: str, message: dict[str, Any]) -> None:
         record = {"timestamp_unix_ms": _now_ms(), "direction": direction, "shape": _fingerprint(message)}
         with self._log_path.open("a", encoding="utf-8") as output:
@@ -407,6 +411,7 @@ def _write_config(
     mcp_failure: bool = False,
     mcp_elicitation: bool = False,
     mcp_progress: bool = False,
+    mcp_roots: bool = False,
     mcp_trace: Path | None = None,
     request_user_input: bool = False,
 ) -> None:
@@ -421,6 +426,8 @@ def _write_config(
             mcp_env_vars.append('DYNAMO_COMPAT_FIXTURE_MCP_OPENAI_FORM = "1"')
         elif mcp_progress:
             mcp_env_vars.append('DYNAMO_COMPAT_FIXTURE_MCP_PROGRESS = "1"')
+        elif mcp_roots:
+            mcp_env_vars.append('DYNAMO_COMPAT_FIXTURE_MCP_ROOTS = "1"')
         if mcp_trace is not None:
             mcp_env_vars.append(f"DYNAMO_COMPAT_FIXTURE_MCP_TRACE = {json.dumps(str(mcp_trace))}")
         mcp_env = f"env = {{ {', '.join(mcp_env_vars)} }}\n" if mcp_env_vars else ""
@@ -640,11 +647,12 @@ async def _run_scenario(
             and file_exists,
         }
 
-    if scenario in {"mcp_tool", "mcp_tool_failure", "mcp_progress"}:
+    if scenario in {"mcp_tool", "mcp_tool_failure", "mcp_progress", "mcp_roots"}:
         failure = scenario == "mcp_tool_failure"
-        tool_name = "mcp__fixture__fixture_failure" if failure else "mcp__fixture__fixture_answer"
+        roots = scenario == "mcp_roots"
+        tool_name = "mcp__fixture__fixture_failure" if failure else "mcp__fixture__fixture_roots" if roots else "mcp__fixture__fixture_answer"
         progress = scenario == "mcp_progress"
-        result_path = workspace / ("mcp_tool_failure_recovered.txt" if failure else "mcp_progress.txt" if progress else "mcp_tool.txt")
+        result_path = workspace / ("mcp_tool_failure_recovered.txt" if failure else "mcp_roots.txt" if roots else "mcp_progress.txt" if progress else "mcp_tool.txt")
         action = (
             "After it returns an error, use a shell tool to create mcp_tool_failure_recovered.txt containing RECOVERED, "
             "read that file back, and finish."
@@ -658,16 +666,21 @@ async def _run_scenario(
         )
         turn = await _wait_turn(server, thread_id, turn_id)
         mcp_tool_item_events = server.item_type_count(thread_id, "mcpToolCall")
+        trace_path = server.artifact_dir / "mcp_transport.json"
+        trace = json.loads(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else {}
+        roots_completed = "roots" in trace.get("roots_response_result_keys", []) if isinstance(trace, dict) else None
         return {
             "turn_status": turn["status"],
             "mcp_failure": failure,
             "mcp_progress_events": server.notification_count("item/mcpToolCall/progress"),
+            "mcp_roots_completed": roots_completed,
             "mcp_tool_item_events": mcp_tool_item_events,
             "result_file_exists": result_path.exists(),
             "reached": turn["status"] == "completed"
             and mcp_tool_item_events == 2
             and result_path.exists()
-            and (not progress or server.notification_count("item/mcpToolCall/progress") >= 1),
+            and (not progress or server.notification_count("item/mcpToolCall/progress") >= 1)
+            and (not roots or roots_completed is True),
         }
 
     if scenario == "mcp_elicitation":
@@ -1258,7 +1271,7 @@ async def run(args: argparse.Namespace) -> int:
     workspace = artifact_dir / "workspace"
     codex_home = artifact_dir / "codex_home"
     _prepare_workspace(workspace)
-    mcp_fixture = Path(__file__).with_name("fixture_mcp_server.py") if args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress"} else None
+    mcp_fixture = Path(__file__).with_name("fixture_mcp_server.py") if args.scenario in {"mcp_tool", "mcp_tool_failure", "mcp_elicitation", "mcp_progress", "mcp_roots"} else None
     _write_config(
         codex_home,
         args.proxy_url,
@@ -1267,7 +1280,8 @@ async def run(args: argparse.Namespace) -> int:
         mcp_failure=args.scenario == "mcp_tool_failure",
         mcp_elicitation=args.scenario == "mcp_elicitation",
         mcp_progress=args.scenario == "mcp_progress",
-        mcp_trace=artifact_dir / "mcp_transport.json" if args.scenario in {"mcp_elicitation", "mcp_progress"} else None,
+        mcp_roots=args.scenario == "mcp_roots",
+        mcp_trace=artifact_dir / "mcp_transport.json" if args.scenario in {"mcp_elicitation", "mcp_progress", "mcp_roots"} else None,
         request_user_input=args.scenario == "request_user_input",
     )
     executable = shutil.which(args.codex) if os.sep not in args.codex else args.codex
@@ -1306,6 +1320,7 @@ async def run(args: argparse.Namespace) -> int:
             "mcp_tool_failure",
             "mcp_elicitation",
             "mcp_progress",
+            "mcp_roots",
             "request_user_input",
         }:
             initialize_capabilities["experimentalApi"] = True
@@ -1488,6 +1503,7 @@ def main() -> int:
             "mcp_tool_failure",
             "mcp_progress",
             "mcp_elicitation",
+            "mcp_roots",
             "request_user_input",
             "structured_output",
             "expected_error",

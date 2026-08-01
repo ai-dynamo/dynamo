@@ -187,6 +187,12 @@ def main() -> int:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--artifacts", type=Path, help="Output directory; defaults under /tmp/dynamo-harness-compat")
+    parser.add_argument(
+        "--min-artifact-free-gib",
+        type=float,
+        default=2.0,
+        help="Require this much free space on the artifact filesystem before starting (default: 2 GiB).",
+    )
     parser.add_argument("--remote-host", default="72.25.69.152")
     parser.add_argument("--remote-user", default="nvidia")
     parser.add_argument("--ssh-port", type=int, default=2222)
@@ -225,6 +231,16 @@ def main() -> int:
         run_name = f"{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{args.harness}-{args.scenario}"
         args.artifacts = Path("/tmp/dynamo-harness-compat") / run_name
     artifacts = args.artifacts.resolve()
+    artifacts.parent.mkdir(parents=True, exist_ok=True)
+    minimum_free_bytes = int(args.min_artifact_free_gib * 1024**3)
+    available_bytes = shutil.disk_usage(artifacts.parent).free
+    if minimum_free_bytes < 0:
+        parser.error("--min-artifact-free-gib must be non-negative")
+    if available_bytes < minimum_free_bytes:
+        parser.error(
+            f"artifact filesystem has {available_bytes / 1024**3:.1f} GiB free; "
+            f"need at least {args.min_artifact_free_gib:.1f} GiB"
+        )
     artifacts.mkdir(parents=True, exist_ok=False)
     (artifacts / "fault.json").write_text(
         json.dumps(

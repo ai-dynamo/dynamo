@@ -26,6 +26,7 @@ WEEKLY_CASES = (
     ("codex", "inline_review", ("--turn-timeout-s", "300")),
     ("codex", "detached_review", ("--turn-timeout-s", "300")),
     ("codex", "invalid_lifecycle", ("--turn-timeout-s", "240")),
+    ("codex", "mcp_roots", ("--turn-timeout-s", "300")),
     ("claude", "baseline_eof", ("--result-timeout-s", "420")),
 )
 FAULT_STATUSES = (400, 401, 403, 404, 409, 429, 500, 502, 503, 529)
@@ -43,7 +44,7 @@ def main() -> int:
     parser.add_argument("--remote-run-root", help="Remote run directory to copy logs from; requires --remote-http-port")
     parser.add_argument("--fault-status", type=int, choices=FAULT_STATUSES)
     parser.add_argument("--skip-fault", action="store_true")
-    parser.add_argument("--include-weekly", action="store_true", help="Add stable P1 lifecycle sentinels.")
+    parser.add_argument("--include-weekly", action="store_true", help="Add stable lifecycle and MCP sentinels.")
     parser.add_argument("--protocol-baseline", type=Path, default=Path(__file__).with_name("protocol_baseline.json"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

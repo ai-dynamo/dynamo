@@ -17,6 +17,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C1j | Codex native user-input request | experimental `request_user_input` request followed by a file derived from the supplied option | experimental user-input tool advertisement, server request, response, and continuation remain accepted | P2 |
 | C1k | Codex MCP elicitation | stdio fixture requests an MCP form response during a native tool call | record the headless client action and any app-server elicitation callback without treating a local decline as a Dynamo failure | P3 |
 | C1l | Codex MCP progress | stdio fixture sends one standards-compliant progress notification using the client token | record whether app-server exposes `mcpToolCall` progress without affecting the completed tool/result loop | P3 |
+| C1l1 | Codex MCP roots | stdio fixture requests `roots/list` during a native tool call | advertised roots capability, client response, and subsequent Responses tool/result loop remain accepted | P2 |
 | C1m | Codex goal lifecycle | model creates, reads, and completes one goal around a shell verification | Responses goal-tool continuations and `thread/goal/updated` lifecycle remain accepted | P1 |
 | C1n | Codex explicit skill input | raw native `skill` input plus a skill-directed file effect | app-server skill expansion and its resulting Responses tool loop remain accepted | P2 weekly |
 | C1a | Codex JSON-schema final output | schema-constrained completed turn | Responses `text.format` discriminator remains accepted | P1 |
