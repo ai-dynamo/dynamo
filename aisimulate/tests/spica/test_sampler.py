@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vizier-backed sampler. Needs the pinned Vizier/JAX stack; skips otherwise."""
+"""Vizier-backed sampler using the pinned Vizier/JAX stack."""
 
 import json
 import uuid
@@ -22,8 +22,6 @@ from aisimulate.spica.sampler import (
     make_branch_sampler,
 )
 from aisimulate.spica.search_space import BranchSpace
-
-pytest.importorskip("vizier")
 
 pytestmark = [
     pytest.mark.timeout(300),

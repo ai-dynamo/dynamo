@@ -312,6 +312,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out = convert_event(
@@ -344,6 +345,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -358,6 +360,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -413,6 +416,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -427,6 +431,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out1 = convert_event(
@@ -527,6 +532,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let out = convert_event(
             raw_evt,
@@ -1494,6 +1500,7 @@ mod tests_startup_helpers {
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
             }],
             data_parallel_rank: Some(0),
         };

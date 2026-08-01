@@ -42,6 +42,8 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import (
     ImageGenerationPayload,
     LoraTestChatPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
     VideoGenerationPayload,
 )
 
@@ -53,6 +55,15 @@ pytest_plugins = ("tests.utils.otel_plugin",)
 def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     return v.startswith("13")
+
+
+def _disable_responses_reasoning(
+    payload: ResponsesPayload | ResponsesStreamPayload,
+) -> ResponsesPayload | ResponsesStreamPayload:
+    # Keep the streaming and non-streaming smoke tests consistent by preventing
+    # reasoning from consuming the entire output token budget.
+    payload.body["reasoning"] = {"effort": "none"}
+    return payload
 
 
 @dataclass
@@ -123,8 +134,8 @@ sglang_configs = {
                 expected_num_choices=2,
             ),
             completion_payload_default(),
-            responses_payload_default(),
-            responses_stream_payload_default(),
+            _disable_responses_reasoning(responses_payload_default()),
+            _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
@@ -804,6 +815,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(56.0),
+            pytest.mark.requested_sglang_vram_gib(56.0),
             # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
             pytest.mark.nightly,

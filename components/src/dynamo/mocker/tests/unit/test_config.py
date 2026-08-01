@@ -39,7 +39,7 @@ def make_args(**overrides):
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
-        "g1_backend": "kvbm",
+        "g1_backend": None,
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
@@ -142,6 +142,57 @@ def test_build_mocker_engine_args_trtllm_accepts_native_g1():
 
     assert engine_args.g1_backend == "native"
     assert engine_args.block_size == 32
+
+
+def test_mocker_defaults_to_native_g1_across_python_entrypoints():
+    cli_args = parse_args([])
+    assert cli_args.g1_backend is None
+    assert CONFIG.build_mocker_engine_args(cli_args).g1_backend == "native"
+    assert MockEngineArgs().g1_backend == "native"
+    assert MockEngineArgs.from_json("{}").g1_backend == "native"
+
+
+@pytest.mark.parametrize(
+    "offload",
+    [
+        {"num_g2_blocks": 8},
+        {"num_g2_blocks": 8, "num_g3_blocks": 16},
+        {"num_g2_blocks": 8, "enable_g4_storage": True},
+    ],
+)
+def test_mocker_offload_automatically_selects_kvbm_g1(offload):
+    engine_args = MockEngineArgs(**offload)
+
+    assert engine_args.g1_backend == "kvbm"
+
+
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_explicit_native_with_offload_is_rejected(engine_type):
+    with pytest.raises(Exception, match="omit g1_backend"):
+        MockEngineArgs(
+            engine_type=engine_type,
+            g1_backend="native",
+            num_g2_blocks=8,
+        )
+
+
+def test_mocker_explicit_native_accepts_disabled_offload():
+    engine_args = MockEngineArgs(
+        g1_backend="native",
+        num_g2_blocks=0,
+        num_g3_blocks=0,
+    )
+
+    assert engine_args.g1_backend == "native"
+
+
+@pytest.mark.parametrize("engine_type", ["VLLM", "TRTLLM"])
+def test_mocker_uppercase_json_offload_selects_kvbm_g1(engine_type):
+    engine_args = MockEngineArgs.from_json(
+        json.dumps({"engine_type": engine_type, "num_g2_blocks": 8})
+    )
+
+    assert engine_args.g1_backend == "kvbm"
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
@@ -425,6 +476,36 @@ def test_mocker_cli_accepts_native_g1_for_trtllm():
     assert args.g1_backend == "native"
 
 
+@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+def test_mocker_cli_rejects_explicit_native_g1_with_offload(engine_type, capsys):
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--engine-type",
+                engine_type,
+                "--g1-backend",
+                "native",
+                "--num-g2-blocks",
+                "8",
+            ]
+        )
+
+    assert "omit --g1-backend" in capsys.readouterr().err
+
+
+def test_mocker_cli_ignores_explicit_g1_backend_for_sglang():
+    args = parse_args(
+        [
+            "--engine-type",
+            "sglang",
+            "--g1-backend",
+            "native",
+        ]
+    )
+
+    assert args.g1_backend == "native"
+
+
 def test_mocker_cli_accepts_max_model_len():
     args = parse_args(["--max-model-len", "32768"])
 
@@ -610,6 +691,27 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
+def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
+    """Use the language-model config when Transformers exposes a multimodal wrapper."""
+    from dynamo.mocker.utils import kv_cache
+
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        num_attention_heads=8,
+        hidden_size=64,
+        dtype="bfloat16",
+    )
+    config = SimpleNamespace(get_text_config=lambda: text_config)
+    monkeypatch.setattr(
+        kv_cache.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config,
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+
+
 def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
     # Offload KV-byte estimation must use the configured (normalized) KV dtype,
     # not always "auto".
@@ -683,21 +785,16 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     ]
 
 
-def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
-    monkeypatch, caplog
-):
-    def missing_memory(module_name):
-        raise ModuleNotFoundError(name=module_name)
+def test_build_mocker_engine_args_propagates_aic_estimator_error(monkeypatch):
+    def invalid_capacity(**_kwargs):
+        raise ValueError("invalid capacity request")
 
-    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", invalid_capacity)
 
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(aic_perf_model=True, model_path="/models/mock")
-    )
-
-    assert engine_args.num_gpu_blocks == 16384
-    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
-    assert "--num-gpu-blocks-override" in caplog.text
+    with pytest.raises(ValueError, match="invalid capacity request"):
+        CONFIG.build_mocker_engine_args(
+            make_args(aic_perf_model=True, model_path="/models/mock")
+        )
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):

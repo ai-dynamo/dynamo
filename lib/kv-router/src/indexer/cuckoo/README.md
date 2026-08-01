@@ -18,7 +18,7 @@ full-hash ownership to interpret removals. The consumer needs compact, concurren
 across DCs and stores only the lossy CKF projection.
 
 For the higher-level Relay and recovery model, see
-[Multi-DC KV Routing and the DC Relay](../../../../../docs/fern/components/router/multi-dc-kv-routing.md).
+[Multi-DC KV Routing and the DC Relay](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## Core concepts
 
