@@ -141,15 +141,39 @@ server and client depending on the stream direction.
 > allowing TLS to be configured once at the platform level and auto-injected
 > into all DGD pods without per-component env var setup.
 
+## NATS TLS
+
+NATS is used for JetStream indexer recovery/replay and the audit sink. TLS
+is configured separately from TCP:
+
+| Variable | Description |
+|---|---|
+| `NATS_TLS_CA_CERT_PATH` | CA certificate to verify the NATS server. When set, a custom TLS config is applied. |
+| `NATS_TLS_INSECURE` | Skip NATS server certificate verification (dev only). |
+
+When only the `tls://` URL scheme is used without explicit TLS env vars,
+async-nats handles TLS natively with system roots.
+
+The `NATS_SERVER` URL accepts both `nats://` and `tls://` schemes.
+
+CLI flags (all backends via `DynamoRuntimeArgGroup`):
+
+```
+--nats-tls-ca-cert-path PATH   CA certificate for NATS server verification (PEM)
+--nats-tls-insecure             Disable NATS certificate verification
+```
+
 ## Encrypted paths
 
-When TLS is configured, the following frontend↔worker streams are encrypted:
+When TLS is configured, all communication between Dynamo components is
+encrypted:
 
 | Path | Direction | Data | Transport |
 |---|---|---|---|
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
+| NATS | Frontend/Worker ↔ NATS | JetStream recovery, audit logs | `transports/nats` |
 
 ## Design notes
 

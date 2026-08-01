@@ -176,6 +176,17 @@ pub mod nats {
         /// Maximum age for messages in NATS stream (in seconds)
         pub const DYN_NATS_STREAM_MAX_AGE: &str = "DYN_NATS_STREAM_MAX_AGE";
     }
+
+    /// NATS TLS configuration
+    pub mod tls {
+        /// Path to the PEM CA certificate used to verify the NATS server's certificate.
+        /// When set, a custom TLS config with this CA is applied to the NATS connection.
+        pub const NATS_TLS_CA_CERT_PATH: &str = "NATS_TLS_CA_CERT_PATH";
+
+        /// Disable TLS certificate verification. Set to a truthy value to skip.
+        /// WARNING: Only for local development. Never use in production.
+        pub const NATS_TLS_INSECURE: &str = "NATS_TLS_INSECURE";
+    }
 }
 
 /// ETCD transport environment variables
@@ -867,6 +878,8 @@ mod tests {
             nats::auth::NATS_AUTH_NKEY,
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
+            nats::tls::NATS_TLS_CA_CERT_PATH,
+            nats::tls::NATS_TLS_INSECURE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
