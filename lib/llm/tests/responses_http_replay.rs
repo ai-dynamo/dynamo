@@ -192,6 +192,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
 
         let completed_item = &events[item_done_position].data["item"];
         let failed = &events[failed_position];
+        assert_eq!(completed_item["status"], "incomplete");
         assert_eq!(failed.data["response"]["status"], "failed");
         assert_eq!(failed.data["response"]["output"], json!([completed_item]));
         assert_eq!(
