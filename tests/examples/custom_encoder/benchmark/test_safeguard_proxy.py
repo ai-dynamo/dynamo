@@ -236,6 +236,7 @@ def test_config_is_closed_loop_and_uses_requested_encoder_limits(
     assert config.osl == 7
     assert config.env["DYN_QWEN2_VL_PREPROCESS_CONCURRENCY"] == "4"
     assert config.env["DYN_QWEN2_VL_MAX_BATCH_PATCHES"] == str(8 * 484)
+    assert config.env["DYN_QWEN2_VL_MAX_BATCH_ITEMS"] == "8"
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,3,4,5,6,7,8"
     assert config.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300"
     assert config.env["DYN_CUSTOM_ENCODER_DISPATCH_LOG"] == "1"

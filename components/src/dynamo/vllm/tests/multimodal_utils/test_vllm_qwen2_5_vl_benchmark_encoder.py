@@ -175,6 +175,15 @@ def test_forward_batch_rejects_above_graph_item_cap() -> None:
         encoder.forward_batch([item] * 5)
 
 
+def test_item_cap_must_fit_captured_graph_ladder() -> None:
+    encoder = Qwen2_5VLBenchmarkEncoder()
+    encoder.buckets = (1, 2, 4)
+    encoder.max_batch_items = 5
+
+    with pytest.raises(ValueError, match="largest CUDA-graph batch bucket 4"):
+        encoder._validate_batch_limits()
+
+
 def test_patch_count_matches_pixel_rows_and_grid() -> None:
     item = _item((1, 22, 22))
     assert Qwen2_5VLBenchmarkEncoder._patch_count(item) == 484

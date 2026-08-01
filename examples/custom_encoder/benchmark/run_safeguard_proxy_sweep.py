@@ -249,6 +249,7 @@ def build_config(
             "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE": "1536",
             "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY": "4",
             "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(max_batch_patches),
+            "DYN_QWEN2_VL_MAX_BATCH_ITEMS": "8",
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,3,4,5,6,7,8",
             "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": ",".join(
                 f"{width}x{height}" for width, height in image_sizes
