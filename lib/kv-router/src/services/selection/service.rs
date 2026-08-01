@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::KvRouterConfig;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
+use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
@@ -19,7 +20,7 @@ use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
+    SelectResponse, SelectionWorkerConfig, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 
 pub struct SelectionServiceBuilder {
@@ -63,6 +64,18 @@ impl SelectionServiceBuilder {
 
     pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
         self.selection_cache = config;
+        self
+    }
+
+    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&KvRouterConfig) -> WorkerSelectionPolicy + Send + Sync + 'static,
+    {
+        let kv_router_config = self.kv_router_config.clone();
+        self.worker_selector_factory = Some(Box::new(move || {
+            Box::new(factory(&kv_router_config))
+                as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }));
         self
     }
 
