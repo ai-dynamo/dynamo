@@ -1279,18 +1279,19 @@ impl Endpoint {
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Flag-gated push egress (`DYN_TRTLLM_PUSH_EGRESS=1`): the handler
-        // pushes each response into a Rust channel via
-        // `context.response_sender`, instead of Rust pulling `__anext__` off
-        // its generator on a tokio thread once per response. Requires the
-        // handler to accept a `context` argument, which is how the sender is
-        // delivered; anything else stays on the pull path.
+        // pushes each response into a Rust channel via its `response_sender`
+        // argument, instead of Rust pulling `__anext__` off its generator on a
+        // tokio thread once per response. Requires the handler to declare a
+        // `response_sender` parameter -- NOT `context`, which every handler
+        // accepts and would therefore make this check always true, rendering
+        // the pull-path fallback unreachable. Anything else stays on pull.
         let use_push_egress = push_egress::push_egress_enabled()
             && if push_egress::handler_supports_push(&generator) {
                 true
             } else {
                 tracing::warn!(
-                    "{} is set but this handler does not accept a `context` argument, \
-                     which is how the response sender is delivered; \
+                    "{} is set but this handler does not declare a `response_sender` \
+                     parameter (is it missing @push_egress_capable?); \
                      falling back to the pull egress path",
                     push_egress::PUSH_EGRESS_ENV,
                 );
