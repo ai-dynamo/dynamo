@@ -790,6 +790,8 @@ def test_aggregated_health_check_priority(
         delayed_start=base.delayed_start,
         timeout=base.timeout,
         health_check_workers=True,
+        # This test allocates a single system port (num_system_ports=[1]).
+        health_check_worker_count=1,
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",
