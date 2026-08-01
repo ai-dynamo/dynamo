@@ -7,7 +7,7 @@ use super::super::{
     CkfFormat, DigestIdentity, DynamoEndpointId, IdentitySource as ProtoIdentitySource,
     KvPoolDescriptor, KvPoolId, KvQueryHashFormat, KvQuerySemantics, ModelRegistration,
     POOL_IDENTITY_VERSION, ProducerIdentity, RELAY_CONTRACT_MARKER, RELAY_PROTOCOL_VERSION,
-    v1::model_target,
+    ServingReadinessState, TopologyEntry, WorkerRole, v1::model_target,
 };
 use super::images::MAX_BUCKET_COUNT;
 
@@ -41,6 +41,22 @@ pub enum WireIdentityError {
     InvalidText(&'static str),
     #[error("model registration repeats alias {0:?}")]
     DuplicateAlias(String),
+    #[error("worker-role set must not be empty")]
+    MissingWorkerRoles,
+    #[error("unsupported worker role {0}")]
+    WorkerRole(i32),
+    #[error("worker-role set repeats {0:?}")]
+    DuplicateWorkerRole(WorkerRole),
+    #[error("serving topology has unsupported readiness state {0}")]
+    ReadinessState(i32),
+    #[error("serving topology must contain at least one member")]
+    MissingTopologyMembers,
+    #[error("serving topology repeats endpoint {0:?}")]
+    DuplicateTopologyMember(String),
+    #[error("topology namespace {topology:?} does not match member namespace {member:?}")]
+    TopologyNamespaceMismatch { topology: String, member: String },
+    #[error("serving topology repeats adapter {0:?}")]
+    DuplicateAdapter(String),
 }
 
 pub fn validate_contract_marker(contract_marker: u32) -> Result<(), WireIdentityError> {
@@ -182,7 +198,83 @@ pub fn validate_pool_descriptor(descriptor: &KvPoolDescriptor) -> Result<(), Wir
     descriptor
         .registrations
         .iter()
-        .try_for_each(validate_model_registration)
+        .try_for_each(validate_model_registration)?;
+    validate_worker_roles(&descriptor.pool_roles)
+}
+
+pub fn validate_worker_roles(roles: &[i32]) -> Result<(), WireIdentityError> {
+    if roles.is_empty() {
+        return Err(WireIdentityError::MissingWorkerRoles);
+    }
+    validate_role_set(roles)
+}
+
+pub fn validate_topology_entry(entry: &TopologyEntry) -> Result<(), WireIdentityError> {
+    validate_text("topology namespace", &entry.namespace)?;
+    validate_text("topology canonical model ID", &entry.canonical_model_id)?;
+    validate_readiness_state(entry.state)?;
+    validate_role_set(&entry.present_roles)?;
+    validate_role_set(&entry.missing_roles)?;
+    if entry.members.is_empty() {
+        return Err(WireIdentityError::MissingTopologyMembers);
+    }
+    let mut endpoints = HashSet::with_capacity(entry.members.len());
+    for member in &entry.members {
+        let endpoint = member
+            .endpoint
+            .as_ref()
+            .ok_or(WireIdentityError::MissingField("topology member endpoint"))?;
+        validate_endpoint_id(endpoint)?;
+        if endpoint.namespace != entry.namespace {
+            return Err(WireIdentityError::TopologyNamespaceMismatch {
+                topology: entry.namespace.clone(),
+                member: endpoint.namespace.clone(),
+            });
+        }
+        validate_worker_roles(&member.roles)?;
+        if let Some(pool_id) = member.pool_id.as_ref() {
+            validate_pool_id(pool_id)?;
+        }
+        let endpoint_key = format!(
+            "{}.{}.{}",
+            endpoint.namespace, endpoint.component, endpoint.endpoint
+        );
+        if !endpoints.insert(endpoint_key.clone()) {
+            return Err(WireIdentityError::DuplicateTopologyMember(endpoint_key));
+        }
+    }
+    let mut adapters = HashSet::with_capacity(entry.adapters.len());
+    for adapter in &entry.adapters {
+        validate_text("adapter canonical model ID", &adapter.canonical_model_id)?;
+        validate_readiness_state(adapter.state)?;
+        validate_role_set(&adapter.missing_roles)?;
+        if !adapters.insert(&adapter.canonical_model_id) {
+            return Err(WireIdentityError::DuplicateAdapter(
+                adapter.canonical_model_id.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_readiness_state(value: i32) -> Result<(), WireIdentityError> {
+    ServingReadinessState::try_from(value)
+        .map(|_| ())
+        .map_err(|_| WireIdentityError::ReadinessState(value))
+}
+
+fn validate_role_set(roles: &[i32]) -> Result<(), WireIdentityError> {
+    let mut unique = HashSet::with_capacity(roles.len());
+    for &value in roles {
+        let role = WorkerRole::try_from(value).map_err(|_| WireIdentityError::WorkerRole(value))?;
+        if role == WorkerRole::Unspecified {
+            return Err(WireIdentityError::WorkerRole(value));
+        }
+        if !unique.insert(role) {
+            return Err(WireIdentityError::DuplicateWorkerRole(role));
+        }
+    }
+    Ok(())
 }
 
 fn validate_digest(
@@ -224,7 +316,8 @@ mod tests {
     use prost::Message as _;
 
     use super::super::super::{
-        BaseModelTarget, DigestIdentity, IdentitySource, IndexerDomainId, ModelTarget,
+        AdapterReadiness, BaseModelTarget, DigestIdentity, IdentitySource, IndexerDomainId,
+        ModelTarget, TopologyMember,
     };
     use super::*;
 
@@ -354,6 +447,7 @@ mod tests {
             serving_endpoint: None,
             registrations: Vec::new(),
             query_semantics: None,
+            pool_roles: Vec::new(),
         };
         assert_eq!(
             validate_pool_descriptor(&descriptor),
@@ -380,10 +474,85 @@ mod tests {
             }),
             registrations: Vec::new(),
             query_semantics: None,
+            pool_roles: vec![WorkerRole::Legacy as i32],
         };
         assert_eq!(
             validate_pool_descriptor(&descriptor),
             Err(WireIdentityError::MissingField("KV query semantics"))
+        );
+
+        for roles in [
+            Vec::new(),
+            vec![WorkerRole::Unspecified as i32],
+            vec![99],
+            vec![WorkerRole::Decode as i32, WorkerRole::Decode as i32],
+        ] {
+            assert!(validate_worker_roles(&roles).is_err());
+        }
+        validate_worker_roles(&[WorkerRole::Prefill as i32, WorkerRole::Decode as i32]).unwrap();
+    }
+
+    #[test]
+    fn topology_validation_is_fail_closed_for_members_roles_and_namespaces() {
+        let valid = TopologyEntry {
+            namespace: "prod".into(),
+            canonical_model_id: "llama".into(),
+            state: ServingReadinessState::Ready as i32,
+            present_roles: vec![WorkerRole::Decode as i32],
+            missing_roles: Vec::new(),
+            members: vec![TopologyMember {
+                endpoint: Some(DynamoEndpointId {
+                    namespace: "prod".into(),
+                    component: "backend".into(),
+                    endpoint: "generate".into(),
+                }),
+                roles: vec![WorkerRole::Decode as i32],
+                pool_id: Some(pool_id()),
+            }],
+            degraded_disagg: false,
+            legacy_fallback_active: false,
+            adapters: vec![AdapterReadiness {
+                canonical_model_id: "tenant-a".into(),
+                state: ServingReadinessState::Ready as i32,
+                missing_roles: Vec::new(),
+            }],
+        };
+        validate_topology_entry(&valid).unwrap();
+
+        let mut missing_members = valid.clone();
+        missing_members.members.clear();
+        assert_eq!(
+            validate_topology_entry(&missing_members),
+            Err(WireIdentityError::MissingTopologyMembers)
+        );
+
+        let mut unspecified_role = valid.clone();
+        unspecified_role.members[0].roles = vec![WorkerRole::Unspecified as i32];
+        assert_eq!(
+            validate_topology_entry(&unspecified_role),
+            Err(WireIdentityError::WorkerRole(
+                WorkerRole::Unspecified as i32
+            ))
+        );
+
+        let mut wrong_namespace = valid.clone();
+        wrong_namespace.members[0]
+            .endpoint
+            .as_mut()
+            .unwrap()
+            .namespace = "other".into();
+        assert!(matches!(
+            validate_topology_entry(&wrong_namespace),
+            Err(WireIdentityError::TopologyNamespaceMismatch { .. })
+        ));
+
+        let mut duplicate_adapter = valid;
+        duplicate_adapter
+            .adapters
+            .push(duplicate_adapter.adapters[0].clone());
+        assert_eq!(
+            validate_topology_entry(&duplicate_adapter),
+            Err(WireIdentityError::DuplicateAdapter("tenant-a".into()))
         );
     }
 }

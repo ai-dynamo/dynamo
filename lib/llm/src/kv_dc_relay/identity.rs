@@ -10,6 +10,8 @@ use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
 use dynamo_runtime::protocols::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::worker_type::WorkerType;
+
 fn validate_identity_text<E>(
     value: impl Into<String>,
     empty: E,
@@ -253,12 +255,49 @@ pub enum KvQuerySemanticsError {
     ZeroBlockSize,
 }
 
+/// Worker role declared by a model deployment card for one serving endpoint.
+///
+/// `Legacy` represents a card without `worker_type`; it is distinct from a malformed or
+/// unspecified wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerRole {
+    Prefill,
+    Decode,
+    Encode,
+    Aggregated,
+    Legacy,
+}
+
+impl WorkerRole {
+    pub const fn from_worker_type(worker_type: Option<WorkerType>) -> Self {
+        match worker_type {
+            Some(WorkerType::Prefill) => Self::Prefill,
+            Some(WorkerType::Decode) => Self::Decode,
+            Some(WorkerType::Encode) => Self::Encode,
+            Some(WorkerType::Aggregated) => Self::Aggregated,
+            None => Self::Legacy,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefill => "prefill",
+            Self::Decode => "decode",
+            Self::Encode => "encode",
+            Self::Aggregated => "aggregated",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DcPoolDescriptor {
     producer: ProducerIdentity,
     serving_endpoint: EndpointId,
     registrations: Arc<[CanonicalModelRegistration]>,
     query_semantics: KvQuerySemantics,
+    pool_roles: Arc<[WorkerRole]>,
 }
 
 impl DcPoolDescriptor {
@@ -267,12 +306,14 @@ impl DcPoolDescriptor {
         serving_endpoint: EndpointId,
         registrations: Arc<[CanonicalModelRegistration]>,
         query_semantics: KvQuerySemantics,
+        pool_roles: Arc<[WorkerRole]>,
     ) -> Self {
         Self {
             producer,
             serving_endpoint,
             registrations,
             query_semantics,
+            pool_roles,
         }
     }
 
@@ -294,6 +335,10 @@ impl DcPoolDescriptor {
 
     pub const fn query_semantics(&self) -> KvQuerySemantics {
         self.query_semantics
+    }
+
+    pub fn pool_roles(&self) -> &[WorkerRole] {
+        &self.pool_roles
     }
 }
 

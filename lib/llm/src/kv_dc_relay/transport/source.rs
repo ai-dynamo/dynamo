@@ -13,12 +13,13 @@ use super::super::identity::{DcPoolCatalog, DcRelayIdentity};
 use super::super::load::PoolLoadSnapshot;
 use super::super::pool_registry::PoolRegistry;
 use super::super::publication_hub::{PublicationHubError, PublicationHubSubscription};
-use super::super::readiness::ServingReadinessSnapshot;
+use super::super::topology::{TopologyPublisher, TopologySnapshot};
 
 #[derive(Clone)]
 pub(crate) struct WanPublicationSource {
     component: Component,
     pools: Arc<PoolRegistry>,
+    topology: Arc<TopologyPublisher>,
     relay_identity: DcRelayIdentity,
     lifecycle: CancellationToken,
 }
@@ -27,12 +28,14 @@ impl WanPublicationSource {
     pub(crate) fn new(
         component: Component,
         pools: Arc<PoolRegistry>,
+        topology: Arc<TopologyPublisher>,
         relay_identity: DcRelayIdentity,
         lifecycle: CancellationToken,
     ) -> Self {
         Self {
             component,
             pools,
+            topology,
             relay_identity,
             lifecycle,
         }
@@ -54,8 +57,12 @@ impl WanPublicationSource {
         self.pools.watch_catalog()
     }
 
-    pub(crate) fn watch_readiness(&self) -> watch::Receiver<ServingReadinessSnapshot> {
-        self.pools.watch_readiness()
+    pub(crate) fn watch_readiness(&self) -> watch::Receiver<TopologySnapshot> {
+        self.topology.watch()
+    }
+
+    pub(crate) fn topology_snapshot(&self) -> TopologySnapshot {
+        self.topology.snapshot()
     }
 
     pub(crate) async fn subscribe_pool(
@@ -72,6 +79,10 @@ impl WanPublicationSource {
 
     pub(crate) fn pools(&self) -> &Arc<PoolRegistry> {
         &self.pools
+    }
+
+    pub(crate) fn topology(&self) -> &Arc<TopologyPublisher> {
+        &self.topology
     }
 
     pub(crate) fn fence_publication(&self, producer: ProducerIdentity, reason: &str) -> bool {

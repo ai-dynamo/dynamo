@@ -11,7 +11,7 @@ use dynamo_runtime::protocols::EndpointId;
 
 use super::super::identity::{
     CanonicalModelRegistration, DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat,
-    KvQuerySemantics, ModelTarget,
+    KvQuerySemantics, ModelTarget, WorkerRole,
 };
 use super::super::protocol as proto;
 
@@ -116,6 +116,23 @@ pub(crate) fn descriptor_to_wire(descriptor: &DcPoolDescriptor) -> proto::KvPool
             .map(registration_to_wire)
             .collect(),
         query_semantics: Some(query_semantics_to_wire(descriptor.query_semantics())),
+        pool_roles: descriptor
+            .pool_roles()
+            .iter()
+            .copied()
+            .map(worker_role_to_wire)
+            .map(|role| role as i32)
+            .collect(),
+    }
+}
+
+pub(crate) const fn worker_role_to_wire(role: WorkerRole) -> proto::WorkerRole {
+    match role {
+        WorkerRole::Prefill => proto::WorkerRole::Prefill,
+        WorkerRole::Decode => proto::WorkerRole::Decode,
+        WorkerRole::Encode => proto::WorkerRole::Encode,
+        WorkerRole::Aggregated => proto::WorkerRole::Aggregated,
+        WorkerRole::Legacy => proto::WorkerRole::Legacy,
     }
 }
 
@@ -162,7 +179,7 @@ fn registration_to_wire(registration: &CanonicalModelRegistration) -> proto::Mod
     }
 }
 
-fn endpoint_to_wire(endpoint: &EndpointId) -> proto::DynamoEndpointId {
+pub(crate) fn endpoint_to_wire(endpoint: &EndpointId) -> proto::DynamoEndpointId {
     proto::DynamoEndpointId {
         namespace: endpoint.namespace.clone(),
         component: endpoint.component.clone(),

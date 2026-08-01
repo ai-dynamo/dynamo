@@ -18,10 +18,10 @@ use super::super::publication_codec::{
     PublicationFrame, PublicationFrameKind, encode_heartbeat, encode_snapshot,
 };
 use super::super::publication_hub::{PublicationHubError, PublicationHubSubscription};
-use super::super::readiness::{ServingReadinessSnapshot, ServingReadinessState};
+use super::super::topology::{TopologyReadinessState, TopologySnapshot};
 use super::identity::{
-    descriptor_to_wire, model_target_to_wire, pool_id_from_wire, producer_to_wire,
-    relay_identity_to_wire, unix_timestamp,
+    descriptor_to_wire, endpoint_to_wire, pool_id_from_wire, pool_id_to_wire, producer_to_wire,
+    relay_identity_to_wire, unix_timestamp, worker_role_to_wire,
 };
 use super::load::LoadUpdateHub;
 use super::metrics::{StreamKind, SubscriberLimitScope, TransportMetrics};
@@ -456,7 +456,7 @@ fn catalog_to_wire(catalog: DcPoolCatalog, relay: DcRelayIdentity) -> proto::KvP
 }
 
 fn readiness_to_wire(
-    snapshot: ServingReadinessSnapshot,
+    snapshot: TopologySnapshot,
     relay: DcRelayIdentity,
 ) -> proto::ServingReadinessUpdate {
     proto::ServingReadinessUpdate {
@@ -466,24 +466,63 @@ fn readiness_to_wire(
         entries: snapshot
             .entries
             .into_iter()
-            .map(|entry| proto::ServingReadinessEntry {
-                producer: Some(producer_to_wire(entry.producer)),
+            .map(|entry| proto::TopologyEntry {
+                namespace: entry.namespace,
                 canonical_model_id: entry.model.as_str().to_string(),
-                target: Some(model_target_to_wire(&entry.target)),
                 state: readiness_state_to_wire(entry.state) as i32,
-                present_roles: entry.present_roles,
-                missing_roles: entry.missing_roles,
+                present_roles: entry
+                    .present_roles
+                    .into_iter()
+                    .map(worker_role_to_wire)
+                    .map(|role| role as i32)
+                    .collect(),
+                missing_roles: entry
+                    .missing_roles
+                    .into_iter()
+                    .map(worker_role_to_wire)
+                    .map(|role| role as i32)
+                    .collect(),
+                members: entry
+                    .members
+                    .into_iter()
+                    .map(|member| proto::TopologyMember {
+                        endpoint: Some(endpoint_to_wire(&member.endpoint)),
+                        roles: member
+                            .roles
+                            .into_iter()
+                            .map(worker_role_to_wire)
+                            .map(|role| role as i32)
+                            .collect(),
+                        pool_id: member.pool_id.map(pool_id_to_wire),
+                    })
+                    .collect(),
+                degraded_disagg: entry.degraded_disagg,
+                legacy_fallback_active: entry.legacy_fallback_active,
+                adapters: entry
+                    .adapters
+                    .into_iter()
+                    .map(|adapter| proto::AdapterReadiness {
+                        canonical_model_id: adapter.model.as_str().to_string(),
+                        state: readiness_state_to_wire(adapter.state) as i32,
+                        missing_roles: adapter
+                            .missing_roles
+                            .into_iter()
+                            .map(worker_role_to_wire)
+                            .map(|role| role as i32)
+                            .collect(),
+                    })
+                    .collect(),
             })
             .collect(),
         contract_marker: proto::RELAY_CONTRACT_MARKER,
     }
 }
 
-fn readiness_state_to_wire(state: ServingReadinessState) -> proto::ServingReadinessState {
+fn readiness_state_to_wire(state: TopologyReadinessState) -> proto::ServingReadinessState {
     match state {
-        ServingReadinessState::Unknown => proto::ServingReadinessState::Unknown,
-        ServingReadinessState::Unavailable => proto::ServingReadinessState::Unavailable,
-        ServingReadinessState::Ready => proto::ServingReadinessState::Ready,
+        TopologyReadinessState::Unknown => proto::ServingReadinessState::Unknown,
+        TopologyReadinessState::Unavailable => proto::ServingReadinessState::Unavailable,
+        TopologyReadinessState::Ready => proto::ServingReadinessState::Ready,
     }
 }
 

@@ -35,6 +35,15 @@ enum ServingReadinessState {
   SERVING_READINESS_STATE_READY = 2;
 }
 
+enum WorkerRole {
+  WORKER_ROLE_UNSPECIFIED = 0;
+  WORKER_ROLE_PREFILL = 1;
+  WORKER_ROLE_DECODE = 2;
+  WORKER_ROLE_ENCODE = 3;
+  WORKER_ROLE_AGGREGATED = 4;
+  WORKER_ROLE_LEGACY = 5;
+}
+
 // One atomic, executable token-to-sequence-hash pipeline. Consumers must reject
 // unspecified or unknown formats rather than combining independently versioned steps.
 enum KvQueryHashFormat {
@@ -131,6 +140,8 @@ message KvPoolDescriptor
   DynamoEndpointId serving_endpoint = 2;
   repeated ModelRegistration registrations = 3;
   KvQuerySemantics query_semantics = 4;
+  // Roles declared by the endpoint's current base-model cards, independent of liveness.
+  repeated WorkerRole pool_roles = 5;
 }
 
 message KvPoolCatalogSnapshot
@@ -191,14 +202,33 @@ message SubscribeServingReadinessRequest
   fixed32 contract_marker = 127;
 }
 
-message ServingReadinessEntry
+message TopologyMember
 {
-  ProducerIdentity producer = 1;
+  DynamoEndpointId endpoint = 1;
+  repeated WorkerRole roles = 2;
+  // Stable pool link. Absent when this topology endpoint has no materialized KV pool.
+  optional KvPoolId pool_id = 3;
+}
+
+message AdapterReadiness
+{
+  string canonical_model_id = 1;
+  ServingReadinessState state = 2;
+  repeated WorkerRole missing_roles = 3;
+}
+
+message TopologyEntry
+{
+  // Stable serving-topology key. Producer generations are resolved through members.pool_id.
+  string namespace = 1;
   string canonical_model_id = 2;
-  ModelTarget target = 3;
-  ServingReadinessState state = 4;
-  repeated string present_roles = 5;
-  repeated string missing_roles = 6;
+  ServingReadinessState state = 3;
+  repeated WorkerRole present_roles = 4;
+  repeated WorkerRole missing_roles = 5;
+  repeated TopologyMember members = 6;
+  bool degraded_disagg = 7;
+  bool legacy_fallback_active = 8;
+  repeated AdapterReadiness adapters = 9;
 }
 
 message ServingReadinessUpdate
@@ -206,7 +236,7 @@ message ServingReadinessUpdate
   uint32 protocol_version = 1;
   RelayIdentity relay = 2;
   uint64 revision = 3;
-  repeated ServingReadinessEntry entries = 4;
+  repeated TopologyEntry entries = 4;
   fixed32 contract_marker = 127;
 }
 

@@ -1,0 +1,1074 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Namespace-scoped serving topology projected independently from endpoint-local CKF pools.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use dynamo_kv_router::identity::PoolId;
+use dynamo_kv_router::protocols::WorkerId;
+use dynamo_runtime::protocols::EndpointId;
+use parking_lot::Mutex;
+use tokio::sync::watch;
+
+use super::discovery::{DcMembershipView, EndpointMembership};
+use super::identity::{CanonicalModelId, DcPoolCatalog, ModelTarget, WorkerRole};
+use crate::worker_type::WorkerType;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopologyReadinessState {
+    Ready,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TopologyMember {
+    pub(crate) endpoint: EndpointId,
+    pub(crate) roles: Vec<WorkerRole>,
+    pub(crate) pool_id: Option<PoolId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdapterReadiness {
+    pub(crate) model: CanonicalModelId,
+    pub(crate) state: TopologyReadinessState,
+    pub(crate) missing_roles: Vec<WorkerRole>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TopologyEntry {
+    pub(crate) namespace: String,
+    pub(crate) model: CanonicalModelId,
+    pub(crate) state: TopologyReadinessState,
+    pub(crate) present_roles: Vec<WorkerRole>,
+    pub(crate) missing_roles: Vec<WorkerRole>,
+    pub(crate) members: Vec<TopologyMember>,
+    pub(crate) degraded_disagg: bool,
+    pub(crate) legacy_fallback_active: bool,
+    pub(crate) adapters: Vec<AdapterReadiness>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TopologySnapshot {
+    pub(crate) revision: u64,
+    pub(crate) entries: Vec<TopologyEntry>,
+}
+
+/// Normalized equivalent of one Dynamo WorkerSet for readiness evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TopologyUnit {
+    pub(crate) worker_type: Option<WorkerType>,
+    pub(crate) live_count: usize,
+    pub(crate) needs: Vec<Vec<WorkerType>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TopologyEvaluation {
+    pub(crate) ready: bool,
+    pub(crate) present_roles: Vec<WorkerRole>,
+    pub(crate) missing_roles: Vec<WorkerRole>,
+    pub(crate) has_legacy: bool,
+}
+
+/// Mirrors `Model::evaluate_namespace` without depending on private WorkerSet state.
+pub(crate) fn evaluate_topology(units: &[TopologyUnit]) -> TopologyEvaluation {
+    let mut present = HashSet::new();
+    let mut missing = HashSet::new();
+    let mut has_legacy = false;
+    let mut has_live_worker = false;
+
+    for unit in units {
+        has_live_worker |= unit.live_count != 0;
+        match unit.worker_type {
+            Some(worker_type) if unit.live_count != 0 => {
+                present.insert(worker_type);
+            }
+            Some(_) => {}
+            None => has_legacy = true,
+        }
+    }
+
+    if has_legacy {
+        return TopologyEvaluation {
+            ready: has_live_worker,
+            present_roles: sorted_worker_roles(present),
+            missing_roles: Vec::new(),
+            has_legacy,
+        };
+    }
+
+    for unit in units {
+        let Some(worker_type) = unit.worker_type else {
+            continue;
+        };
+        if !present.contains(&worker_type) {
+            missing.insert(worker_type);
+        }
+        if unit.live_count == 0 || unit.needs.is_empty() {
+            continue;
+        }
+        let satisfied = unit
+            .needs
+            .iter()
+            .any(|alternative| alternative.iter().all(|needed| present.contains(needed)));
+        if !satisfied {
+            for needed in unit.needs.iter().flatten() {
+                if !present.contains(needed) {
+                    missing.insert(*needed);
+                }
+            }
+        }
+    }
+
+    TopologyEvaluation {
+        ready: has_live_worker && missing.is_empty(),
+        present_roles: sorted_worker_roles(present),
+        missing_roles: sorted_worker_roles(missing),
+        has_legacy,
+    }
+}
+
+#[derive(Default)]
+struct AdapterAggregate {
+    has_live_member: bool,
+    live_roles: HashSet<WorkerRole>,
+}
+
+#[derive(Default)]
+struct TopologyAggregate {
+    units: Vec<TopologyUnit>,
+    members: Vec<TopologyMember>,
+    adapters: BTreeMap<CanonicalModelId, AdapterAggregate>,
+    availability_authoritative: bool,
+    initialized: bool,
+}
+
+impl TopologyAggregate {
+    fn observe_authority(&mut self, authoritative: bool) {
+        if !self.initialized {
+            self.availability_authoritative = true;
+            self.initialized = true;
+        }
+        self.availability_authoritative &= authoritative;
+    }
+}
+
+#[derive(Default)]
+struct TopologyProjectionInputs {
+    membership: DcMembershipView,
+    availability: HashMap<EndpointId, Option<HashSet<WorkerId>>>,
+    pools: HashMap<EndpointId, PoolId>,
+    revision: u64,
+}
+
+/// Host-owned publication state. PoolRegistry contributes only its read-only catalog projection.
+pub(crate) struct TopologyPublisher {
+    state: Mutex<TopologyProjectionInputs>,
+    sender: watch::Sender<TopologySnapshot>,
+}
+
+impl TopologyPublisher {
+    pub(crate) fn new(membership: DcMembershipView, catalog: &DcPoolCatalog) -> Self {
+        let pools = pool_links(catalog);
+        let entries = derive_topology(&membership, &HashMap::new(), &pools);
+        let revision = 1;
+        let (sender, _) = watch::channel(TopologySnapshot { revision, entries });
+        Self {
+            state: Mutex::new(TopologyProjectionInputs {
+                membership,
+                pools,
+                revision,
+                ..TopologyProjectionInputs::default()
+            }),
+            sender,
+        }
+    }
+
+    pub(crate) fn watch(&self) -> watch::Receiver<TopologySnapshot> {
+        self.sender.subscribe()
+    }
+
+    pub(crate) fn snapshot(&self) -> TopologySnapshot {
+        self.sender.borrow().clone()
+    }
+
+    pub(crate) fn replace_membership(&self, membership: DcMembershipView) {
+        let mut state = self.state.lock();
+        if state.membership == membership {
+            return;
+        }
+        state
+            .availability
+            .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
+        state.membership = membership;
+        publish_if_changed(&mut state, &self.sender);
+    }
+
+    pub(crate) fn replace_catalog(&self, catalog: &DcPoolCatalog) {
+        let pools = pool_links(catalog);
+        let mut state = self.state.lock();
+        if state.pools == pools {
+            return;
+        }
+        state.pools = pools;
+        publish_if_changed(&mut state, &self.sender);
+    }
+
+    /// `None` means the endpoint's instance watchers have not produced an authoritative
+    /// snapshot. `Some(empty)` is authoritative unavailability.
+    pub(crate) fn replace_availability(
+        &self,
+        endpoint: EndpointId,
+        live_workers: Option<HashSet<WorkerId>>,
+    ) {
+        let mut state = self.state.lock();
+        if !state.membership.endpoints.contains_key(&endpoint) {
+            return;
+        }
+        if state.availability.get(&endpoint) == Some(&live_workers) {
+            return;
+        }
+        state.availability.insert(endpoint, live_workers);
+        publish_if_changed(&mut state, &self.sender);
+    }
+}
+
+fn publish_if_changed(
+    state: &mut TopologyProjectionInputs,
+    sender: &watch::Sender<TopologySnapshot>,
+) {
+    let entries = derive_topology(&state.membership, &state.availability, &state.pools);
+    if sender.borrow().entries == entries {
+        return;
+    }
+    state.revision = state.revision.saturating_add(1);
+    sender.send_replace(TopologySnapshot {
+        revision: state.revision,
+        entries,
+    });
+}
+
+fn pool_links(catalog: &DcPoolCatalog) -> HashMap<EndpointId, PoolId> {
+    catalog
+        .pools()
+        .iter()
+        .map(|descriptor| (descriptor.serving_endpoint().clone(), descriptor.pool_id()))
+        .collect()
+}
+
+fn derive_topology(
+    membership: &DcMembershipView,
+    availability: &HashMap<EndpointId, Option<HashSet<WorkerId>>>,
+    pools: &HashMap<EndpointId, PoolId>,
+) -> Vec<TopologyEntry> {
+    let mut groups = BTreeMap::<(String, CanonicalModelId), TopologyAggregate>::new();
+
+    for (endpoint, endpoint_membership) in membership.endpoints.iter() {
+        let base_models = endpoint_membership
+            .registrations
+            .iter()
+            .filter_map(|registration| match registration.target() {
+                ModelTarget::Base { base_model } => Some(base_model.clone()),
+                ModelTarget::Lora { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let endpoint_availability = availability.get(endpoint).and_then(Option::as_ref);
+
+        for base_model in base_models {
+            let group = groups
+                .entry((endpoint.namespace.clone(), base_model.clone()))
+                .or_default();
+            group.observe_authority(endpoint_availability.is_some());
+            group.members.push(TopologyMember {
+                endpoint: endpoint.clone(),
+                roles: endpoint_membership.roles.clone(),
+                pool_id: pools.get(endpoint).copied(),
+            });
+            group
+                .units
+                .extend(topology_units(endpoint_membership, endpoint_availability));
+            collect_adapter_membership(
+                group,
+                endpoint_membership,
+                &base_model,
+                endpoint_availability,
+            );
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|((namespace, model), mut group)| {
+            group.members.sort_unstable_by(|left, right| {
+                left.endpoint.to_string().cmp(&right.endpoint.to_string())
+            });
+            let evaluation = evaluate_topology(&group.units);
+            let state = if !group.availability_authoritative {
+                TopologyReadinessState::Unknown
+            } else if evaluation.ready {
+                TopologyReadinessState::Ready
+            } else {
+                TopologyReadinessState::Unavailable
+            };
+            let degraded_disagg = has_ambiguous_role(&group.members, WorkerRole::Prefill)
+                || has_ambiguous_role(&group.members, WorkerRole::Decode);
+            let adapters = derive_adapters(&group.adapters, &group.members, state, &evaluation);
+            TopologyEntry {
+                namespace,
+                model,
+                state,
+                present_roles: if state == TopologyReadinessState::Unknown {
+                    Vec::new()
+                } else {
+                    evaluation.present_roles
+                },
+                missing_roles: if state == TopologyReadinessState::Unknown {
+                    Vec::new()
+                } else {
+                    evaluation.missing_roles
+                },
+                members: group.members,
+                degraded_disagg,
+                legacy_fallback_active: evaluation.has_legacy,
+                adapters,
+            }
+        })
+        .collect()
+}
+
+fn topology_units(
+    membership: &EndpointMembership,
+    live_workers: Option<&HashSet<WorkerId>>,
+) -> Vec<TopologyUnit> {
+    let mut groups = HashMap::<(Option<WorkerType>, Vec<Vec<WorkerType>>), usize>::new();
+    for (&worker_id, topology) in &membership.worker_topology {
+        let live = live_workers.is_some_and(|workers| workers.contains(&worker_id));
+        let live_count = groups
+            .entry((topology.worker_type, topology.needs.clone()))
+            .or_default();
+        *live_count += usize::from(live);
+    }
+    groups
+        .into_iter()
+        .map(|((worker_type, needs), live_count)| TopologyUnit {
+            worker_type,
+            live_count,
+            needs,
+        })
+        .collect()
+}
+
+fn collect_adapter_membership(
+    group: &mut TopologyAggregate,
+    membership: &EndpointMembership,
+    base_model: &CanonicalModelId,
+    live_workers: Option<&HashSet<WorkerId>>,
+) {
+    for (adapter, adapter_membership) in &membership.adapters {
+        if &adapter_membership.base_model != base_model {
+            continue;
+        }
+        let aggregate = group.adapters.entry(adapter.clone()).or_default();
+        for worker_id in adapter_membership.workers.keys() {
+            if !live_workers.is_some_and(|workers| workers.contains(worker_id)) {
+                continue;
+            }
+            aggregate.has_live_member = true;
+            if let Some(role) = membership
+                .worker_topology
+                .get(worker_id)
+                .and_then(|topology| topology.worker_type)
+                .map(|worker_type| WorkerRole::from_worker_type(Some(worker_type)))
+                && role != WorkerRole::Encode
+            {
+                aggregate.live_roles.insert(role);
+            }
+        }
+    }
+}
+
+fn derive_adapters(
+    adapters: &BTreeMap<CanonicalModelId, AdapterAggregate>,
+    members: &[TopologyMember],
+    base_state: TopologyReadinessState,
+    evaluation: &TopologyEvaluation,
+) -> Vec<AdapterReadiness> {
+    let required_roles = members
+        .iter()
+        .flat_map(|member| member.roles.iter().copied())
+        .filter(|role| {
+            matches!(
+                role,
+                WorkerRole::Prefill | WorkerRole::Decode | WorkerRole::Aggregated
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    adapters
+        .iter()
+        .map(|(model, aggregate)| {
+            let mut missing = required_roles
+                .iter()
+                .copied()
+                .filter(|role| !aggregate.live_roles.contains(role))
+                .collect::<BTreeSet<_>>();
+            missing.extend(evaluation.missing_roles.iter().copied());
+            let state = match base_state {
+                TopologyReadinessState::Unknown => TopologyReadinessState::Unknown,
+                TopologyReadinessState::Unavailable => TopologyReadinessState::Unavailable,
+                TopologyReadinessState::Ready if evaluation.has_legacy => {
+                    if aggregate.has_live_member {
+                        TopologyReadinessState::Ready
+                    } else {
+                        TopologyReadinessState::Unavailable
+                    }
+                }
+                TopologyReadinessState::Ready if missing.is_empty() => {
+                    TopologyReadinessState::Ready
+                }
+                TopologyReadinessState::Ready => TopologyReadinessState::Unavailable,
+            };
+            AdapterReadiness {
+                model: model.clone(),
+                state,
+                missing_roles: if state == TopologyReadinessState::Unknown {
+                    Vec::new()
+                } else {
+                    missing.into_iter().collect()
+                },
+            }
+        })
+        .collect()
+}
+
+fn has_ambiguous_role(members: &[TopologyMember], role: WorkerRole) -> bool {
+    members
+        .iter()
+        .filter(|member| member.roles.contains(&role))
+        .map(|member| &member.endpoint)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1
+}
+
+fn sorted_worker_roles(roles: HashSet<WorkerType>) -> Vec<WorkerRole> {
+    let mut roles = roles
+        .into_iter()
+        .map(|worker_type| WorkerRole::from_worker_type(Some(worker_type)))
+        .collect::<Vec<_>>();
+    roles.sort_unstable();
+    roles
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dynamo_kv_router::identity::{
+        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, RoutingScopeId,
+    };
+    use dynamo_kv_router::indexer::cuckoo::{CkfConfig, DcCkfState, ProducerIdentity};
+
+    use super::super::discovery::{
+        AdapterMembership, AdapterWorkerMembership, DomainWorkerTopology,
+    };
+    use super::super::identity::{
+        CanonicalModelRegistration, DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat,
+        KvQuerySemantics, ModelTarget,
+    };
+    use super::*;
+
+    fn unit(
+        worker_type: Option<WorkerType>,
+        live_count: usize,
+        needs: Vec<Vec<WorkerType>>,
+    ) -> TopologyUnit {
+        TopologyUnit {
+            worker_type,
+            live_count,
+            needs,
+        }
+    }
+
+    fn model(value: &str) -> CanonicalModelId {
+        CanonicalModelId::new(value).unwrap()
+    }
+
+    fn endpoint(
+        endpoint: &str,
+        canonical_model: &str,
+        worker_id: WorkerId,
+        worker_type: Option<WorkerType>,
+        needs: Vec<Vec<WorkerType>>,
+    ) -> EndpointMembership {
+        let endpoint = EndpointId::from(endpoint);
+        EndpointMembership {
+            endpoint,
+            generation: 1,
+            domain: None,
+            registrations: vec![CanonicalModelRegistration::new(
+                model(canonical_model),
+                Vec::new(),
+            )],
+            models: vec![canonical_model.to_string()],
+            aliases: Vec::new(),
+            roles: vec![WorkerRole::from_worker_type(worker_type)],
+            runtime_configs: HashMap::new(),
+            worker_topology: HashMap::from([(
+                worker_id,
+                DomainWorkerTopology { worker_type, needs },
+            )]),
+            adapters: HashMap::new(),
+            conflicts: Vec::new(),
+        }
+    }
+
+    fn with_adapter(
+        mut membership: EndpointMembership,
+        base_model: &str,
+        adapter: &str,
+        worker_id: WorkerId,
+    ) -> EndpointMembership {
+        let base_model = model(base_model);
+        let adapter = model(adapter);
+        membership
+            .registrations
+            .push(CanonicalModelRegistration::with_target(
+                adapter.clone(),
+                ModelTarget::Lora {
+                    base_model: base_model.clone(),
+                    adapter: adapter.clone(),
+                },
+                Vec::new(),
+            ));
+        membership.adapters.insert(
+            adapter,
+            AdapterMembership {
+                base_model,
+                workers: HashMap::from([(
+                    worker_id,
+                    AdapterWorkerMembership {
+                        max_gpu_lora_count: Some(8),
+                    },
+                )]),
+            },
+        );
+        membership
+    }
+
+    fn view(memberships: Vec<EndpointMembership>) -> DcMembershipView {
+        DcMembershipView {
+            endpoints: Arc::new(
+                memberships
+                    .into_iter()
+                    .map(|membership| (membership.endpoint.clone(), membership))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn pool_id(seed: u8) -> PoolId {
+        PoolId::new(
+            IndexerDomainId::new(
+                CacheSemanticsId::new([seed; 16], IdentitySource::Explicit),
+                RoutingScopeId::new([seed.wrapping_add(1); 16], IdentitySource::Explicit),
+            ),
+            DcId::new(3),
+        )
+    }
+
+    fn catalog(view: &DcMembershipView, layout_generation: u64) -> DcPoolCatalog {
+        let format = DcCkfState::new(CkfConfig::new(32))
+            .expect("fixture CKF")
+            .format();
+        let mut memberships = view.endpoints.values().collect::<Vec<_>>();
+        memberships.sort_unstable_by_key(|membership| membership.endpoint.to_string());
+        let pools = memberships
+            .into_iter()
+            .enumerate()
+            .map(|(index, membership)| {
+                let pool_id = pool_id((index + 1) as u8);
+                DcPoolDescriptor::new(
+                    ProducerIdentity::new(pool_id, 11, layout_generation, format),
+                    membership.endpoint.clone(),
+                    Arc::from(membership.registrations.clone()),
+                    KvQuerySemantics::new(64, KvQueryHashFormat::DynamoStandardV1).unwrap(),
+                    Arc::from(membership.roles.clone()),
+                )
+            })
+            .collect();
+        DcPoolCatalog::new(DcRelayIdentity::new(7, 11), layout_generation, pools)
+    }
+
+    fn publisher(view: &DcMembershipView) -> TopologyPublisher {
+        TopologyPublisher::new(view.clone(), &catalog(view, 1))
+    }
+
+    fn publish_live(publisher: &TopologyPublisher, view: &DcMembershipView) {
+        for membership in view.endpoints.values() {
+            publisher.replace_availability(
+                membership.endpoint.clone(),
+                Some(membership.worker_topology.keys().copied().collect()),
+            );
+        }
+    }
+
+    fn entry<'a>(snapshot: &'a TopologySnapshot, canonical_model: &str) -> &'a TopologyEntry {
+        snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.model.as_str() == canonical_model)
+            .expect("topology entry")
+    }
+
+    #[test]
+    fn evaluator_matches_aggregated_pd_epd_and_dead_worker_semantics() {
+        let aggregated = evaluate_topology(&[unit(Some(WorkerType::Aggregated), 1, vec![])]);
+        assert!(aggregated.ready);
+        assert_eq!(aggregated.present_roles, [WorkerRole::Aggregated]);
+
+        let pd = evaluate_topology(&[
+            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
+            unit(Some(WorkerType::Decode), 1, vec![vec![WorkerType::Prefill]]),
+        ]);
+        assert!(pd.ready);
+
+        let epd = evaluate_topology(&[
+            unit(
+                Some(WorkerType::Encode),
+                1,
+                vec![
+                    vec![WorkerType::Prefill, WorkerType::Decode],
+                    vec![WorkerType::Aggregated],
+                ],
+            ),
+            unit(Some(WorkerType::Prefill), 1, vec![]),
+            unit(Some(WorkerType::Decode), 1, vec![]),
+        ]);
+        assert!(epd.ready);
+
+        let missing_decode = evaluate_topology(&[
+            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
+            unit(Some(WorkerType::Decode), 0, vec![vec![WorkerType::Prefill]]),
+        ]);
+        assert!(!missing_decode.ready);
+        assert_eq!(missing_decode.missing_roles, [WorkerRole::Decode]);
+    }
+
+    #[test]
+    fn evaluator_matches_legacy_fallback_for_legacy_only_and_mixed_inputs() {
+        for units in [
+            vec![unit(None, 1, vec![])],
+            vec![
+                unit(None, 1, vec![]),
+                unit(Some(WorkerType::Decode), 0, vec![vec![WorkerType::Prefill]]),
+            ],
+        ] {
+            let evaluation = evaluate_topology(&units);
+            assert!(evaluation.ready);
+            assert!(evaluation.has_legacy);
+            assert!(evaluation.missing_roles.is_empty());
+        }
+        let unavailable = evaluate_topology(&[unit(None, 0, vec![])]);
+        assert!(!unavailable.ready);
+        assert!(unavailable.has_legacy);
+    }
+
+    #[test]
+    fn evaluator_ignores_needs_of_dead_workers_but_reports_their_declared_role() {
+        let evaluation = evaluate_topology(&[
+            unit(Some(WorkerType::Aggregated), 1, vec![]),
+            unit(
+                Some(WorkerType::Encode),
+                0,
+                vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+            ),
+        ]);
+        assert!(!evaluation.ready);
+        assert_eq!(evaluation.missing_roles, [WorkerRole::Encode]);
+        assert!(!evaluation.missing_roles.contains(&WorkerRole::Prefill));
+        assert!(!evaluation.missing_roles.contains(&WorkerRole::Decode));
+    }
+
+    #[test]
+    fn empty_topology_is_not_ready() {
+        let evaluation = evaluate_topology(&[]);
+        assert!(!evaluation.ready);
+        assert!(!evaluation.has_legacy);
+        assert!(evaluation.present_roles.is_empty());
+        assert!(evaluation.missing_roles.is_empty());
+    }
+
+    #[test]
+    fn aggregated_models_in_one_namespace_have_independent_ready_entries() {
+        let view = view(vec![
+            endpoint(
+                "production.llama.generate",
+                "meta/llama-3-70b",
+                1,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            ),
+            endpoint(
+                "production.mistral.generate",
+                "mistralai/mixtral-8x7b",
+                2,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+
+        assert_eq!(snapshot.entries.len(), 2);
+        assert!(snapshot.entries.iter().all(|entry| {
+            entry.namespace == "production"
+                && entry.state == TopologyReadinessState::Ready
+                && entry.present_roles == [WorkerRole::Aggregated]
+                && !entry.degraded_disagg
+        }));
+    }
+
+    #[test]
+    fn pd_joins_endpoint_local_pools_into_one_ready_namespace_topology() {
+        let view = view(vec![
+            endpoint(
+                "production.prefill.generate",
+                "meta/llama-3-70b",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.backend.generate",
+                "meta/llama-3-70b",
+                2,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "meta/llama-3-70b");
+
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert_eq!(
+            topology.present_roles,
+            [WorkerRole::Prefill, WorkerRole::Decode]
+        );
+        assert_eq!(topology.members.len(), 2);
+        assert!(
+            topology
+                .members
+                .iter()
+                .all(|member| member.pool_id.is_some())
+        );
+        assert!(!topology.degraded_disagg);
+    }
+
+    #[test]
+    fn epd_requires_encode_and_keeps_its_phantom_pool_link() {
+        let encode = EndpointId::from("production.encoder.generate");
+        let view = view(vec![
+            endpoint(
+                "production.encoder.generate",
+                "vision-language",
+                1,
+                Some(WorkerType::Encode),
+                vec![
+                    vec![WorkerType::Prefill, WorkerType::Decode],
+                    vec![WorkerType::Aggregated],
+                ],
+            ),
+            endpoint(
+                "production.prefill.generate",
+                "vision-language",
+                2,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.backend.generate",
+                "vision-language",
+                3,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let ready = publisher.snapshot();
+        let topology = entry(&ready, "vision-language");
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        let encode_member = topology
+            .members
+            .iter()
+            .find(|member| member.endpoint == encode)
+            .expect("encode member");
+        assert_eq!(encode_member.roles, [WorkerRole::Encode]);
+        assert!(
+            encode_member.pool_id.is_some(),
+            "surface-less Encode remains an advertised phantom pool until a reliable publisher signal exists"
+        );
+
+        publisher.replace_availability(encode, Some(HashSet::new()));
+        let unavailable = publisher.snapshot();
+        let topology = entry(&unavailable, "vision-language");
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        assert_eq!(topology.missing_roles, [WorkerRole::Encode]);
+    }
+
+    #[test]
+    fn duplicate_pd_endpoints_are_ready_but_marked_degraded() {
+        let view = view(vec![
+            endpoint(
+                "production.prefill-a.generate",
+                "llama",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.prefill-b.generate",
+                "llama",
+                2,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.decode-a.generate",
+                "llama",
+                3,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+            endpoint(
+                "production.decode-b.generate",
+                "llama",
+                4,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "llama");
+
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert!(topology.degraded_disagg);
+    }
+
+    #[test]
+    fn independent_pd_models_do_not_trigger_cross_model_ambiguity() {
+        let view = view(vec![
+            endpoint(
+                "production.llama-prefill.generate",
+                "llama",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.llama-decode.generate",
+                "llama",
+                2,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+            endpoint(
+                "production.mistral-prefill.generate",
+                "mistral",
+                3,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.mistral-decode.generate",
+                "mistral",
+                4,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+
+        assert_eq!(snapshot.entries.len(), 2);
+        assert!(snapshot.entries.iter().all(|entry| {
+            entry.state == TopologyReadinessState::Ready && !entry.degraded_disagg
+        }));
+    }
+
+    #[test]
+    fn mixed_and_legacy_only_topologies_follow_core_fallback() {
+        let mixed = view(vec![
+            endpoint("production.legacy.generate", "llama", 1, None, Vec::new()),
+            endpoint(
+                "production.decode.generate",
+                "llama",
+                2,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let mixed_publisher = publisher(&mixed);
+        mixed_publisher.replace_availability(
+            EndpointId::from("production.legacy.generate"),
+            Some(HashSet::from([1])),
+        );
+        mixed_publisher.replace_availability(
+            EndpointId::from("production.decode.generate"),
+            Some(HashSet::new()),
+        );
+        let snapshot = mixed_publisher.snapshot();
+        let topology = entry(&snapshot, "llama");
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert!(topology.legacy_fallback_active);
+        assert!(topology.missing_roles.is_empty());
+
+        let legacy = view(vec![endpoint(
+            "production.legacy.generate",
+            "mistral",
+            3,
+            None,
+            Vec::new(),
+        )]);
+        let publisher = publisher(&legacy);
+        publish_live(&publisher, &legacy);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "mistral");
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert!(topology.legacy_fallback_active);
+    }
+
+    #[test]
+    fn epd_lora_excludes_encode_from_adapter_membership_but_not_base_readiness() {
+        let encode = EndpointId::from("production.encoder.generate");
+        let view = view(vec![
+            endpoint(
+                "production.encoder.generate",
+                "vision-language",
+                1,
+                Some(WorkerType::Encode),
+                vec![
+                    vec![WorkerType::Prefill, WorkerType::Decode],
+                    vec![WorkerType::Aggregated],
+                ],
+            ),
+            with_adapter(
+                endpoint(
+                    "production.prefill.generate",
+                    "vision-language",
+                    2,
+                    Some(WorkerType::Prefill),
+                    vec![vec![WorkerType::Decode]],
+                ),
+                "vision-language",
+                "tenant-a",
+                2,
+            ),
+            with_adapter(
+                endpoint(
+                    "production.backend.generate",
+                    "vision-language",
+                    3,
+                    Some(WorkerType::Decode),
+                    vec![vec![WorkerType::Prefill]],
+                ),
+                "vision-language",
+                "tenant-a",
+                3,
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "vision-language");
+        assert_eq!(topology.adapters.len(), 1);
+        assert_eq!(topology.adapters[0].state, TopologyReadinessState::Ready);
+        assert!(topology.adapters[0].missing_roles.is_empty());
+
+        publisher.replace_availability(encode, Some(HashSet::new()));
+        let snapshot = publisher.snapshot();
+        let topology = entry(&snapshot, "vision-language");
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        assert_eq!(
+            topology.adapters[0].state,
+            TopologyReadinessState::Unavailable
+        );
+    }
+
+    #[test]
+    fn unknown_is_limited_to_members_without_authoritative_availability() {
+        let view = view(vec![
+            endpoint(
+                "production.prefill.generate",
+                "llama",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.decode.generate",
+                "llama",
+                2,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        let initial = publisher.snapshot();
+        assert_eq!(
+            entry(&initial, "llama").state,
+            TopologyReadinessState::Unknown
+        );
+
+        publisher.replace_availability(
+            EndpointId::from("production.prefill.generate"),
+            Some(HashSet::from([1])),
+        );
+        let partial = publisher.snapshot();
+        assert_eq!(
+            entry(&partial, "llama").state,
+            TopologyReadinessState::Unknown
+        );
+
+        publisher.replace_availability(
+            EndpointId::from("production.decode.generate"),
+            Some(HashSet::from([2])),
+        );
+        let ready = publisher.snapshot();
+        assert_eq!(entry(&ready, "llama").state, TopologyReadinessState::Ready);
+        let revision = ready.revision;
+        publisher.replace_availability(
+            EndpointId::from("production.decode.generate"),
+            Some(HashSet::from([2])),
+        );
+        assert_eq!(publisher.snapshot().revision, revision);
+    }
+
+    #[test]
+    fn producer_generation_swap_does_not_churn_stable_topology_links() {
+        let view = view(vec![endpoint(
+            "production.backend.generate",
+            "llama",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        )]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let before = publisher.snapshot();
+        let pool_id = before.entries[0].members[0].pool_id;
+
+        publisher.replace_catalog(&catalog(&view, 2));
+        let after = publisher.snapshot();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.entries[0].members[0].pool_id, pool_id);
+    }
+}

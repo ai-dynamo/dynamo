@@ -23,7 +23,7 @@ The `KvEventRelay` service has five methods:
 | `GetRelayInfo` | One `RelayInfo` with the protocol version and typed Relay identity. |
 | `WatchKvPoolCatalog` | A stream of revisioned, complete `KvPoolCatalogSnapshot` values. |
 | `SubscribeKvPool` | An initial CBI1 snapshot followed by contiguous deltas and heartbeats for one exact `ProducerIdentity`. |
-| `SubscribeServingReadiness` | A stream of complete readiness projections for all current model registrations. |
+| `SubscribeServingReadiness` | A stream of complete namespace-scoped model topology projections. |
 | `SubscribeKvPoolLoad` | A stream of complete load windows for all active pools. |
 
 Streaming requests require a non-empty `subscriber_id` of at most 128 bytes. The server enforces a
@@ -46,17 +46,23 @@ with an initialized publication hub. Pool subscribers also have bounded message 
 - the `IdentitySource` of each digest;
 - the logical `DcId`.
 
-`ProducerIdentity` adds the producer incarnation, layout generation, and complete CKF format. Every
-filter, readiness, and load entry carries that producer identity. A consumer must reject identity,
-layout, or format drift before applying state.
+`ProducerIdentity` adds the producer incarnation, layout generation, and complete CKF format.
+Filter and load entries carry that exact producer identity. Topology members instead reference the
+stable `KvPoolId`; consumers resolve its current producer through the catalog. A consumer must
+reject identity, layout, or format drift before applying pool state.
 
-The serving `DynamoEndpointId` is descriptor metadata. It does not replace or extend `KvPoolId`.
+The serving `DynamoEndpointId` identifies the endpoint that owns the pool. It is descriptor
+metadata, not an inference ingress, and does not replace or extend `KvPoolId`.
 
 ## Catalog and Model Registrations
 
-Each `KvPoolDescriptor` contains one producer, one serving endpoint, required `KvQuerySemantics`,
-and nested model registrations. Query semantics specify a nonzero KV block size and one atomic
-token-to-sequence-hash format. `DYNAMO_STANDARD_V1` uses block-size token windows;
+Each `KvPoolDescriptor` contains one producer, one serving endpoint, its declared `pool_roles`,
+required `KvQuerySemantics`, and nested model registrations. Roles are endpoint-local and do not
+encode current liveness. `LEGACY` represents a model deployment card without a typed worker role;
+`UNSPECIFIED`, unknown, empty, or duplicate role sets are invalid.
+
+Query semantics specify a nonzero KV block size and one atomic token-to-sequence-hash format.
+`DYNAMO_STANDARD_V1` uses block-size token windows;
 `DYNAMO_EAGLE_V1` uses `kv_block_size + 1` token windows with a `kv_block_size` stride. Each format
 also fixes token and multimodal encoding, request-wide LoRA/cache-namespace salting, local block
 hashing, and rolling sequence hashing. Consumers must reject an unspecified or unknown format.
@@ -76,6 +82,19 @@ and adapter KV entries in one physical pool while preserving distinct cache keys
 The wire contract does not publish derived model-to-pool or alias-to-model indexes. Consumers build
 those indexes, if needed, from the current catalog snapshot. Independent endpoints that advertise
 the same canonical model remain independent descriptors and physical pool streams.
+
+The catalog and serving topology are two normalized projections:
+
+- The catalog describes endpoint-local physical KV pools and their current producer generations.
+- The topology stream groups serving facts by `(namespace, canonical_model_id)` and links its
+  endpoint members back to catalog pools by stable `KvPoolId`.
+
+The Relay never merges CKFs across endpoints. In prefill/decode (PD) and
+encode/prefill/decode (EPD) deployments, Prefill and Decode pools both carry meaningful,
+independently queryable KV state. Consumers calculate hashes separately for each pool using that
+pool's `query_semantics`; Prefill and Decode formats can differ. A surface-less Encode endpoint is
+currently advertised with role `ENCODE` and an empty CKF/load pool because discovery has no
+backend-independent signal that reliably proves the absence of a KV publisher.
 
 `WatchKvPoolCatalog` sends the current complete snapshot immediately. Later updates are also
 complete snapshots and may skip revision numbers when watch notifications coalesce. A reconnecting
@@ -110,16 +129,32 @@ authoritative signal that the generation is no longer publishable.
 ## Readiness Stream
 
 `SubscribeServingReadiness` sends one complete projection immediately, then sends revisions and
-heartbeats. Each entry is keyed by `ProducerIdentity`, canonical model ID, and `ModelTarget` and has
-one of these states:
+heartbeats. Each `TopologyEntry` is keyed by `(namespace, canonical_model_id)`, independently of
+producer-generation churn, and has one of these states:
 
-- `READY`
-- `UNAVAILABLE`
-- `UNKNOWN`
+- `READY`: Dynamo's namespace-wide dependency DNF is satisfied and at least one worker is live.
+- `UNAVAILABLE`: availability is authoritative but a declared role is absent or no worker is
+  live.
+- `UNKNOWN`: at least one participating endpoint has not produced an authoritative availability
+  snapshot.
 
-`present_roles` and `missing_roles` explain the evaluated worker topology. LoRA entries also depend
-on adapter membership for their backing base model. Readiness is independent of CKF publication;
-reopening this stream does not require a pool snapshot.
+`present_roles` and `missing_roles` explain the namespace-wide result. `members` lists every
+participating endpoint, its declared roles, and an optional stable pool ID. A missing pool ID means
+the endpoint contributes topology but has no materialized KV pool.
+
+The evaluator mirrors Dynamo's `Model::evaluate_namespace` behavior:
+
+- Any legacy card activates the compatibility fallback: the entry is ready when any worker is
+  live, and `legacy_fallback_active` exposes the weaker gating.
+- Multiple typed Prefill or Decode endpoints for one key remain serviceable but set
+  `degraded_disagg`, matching Dynamo's ambiguous rendezvous behavior.
+- An adapter deployment card never creates a top-level entry. Its status appears under the base
+  entry's `adapters` list. Prefill, Decode, and Aggregated roles can carry adapter membership;
+  Encode remains a required base-topology dependency but is not adapter-bearing.
+
+Readiness is independent of CKF publication; reopening this stream does not require a pool
+snapshot. The Relay does not publish an ingress target. Mapping a ready topology key to a request
+entry point is consumer or deployment policy.
 
 ## Load Stream
 
@@ -195,9 +230,9 @@ cannot exceed `IMAGES_MAX_FRAME_BYTES`; a larger publication becomes a chunked s
 
 ## Consumer Recovery Rules
 
-A consumer keeps catalog, pool filter, readiness, and load as independent state machines:
+A consumer keeps catalog, pool filter, topology readiness, and load as independent state machines:
 
-- Replace catalog and readiness state from the first complete snapshot after reconnecting.
+- Replace catalog and topology state from the first complete snapshot after reconnecting.
 - Do not expose a pool filter until all snapshot chunks are validated and installed.
 - Apply a delta only when its Relay identity, producer identity, format, and base sequence match the
   installed generation.

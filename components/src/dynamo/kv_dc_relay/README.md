@@ -16,10 +16,17 @@ keeps independent serving endpoints in separate pools, even when they advertise 
 model. If two endpoints resolve to the same `PoolId`, the Relay fences that identity instead of
 combining their KV state.
 
-The serving endpoint is descriptor metadata, not part of `PoolId`. Each endpoint pool has one
-canonical base-model registration and can add Low-Rank Adaptation (LoRA) registrations backed by
-that model. Every registration carries its aliases. A LoRA registration stays in the base model's
-pool and does not create a separate CKF.
+The serving endpoint identifies the endpoint that owns the pool; it is not an inference ingress and
+is not part of `PoolId`. Each descriptor also publishes the worker roles declared by that
+endpoint. Each endpoint pool has one canonical base-model registration and can add Low-Rank
+Adaptation (LoRA) registrations backed by that model. Every registration carries its aliases. A
+LoRA registration stays in the base model's pool and does not create a separate CKF.
+
+The pool catalog and serving topology are separate projections. The catalog remains endpoint-local.
+The topology stream groups endpoints by `(namespace, canonical_model_id)` so Dynamo's
+namespace-wide dependencies can be evaluated without merging their CKFs. Topology members link
+back to a pool by stable `PoolId`; consumers resolve the current producer generation through the
+catalog.
 
 For each pool, the Relay:
 
@@ -44,13 +51,19 @@ The Relay uses separate recovery boundaries for each exported fact:
   CKF snapshot and then fans out contiguous deltas through bounded subscriber queues. A lagged
   subscriber reconnects for a fresh snapshot. An initialized hub keeps its mirror until the pool
   generation retires, even when it has no subscribers.
-- Serving readiness is a revisioned projection of endpoint availability, worker topology, and LoRA
-  adapter membership. Reconnecting the readiness stream does not rebuild CKF state.
+- Serving readiness is a revisioned namespace-wide projection of endpoint availability, typed
+  worker dependencies, and LoRA adapter membership. Reconnecting the readiness stream does not
+  rebuild CKF state.
 - Pool load is emitted as complete, latest-wins windows with independent coverage counts for each
   signal. A lagged load subscriber reconnects without affecting catalog, readiness, or CKF streams.
 
 The Relay publishes pool facts and does not merge or rank independent pools. Consumers choose how
 to compare those streams.
+
+In prefill/decode (PD) and encode/prefill/decode (EPD) deployments, each endpoint retains its own
+pool. Prefill and Decode CKFs are both meaningful and may use different query semantics. Until
+discovery exposes a reliable backend-independent KV-publisher signal, an Encode-only endpoint is
+also advertised as an `ENCODE` pool with empty CKF and load state.
 
 ## Usage
 

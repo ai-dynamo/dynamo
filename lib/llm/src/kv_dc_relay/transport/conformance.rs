@@ -25,17 +25,17 @@ use tonic::transport::{
     Certificate, Channel, ClientTlsConfig, Endpoint, Identity as ClientIdentity,
 };
 
-use super::super::discovery::DomainWorkerTopology;
+use super::super::discovery::{DcMembershipView, DomainWorkerTopology, EndpointMembership};
 use super::super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcRelayIdentity, KvQueryHashFormat,
-    KvQuerySemantics, ModelAlias,
+    KvQuerySemantics, ModelAlias, WorkerRole,
 };
 use super::super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolWanFacts,
 };
 use super::super::protocol as proto;
 use super::super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
-use super::super::readiness::EndpointServingFacts;
+use super::super::topology::TopologyPublisher;
 use super::super::transport_config::KvDcRelayTransportConfig;
 use super::server::KvDcRelayTransport;
 use super::source::WanPublicationSource;
@@ -55,6 +55,7 @@ struct RelayFixture {
     address: SocketAddr,
     transport: KvDcRelayTransport,
     registry: Arc<PoolRegistry>,
+    topology: Arc<TopologyPublisher>,
     attachment: Option<PoolAttachment>,
     pool_id: PoolId,
 }
@@ -84,6 +85,12 @@ impl RelayFixture {
         ));
         let pool_id = pool_id(fixture_id as u8);
         let attachment = attach_pool(&registry, pool_id).await;
+        let endpoint = EndpointId::from("backend.generate");
+        let topology = Arc::new(TopologyPublisher::new(
+            membership_view(endpoint.clone()),
+            &registry.catalog(),
+        ));
+        topology.replace_availability(endpoint, Some(HashSet::from([WORKER_ID])));
         assert!(registry.observe_load(
             pool_id,
             attachment.layout_generation,
@@ -97,8 +104,13 @@ impl RelayFixture {
         ));
 
         let lifecycle = CancellationToken::new();
-        let source =
-            WanPublicationSource::new(component, registry.clone(), relay_identity, lifecycle);
+        let source = WanPublicationSource::new(
+            component,
+            registry.clone(),
+            topology.clone(),
+            relay_identity,
+            lifecycle,
+        );
         let pki = test_pki();
         let temp = TempDir::new().unwrap();
         let mut config = tls_test_config(&temp, &pki);
@@ -114,6 +126,7 @@ impl RelayFixture {
             address,
             transport,
             registry,
+            topology,
             attachment: Some(attachment),
             pool_id,
         }
@@ -146,6 +159,7 @@ impl RelayFixture {
             .expect("pool attachment must be active");
         self.registry.detach(old).await.unwrap();
         self.attachment = Some(attach_pool(&self.registry, self.pool_id).await);
+        self.topology.replace_catalog(&self.registry.catalog());
     }
 
     async fn shutdown(mut self) {
@@ -183,23 +197,42 @@ async fn attach_pool(registry: &PoolRegistry, pool_id: PoolId) -> PoolAttachment
             )],
             query_semantics: KvQuerySemantics::new(64, KvQueryHashFormat::DynamoStandardV1)
                 .unwrap(),
+            roles: vec![WorkerRole::Legacy],
             wan_facts: Some(PoolWanFacts {
-                serving: EndpointServingFacts {
-                    worker_topology: HashMap::from([(
-                        WORKER_ID,
-                        DomainWorkerTopology {
-                            worker_type: None,
-                            needs: Vec::new(),
-                        },
-                    )]),
-                    live_workers: Some(HashSet::from([WORKER_ID])),
-                    ..EndpointServingFacts::default()
-                },
                 runtime_configs: HashMap::from([(WORKER_ID, runtime_config)]),
             }),
         })
         .await
         .unwrap()
+}
+
+fn membership_view(endpoint: EndpointId) -> DcMembershipView {
+    let registration = CanonicalModelRegistration::new(
+        CanonicalModelId::new("llama").unwrap(),
+        vec![ModelAlias::new("chat").unwrap()],
+    );
+    let membership = EndpointMembership {
+        endpoint: endpoint.clone(),
+        generation: 1,
+        domain: None,
+        registrations: vec![registration],
+        models: vec!["llama".to_string()],
+        aliases: vec!["chat".to_string()],
+        roles: vec![WorkerRole::Legacy],
+        runtime_configs: HashMap::new(),
+        worker_topology: HashMap::from([(
+            WORKER_ID,
+            DomainWorkerTopology {
+                worker_type: None,
+                needs: Vec::new(),
+            },
+        )]),
+        adapters: HashMap::new(),
+        conflicts: Vec::new(),
+    };
+    DcMembershipView {
+        endpoints: Arc::new(HashMap::from([(endpoint, membership)])),
+    }
 }
 
 fn stored(event_id: u64, hash: u64) -> RouterEvent {
@@ -365,6 +398,7 @@ async fn initial_catalog(
     proto::validate_pool_descriptor(descriptor).expect("valid pool descriptor");
     assert_eq!(descriptor.registrations[0].canonical_model_id, "llama");
     assert_eq!(descriptor.registrations[0].aliases, ["chat"]);
+    assert_eq!(descriptor.pool_roles, [proto::WorkerRole::Legacy as i32]);
     assert_eq!(
         descriptor
             .query_semantics
@@ -460,11 +494,19 @@ async fn actual_relay_transport_serves_all_rpc_surfaces_and_contiguous_cbi1() {
     proto::validate_protocol_envelope(readiness.protocol_version, readiness.contract_marker)
         .expect("valid readiness envelope");
     assert_eq!(readiness.entries.len(), 1);
-    assert_eq!(readiness.entries[0].producer.as_ref(), Some(&producer));
+    proto::validate_topology_entry(&readiness.entries[0]).expect("valid topology entry");
+    assert_eq!(readiness.entries[0].canonical_model_id, "llama");
     assert_eq!(
         readiness.entries[0].state,
         proto::ServingReadinessState::Ready as i32
     );
+    assert!(readiness.entries[0].legacy_fallback_active);
+    assert_eq!(readiness.entries[0].members.len(), 1);
+    assert_eq!(
+        readiness.entries[0].members[0].roles,
+        [proto::WorkerRole::Legacy as i32]
+    );
+    assert!(readiness.entries[0].members[0].pool_id.is_some());
 
     let mut load = client
         .subscribe_kv_pool_load(proto::SubscribeKvPoolLoadRequest {

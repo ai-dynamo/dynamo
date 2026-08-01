@@ -47,7 +47,7 @@ use super::discovery::{
     DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
     KvDcRelayDiscoveryConfig, MaterializationConflict,
 };
-use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity};
+use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
@@ -56,9 +56,9 @@ use super::pool_registry::{
 use super::pool_registry::{PoolPublicationConfig, PoolWanFacts};
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::publication_hub::PublicationHubConfig;
-#[cfg(feature = "kv-dc-relay-wan")]
-use super::readiness::EndpointServingFacts;
 use super::resolution::stable_dc_id;
+#[cfg(feature = "kv-dc-relay-wan")]
+use super::topology::TopologyPublisher;
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::transport::{KvDcRelayTransport, WanPublicationSource};
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -381,13 +381,13 @@ struct EndpointPoolRuntime {
     recovery: RecoverySupervisor<KvDcRelayRecoveryTarget>,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
+    roles: Vec<WorkerRole>,
     #[cfg(feature = "kv-dc-relay-wan")]
     wan: Option<EndpointWanRuntime>,
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
 struct EndpointWanRuntime {
-    serving_facts: EndpointServingFacts,
     load_runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
     load_cancel: CancellationToken,
     load_task: JoinHandle<()>,
@@ -683,10 +683,17 @@ impl KvDcRelay {
         #[cfg(not(feature = "kv-dc-relay-wan"))]
         let pools = Arc::new(PoolRegistry::new(relay_identity, actor_config));
         #[cfg(feature = "kv-dc-relay-wan")]
+        let topology = {
+            let mut initial_view = membership_rx.borrow().clone();
+            reject_duplicate_live_pools(&mut initial_view, ckf_dc_id);
+            Arc::new(TopologyPublisher::new(initial_view, &pools.catalog()))
+        };
+        #[cfg(feature = "kv-dc-relay-wan")]
         let transport = if let Some(transport_config) = transport_config {
             let source = WanPublicationSource::new(
                 component.clone(),
                 pools.clone(),
+                topology.clone(),
                 relay_identity,
                 cancel.clone(),
             );
@@ -715,6 +722,8 @@ impl KvDcRelay {
             terminal.clone(),
             #[cfg(feature = "kv-dc-relay-wan")]
             wan_facts_mode,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            topology.clone(),
         ));
         let supervisor = tokio::spawn(supervise_host_task(
             host,
@@ -935,14 +944,22 @@ async fn run_host_supervisor(
     fatal_cancel: CancellationToken,
     terminal: Arc<HostTerminalState>,
     #[cfg(feature = "kv-dc-relay-wan")] wan_facts_mode: WanFactsMode,
+    #[cfg(feature = "kv-dc-relay-wan")] topology: Arc<TopologyPublisher>,
 ) -> anyhow::Result<()> {
     let recovery_fetch_permit = Arc::new(Semaphore::new(DEFAULT_RECOVERY_FETCH_CONCURRENCY));
     let mut slots: HashMap<EndpointId, EndpointSlotTask> = HashMap::new();
     let mut retired_slots = JoinSet::new();
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let mut catalog_rx = pools.watch_catalog();
 
     let outcome = loop {
         let mut view = membership_rx.borrow_and_update().clone();
         reject_duplicate_live_pools(&mut view, ckf_dc_id);
+        #[cfg(feature = "kv-dc-relay-wan")]
+        {
+            topology.replace_membership(view.clone());
+            topology.replace_catalog(&catalog_rx.borrow_and_update());
+        }
         for (slot_id, membership) in view.endpoints.iter() {
             let slot = slots.entry(slot_id.clone()).or_insert_with(|| {
                 let (metadata, metadata_rx) = watch::channel(None);
@@ -960,6 +977,8 @@ async fn run_host_supervisor(
                     cancel.child_token(),
                     #[cfg(feature = "kv-dc-relay-wan")]
                     wan_facts_mode,
+                    #[cfg(feature = "kv-dc-relay-wan")]
+                    topology.clone(),
                 ));
                 EndpointSlotTask {
                     metadata,
@@ -975,6 +994,14 @@ async fn run_host_supervisor(
             .map(|(slot_id, slot)| (slot_id.clone(), slot.status.clone()))
             .collect();
 
+        let catalog_changed = async {
+            #[cfg(feature = "kv-dc-relay-wan")]
+            {
+                return catalog_rx.changed().await;
+            }
+            #[cfg(not(feature = "kv-dc-relay-wan"))]
+            std::future::pending::<Result<(), watch::error::RecvError>>().await
+        };
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break Ok(()),
@@ -987,6 +1014,16 @@ async fn run_host_supervisor(
                     record_host_failure(&fatal_cancel, &terminal, reason.clone());
                     break Err(anyhow::anyhow!(reason));
                 }
+            }
+            changed = catalog_changed => {
+                #[cfg(feature = "kv-dc-relay-wan")]
+                if changed.is_err() && !cancel.is_cancelled() {
+                    let reason = "KV DC Relay pool catalog watch closed unexpectedly".to_string();
+                    record_host_failure(&fatal_cancel, &terminal, reason.clone());
+                    break Err(anyhow::anyhow!(reason));
+                }
+                #[cfg(not(feature = "kv-dc-relay-wan"))]
+                let _ = changed;
             }
             retired = retired_slots.join_next(), if !retired_slots.is_empty() => {
                 report_retired_endpoint_slot(retired);
@@ -1177,6 +1214,7 @@ async fn run_endpoint_slot(
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
     #[cfg(feature = "kv-dc-relay-wan")] wan_facts_mode: WanFactsMode,
+    #[cfg(feature = "kv-dc-relay-wan")] topology: Arc<TopologyPublisher>,
 ) {
     let endpoint = slot_id.clone();
     let mut config_tx: Option<watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>> = None;
@@ -1184,8 +1222,6 @@ async fn run_endpoint_slot(
     let mut runtime: Option<EndpointPoolRuntime> = None;
     #[cfg(feature = "kv-dc-relay-wan")]
     let mut instance_rx = None;
-    #[cfg(feature = "kv-dc-relay-wan")]
-    let mut availability_authoritative = false;
     #[cfg(feature = "kv-dc-relay-wan")]
     let mut availability_retry_delay = Duration::from_millis(100);
     let mut layout_generation = 0u64;
@@ -1212,11 +1248,12 @@ async fn run_endpoint_slot(
                 Ok(receiver) => {
                     // Both runtime watchers carry an initial snapshot. An empty snapshot is an
                     // authoritative observation that the endpoint currently has no live workers.
-                    availability_authoritative = true;
+                    topology.replace_availability(endpoint.clone(), Some(receiver.live_workers()));
                     instance_rx = Some(receiver);
                     availability_retry_delay = Duration::from_millis(100);
                 }
                 Err(error) => {
+                    topology.replace_availability(endpoint.clone(), None);
                     tracing::debug!(
                         %endpoint,
                         %error,
@@ -1260,15 +1297,19 @@ async fn run_endpoint_slot(
             }
             let domain = membership.domain.clone()?;
             let kv_state_endpoint = source_view.as_ref()?.resolved_kv_state_endpoint()?.clone();
-            source_view
+            let has_active_source = source_view
                 .as_ref()?
                 .sources
                 .values()
-                .any(|source| source.active_source().is_some())
-                .then_some(ActorBinding {
-                    domain,
-                    kv_state_endpoint,
-                })
+                .any(|source| source.active_source().is_some());
+            let is_encode_only = membership.roles.as_slice() == [WorkerRole::Encode];
+            // Surface-less Encode workers currently advertise cache semantics but do not expose
+            // a backend-independent KV-publisher capability. Keep their endpoint-local pool
+            // visible with an empty CKF/load until discovery can distinguish that case reliably.
+            (has_active_source || is_encode_only).then_some(ActorBinding {
+                domain,
+                kv_state_endpoint,
+            })
         });
         if retry_binding.as_ref() != desired_binding.as_ref() {
             retry_binding = desired_binding.clone();
@@ -1304,7 +1345,6 @@ async fn run_endpoint_slot(
                 #[cfg(feature = "kv-dc-relay-wan")]
                 {
                     instance_rx = None;
-                    availability_authoritative = false;
                 }
                 let mut current = status.write().await;
                 current.lifecycle = SlotLifecycle::Lightweight;
@@ -1354,6 +1394,20 @@ async fn run_endpoint_slot(
             }
         }
 
+        if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
+            && membership.is_materializable()
+            && active.roles != membership.roles
+        {
+            match pools.replace_roles(&mut active.attachment, membership.roles.clone()) {
+                Ok(()) => active.roles.clone_from(&membership.roles),
+                Err(error) => tracing::warn!(
+                    %endpoint,
+                    %error,
+                    "Failed to refresh KV DC Relay pool roles"
+                ),
+            }
+        }
+
         #[cfg(feature = "kv-dc-relay-wan")]
         if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
             && let Some(wan) = active.wan.as_mut()
@@ -1375,16 +1429,6 @@ async fn run_endpoint_slot(
                     ),
                 }
             }
-            let facts = serving_facts(membership, instance_rx.as_ref(), availability_authoritative);
-            if facts != wan.serving_facts
-                && pools.replace_serving_facts(
-                    active.attachment.pool_id,
-                    active.attachment.layout_generation,
-                    facts.clone(),
-                )
-            {
-                wan.serving_facts = facts;
-            }
         }
 
         if runtime.is_none()
@@ -1402,13 +1446,9 @@ async fn run_endpoint_slot(
                 endpoint.clone(),
                 binding.clone(),
                 membership.registrations.clone(),
+                membership.roles.clone(),
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts_mode.is_enabled().then(|| PoolWanFacts {
-                    serving: serving_facts(
-                        &membership,
-                        instance_rx.as_ref(),
-                        availability_authoritative,
-                    ),
                     runtime_configs: membership.runtime_configs.clone(),
                 }),
                 membership_watch,
@@ -1536,26 +1576,17 @@ async fn run_endpoint_slot(
             SlotInput::Metadata | SlotInput::Source | SlotInput::Health => {}
             #[cfg(feature = "kv-dc-relay-wan")]
             SlotInput::Instance => {
-                availability_authoritative = true;
+                topology.replace_availability(
+                    endpoint.clone(),
+                    instance_rx
+                        .as_ref()
+                        .map(EndpointAvailabilityWatch::live_workers),
+                );
             }
             #[cfg(feature = "kv-dc-relay-wan")]
             SlotInput::AvailabilityRetry => {
                 instance_rx = None;
-                availability_authoritative = false;
-                if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
-                    && let Some(wan) = active.wan.as_mut()
-                {
-                    let facts = serving_facts(membership, None, false);
-                    if facts != wan.serving_facts
-                        && pools.replace_serving_facts(
-                            active.attachment.pool_id,
-                            active.attachment.layout_generation,
-                            facts.clone(),
-                        )
-                    {
-                        wan.serving_facts = facts;
-                    }
-                }
+                topology.replace_availability(endpoint.clone(), None);
                 availability_retry_delay = availability_retry_delay
                     .saturating_mul(2)
                     .min(Duration::from_secs(5));
@@ -1691,26 +1722,6 @@ async fn instance_availability_watch(
     })
 }
 
-#[cfg(feature = "kv-dc-relay-wan")]
-fn serving_facts(
-    membership: &EndpointMembership,
-    instance_rx: Option<&EndpointAvailabilityWatch>,
-    availability_authoritative: bool,
-) -> EndpointServingFacts {
-    let live_workers = availability_authoritative.then(|| {
-        instance_rx
-            .into_iter()
-            .flat_map(EndpointAvailabilityWatch::live_workers)
-            .filter(|worker_id| membership.worker_topology.contains_key(worker_id))
-            .collect::<HashSet<_>>()
-    });
-    EndpointServingFacts {
-        worker_topology: membership.worker_topology.clone(),
-        adapters: membership.adapters.clone(),
-        live_workers,
-    }
-}
-
 async fn diagnostic_tick() {
     #[cfg(feature = "ckf-diagnostics")]
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1725,6 +1736,7 @@ async fn start_endpoint_pool(
     endpoint: EndpointId,
     binding: ActorBinding,
     registrations: Vec<CanonicalModelRegistration>,
+    roles: Vec<WorkerRole>,
     #[cfg(feature = "kv-dc-relay-wan")] wan_facts: Option<PoolWanFacts>,
     membership_watch: KvSourceMembershipWatch,
     rebuild_permit: Arc<Semaphore>,
@@ -1739,6 +1751,7 @@ async fn start_endpoint_pool(
             endpoint: endpoint.clone(),
             registrations: registrations.clone(),
             query_semantics: binding.domain.query_semantics,
+            roles: roles.clone(),
             #[cfg(feature = "kv-dc-relay-wan")]
             wan_facts: wan_facts.clone(),
         })
@@ -1796,7 +1809,6 @@ async fn start_endpoint_pool(
             load_cancel.clone(),
         );
         EndpointWanRuntime {
-            serving_facts: facts.serving,
             load_runtime_configs: facts.runtime_configs,
             load_cancel,
             load_task,
@@ -1807,6 +1819,7 @@ async fn start_endpoint_pool(
         recovery,
         binding,
         registrations,
+        roles,
         #[cfg(feature = "kv-dc-relay-wan")]
         wan,
     })
@@ -2209,7 +2222,13 @@ async fn endpoint_stats(
             .unwrap_or_default(),
         roles: membership
             .as_ref()
-            .map(|membership| membership.roles.clone())
+            .map(|membership| {
+                membership
+                    .roles
+                    .iter()
+                    .map(|role| role.as_str().to_string())
+                    .collect()
+            })
             .unwrap_or_default(),
         aggregation,
         publication,
@@ -2324,7 +2343,7 @@ mod tests {
             )],
             models: vec!["llama".to_string()],
             aliases: Vec::new(),
-            roles: Vec::new(),
+            roles: vec![WorkerRole::Aggregated],
             runtime_configs: HashMap::new(),
             worker_topology: HashMap::new(),
             adapters: HashMap::new(),
@@ -2641,160 +2660,6 @@ mod tests {
         assert!(terminal.last_error().is_none());
     }
 
-    #[cfg(feature = "kv-dc-relay-wan")]
-    #[tokio::test]
-    async fn availability_empty_live_and_rebind_states_are_authoritative_for_base_and_lora() {
-        use dynamo_runtime::component::TransportType;
-
-        use crate::kv_dc_relay::discovery::{
-            AdapterMembership, AdapterWorkerMembership, DomainWorkerTopology,
-        };
-        use crate::kv_dc_relay::identity::{CanonicalModelId, ModelTarget};
-        use crate::kv_dc_relay::readiness::ServingReadinessState;
-        use crate::worker_type::WorkerType;
-
-        let endpoint = EndpointId::from("prod.backend.generate");
-        let base_model = CanonicalModelId::new("llama").unwrap();
-        let adapter = CanonicalModelId::new("tenant-a").unwrap();
-        let registrations = vec![
-            CanonicalModelRegistration::new(base_model.clone(), Vec::new()),
-            CanonicalModelRegistration::with_target(
-                adapter.clone(),
-                ModelTarget::Lora {
-                    base_model: base_model.clone(),
-                    adapter: adapter.clone(),
-                },
-                Vec::new(),
-            ),
-        ];
-        let mut membership = membership("prod.backend.generate", domain(1, "meta/llama"));
-        membership.registrations.clone_from(&registrations);
-        membership.worker_topology = HashMap::from([(
-            1,
-            DomainWorkerTopology {
-                worker_type: Some(WorkerType::Aggregated),
-                needs: Vec::new(),
-            },
-        )]);
-        membership.adapters = HashMap::from([(
-            adapter,
-            AdapterMembership {
-                base_model,
-                workers: HashMap::from([(
-                    1,
-                    AdapterWorkerMembership {
-                        max_gpu_lora_count: Some(4),
-                    },
-                )]),
-            },
-        )]);
-
-        let (routable_tx, routable) = watch::channel(Vec::new());
-        let (discovered_tx, discovered) = watch::channel(Vec::new());
-        let mut availability = EndpointAvailabilityWatch {
-            routable,
-            discovered,
-        };
-        let registry = registry();
-        let attachment = registry
-            .attach(PoolAttachRequest {
-                pool_id: PoolId::new(domain(1, "meta/llama").id, DcId::new(7)),
-                endpoint,
-                registrations,
-                query_semantics: query_semantics(),
-                wan_facts: Some(PoolWanFacts {
-                    serving: serving_facts(&membership, Some(&availability), true),
-                    runtime_configs: HashMap::new(),
-                }),
-            })
-            .await
-            .unwrap();
-        assert!(
-            registry
-                .readiness()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServingReadinessState::Unavailable)
-        );
-
-        discovered_tx.send_replace(vec![Instance {
-            component: "backend".to_string(),
-            endpoint: "generate".to_string(),
-            namespace: "prod".to_string(),
-            instance_id: 1,
-            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
-            device_type: None,
-        }]);
-        routable_tx.send_replace(vec![1]);
-        availability.changed().await.unwrap();
-        assert!(registry.replace_serving_facts(
-            attachment.pool_id,
-            attachment.layout_generation,
-            serving_facts(&membership, Some(&availability), true),
-        ));
-        assert!(
-            registry
-                .readiness()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServingReadinessState::Ready)
-        );
-
-        routable_tx.send_replace(Vec::new());
-        availability.changed().await.unwrap();
-        assert!(registry.replace_serving_facts(
-            attachment.pool_id,
-            attachment.layout_generation,
-            serving_facts(&membership, Some(&availability), true),
-        ));
-        assert!(
-            registry
-                .readiness()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServingReadinessState::Unavailable)
-        );
-
-        availability.routable.borrow_and_update();
-        availability.discovered.borrow_and_update();
-        drop(routable_tx);
-        drop(discovered_tx);
-        assert!(availability.changed().await.is_err());
-        assert!(registry.replace_serving_facts(
-            attachment.pool_id,
-            attachment.layout_generation,
-            serving_facts(&membership, None, false),
-        ));
-        assert!(
-            registry
-                .readiness()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServingReadinessState::Unknown)
-        );
-
-        let (_rebound_routable_tx, routable) = watch::channel(Vec::new());
-        let (_rebound_discovered_tx, discovered) = watch::channel(Vec::new());
-        let rebound = EndpointAvailabilityWatch {
-            routable,
-            discovered,
-        };
-        assert!(registry.replace_serving_facts(
-            attachment.pool_id,
-            attachment.layout_generation,
-            serving_facts(&membership, Some(&rebound), true),
-        ));
-        assert!(
-            registry
-                .readiness()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServingReadinessState::Unavailable)
-        );
-
-        registry.detach(attachment).await.unwrap();
-    }
-
     #[tokio::test]
     async fn duplicate_pool_owners_are_all_fenced_and_make_health_unhealthy() {
         let domain = domain(1, "meta/llama");
@@ -2870,9 +2735,9 @@ mod tests {
                     Vec::new(),
                 )],
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -2916,9 +2781,9 @@ mod tests {
                 endpoint: EndpointId::from("prod.backend.generate"),
                 registrations: new_registrations,
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -2974,6 +2839,11 @@ mod tests {
         let registry = Arc::new(registry());
         let mut catalog_rx = registry.watch_catalog();
         let slot_cancel = CancellationToken::new();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView::default(),
+            &registry.catalog(),
+        ));
         let slot = tokio::spawn(run_endpoint_slot(
             component,
             DcId::new(7),
@@ -2987,6 +2857,8 @@ mod tests {
             slot_cancel.clone(),
             #[cfg(feature = "kv-dc-relay-wan")]
             WanFactsMode::Disabled,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            topology,
         ));
 
         let old_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
@@ -3060,6 +2932,11 @@ mod tests {
         let registry = Arc::new(registry());
         let mut catalog_rx = registry.watch_catalog();
         let slot_cancel = CancellationToken::new();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView::default(),
+            &registry.catalog(),
+        ));
         let slot = tokio::spawn(run_endpoint_slot(
             component,
             DcId::new(7),
@@ -3073,6 +2950,8 @@ mod tests {
             slot_cancel.clone(),
             #[cfg(feature = "kv-dc-relay-wan")]
             WanFactsMode::Disabled,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            topology,
         ));
 
         let old_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
@@ -3086,10 +2965,7 @@ mod tests {
         .await;
         let producer = old_catalog.pools()[0].producer();
         #[cfg(feature = "kv-dc-relay-wan")]
-        {
-            assert!(registry.readiness().entries.is_empty());
-            assert!(registry.load_snapshots().is_empty());
-        }
+        assert!(registry.load_snapshots().is_empty());
 
         metadata_tx.send_replace(Some(new_membership));
         let new_catalog = wait_for_catalog(&mut catalog_rx, |catalog| {
@@ -3118,6 +2994,88 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "kv-dc-relay-wan")]
+    #[tokio::test]
+    async fn encode_without_kv_source_publishes_an_empty_encode_pool() {
+        let component = test_component("encode-phantom-pool").await;
+        let endpoint = EndpointId::from("production.encoder.generate");
+        let membership = EndpointMembership {
+            endpoint: endpoint.clone(),
+            generation: 1,
+            domain: Some(domain(1, "vision-language")),
+            registrations: vec![CanonicalModelRegistration::new(
+                super::super::identity::CanonicalModelId::new("vision-language").unwrap(),
+                Vec::new(),
+            )],
+            models: vec!["vision-language".to_string()],
+            aliases: Vec::new(),
+            roles: vec![WorkerRole::Encode],
+            runtime_configs: HashMap::new(),
+            worker_topology: HashMap::from([(
+                1,
+                super::super::discovery::DomainWorkerTopology {
+                    worker_type: Some(crate::worker_type::WorkerType::Encode),
+                    needs: vec![
+                        vec![
+                            crate::worker_type::WorkerType::Prefill,
+                            crate::worker_type::WorkerType::Decode,
+                        ],
+                        vec![crate::worker_type::WorkerType::Aggregated],
+                    ],
+                },
+            )]),
+            adapters: HashMap::new(),
+            conflicts: Vec::new(),
+        };
+        let topology_view = DcMembershipView {
+            endpoints: Arc::new(HashMap::from([(endpoint.clone(), membership.clone())])),
+        };
+        let (_metadata_tx, metadata_rx) = watch::channel(Some(membership));
+        let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
+        let registry = Arc::new(registry());
+        let mut catalog_rx = registry.watch_catalog();
+        let topology = Arc::new(TopologyPublisher::new(topology_view, &registry.catalog()));
+        let slot_cancel = CancellationToken::new();
+        let slot = tokio::spawn(run_endpoint_slot(
+            component,
+            DcId::new(7),
+            endpoint,
+            metadata_rx,
+            status.clone(),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+            registry.clone(),
+            Duration::from_secs(1),
+            slot_cancel.clone(),
+            WanFactsMode::Enabled,
+            topology,
+        ));
+
+        let catalog =
+            wait_for_catalog(&mut catalog_rx, |catalog| !catalog.pools().is_empty()).await;
+        assert_eq!(catalog.pools().len(), 1);
+        assert_eq!(catalog.pools()[0].pool_roles(), [WorkerRole::Encode]);
+        let load = registry.load_snapshots();
+        assert_eq!(load.len(), 1);
+        assert_eq!(load[0].kv_expected_ranks, 0);
+        assert_eq!(load[0].kv_observed_ranks, 0);
+        let actor = status
+            .read()
+            .await
+            .actor
+            .clone()
+            .expect("Encode pool actor");
+        let stats = actor.state_stats().await.unwrap();
+        assert_eq!(stats.0.aggregation().unique_block_count(), 0);
+        assert!(stats.2.is_empty());
+
+        slot_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), slot)
+            .await
+            .expect("Encode endpoint slot shutdown timed out")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn pool_is_withdrawn_before_recovery_teardown_completes() {
         let registry = Arc::new(registry());
@@ -3130,9 +3088,9 @@ mod tests {
                     Vec::new(),
                 )],
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -3310,9 +3268,9 @@ mod tests {
                     Vec::new(),
                 )],
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })

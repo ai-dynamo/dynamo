@@ -12,13 +12,14 @@ pub mod v1 {
 pub mod wire;
 
 pub use v1::{
-    BaseModelTarget, CkfFormat, DigestIdentity, DynamoEndpointId, FilterUpdate, FilterUpdateKind,
-    IdentitySource, IndexerDomainId, KvPoolCatalogSnapshot, KvPoolCatalogUpdate, KvPoolDescriptor,
-    KvPoolId, KvPoolLoadEntry, KvPoolLoadUpdate, KvQueryHashFormat, KvQuerySemantics,
-    LoraModelTarget, ModelRegistration, ModelTarget, ProducerIdentity, RelayIdentity, RelayInfo,
-    RelayInfoRequest, ServingReadinessEntry, ServingReadinessState, ServingReadinessUpdate,
+    AdapterReadiness, BaseModelTarget, CkfFormat, DigestIdentity, DynamoEndpointId, FilterUpdate,
+    FilterUpdateKind, IdentitySource, IndexerDomainId, KvPoolCatalogSnapshot, KvPoolCatalogUpdate,
+    KvPoolDescriptor, KvPoolId, KvPoolLoadEntry, KvPoolLoadUpdate, KvQueryHashFormat,
+    KvQuerySemantics, LoraModelTarget, ModelRegistration, ModelTarget, ProducerIdentity,
+    RelayIdentity, RelayInfo, RelayInfoRequest, ServingReadinessState, ServingReadinessUpdate,
     SubscribeKvPoolLoadRequest, SubscribeKvPoolRequest, SubscribeServingReadinessRequest,
-    WatchKvPoolCatalogRequest, kv_event_relay_client::KvEventRelayClient,
+    TopologyEntry, TopologyMember, WatchKvPoolCatalogRequest, WorkerRole,
+    kv_event_relay_client::KvEventRelayClient,
 };
 
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -27,6 +28,7 @@ pub use wire::{
     WireIdentityError, validate_ckf_format, validate_contract_marker, validate_endpoint_id,
     validate_model_registration, validate_pool_descriptor, validate_pool_id,
     validate_producer_identity, validate_protocol_envelope, validate_query_semantics,
+    validate_topology_entry, validate_worker_roles,
 };
 
 /// Current Relay protocol revision.
@@ -115,6 +117,7 @@ mod tests {
                         kv_block_size: 64,
                         hash_format: KvQueryHashFormat::DynamoStandardV1 as i32,
                     }),
+                    pool_roles: vec![WorkerRole::Decode as i32],
                 }],
             }),
             contract_marker: RELAY_CONTRACT_MARKER,

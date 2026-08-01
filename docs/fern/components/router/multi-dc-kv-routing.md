@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multi-DC KV Routing and the DC Relay
-subtitle: Publish independent pool catalog, KV, readiness, and load streams from each data center
+subtitle: Publish endpoint-local KV pools and namespace-wide serving topology from each data center
 ---
 
 **Experimental.** NVIDIA Dynamo includes a data-center-local Relay, a versioned Cuckoo-filter
@@ -20,8 +20,11 @@ flowchart LR
     subgraph DC["One data center"]
         E1["Serving endpoint A"] -->|"ordered KV events"| A1["Pool actor A\nexact ownership + CKF"]
         E2["Serving endpoint B"] -->|"ordered KV events"| A2["Pool actor B\nexact ownership + CKF"]
-        A1 --> P["Catalog, pool, readiness,\nand load publication"]
+        E1 -->|"model cards + availability"| T["Namespace topology\n(namespace, model)"]
+        E2 -->|"model cards + availability"| T
+        A1 --> P["Catalog, pool, topology,\nand load publication"]
         A2 --> P
+        T --> P
     end
     P -->|"mTLS gRPC"| C["Pool-fact consumer"]
 ```
@@ -32,7 +35,10 @@ The Relay maintains these boundaries:
 - Independent endpoints stay separate even when they advertise the same canonical model.
 - The pool actor owns exact worker/rank membership, full-hash refcounts, CKF mutation, and
   publication sequencing.
-- Catalog, readiness, and load are separate projections. Their recovery does not mutate CKF state.
+- The catalog is endpoint-local. Serving topology is grouped independently by
+  `(namespace, canonical_model_id)` and links members to pools by stable `PoolId`.
+- Catalog, topology readiness, and load are separate projections. Their recovery does not mutate
+  CKF state.
 - A publication hub exists only after the first client subscribes to that pool.
 
 Combining KV state from independent endpoints would make a hit ambiguous: a consumer could choose
@@ -52,8 +58,9 @@ PoolId = (identity_version, IndexerDomainId, DcId)
 ```
 
 `PoolId` identifies the stable logical pool. The serving `namespace.component.endpoint` is carried
-separately in the pool descriptor so a consumer can resolve the stream to the endpoint that
-produced it. `ProducerIdentity` identifies one physical CKF generation for that pool. If two live
+separately in the pool descriptor so a consumer can resolve the stream to the endpoint that owns
+it. It is not an inference ingress. The descriptor also carries the endpoint's declared worker
+roles. `ProducerIdentity` identifies one physical CKF generation for that pool. If two live
 endpoints resolve to the same `PoolId`, the Relay treats ownership as ambiguous, fences the identity,
 and withdraws it from the catalog instead of aggregating both endpoints.
 
@@ -77,12 +84,28 @@ Low-Rank Adaptation (LoRA) adapters backed by that model. Every registration inc
 - zero or more aliases.
 
 LoRA adapters share the KV domain of their backing base model. They remain nested registrations on
-that pool and do not create separate CKF streams. Readiness is still evaluated per registration, so
-the base model can be ready while a specific adapter is unavailable.
+that pool and do not create separate CKF streams. In the topology projection an adapter is nested
+under its base model instead of creating a top-level entry, so the base model can be ready while a
+specific adapter is unavailable.
 
 The Relay does not flatten descriptors into model-to-pool or alias-to-model indexes. A consumer can
 derive the lookup shape it needs from catalog snapshots. Two endpoints that register the same
 canonical model therefore remain two candidate descriptors with independent producer identities.
+
+## Aggregated, PD, and EPD Topologies
+
+An aggregated deployment normally contributes one endpoint, one pool, and one
+`AGGREGATED` topology member. Prefill/decode (PD) disaggregation contributes separate Prefill and
+Decode endpoints and therefore separate physical pools. Both CKFs are meaningful: the Prefill CKF
+describes prefill-side prefix reuse, while the Decode CKF describes decode-side reuse. Consumers
+must hash a request separately for each pool using its own `query_semantics`; the two endpoints can
+use different hash formats.
+
+Encode/prefill/decode (EPD) adds an `ENCODE` topology dependency. Encode is required for base-model
+readiness but is not an adapter-bearing role; Low-Rank Adaptation membership is evaluated only for
+Prefill, Decode, and Aggregated roles. Dynamo discovery does not yet expose a universal signal that
+reliably proves an Encode endpoint has no KV publisher. The Relay therefore advertises an
+Encode-only endpoint as an `ENCODE` pool with empty CKF and load state.
 
 ## WAN API
 
@@ -94,7 +117,7 @@ contract marker, and every response carries protocol version `1` and a typed Rel
 | `GetRelayInfo` | Returns the protocol version and current `RelayIdentity`. |
 | `WatchKvPoolCatalog` | Sends the current revisioned catalog snapshot, then a new complete snapshot after each observed catalog change. |
 | `SubscribeKvPool` | Selects one exact `ProducerIdentity` from the catalog; sends an initial chunked CKF snapshot, contiguous deltas, and application heartbeats. |
-| `SubscribeServingReadiness` | Sends the current readiness projection, updates on revision changes, and repeats it on heartbeats. |
+| `SubscribeServingReadiness` | Sends the current namespace topology projection, updates on revision changes, and repeats it on heartbeats. |
 | `SubscribeKvPoolLoad` | Sends the current complete load window, then complete windows for all active pools. |
 
 Each streaming request includes a non-empty subscriber ID of at most 128 bytes. Subscriber limits
@@ -142,17 +165,27 @@ not make a multi-bucket update atomic.
 
 ## Serving Readiness
 
-Readiness answers whether a specific model registration in a pool has an authoritative serving
-topology with the required live roles:
+Readiness answers whether a canonical model in one Dynamo namespace has an authoritative serving
+topology with the required live roles. Each entry is keyed by
+`(namespace, canonical_model_id)`; producer replacement does not change that key.
 
-- `READY` means at least one eligible worker is live and all declared role dependencies are met.
-- `UNAVAILABLE` means authoritative availability is present but no eligible live topology satisfies
-  the registration.
-- `UNKNOWN` means the Relay lacks authoritative availability or cannot interpret the topology
-  consistently.
+- `READY` means at least one worker is live and Dynamo's namespace-wide dependency DNF is
+  satisfied.
+- `UNAVAILABLE` means availability is authoritative but a declared role is absent or no worker is
+  live.
+- `UNKNOWN` means at least one participating endpoint has not produced an authoritative
+  availability snapshot.
 
-For a LoRA target, eligibility also requires adapter membership with the advertised backing base
-model. Readiness is a serving fact, not a CKF hit guarantee.
+`TopologyEntry.members` lists each endpoint, its declared roles, and an optional stable
+`PoolId`. Consumers resolve the current `ProducerIdentity` through the catalog. Any legacy model
+card activates Dynamo's compatibility fallback—ready when any worker is live—and sets
+`legacy_fallback_active`. More than one typed Prefill or Decode endpoint keeps the entry ready but
+sets `degraded_disagg`, matching Dynamo's behavior when prefill/decode rendezvous is ambiguous.
+
+For a LoRA target, the nested adapter status also requires adapter membership with the advertised
+backing base model on each applicable role. Readiness is a serving fact, not a CKF hit guarantee.
+The Relay does not publish a request ingress; mapping a topology key to an ingress remains consumer
+or deployment policy.
 
 ## Pool Load
 
@@ -176,7 +209,7 @@ time determines freshness across data centers.
 | Suspect exact pool state or duplicate `PoolId` | Withdraw and fence the producer generation, then materialize a fresh generation when discovery is valid. |
 | Catalog disconnect | Reopen `WatchKvPoolCatalog` and replace the local catalog with its first snapshot. |
 | Pool stream lag, sequence gap, identity drift, or malformed CBI1 | Retire only that consumer pool state, reopen `SubscribeKvPool`, and install a complete snapshot. |
-| Readiness disconnect | Reopen `SubscribeServingReadiness` and replace the readiness projection. |
+| Topology disconnect | Reopen `SubscribeServingReadiness` and replace the complete topology projection. |
 | Load lag or disconnect | Reopen `SubscribeKvPoolLoad` and accept the next complete window. |
 
 A fenced pool is withdrawn before actor teardown begins, so the catalog does not advertise a

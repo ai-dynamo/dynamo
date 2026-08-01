@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! DC-scoped KV-cache Relay and endpoint-independent CKF identity boundary.
+//! DC-scoped KV-cache Relay with endpoint-local CKF pools.
 
 mod actor;
 mod discovery;
@@ -16,9 +16,9 @@ pub mod protocol;
 mod publication_codec;
 #[cfg(feature = "kv-dc-relay-wan")]
 mod publication_hub;
-#[cfg(feature = "kv-dc-relay-wan")]
-mod readiness;
 mod resolution;
+#[cfg(feature = "kv-dc-relay-wan")]
+mod topology;
 #[cfg(feature = "kv-dc-relay-wan")]
 mod transport;
 #[cfg(feature = "kv-dc-relay-wan")]
@@ -39,7 +39,7 @@ pub use host::{
 pub use identity::{
     CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
     DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError,
-    ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources,
+    ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
 };
 #[cfg(feature = "kv-dc-relay-wan")]
 pub use transport_config::KvDcRelayTransportConfig;

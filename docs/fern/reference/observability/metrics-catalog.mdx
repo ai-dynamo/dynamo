@@ -295,9 +295,8 @@ endpoint. The Relay does not open a separate metrics listener.
   Pools where at least one load signal has no expected ranks or fewer observed ranks than expected.
 </ParamField>
 
-<ParamField path="dynamo_component_kv_dc_relay_serving_readiness_binding_count" type="gauge">
-  Current advertised canonical model registrations by serving-readiness
-  [`state`](metric-labels.mdx#state).
+<ParamField path="dynamo_component_kv_dc_relay_serving_topology_count" type="gauge">
+  Current namespace model topologies by serving-readiness [`state`](metric-labels.mdx#state).
 </ParamField>
 
 <ParamField path="dynamo_component_kv_dc_relay_tls_expiry_timestamp_seconds" type="gauge">

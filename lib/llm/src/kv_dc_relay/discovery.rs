@@ -17,7 +17,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::identity::{CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelTarget};
+use super::identity::{
+    CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelTarget, WorkerRole,
+};
 use super::resolution::{ResolvedIndexerDomain, resolve_indexer_domain};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
@@ -164,7 +166,7 @@ pub(crate) struct EndpointMembership {
     pub(crate) registrations: Vec<CanonicalModelRegistration>,
     pub(crate) models: Vec<String>,
     pub(crate) aliases: Vec<String>,
-    pub(crate) roles: Vec<String>,
+    pub(crate) roles: Vec<WorkerRole>,
     pub(crate) runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
     pub(crate) worker_topology: HashMap<WorkerId, DomainWorkerTopology>,
     pub(crate) adapters: HashMap<CanonicalModelId, AdapterMembership>,
@@ -238,7 +240,7 @@ struct EndpointMembershipBuilder {
     runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
     worker_topology: HashMap<WorkerId, DomainWorkerTopology>,
     adapters: HashMap<CanonicalModelId, AdapterMembership>,
-    roles: HashSet<String>,
+    roles: HashSet<WorkerRole>,
     conflicts: Vec<MaterializationConflict>,
 }
 
@@ -543,9 +545,9 @@ impl MembershipState {
                         needs: projection.card.needs.clone(),
                     },
                 );
-                if let Some(worker_type) = projection.card.worker_type {
-                    builder.roles.insert(worker_type.as_str().to_string());
-                }
+                builder
+                    .roles
+                    .insert(WorkerRole::from_worker_type(projection.card.worker_type));
                 builder.claims.push(RegistrationClaim {
                     binding: BindingIdentity {
                         model: model.clone(),
@@ -713,7 +715,7 @@ impl MembershipState {
                 registrations,
                 models: sorted(models),
                 aliases: sorted(aliases),
-                roles: sorted(builder.roles),
+                roles: sorted_values(builder.roles),
                 runtime_configs: builder.runtime_configs,
                 worker_topology: builder.worker_topology,
                 adapters: builder.adapters,
@@ -946,6 +948,12 @@ fn sorted(values: HashSet<String>) -> Vec<String> {
     values
 }
 
+fn sorted_values<T: Ord>(values: HashSet<T>) -> Vec<T> {
+    let mut values: Vec<_> = values.into_iter().collect();
+    values.sort_unstable();
+    values
+}
+
 fn valid_aliases(
     id: &ModelCardInstanceId,
     card: &ModelDeploymentCard,
@@ -1169,6 +1177,45 @@ mod tests {
         endpoint: &EndpointId,
     ) -> &'a EndpointMembership {
         &view.endpoints[endpoint]
+    }
+
+    #[test]
+    fn encode_role_is_preserved_for_surface_less_and_front_door_cards() {
+        use crate::model_type::ModelType;
+
+        let mut surface_less = card("vision-language", "vision-language", 16);
+        surface_less.worker_type = Some(WorkerType::Encode);
+        surface_less.model_type = ModelType::empty();
+        let mut front_door = surface_less.clone();
+        front_door.model_type = ModelType::Chat;
+
+        let filter = DcDiscoveryFilter::default();
+        let mut state = MembershipState::default();
+        state.replace_all(
+            vec![
+                instance("encoder-internal", 1, None, surface_less),
+                instance("encoder-frontdoor", 2, None, front_door),
+            ],
+            &filter,
+        );
+        let view = state.view(&filter);
+
+        for endpoint in [
+            EndpointId::from("prod.backend.encoder-internal"),
+            EndpointId::from("prod.backend.encoder-frontdoor"),
+        ] {
+            let membership = membership_for_endpoint(&view, &endpoint);
+            assert_eq!(membership.roles, [WorkerRole::Encode]);
+            assert_eq!(
+                membership
+                    .worker_topology
+                    .values()
+                    .next()
+                    .unwrap()
+                    .worker_type,
+                Some(WorkerType::Encode)
+            );
+        }
     }
 
     #[test]

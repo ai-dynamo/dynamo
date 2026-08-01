@@ -23,7 +23,7 @@ use super::actor::{ActorFault, KvDcRelayHandle, StreamScope};
 use super::host::KvDcRelayError;
 use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcPoolCatalog, DcPoolDescriptor, DcRelayIdentity,
-    KvQuerySemantics, ModelAlias,
+    KvQuerySemantics, ModelAlias, WorkerRole,
 };
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::load::{PoolLoadSnapshot, PoolLoadState};
@@ -32,8 +32,6 @@ use super::publication_hub::{
     PublicationHub, PublicationHubConfig, PublicationHubError, PublicationHubHealth,
     PublicationHubSubscription, TerminalFailure, publication_lease,
 };
-#[cfg(feature = "kv-dc-relay-wan")]
-use super::readiness::{EndpointServingFacts, ServingReadinessSnapshot, derive_endpoint_readiness};
 #[cfg(feature = "kv-dc-relay-wan")]
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -54,6 +52,7 @@ pub(super) struct PoolAttachRequest {
     pub(super) endpoint: EndpointId,
     pub(super) registrations: Vec<CanonicalModelRegistration>,
     pub(super) query_semantics: KvQuerySemantics,
+    pub(super) roles: Vec<WorkerRole>,
     #[cfg(feature = "kv-dc-relay-wan")]
     pub(super) wan_facts: Option<PoolWanFacts>,
 }
@@ -61,7 +60,6 @@ pub(super) struct PoolAttachRequest {
 #[cfg(feature = "kv-dc-relay-wan")]
 #[derive(Debug, Clone)]
 pub(super) struct PoolWanFacts {
-    pub(super) serving: EndpointServingFacts,
     pub(super) runtime_configs: HashMap<WorkerId, ModelRuntimeConfig>,
 }
 
@@ -85,6 +83,7 @@ struct PoolEntry {
     layout_generation: u64,
     registrations: Arc<[CanonicalModelRegistration]>,
     query_semantics: KvQuerySemantics,
+    roles: Arc<[WorkerRole]>,
     cancel: CancellationToken,
     state: PoolEntryState,
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -95,7 +94,6 @@ struct PoolEntry {
 
 #[cfg(feature = "kv-dc-relay-wan")]
 struct PoolWanState {
-    serving: EndpointServingFacts,
     load: PoolLoadState,
 }
 
@@ -367,8 +365,6 @@ struct PoolRegistryState {
     reservations: HashMap<PoolId, PoolReservation>,
     next_layout_generation: u64,
     catalog_revision: u64,
-    #[cfg(feature = "kv-dc-relay-wan")]
-    readiness_revision: u64,
     accepting: bool,
 }
 
@@ -379,8 +375,6 @@ impl Default for PoolRegistryState {
             reservations: HashMap::new(),
             next_layout_generation: 1,
             catalog_revision: 0,
-            #[cfg(feature = "kv-dc-relay-wan")]
-            readiness_revision: 0,
             accepting: true,
         }
     }
@@ -391,6 +385,7 @@ pub(super) struct PoolAttachment {
     pub(super) layout_generation: u64,
     pub(super) handle: KvDcRelayHandle,
     registrations: Arc<[CanonicalModelRegistration]>,
+    roles: Arc<[WorkerRole]>,
     pub(super) faults: mpsc::Receiver<ActorFault>,
     pub(super) pool_cancel: CancellationToken,
 }
@@ -407,8 +402,6 @@ pub(super) struct PoolRegistry {
     publication_hub_permits: Arc<Semaphore>,
     #[cfg(feature = "kv-dc-relay-wan")]
     max_initialized_pool_hubs: usize,
-    #[cfg(feature = "kv-dc-relay-wan")]
-    readiness_tx: watch::Sender<ServingReadinessSnapshot>,
     #[cfg(feature = "kv-dc-relay-wan")]
     load_tx: watch::Sender<Vec<PoolLoadSnapshot>>,
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -456,7 +449,6 @@ impl PoolRegistry {
     ) -> Self {
         debug_assert_ne!(publication_config.max_initialized_pool_hubs, 0);
         let (catalog_tx, _) = watch::channel(DcPoolCatalog::new(relay_identity, 0, Vec::new()));
-        let (readiness_tx, _) = watch::channel(ServingReadinessSnapshot::default());
         let (load_tx, _) = watch::channel(Vec::new());
         Self {
             relay_identity,
@@ -469,7 +461,6 @@ impl PoolRegistry {
                 publication_config.max_initialized_pool_hubs,
             )),
             max_initialized_pool_hubs: publication_config.max_initialized_pool_hubs,
-            readiness_tx,
             load_tx,
             publication_terminal_failures: AtomicU64::new(0),
         }
@@ -496,13 +487,13 @@ impl PoolRegistry {
             request.pool_id
         );
         validate_registrations(&request.registrations)?;
+        validate_roles(&request.roles)?;
         #[cfg(feature = "kv-dc-relay-wan")]
         let wan = request
             .wan_facts
             .as_ref()
             .map(|facts| -> anyhow::Result<PoolWanState> {
                 Ok(PoolWanState {
-                    serving: facts.serving.clone(),
                     load: PoolLoadState::from_runtime_configs(&facts.runtime_configs)?,
                 })
             })
@@ -552,6 +543,7 @@ impl PoolRegistry {
         .map_err(|error| anyhow::anyhow!("KV DC Relay CKF allocation task failed: {error}"))??;
 
         let registrations: Arc<[CanonicalModelRegistration]> = request.registrations.into();
+        let roles: Arc<[WorkerRole]> = request.roles.into();
         let cancel = CancellationToken::new();
 
         let mut state = self.state.lock();
@@ -580,6 +572,7 @@ impl PoolRegistry {
             request.endpoint.clone(),
             registrations.clone(),
             request.query_semantics,
+            roles.clone(),
         );
         state.reservations.remove(&request.pool_id);
         debug_assert!(!state.pools.contains_key(&request.pool_id));
@@ -592,6 +585,7 @@ impl PoolRegistry {
                 layout_generation,
                 registrations: registrations.clone(),
                 query_semantics: request.query_semantics,
+                roles: roles.clone(),
                 cancel: cancel.clone(),
                 state: PoolEntryState::Active,
                 #[cfg(feature = "kv-dc-relay-wan")]
@@ -603,7 +597,6 @@ impl PoolRegistry {
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
         #[cfg(feature = "kv-dc-relay-wan")]
         {
-            publish_readiness_if_changed(&mut state, &self.readiness_tx);
             publish_load_if_changed(&state, &self.load_tx, request.pool_id);
         }
         reservation.disarm();
@@ -613,6 +606,7 @@ impl PoolRegistry {
             layout_generation,
             handle,
             registrations,
+            roles,
             faults,
             pool_cancel: cancel,
         })
@@ -667,37 +661,47 @@ impl PoolRegistry {
             entry.endpoint.clone(),
             registrations.clone(),
             entry.query_semantics,
+            entry.roles.clone(),
         );
         attachment.registrations = registrations;
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
-        #[cfg(feature = "kv-dc-relay-wan")]
-        publish_readiness_if_changed(&mut state, &self.readiness_tx);
         Ok(())
     }
 
-    #[cfg(feature = "kv-dc-relay-wan")]
-    pub(super) fn replace_serving_facts(
+    pub(super) fn replace_roles(
         &self,
-        pool_id: PoolId,
-        layout_generation: u64,
-        serving_facts: EndpointServingFacts,
-    ) -> bool {
+        attachment: &mut PoolAttachment,
+        roles: Vec<WorkerRole>,
+    ) -> anyhow::Result<()> {
+        validate_roles(&roles)?;
+        if attachment.roles.as_ref() == roles.as_slice() {
+            return Ok(());
+        }
+
+        let roles: Arc<[WorkerRole]> = roles.into();
         let mut state = self.state.lock();
-        let Some(entry) = state.pools.get_mut(&pool_id) else {
-            return false;
-        };
-        if entry.layout_generation != layout_generation || entry.state != PoolEntryState::Active {
-            return false;
-        }
-        let Some(wan) = entry.wan.as_mut() else {
-            return false;
-        };
-        if wan.serving == serving_facts {
-            return true;
-        }
-        wan.serving = serving_facts;
-        publish_readiness_if_changed(&mut state, &self.readiness_tx);
-        true
+        let entry = state
+            .pools
+            .get_mut(&attachment.pool_id)
+            .ok_or_else(|| anyhow::anyhow!("pool {} is not attached", attachment.pool_id))?;
+        anyhow::ensure!(
+            entry.layout_generation == attachment.layout_generation
+                && entry.state == PoolEntryState::Active,
+            "pool {} generation {} is no longer active",
+            attachment.pool_id,
+            attachment.layout_generation
+        );
+        entry.roles = roles.clone();
+        let descriptor = DcPoolDescriptor::new(
+            entry.identity,
+            entry.endpoint.clone(),
+            entry.registrations.clone(),
+            entry.query_semantics,
+            roles.clone(),
+        );
+        attachment.roles = roles;
+        publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
+        Ok(())
     }
 
     #[cfg(feature = "kv-dc-relay-wan")]
@@ -823,7 +827,6 @@ impl PoolRegistry {
         let hub = entry.hub.clone();
         if was_active {
             publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
-            publish_readiness_if_changed(&mut state, &self.readiness_tx);
             publish_load_if_changed(&state, &self.load_tx, pool_id);
         }
         Some((hub, was_active))
@@ -870,7 +873,6 @@ impl PoolRegistry {
             }
             #[cfg(feature = "kv-dc-relay-wan")]
             {
-                publish_readiness_if_changed(&mut state, &self.readiness_tx);
                 publish_load_if_changed(&state, &self.load_tx, pool_id);
             }
             entry
@@ -956,16 +958,6 @@ impl PoolRegistry {
     }
 
     #[cfg(feature = "kv-dc-relay-wan")]
-    pub(super) fn readiness(&self) -> ServingReadinessSnapshot {
-        self.readiness_tx.borrow().clone()
-    }
-
-    #[cfg(feature = "kv-dc-relay-wan")]
-    pub(super) fn watch_readiness(&self) -> watch::Receiver<ServingReadinessSnapshot> {
-        self.readiness_tx.subscribe()
-    }
-
-    #[cfg(feature = "kv-dc-relay-wan")]
     pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
         self.load_tx.borrow().clone()
     }
@@ -1005,7 +997,6 @@ impl PoolRegistry {
             publish_catalog_clear(&mut state, &self.catalog_tx);
             #[cfg(feature = "kv-dc-relay-wan")]
             {
-                publish_readiness_if_changed(&mut state, &self.readiness_tx);
                 self.load_tx.send_if_modified(|snapshots| {
                     if snapshots.is_empty() {
                         return false;
@@ -1132,38 +1123,6 @@ fn publish_catalog_clear(state: &mut PoolRegistryState, sender: &watch::Sender<D
 }
 
 #[cfg(feature = "kv-dc-relay-wan")]
-fn publish_readiness_if_changed(
-    state: &mut PoolRegistryState,
-    sender: &watch::Sender<ServingReadinessSnapshot>,
-) {
-    let mut entries = state
-        .pools
-        .values()
-        .filter(|entry| entry.state == PoolEntryState::Active)
-        .flat_map(|entry| {
-            entry.wan.iter().flat_map(|wan| {
-                derive_endpoint_readiness(entry.identity, &entry.registrations, &wan.serving)
-            })
-        })
-        .collect::<Vec<_>>();
-    entries.sort_unstable_by(|left, right| {
-        (left.producer.pool_id(), &left.model, &left.target).cmp(&(
-            right.producer.pool_id(),
-            &right.model,
-            &right.target,
-        ))
-    });
-    if sender.borrow().entries == entries {
-        return;
-    }
-    state.readiness_revision = state.readiness_revision.saturating_add(1);
-    sender.send_replace(ServingReadinessSnapshot {
-        revision: state.readiness_revision,
-        entries,
-    });
-}
-
-#[cfg(feature = "kv-dc-relay-wan")]
 fn publish_load_if_changed(
     state: &PoolRegistryState,
     sender: &watch::Sender<Vec<PoolLoadSnapshot>>,
@@ -1244,6 +1203,21 @@ fn validate_registrations(registrations: &[CanonicalModelRegistration]) -> anyho
     Ok(())
 }
 
+fn validate_roles(roles: &[WorkerRole]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !roles.is_empty(),
+        "pool requires at least one declared worker role"
+    );
+    let mut unique = std::collections::HashSet::with_capacity(roles.len());
+    for role in roles {
+        anyhow::ensure!(
+            unique.insert(*role),
+            "pool repeats declared worker role {role:?}"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc as std_mpsc};
@@ -1304,9 +1278,9 @@ mod tests {
             endpoint: EndpointId::from(endpoint),
             registrations: vec![registration(model)],
             query_semantics: query_semantics(),
+            roles: vec![WorkerRole::Aggregated],
             #[cfg(feature = "kv-dc-relay-wan")]
             wan_facts: Some(PoolWanFacts {
-                serving: EndpointServingFacts::default(),
                 runtime_configs: HashMap::new(),
             }),
         }
@@ -1776,6 +1750,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn declared_role_change_updates_catalog_without_replacing_generation() {
+        let registry = PoolRegistry::new(relay_identity(), config());
+        let mut attachment = registry
+            .attach(request(pool(1), "fast.router.generate", "llama"))
+            .await
+            .unwrap();
+        let producer = attachment.handle.identity();
+
+        registry
+            .replace_roles(&mut attachment, vec![WorkerRole::Decode])
+            .unwrap();
+        let catalog = registry.catalog();
+        assert_eq!(descriptor(&catalog, pool(1)).producer(), producer);
+        assert_eq!(
+            descriptor(&catalog, pool(1)).pool_roles(),
+            [WorkerRole::Decode]
+        );
+
+        assert!(registry.replace_roles(&mut attachment, Vec::new()).is_err());
+        assert_eq!(
+            descriptor(&registry.catalog(), pool(1)).pool_roles(),
+            [WorkerRole::Decode]
+        );
+        registry.detach(attachment).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn one_lora_target_binds_to_independent_pools() {
         let registry = PoolRegistry::new(relay_identity(), config());
         let base = CanonicalModelId::new("llama").unwrap();
@@ -1799,9 +1800,9 @@ mod tests {
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: registrations(),
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -1813,9 +1814,9 @@ mod tests {
                 endpoint: EndpointId::from("slow.router.generate"),
                 registrations: registrations(),
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -1865,9 +1866,9 @@ mod tests {
                     Vec::new(),
                 )],
                 query_semantics: query_semantics(),
+                roles: vec![WorkerRole::Aggregated],
                 #[cfg(feature = "kv-dc-relay-wan")]
                 wan_facts: Some(PoolWanFacts {
-                    serving: EndpointServingFacts::default(),
                     runtime_configs: HashMap::new(),
                 }),
             })
@@ -2140,13 +2141,7 @@ mod tests {
         let attachment = registry.attach(attach_request).await.unwrap();
 
         assert_eq!(registry.catalog().pools().len(), 1);
-        assert!(registry.readiness().entries.is_empty());
         assert!(registry.load_snapshots().is_empty());
-        assert!(!registry.replace_serving_facts(
-            attachment.pool_id,
-            attachment.layout_generation,
-            EndpointServingFacts::default(),
-        ));
         assert!(
             !registry
                 .replace_load_capacity(
@@ -2168,25 +2163,8 @@ mod tests {
 
     #[cfg(feature = "kv-dc-relay-wan")]
     #[tokio::test]
-    async fn readiness_and_load_are_generation_scoped_and_withdrawn_together() {
-        use std::collections::HashSet;
-
-        use crate::kv_dc_relay::discovery::DomainWorkerTopology;
-        use crate::kv_dc_relay::readiness::ServingReadinessState;
-        use crate::worker_type::WorkerType;
-
+    async fn load_is_generation_scoped_and_withdrawn_with_the_pool() {
         let registry = PoolRegistry::new(relay_identity(), config());
-        let serving_facts = EndpointServingFacts {
-            worker_topology: HashMap::from([(
-                1,
-                DomainWorkerTopology {
-                    worker_type: Some(WorkerType::Aggregated),
-                    needs: Vec::new(),
-                },
-            )]),
-            live_workers: Some(HashSet::from([1])),
-            ..EndpointServingFacts::default()
-        };
         let runtime_configs = HashMap::from([(
             1,
             ModelRuntimeConfig {
@@ -2201,20 +2179,14 @@ mod tests {
                 endpoint: EndpointId::from("fast.router.generate"),
                 registrations: vec![registration("llama")],
                 query_semantics: query_semantics(),
-                wan_facts: Some(PoolWanFacts {
-                    serving: serving_facts.clone(),
-                    runtime_configs,
-                }),
+                roles: vec![WorkerRole::Aggregated],
+                wan_facts: Some(PoolWanFacts { runtime_configs }),
             })
             .await
             .unwrap();
         let old_generation = attachment.layout_generation;
         let old_producer = attachment.handle.identity();
 
-        let readiness = registry.readiness();
-        assert_eq!(readiness.entries.len(), 1);
-        assert_eq!(readiness.entries[0].producer, old_producer);
-        assert_eq!(readiness.entries[0].state, ServingReadinessState::Ready);
         let initial_load = registry.load_snapshots();
         assert_eq!(initial_load.len(), 1);
         assert_eq!(initial_load[0].kv_expected_ranks, 1);
@@ -2240,9 +2212,7 @@ mod tests {
                 .withdraw(pool(1), old_generation, PoolRetirementMode::Graceful)
                 .await
         );
-        assert!(registry.readiness().entries.is_empty());
         assert!(registry.load_snapshots().is_empty());
-        assert!(!registry.replace_serving_facts(pool(1), old_generation, serving_facts.clone(),));
         assert!(!registry.observe_load(
             pool(1),
             old_generation,
@@ -2261,7 +2231,6 @@ mod tests {
             .unwrap();
         assert_ne!(replacement.layout_generation, old_generation);
         assert_ne!(replacement.handle.identity(), old_producer);
-        assert!(!registry.replace_serving_facts(pool(1), old_generation, serving_facts));
         assert!(
             !registry
                 .replace_load_capacity(
@@ -2278,10 +2247,6 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(registry.load_snapshots()[0].kv_expected_ranks, 0);
-        assert_eq!(
-            registry.readiness().entries[0].state,
-            ServingReadinessState::Unknown
-        );
         registry.detach(replacement).await.unwrap();
     }
 
@@ -2310,7 +2275,6 @@ mod tests {
         .await
         .expect("terminal hub failure must withdraw the catalog descriptor");
         assert!(attachment.pool_cancel.is_cancelled());
-        assert!(registry.readiness().entries.is_empty());
         assert!(registry.load_snapshots().is_empty());
         assert!(
             registry

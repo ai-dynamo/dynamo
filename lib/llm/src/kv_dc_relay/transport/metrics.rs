@@ -11,7 +11,7 @@ use prometheus::{IntCounter, IntGauge};
 
 use super::super::identity::DcRelayIdentity;
 use super::super::pool_registry::PoolRegistry;
-use super::super::readiness::ServingReadinessState;
+use super::super::topology::{TopologyPublisher, TopologyReadinessState};
 use super::source::WanPublicationSource;
 
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +40,7 @@ struct MetricsOwnerKey {
 struct ActiveMetricsSource {
     identity: DcRelayIdentity,
     pools: Weak<PoolRegistry>,
+    topology: Weak<TopologyPublisher>,
     last_terminal_failures: u64,
 }
 
@@ -137,8 +138,8 @@ impl TransportMetrics {
             &[],
         )?;
         let readiness = metrics.create_intgaugevec(
-            "kv_dc_relay_serving_readiness_binding_count",
-            "Current advertised model bindings by serving-readiness state.",
+            "kv_dc_relay_serving_topology_count",
+            "Current namespace model topologies by serving-readiness state.",
             &["state"],
             &[],
         )?;
@@ -244,6 +245,7 @@ impl TransportMetrics {
         *active = Some(ActiveMetricsSource {
             identity: source.relay_identity(),
             pools: Arc::downgrade(source.pools()),
+            topology: Arc::downgrade(source.topology()),
             last_terminal_failures: 0,
         });
         self.tls_server_cert_expiry
@@ -277,9 +279,14 @@ impl TransportMetrics {
             self.reset_gauges();
             return;
         };
+        let Some(topology) = active.topology.upgrade() else {
+            *active_guard = None;
+            self.reset_gauges();
+            return;
+        };
         let catalog = pools.catalog();
         let publication = pools.publication_metrics();
-        let readiness = pools.readiness();
+        let readiness = topology.snapshot();
         let load = pools.load_snapshots();
         self.catalog_pool_count
             .set(saturating_i64(catalog.pools().len()));
@@ -305,9 +312,9 @@ impl TransportMetrics {
         let mut ready = 0usize;
         for entry in readiness.entries {
             match entry.state {
-                ServingReadinessState::Unknown => unknown += 1,
-                ServingReadinessState::Unavailable => unavailable += 1,
-                ServingReadinessState::Ready => ready += 1,
+                TopologyReadinessState::Unknown => unknown += 1,
+                TopologyReadinessState::Unavailable => unavailable += 1,
+                TopologyReadinessState::Ready => ready += 1,
             }
         }
         self.readiness_unknown_count.set(saturating_i64(unknown));
@@ -466,7 +473,8 @@ mod tests {
                 publication_delay: Duration::from_millis(1),
             },
         ));
-        WanPublicationSource::new(component, pools, identity, lifecycle)
+        let topology = Arc::new(TopologyPublisher::new(Default::default(), &pools.catalog()));
+        WanPublicationSource::new(component, pools, topology, identity, lifecycle)
     }
 
     #[tokio::test]
