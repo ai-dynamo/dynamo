@@ -549,6 +549,9 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 required_owners:
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
+  owners:
+  - operator
 - glob: deploy/operator/
   owners:
   - operator
@@ -851,6 +854,10 @@ shared:
   owners:
   - performance
   - planner
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner

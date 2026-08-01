@@ -786,6 +786,7 @@
 /components/src/dynamo/sglang/request_handlers/video_generation/                                        @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/common/configuration/groups/*router_args.py                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py                                      @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/src/dynamo/planner/connectors/clients/kubernetes_api.py                                     @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/sglang/request_handlers/embedding/metrics.py                                     @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/tests/test_sglang_gms_memory_saver.py                                     @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/common/tests/multimodal/test_routing_utils.py                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
