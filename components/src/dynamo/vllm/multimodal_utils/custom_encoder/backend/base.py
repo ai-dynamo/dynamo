@@ -22,10 +22,12 @@ Division of labour (author vs. Dynamo):
   to peak; if ``buckets`` is set (once CUDA-graph batching is supported), capture
   one CUDA graph per rung here so it is bound to the thread that later replays it
   in ``forward_batch``. Pick the device yourself (``"cuda"`` / the current device).
-- ``preprocess(raw) -> Preprocessed{item, cost}`` — **off the actor thread,
+- ``preprocess(raw) -> Preprocessed{item, cost, bucket_key}`` — **off the actor thread,
   concurrent.** Deterministic, thread-safe, CUDA-free (fetch / resize / patchify
   on CPU/pinned memory). ``cost`` is a **scalar** — how much the item adds toward
-  ``max_batch_cost`` (e.g. its visual-token count). Raise to reject a bad input —
+  ``max_batch_cost`` (e.g. its visual-token count). ``bucket_key`` is an opaque
+  compatibility partition (e.g. an exact image grid); Dynamo never mixes keys in
+  one forward. Raise to reject a bad input —
   it fails only that image, before any GPU work. **Off by default:** override
   ``preprocess`` *and* set ``preprocess_concurrency > 0`` together to enable this
   pool. With the defaults (identity passthrough, ``preprocess_concurrency = 0``)
@@ -49,6 +51,9 @@ Attributes read **once at setup** (never per-request):
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
   *chosen* budget (a token budget when ``cost`` is a token count). ``None`` (the
   default) ⇒ **pass-through**: no cap (the author owns sizing).
+- ``max_batch_items`` — an optional independent item-count ceiling for backends
+  with a finite graph-count or pointer-table capacity. ``None`` leaves count
+  unconstrained.
 - ``buckets`` — sorted graph ladder, forward-compatible (unused until CUDA-graph
   batching is supported). ``None``/empty ⇒ eager.
 - ``preprocess_concurrency`` — size of the off-thread pool Dynamo runs
@@ -56,16 +61,18 @@ Attributes read **once at setup** (never per-request):
   straight to ``forward_batch``. Set ``> 0`` (with an overridden ``preprocess``)
   for off-loop fetch / resize / patchify.
 
-Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
-``max_batch_cost`` and never inspects item shape — the author owns any
-shape/padding concerns inside ``forward_batch``.
+Within each opaque compatibility partition, batching is **one-dimensional**:
+Dynamo packs by scalar ``cost`` up to ``max_batch_cost`` and never inspects item
+shape — the author owns the key and all shape/padding concerns inside
+``forward_batch``. FIFO means batcher-submission order after concurrent
+preprocessing, not original client-arrival order.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, List, Optional, Sequence, TypeVar
+from typing import Generic, Hashable, List, Optional, Sequence, TypeVar
 
 import torch
 
@@ -75,7 +82,7 @@ ItemT = TypeVar("ItemT")  # opaque payload preprocess() hands to forward_batch()
 
 @dataclass(frozen=True)
 class Preprocessed(Generic[ItemT]):
-    """The result of ``preprocess(raw)``: an opaque item plus its batching cost.
+    """The result of ``preprocess(raw)``: an opaque item plus batching policy.
 
     ``cost`` is computed **once, off the actor thread**, so the batcher never
     evaluates model policy (it stays torch-free) and packs purely by this scalar.
@@ -87,10 +94,14 @@ class Preprocessed(Generic[ItemT]):
             **pass-through mode** (``max_batch_cost`` is ``None``) the batcher
             never reads it, so a pass-through author can leave it at the default
             ``1``.
+        bucket_key: Optional opaque compatibility partition. Items with different
+            keys are never passed to the same ``forward_batch`` call. ``None``
+            preserves the single-partition behavior.
     """
 
     item: ItemT
     cost: int = 1
+    bucket_key: Hashable | None = None
 
 
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
@@ -115,6 +126,11 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     #: — every drained item in one iteration is handed to a single ``forward_batch``
     #: (the author owns sizing; ``cost`` is ignored).
     max_batch_cost: Optional[int] = None
+
+    #: Optional independent item-count ceiling per ``forward_batch`` call. Use
+    #: this for a finite graph-count capacity; keep scalar compute/resource work
+    #: in ``max_batch_cost``.
+    max_batch_items: Optional[int] = None
 
     #: Sorted graph ladder (the captured rungs), **forward-compatible** — unused
     #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.

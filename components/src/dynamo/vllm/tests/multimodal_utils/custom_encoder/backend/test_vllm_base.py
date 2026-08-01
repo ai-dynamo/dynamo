@@ -3,8 +3,8 @@
 
 """Unit tests for the custom encoder backend contract.
 
-Pin the author-facing contract surface: the ``Preprocessed`` carrier (item +
-scalar cost, no bucket_key), the hardcoded ``image_token_id`` attribute, the
+Pin the author-facing contract surface: the ``Preprocessed`` carrier (item,
+scalar cost, and opaque compatibility key), the hardcoded ``image_token_id`` attribute, the
 no-device ``build`` signature, and that the ABC cannot be instantiated without
 the required methods.
 """
@@ -55,8 +55,8 @@ class _PassthroughBackend(VisionEncoderBackend):
 
 
 def test_preprocessed_is_frozen():
-    p = Preprocessed(item="x", cost=3)
-    assert (p.item, p.cost) == ("x", 3)
+    p = Preprocessed(item="x", cost=3, bucket_key=(1, 4, 4))
+    assert (p.item, p.cost, p.bucket_key) == ("x", 3, (1, 4, 4))
     with pytest.raises(Exception):  # FrozenInstanceError
         p.cost = 4  # type: ignore[misc]
 
@@ -66,9 +66,8 @@ def test_preprocessed_cost_defaults_to_1():
     assert Preprocessed(item="x").cost == 1
 
 
-def test_preprocessed_has_no_bucket_key():
-    # Batching is one-dimensional (scalar cost only) — there is no bucket_key.
-    assert not hasattr(Preprocessed(item="x"), "bucket_key")
+def test_preprocessed_bucket_key_defaults_to_none():
+    assert Preprocessed(item="x").bucket_key is None
 
 
 def test_abc_cannot_be_instantiated():
@@ -96,6 +95,7 @@ def test_default_attrs_and_close_noop():
     # preprocess pool.
     assert e.buckets is None
     assert e.max_batch_cost is None
+    assert e.max_batch_items is None
     assert e.preprocess_concurrency == 0
     assert e.image_token_id == 151655
     assert e.close() is None

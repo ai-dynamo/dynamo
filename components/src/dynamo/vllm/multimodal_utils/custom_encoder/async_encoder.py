@@ -15,9 +15,10 @@ turns the author's synchronous, thread-affine backend into an awaitable
   submits if **all** succeed; on any failure it submits nothing (zero GPU work)
   and raises the request-level error, so a text-only LM never sees a partial
   result;
-- handing the preprocessed items (with their off-thread-computed scalar ``cost``)
-  to a ``ThreadedMicroBatcher``, which coalesces across concurrent ``encode`` calls
-  by cost and runs ``backend.forward_batch`` on the single actor thread.
+- handing the preprocessed items (with their off-thread-computed scalar ``cost``
+  and opaque compatibility key) to a ``ThreadedMicroBatcher``, which coalesces
+  across concurrent ``encode`` calls by key, cost, and item cap, then runs
+  ``backend.forward_batch`` on the single actor thread.
 
 The backend's ``build`` runs on the batcher's actor thread (so a CUDA graph it
 captures is replayed on the same thread) and its ``close`` runs there at
@@ -128,6 +129,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             self._batcher = ThreadedMicroBatcher(
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
+                max_batch_items=self._backend.max_batch_items,
                 max_queue_delay_us=self._max_queue_delay_us,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
@@ -202,7 +204,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         preprocessed: List[Preprocessed] = settled  # type: ignore[assignment]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
-        return await self._batcher.submit(items, costs)
+        bucket_keys = [p.bucket_key for p in preprocessed]
+        return await self._batcher.submit(items, costs, bucket_keys)
 
     def shutdown(self) -> None:
         """Stop the actor thread (running ``backend.close`` on it) and the

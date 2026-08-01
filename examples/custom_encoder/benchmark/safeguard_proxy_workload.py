@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate and audit the fixed-shape Qwen custom-encoder proxy workload."""
+"""Generate and audit single- or mixed-shape Qwen encoder workloads."""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ SEED = 42
 JPEG_MIN_BYTES = 50 * 1024
 JPEG_MAX_BYTES = 60 * 1024
 DEFAULT_IMAGE_SIZE = 500
+BENCHMARK_IMAGE_SIZE_COUNTS = ((300, 300, 500), (500, 500, 500))
 BASE_PROMPT = "Classify the image and briefly explain the label."
 CUSTOM_IMAGE_TOKEN = "<|image_pad|>"
 CUSTOM_CHAT_TEMPLATE = (
@@ -188,6 +189,42 @@ def _request_schedule(image_paths: list[str], requests: int, seed: int) -> list[
     return schedule
 
 
+def _normalize_image_size_counts(
+    image_size: int,
+    unique_images: int,
+    image_size_counts: tuple[tuple[int, int, int], ...] | None,
+) -> tuple[tuple[int, int, int], ...]:
+    if image_size_counts is None:
+        image_size_counts = ((image_size, image_size, unique_images),)
+    if not image_size_counts:
+        raise ValueError("image_size_counts must not be empty")
+    normalized: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for width, height, count in image_size_counts:
+        if width < 1 or height < 1 or count < 1:
+            raise ValueError("image dimensions and counts must be positive")
+        dimensions = (width, height)
+        if dimensions in seen:
+            raise ValueError(f"duplicate image size: {width}x{height}")
+        seen.add(dimensions)
+        normalized.append((width, height, count))
+    return tuple(normalized)
+
+
+def _parse_image_size_count(value: str) -> tuple[int, int, int]:
+    try:
+        dimensions, count_text = value.rsplit(":", 1)
+        width_text, height_text = dimensions.lower().split("x", 1)
+        parsed = (int(width_text), int(height_text), int(count_text))
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "expected WIDTHxHEIGHT:COUNT, for example 300x300:500"
+        ) from exc
+    if min(parsed) < 1:
+        raise argparse.ArgumentTypeError("dimensions and count must be positive")
+    return parsed
+
+
 def generate_workload(
     output_dir: Path,
     decoder_model: str = DECODER_MODEL,
@@ -198,63 +235,93 @@ def generate_workload(
     target_isl: int = TARGET_ISL,
     seed: int = SEED,
     image_size: int = DEFAULT_IMAGE_SIZE,
+    image_size_counts: tuple[tuple[int, int, int], ...] | None = None,
 ) -> Path:
     if not concurrencies or any(value < 1 for value in concurrencies):
         raise ValueError("concurrencies must be positive")
     if len(set(concurrencies)) != len(concurrencies):
         raise ValueError("concurrencies must be unique")
-    if image_size < 1:
-        raise ValueError("image_size must be positive")
-    if unique_images < 1:
-        raise ValueError("unique_images must be positive")
+    normalized_sizes = _normalize_image_size_counts(
+        image_size, unique_images, image_size_counts
+    )
+    unique_images = sum(count for _, _, count in normalized_sizes)
     if unique_images > requests:
-        raise ValueError("unique_images must not exceed requests")
+        raise ValueError("unique images must not exceed requests")
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(decoder_model)
     processor = AutoProcessor.from_pretrained(encoder_model)
-    dimensions = (image_size, image_size)
-
-    records = [
-        _generate_jpeg(
-            output_dir / "images" / f"image_{index:02d}_{image_size}x{image_size}.jpg",
-            seed + index,
-            dimensions,
-        )
-        for index in range(unique_images)
-    ]
+    records: list[dict[str, Any]] = []
+    image_index = 0
+    for width, height, count in normalized_sizes:
+        for size_index in range(count):
+            records.append(
+                _generate_jpeg(
+                    output_dir
+                    / "images"
+                    / (
+                        f"image_{image_index:04d}_{width}x{height}_"
+                        f"{size_index:04d}.jpg"
+                    ),
+                    seed + image_index,
+                    (width, height),
+                )
+            )
+            image_index += 1
     encoded_hashes = {str(record["encoded_sha256"]) for record in records}
     decoded_hashes = {str(record["decoded_rgb_sha256"]) for record in records}
     if len(encoded_hashes) != unique_images or len(decoded_hashes) != unique_images:
         raise RuntimeError("generated image pool is not globally unique")
 
-    with Image.open(str(records[0]["path"])) as encoded:
-        calibration_image = encoded.convert("RGB")
-
-    def calculate_isl(prompt: str) -> int:
-        return _calculate_custom_isl_components(
-            tokenizer, processor.image_processor, prompt, calibration_image
+    prompts_by_size: dict[str, str] = {}
+    observed_isl_by_size: dict[str, int] = {}
+    for width, height, _ in normalized_sizes:
+        size_key = f"{width}x{height}"
+        calibration_record = next(
+            record
+            for record in records
+            if (int(record["width"]), int(record["height"])) == (width, height)
         )
+        with Image.open(str(calibration_record["path"])) as encoded:
+            calibration_image = encoded.convert("RGB")
 
-    prompt, observed_isl = _calibrate_prompt(target_isl, calculate_isl)
+        def calculate_isl(prompt: str) -> int:
+            return _calculate_custom_isl_components(
+                tokenizer, processor.image_processor, prompt, calibration_image
+            )
+
+        prompt, observed_isl = _calibrate_prompt(target_isl, calculate_isl)
+        prompts_by_size[size_key] = prompt
+        observed_isl_by_size[size_key] = observed_isl
+
+    prompts_by_path: dict[str, str] = {}
     for record in records:
         with Image.open(str(record["path"])) as encoded:
             image = encoded.convert("RGB")
-        if (
-            _calculate_custom_isl_components(
-                tokenizer, processor.image_processor, prompt, image
-            )
-            != target_isl
-        ):
-            raise RuntimeError("fixed-shape image produced a different ISL")
+        size_key = f'{record["width"]}x{record["height"]}'
+        prompt = prompts_by_size[size_key]
+        image_inputs = processor.image_processor(images=[image], return_tensors="pt")
+        grid = image_inputs["image_grid_thw"][0]
+        raw_patch_rows = int(grid.prod().item())
+        merge_size = int(processor.image_processor.merge_size)
+        observed_isl = _calculate_custom_isl_components(
+            tokenizer, processor.image_processor, prompt, image
+        )
+        if observed_isl != target_isl:
+            raise RuntimeError(f"{size_key} image produced ISL {observed_isl}")
+        record["grid_thw"] = [int(value) for value in grid.tolist()]
+        record["raw_patch_rows"] = raw_patch_rows
+        record["merged_visual_tokens"] = raw_patch_rows // merge_size**2
+        prompts_by_path[str(record["path"])] = prompt
 
     schedule = _request_schedule(
         [str(record["path"]) for record in records], requests, seed
     )
+    records_by_path = {str(record["path"]): record for record in records}
     rows = [
         {
             "session_id": f"request-{index:04d}",
             "image": image_path,
-            "text": prompt,
+            "text": prompts_by_path[image_path],
         }
         for index, image_path in enumerate(schedule)
     ]
@@ -265,6 +332,19 @@ def generate_workload(
 
     sizes = [int(record["size_bytes"]) for record in records]
     occurrence_counts = Counter(schedule)
+    requests_by_size = Counter(
+        f'{records_by_path[path]["width"]}x{records_by_path[path]["height"]}'
+        for path in schedule
+    )
+    size_manifest = [
+        {
+            "width": width,
+            "height": height,
+            "unique_images": count,
+            "requests": requests_by_size[f"{width}x{height}"],
+        }
+        for width, height, count in normalized_sizes
+    ]
     manifest = {
         "axis": "concurrency",
         "concurrencies": list(concurrencies),
@@ -276,13 +356,9 @@ def generate_workload(
         "seed": seed,
         "target_isl": target_isl,
         "target_osl": TARGET_OSL,
-        "prompt": prompt,
-        "prompt_policy": "byte-identical calibrated synthetic prompt",
-        "decoded_image": {
-            "mode": "RGB",
-            "width": image_size,
-            "height": image_size,
-        },
+        "prompts_by_image_size": prompts_by_size,
+        "prompt_policy": "exact-ISL calibrated synthetic prompt per image size",
+        "image_size_counts": size_manifest,
         "encoding": {
             "format": "JPEG",
             "quality": 85,
@@ -305,13 +381,13 @@ def generate_workload(
             "sha256": _sha256(input_path),
         },
         "images": records,
-        "observed_calibration_isl": observed_isl,
+        "observed_calibration_isl_by_image_size": observed_isl_by_size,
     }
     manifest_path = output_dir / "workload_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(
         f"workload={input_path.resolve()} images={unique_images} "
-        f"requests={requests} isl={observed_isl}"
+        f"requests={requests} sizes={size_manifest} isl={target_isl}"
     )
     return manifest_path
 
@@ -320,21 +396,41 @@ def validate_workload(
     root: Path,
     expected_image_size: int | None = None,
     expected_unique_images: int | None = None,
+    expected_image_size_counts: tuple[tuple[int, int, int], ...] | None = None,
 ) -> dict[str, Any]:
     manifest_path = root / "workload_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    decoded_image = manifest["decoded_image"]
-    image_size = (int(decoded_image["width"]), int(decoded_image["height"]))
-    if min(image_size) < 1:
-        raise AssertionError("manifest image dimensions must be positive")
-    if expected_image_size is not None and image_size != (
-        expected_image_size,
-        expected_image_size,
-    ):
+    if "image_size_counts" in manifest:
+        size_entries = manifest["image_size_counts"]
+    else:
+        decoded_image = manifest["decoded_image"]
+        size_entries = [
+            {
+                "width": decoded_image["width"],
+                "height": decoded_image["height"],
+                "unique_images": manifest.get("unique_images", 1),
+                "requests": manifest.get("requests_per_concurrency", 1),
+            }
+        ]
+    manifest_size_counts = tuple(
+        (int(entry["width"]), int(entry["height"]), int(entry["unique_images"]))
+        for entry in size_entries
+    )
+    if any(min(entry) < 1 for entry in manifest_size_counts):
+        raise AssertionError("manifest image dimensions and counts must be positive")
+    if expected_image_size is not None and tuple(
+        (width, height) for width, height, _ in manifest_size_counts
+    ) != ((expected_image_size, expected_image_size),):
         raise AssertionError(
-            f"workload image size {image_size} does not match requested "
+            "workload image size does not match requested "
             f"{expected_image_size}x{expected_image_size}"
         )
+    if expected_image_size_counts is not None:
+        expected = _normalize_image_size_counts(1, 1, expected_image_size_counts)
+        if manifest_size_counts != expected:
+            raise AssertionError(
+                f"workload size counts {manifest_size_counts} do not match {expected}"
+            )
     requests = int(manifest["requests_per_concurrency"])
     unique_images = int(manifest["unique_images"])
     if expected_unique_images is not None and unique_images != expected_unique_images:
@@ -353,10 +449,8 @@ def validate_workload(
         raise AssertionError("input JSONL count or hash mismatch")
     if len({row["session_id"] for row in rows}) != requests:
         raise AssertionError("session IDs must be unique")
-    if len({row["text"] for row in rows}) != 1:
-        raise AssertionError("prompt must be byte-identical across requests")
-
-    image_paths = {str(record["path"]) for record in manifest["images"]}
+    image_records = {str(record["path"]): record for record in manifest["images"]}
+    image_paths = set(image_records)
     if len(image_paths) != unique_images:
         raise AssertionError("manifest image count is wrong")
     occurrence_counts = Counter(str(row["image"]) for row in rows)
@@ -374,7 +468,13 @@ def validate_workload(
     decoded_hashes: set[str] = set()
     tokenizer = AutoTokenizer.from_pretrained(manifest["decoder_model"])
     processor = AutoProcessor.from_pretrained(manifest["encoder_model"])
-    prompt = str(manifest["prompt"])
+    prompts_by_size = manifest.get("prompts_by_image_size")
+    if prompts_by_size is None:
+        only_width, only_height, _ = manifest_size_counts[0]
+        prompts_by_size = {f"{only_width}x{only_height}": str(manifest["prompt"])}
+    actual_size_counts: Counter[tuple[int, int]] = Counter()
+    total_raw_patch_rows = 0
+    total_merged_visual_tokens = 0
     for record in manifest["images"]:
         path = Path(record["path"])
         payload = path.read_bytes()
@@ -383,13 +483,16 @@ def validate_workload(
         encoded_hash = hashlib.sha256(payload).hexdigest()
         if encoded_hash != record["encoded_sha256"]:
             raise AssertionError(f"encoded hash mismatch: {path}")
+        expected_dimensions = (int(record["width"]), int(record["height"]))
         with Image.open(path) as encoded:
-            if encoded.format != "JPEG" or encoded.size != image_size:
+            if encoded.format != "JPEG" or encoded.size != expected_dimensions:
                 raise AssertionError(f"invalid JPEG shape or format: {path}")
             image = encoded.convert("RGB")
         decoded_hash = hashlib.sha256(image.tobytes()).hexdigest()
         if decoded_hash != record["decoded_rgb_sha256"]:
             raise AssertionError(f"decoded hash mismatch: {path}")
+        size_key = f"{expected_dimensions[0]}x{expected_dimensions[1]}"
+        prompt = str(prompts_by_size[size_key])
         if (
             _calculate_custom_isl_components(
                 tokenizer, processor.image_processor, prompt, image
@@ -397,19 +500,68 @@ def validate_workload(
             != target_isl
         ):
             raise AssertionError(f"ISL calibration mismatch: {path}")
+        image_inputs = processor.image_processor(images=[image], return_tensors="pt")
+        grid = image_inputs["image_grid_thw"][0]
+        raw_patch_rows = int(grid.prod().item())
+        merge_size = int(processor.image_processor.merge_size)
+        merged_visual_tokens = raw_patch_rows // merge_size**2
+        if "raw_patch_rows" in record and raw_patch_rows != int(
+            record["raw_patch_rows"]
+        ):
+            raise AssertionError(f"raw patch count mismatch: {path}")
+        if "merged_visual_tokens" in record and merged_visual_tokens != int(
+            record["merged_visual_tokens"]
+        ):
+            raise AssertionError(f"merged visual token count mismatch: {path}")
+        actual_size_counts[expected_dimensions] += 1
+        total_raw_patch_rows += occurrence_counts[str(path)] * raw_patch_rows
+        total_merged_visual_tokens += (
+            occurrence_counts[str(path)] * merged_visual_tokens
+        )
         encoded_hashes.add(encoded_hash)
         decoded_hashes.add(decoded_hash)
     if len(encoded_hashes) != unique_images or len(decoded_hashes) != unique_images:
         raise AssertionError("image uniqueness audit failed")
+
+    expected_sizes = Counter(
+        {(width, height): count for width, height, count in manifest_size_counts}
+    )
+    if actual_size_counts != expected_sizes:
+        raise AssertionError(
+            f"decoded image size counts {actual_size_counts} do not match "
+            f"{expected_sizes}"
+        )
+    path_size = {
+        path: (int(record["width"]), int(record["height"]))
+        for path, record in image_records.items()
+    }
+    row_size_counts = Counter(path_size[str(row["image"])] for row in rows)
+    expected_request_counts = Counter(
+        {
+            (int(entry["width"]), int(entry["height"])): int(entry["requests"])
+            for entry in size_entries
+        }
+    )
+    if row_size_counts != expected_request_counts:
+        raise AssertionError("request image-size counts do not match manifest")
+    for row in rows:
+        width, height = path_size[str(row["image"])]
+        if row["text"] != prompts_by_size[f"{width}x{height}"]:
+            raise AssertionError("request prompt does not match its image size")
 
     result = {
         "manifest_sha256": _sha256(manifest_path),
         "input_sha256": _sha256(input_path),
         "requests": requests,
         "images": unique_images,
-        "image_size": list(image_size),
+        "image_size_counts": [
+            {"width": width, "height": height, "count": count}
+            for width, height, count in manifest_size_counts
+        ],
         "target_isl": target_isl,
         "reuse_counts": actual_counts,
+        "raw_patch_rows": total_raw_patch_rows,
+        "merged_visual_tokens": total_merged_visual_tokens,
     }
     print("WORKLOAD_AUDIT=PASS")
     print(json.dumps(result, indent=2))
@@ -428,10 +580,21 @@ def main() -> None:
     )
     generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
+    generate.add_argument(
+        "--image-size-count",
+        action="append",
+        type=_parse_image_size_count,
+        help="repeatable WIDTHxHEIGHT:UNIQUE_IMAGES (for example 300x300:500)",
+    )
     validate = subparsers.add_parser("validate")
     validate.add_argument("workload_dir", type=Path)
     validate.add_argument("--image-size", type=int)
     validate.add_argument("--unique-images", type=int)
+    validate.add_argument(
+        "--image-size-count",
+        action="append",
+        type=_parse_image_size_count,
+    )
     args = parser.parse_args()
     if args.command == "generate":
         generate_workload(
@@ -441,12 +604,18 @@ def main() -> None:
             concurrencies=tuple(args.concurrencies),
             image_size=args.image_size,
             unique_images=args.unique_images,
+            image_size_counts=(
+                tuple(args.image_size_count) if args.image_size_count else None
+            ),
         )
     else:
         validate_workload(
             args.workload_dir.resolve(),
             expected_image_size=args.image_size,
             expected_unique_images=args.unique_images,
+            expected_image_size_counts=(
+                tuple(args.image_size_count) if args.image_size_count else None
+            ),
         )
 
 
