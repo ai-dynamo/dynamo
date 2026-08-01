@@ -92,6 +92,9 @@ vllm:
     runtime_image: vllm/vllm-openai-rocm
     base_image_tag: v0.26.0
     runtime_image_tag: v0.26.0
+    # KVBM's cuda path links nccl and its wheel is repaired with auditwheel; neither
+    # is wired up for ROCm yet, so keep it off until it is separately validated.
+    enable_kvbm: "false"
     # baseline_sbom: not yet captured for rocm — runtime build runs without subtraction
   flashinf_ref: v0.6.14
   vllm_omni_ref: "v0.26.0rc1"

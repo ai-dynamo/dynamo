@@ -309,7 +309,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
-    if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+    if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ] || [ "$DEVICE" = "rocm" ]; then \
     apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
@@ -786,7 +786,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
                 --plat manylinux_2_28_${ARCH_ALT} \
                 --wheel-dir /opt/dynamo/dist \
                 target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ] || [ "$DEVICE" = "rocm" ]; then \
             cp target/wheels/*.whl /opt/dynamo/dist/; \
         fi; \
     fi && \

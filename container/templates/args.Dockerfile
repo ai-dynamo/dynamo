@@ -46,7 +46,12 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
+{# Per-device override wins, mirroring nixl_ref below. #}
+{% if "enable_kvbm" in context[framework].get(device_key, {}) -%}
+ARG ENABLE_KVBM={{ context[framework][device_key].enable_kvbm }}
+{% else -%}
 ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
+{% endif -%}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
