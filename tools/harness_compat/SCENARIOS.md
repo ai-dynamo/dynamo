@@ -18,6 +18,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C1k | Codex MCP elicitation | stdio fixture requests an MCP form response during a native tool call | record the headless client action and any app-server elicitation callback without treating a local decline as a Dynamo failure | P3 |
 | C1l | Codex MCP progress | stdio fixture sends one standards-compliant progress notification using the client token | record whether app-server exposes `mcpToolCall` progress without affecting the completed tool/result loop | P3 |
 | C1m | Codex goal lifecycle | model creates, reads, and completes one goal around a shell verification | Responses goal-tool continuations and `thread/goal/updated` lifecycle remain accepted | P1 |
+| C1n | Codex explicit skill input | raw native `skill` input plus a skill-directed file effect | app-server skill expansion and its resulting Responses tool loop remain accepted | P2 weekly |
 | C1a | Codex JSON-schema final output | schema-constrained completed turn | Responses `text.format` discriminator remains accepted | P1 |
 | C1b | Codex failed shell tool then recovery | native command exit code 1 plus recovery file | tool-result continuation remains a valid Responses turn | P1 |
 | C2 | Codex child agent | `spawn_agent` then child completion | child request has `thread-id` and parent mapping | P0 |
