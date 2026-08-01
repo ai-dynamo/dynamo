@@ -232,12 +232,12 @@ pub struct WorkerCandidates<'a> {
 }
 
 pub trait WorkerScorer: Send {
-    /// Add one finite, lower-is-better cost contribution per candidate row.
+    /// Write one finite, lower-is-better cost contribution per candidate row.
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        costs: &mut [f64],
+        contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError>;
 }
 
@@ -412,6 +412,7 @@ struct WorkerSelectionPolicyInner {
     picker: Box<dyn WorkerPicker>,
     candidates: WorkerCandidateColumns,
     costs: Vec<f64>,
+    contributions: Vec<f64>,
 }
 
 /// Opt-in native scorer/picker composition for [`WorkerSelector`].
@@ -432,6 +433,7 @@ impl WorkerSelectionPolicy {
                 picker,
                 candidates: WorkerCandidateColumns::default(),
                 costs: Vec::new(),
+                contributions: Vec::new(),
             }),
         }
     }
@@ -781,11 +783,11 @@ where
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        costs: &mut [f64],
+        contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        debug_assert_eq!(candidates.len(), costs.len());
-        for (row, cost) in costs.iter_mut().enumerate() {
-            *cost += self.worker_cost(context, &candidates.row(row));
+        debug_assert_eq!(candidates.len(), contributions.len());
+        for (row, contribution) in contributions.iter_mut().enumerate() {
+            *contribution = self.worker_cost(context, &candidates.row(row));
         }
         Ok(())
     }
@@ -991,15 +993,25 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             picker,
             candidates,
             costs,
+            contributions,
             ..
         } = &mut *inner;
         costs.resize(candidates.workers.len(), 0.0);
         costs.fill(0.0);
+        contributions.resize(candidates.workers.len(), 0.0);
         let candidate_view = candidates.candidates();
         for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
-            scorer.score(&input.context, candidate_view, costs)?;
-            if let Some(row) = costs.iter().position(|cost| !cost.is_finite()) {
-                return Err(WorkerSelectionPolicyError::NonFiniteCost { scorer_index, row }.into());
+            contributions.fill(0.0);
+            scorer.score(&input.context, candidate_view, contributions)?;
+            for (row, (cost, contribution)) in
+                costs.iter_mut().zip(contributions.iter()).enumerate()
+            {
+                *cost += *contribution;
+                if !contribution.is_finite() || !cost.is_finite() {
+                    return Err(
+                        WorkerSelectionPolicyError::NonFiniteCost { scorer_index, row }.into(),
+                    );
+                }
             }
         }
 

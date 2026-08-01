@@ -94,10 +94,26 @@ impl WorkerScorer for HighestWorkerScorer {
         &mut self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-        costs: &mut [f64],
+        contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (row, worker) in candidates.workers().iter().enumerate() {
-            costs[row] -= worker.worker_id as f64;
+            contributions[row] = -2.0 * worker.worker_id as f64;
+        }
+        Ok(())
+    }
+}
+
+struct WorkerIdScorer;
+
+impl WorkerScorer for WorkerIdScorer {
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        contributions: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (row, worker) in candidates.workers().iter().enumerate() {
+            contributions[row] = worker.worker_id as f64;
         }
         Ok(())
     }
@@ -128,9 +144,9 @@ impl WorkerScorer for NonFiniteScorer {
         &mut self,
         _context: &WorkerSelectionContext<'_>,
         _candidates: WorkerCandidates<'_>,
-        costs: &mut [f64],
+        contributions: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        costs[0] = f64::NAN;
+        contributions[0] = f64::NAN;
         Ok(())
     }
 }
@@ -426,7 +442,7 @@ async fn native_worker_selection_policy_scores_picks_and_books() {
     let app = native_policy_app(|config| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            vec![Box::new(HighestWorkerScorer)],
+            vec![Box::new(WorkerIdScorer), Box::new(HighestWorkerScorer)],
             Box::new(LowestCostPicker),
         )
     })
