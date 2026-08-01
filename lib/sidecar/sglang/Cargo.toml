@@ -19,8 +19,15 @@ ignored = ["prost"]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
+# Composition root: the OpenAI frontend with the sglang direct-gRPC dispatch
+# provider registered. Keeps the generic ai-dynamo wheel free of sglang/tonic.
+[[bin]]
+name = "dynamo-sglang-frontend"
+path = "src/bin/frontend.rs"
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
@@ -28,6 +35,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

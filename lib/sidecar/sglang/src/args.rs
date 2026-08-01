@@ -56,6 +56,22 @@ pub struct Args {
     /// Total startup deadline in seconds.
     #[arg(long, default_value_t = 300)]
     pub health_deadline_secs: u64,
+
+    /// Run in "direct" mode: register this worker in discovery with a gRPC
+    /// transport and health-check the SGLang gRPC server, but do NOT serve the
+    /// Dynamo request plane. The frontend dispatches inference straight to
+    /// SGLang's native gRPC endpoint. Aggregated serving only. Reuses the
+    /// generic `--direct` registrar in `backend-common` via
+    /// `WorkerConfig.is_direct`.
+    #[arg(long = "direct", default_value_t = false, env = "DYN_DIRECT")]
+    pub direct: bool,
+
+    /// Address the frontend dials for SGLang's gRPC in `--direct` mode, when it
+    /// differs from `--sglang-endpoint` (e.g. a routable pod IP:port for
+    /// multi-node, where the sidecar itself connects over loopback). Defaults to
+    /// the SGLang endpoint the sidecar connects to. Ignored without `--direct`.
+    #[arg(long, env = "DYN_ADVERTISE_GRPC_ENDPOINT")]
+    pub advertise_grpc_endpoint: Option<String>,
 }
 
 impl Args {

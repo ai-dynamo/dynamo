@@ -14,6 +14,7 @@
 
 pub mod args;
 pub mod client;
+pub mod direct;
 pub mod engine;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
@@ -22,4 +23,5 @@ pub mod engine;
 pub mod proto;
 mod protocol;
 
+pub use direct::{GrpcDispatch, SglangDirectDispatchProvider};
 pub use engine::SglangSidecarEngine;
