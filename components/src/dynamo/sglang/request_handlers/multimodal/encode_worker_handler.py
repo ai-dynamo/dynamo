@@ -106,10 +106,19 @@ def _install_load_video_passthrough() -> None:
     ``NvdecVideoDecoder`` so SGLang can drive frame selection itself, so teach
     ``load_video`` to pass such objects through.
 
-    Patches the name bound in ``base_processor`` -- that module does
+    Patch the name **as bound in each importing module**: they do
     ``from sglang.srt.utils import load_video``, so rebinding
-    ``sglang.srt.utils.load_video`` alone would not affect the call site. Both are
-    patched for safety. Idempotent; a no-op when SGLang is unavailable.
+    ``sglang.srt.utils.load_video`` alone leaves those call sites untouched.
+    ``encode_server`` is the one this handler actually goes through -- its
+    ``_flatten_and_load_videos`` calls its own binding -- and omitting it is why
+    an earlier revision still raised ``ValueError: Unsupported video input type``
+    end to end while every unit test passed.
+
+    Verified against ``v0.5.16``: ``encode_server``, ``base_processor`` and
+    ``utils`` are the ``srt`` modules that bind the name. Patch every one that
+    imports successfully and log which, so a future SGLang bump that moves the
+    call site shows up as a missing module rather than silently reverting to the
+    URL path. Idempotent; a no-op when SGLang is unavailable.
     """
     if not SGLANG_VIDEO_DECODER_AVAILABLE:
         return
@@ -127,7 +136,10 @@ def _install_load_video_passthrough() -> None:
         _load_video_passthrough._dynamo_nvdec_passthrough = True  # type: ignore[attr-defined]
         module.load_video = _load_video_passthrough
 
+    patched: list[str] = []
     for module_path in (
+        # The encode worker's own call site -- the one that matters here.
+        "sglang.srt.disaggregation.encode_server",
         "sglang.srt.multimodal.processors.base_processor",
         "sglang.srt.utils",
     ):
@@ -136,9 +148,25 @@ def _install_load_video_passthrough() -> None:
         except (ImportError, OSError):
             continue
         orig = getattr(module, "load_video", None)
-        if orig is None or getattr(orig, "_dynamo_nvdec_passthrough", False):
+        if orig is None:
+            continue
+        if getattr(orig, "_dynamo_nvdec_passthrough", False):
+            patched.append(module_path)
             continue
         _wrap(module, orig)
+        patched.append(module_path)
+
+    if "sglang.srt.disaggregation.encode_server" not in patched:
+        # Without this one the decoder reaches load_video unpatched and the
+        # request fails with "Unsupported video input type" rather than falling
+        # back, so make the gap visible instead of waiting for a 400.
+        logger.warning(
+            "load_video passthrough not installed on encode_server (patched: %s); "
+            "NVDEC video decoding will not work on this SGLang version",
+            patched or "none",
+        )
+    else:
+        logger.debug("load_video passthrough installed on: %s", patched)
 
 
 def _install_nvdec_video_metadata_shim() -> None:

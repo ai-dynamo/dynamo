@@ -521,3 +521,41 @@ async def test_video_routes_through_nvdec_with_cache_disabled(
     nvdec_handler.encoder.encode_mock.assert_awaited_once_with(
         [decoder], Modality.VIDEO
     )
+
+
+def test_load_video_passthrough_patches_the_encode_server_binding() -> None:
+    """The passthrough must reach the binding encode_server actually calls.
+
+    Regression: an earlier revision patched base_processor and sglang.srt.utils
+    but not encode_server, which does its own ``from sglang.srt.utils import
+    load_video``. Every unit test passed -- they stubbed the decoder factory, so
+    load_video was never reached -- while the deployed encode worker rejected
+    each video request with "Unsupported video input type" and returned 400.
+    """
+    encode_server = pytest.importorskip(
+        "sglang.srt.disaggregation.encode_server",
+        reason="SGLang required to verify the patch target",
+    )
+    from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        _install_load_video_passthrough,
+    )
+
+    _install_load_video_passthrough()
+    patched = encode_server.load_video
+    assert getattr(patched, "_dynamo_nvdec_passthrough", False), (
+        "encode_server.load_video is unpatched; NVDEC decoders will be rejected "
+        "by SGLang at request time"
+    )
+
+    # A pre-built decoder passes straight through instead of raising.
+    sentinel = VideoDecoderWrapper.__new__(VideoDecoderWrapper)
+    assert patched(sentinel) is sentinel
+
+    # Anything else still goes to the original implementation.
+    with pytest.raises(Exception):
+        patched(object())
+
+    _install_load_video_passthrough()  # idempotent
+    assert encode_server.load_video is patched

@@ -95,8 +95,10 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         # close()/__del__ need _tmp_path, and source_bytes reads the rest.
         self._source = tmp_path
         self._source_bytes = data
-        self._source_path = None
-        self._tmp_path = tmp_path
+        self._source_path: str | None = None
+        # Annotated because close() clears it; without this mypy infers `str`
+        # from the assignment and rejects the reset.
+        self._tmp_path: str | None = tmp_path
         self._num_decode_threads = 1
         self._tc_kwargs: dict[str, Any] = {}
 
