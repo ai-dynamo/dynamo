@@ -11,6 +11,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import shlex
 import signal
 import statistics
@@ -20,6 +21,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,7 @@ DEFAULT_CONCURRENCIES = (8, 16, 32, 64)
 REQUESTS = 1000
 WARMUP_REQUESTS = 20
 CONFIRMATION_RUNS = 3
+PATCH_SWEEP_RUNS = 5
 COMBINED_PORT = 8000
 ENCODER_ONLY_PORT = 8001
 QUEUE_DELAY_US = 1000
@@ -710,9 +713,10 @@ def _base_env() -> dict[str, str]:
             "DYN_QWEN2_VL_ENCODER_MODEL": ENCODER_MODEL,
             "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE": "1536",
             "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY": "64",
-            "DYN_QWEN2_VL_MAX_BATCH_COST": "64",
+            "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(64 * 36 * 36),
+            "DYN_QWEN2_VL_MAX_BATCH_ITEMS": "64",
             "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": "1,2,4,8,16,32,64",
-            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": "500x500",
+            "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES": "300x300,500x500",
             "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
             "DYN_CUSTOM_ENCODER_DISPATCH_LOG": "1",
         }
@@ -1285,6 +1289,231 @@ def summarize(output_root: Path, markdown_path: Path, csv_path: Path) -> None:
     print(f"report={markdown_path} csv={csv_path}")
 
 
+PATCH_SWEEP_CONFIGS: tuple[tuple[str, int, int], ...] = (
+    ("count64", 64 * 36 * 36, 64),
+    ("count32", 64 * 36 * 36, 32),
+    ("patch41472", 32 * 36 * 36, 64),
+)
+
+
+def _patch_sweep_encoder_service(
+    cell_dir: Path, max_batch_patches: int, max_batch_items: int
+) -> ServiceProcess:
+    env = _base_env()
+    env.update(
+        {
+            "DYN_QWEN2_VL_MAX_BATCH_PATCHES": str(max_batch_patches),
+            "DYN_QWEN2_VL_MAX_BATCH_ITEMS": str(max_batch_items),
+        }
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "examples.custom_encoder.benchmark.encoder_only_server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(ENCODER_ONLY_PORT),
+        "--model",
+        DECODER_MODEL,
+        "--max-queue-delay-us",
+        "0",
+    ]
+    return ServiceProcess(
+        "encoder-only-patch-sweep",
+        command,
+        env,
+        f"http://localhost:{ENCODER_ONLY_PORT}/health",
+        cell_dir / "server.log",
+        ready_text='"ready"',
+    )
+
+
+def _patch_sweep_dispatch_summary(server_log: Path) -> dict[str, Any]:
+    dispatch_pattern = re.compile(
+        r"custom_encoder_dispatch mode=graph batch_size=(\d+) bucket=(\d+) "
+        r"grid=(\d+)x(\d+)x(\d+) patch_cost=(\d+) padded_patch_cost=(\d+)"
+    )
+    memory_pattern = re.compile(r"device_memory_delta_gib=([0-9.]+)")
+    dispatches: Counter[tuple[str, int, int]] = Counter()
+    actual_patches = 0
+    padded_patches = 0
+    capture_memory_gib: float | None = None
+    for line in server_log.read_text(encoding="utf-8").splitlines():
+        if match := dispatch_pattern.search(line):
+            batch_size, bucket, temporal, height, width, actual, padded = (
+                int(value) for value in match.groups()
+            )
+            grid = f"{temporal}x{height}x{width}"
+            dispatches[(grid, batch_size, bucket)] += 1
+            actual_patches += actual
+            padded_patches += padded
+        if match := memory_pattern.search(line):
+            capture_memory_gib = float(match.group(1))
+    return {
+        "calls": sum(dispatches.values()),
+        "actual_patches_including_warmup": actual_patches,
+        "padded_patches_including_warmup": padded_patches,
+        "padded_to_actual_amplification": (
+            padded_patches / actual_patches if actual_patches else None
+        ),
+        "capture_memory_delta_gib": capture_memory_gib,
+        "distribution": [
+            {
+                "grid": grid,
+                "batch_size": batch_size,
+                "bucket": bucket,
+                "calls": calls,
+            }
+            for (grid, batch_size, bucket), calls in sorted(dispatches.items())
+        ],
+    }
+
+
+def run_patch_budget_sweep(
+    workload_dir: Path,
+    warmup_dir: Path,
+    output_dir: Path,
+    repetitions: int = PATCH_SWEEP_RUNS,
+    concurrency: int = 64,
+) -> list[dict[str, Any]]:
+    if repetitions < 1 or concurrency < 1:
+        raise ValueError("repetitions and concurrency must be positive")
+    measured_audit = validate_workload(
+        workload_dir,
+        expected_unique_images=REQUESTS,
+        expected_image_size_counts=((300, 300, 500), (500, 500, 500)),
+    )
+    warmup_audit = validate_workload(
+        warmup_dir,
+        expected_unique_images=WARMUP_REQUESTS,
+        expected_image_size_counts=((300, 300, 10), (500, 500, 10)),
+    )
+    if measured_audit["raw_patch_rows"] != 890_000:
+        raise AssertionError("measured workload must contain exactly 890,000 patches")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "dynamo_commit": _command_output(["git", "rev-parse", "HEAD"]),
+        "dynamo_branch": _command_output(["git", "branch", "--show-current"]),
+        "container_image": os.environ.get("DYNAMO_BENCHMARK_IMAGE"),
+        "gpu": _command_output(
+            [
+                "nvidia-smi",
+                "--id=0",
+                "--query-gpu=name,uuid,driver_version",
+                "--format=csv,noheader",
+            ]
+        ),
+        "repetitions": repetitions,
+        "concurrency": concurrency,
+        "request_count": REQUESTS,
+        "warmup_request_count": WARMUP_REQUESTS,
+        "measured_workload": measured_audit,
+        "warmup_workload": warmup_audit,
+        "configs": [
+            {
+                "name": name,
+                "max_batch_patches": patches,
+                "max_batch_items": items,
+            }
+            for name, patches, items in PATCH_SWEEP_CONFIGS
+        ],
+        "order_policy": "rotate config order by repetition",
+    }
+    _write_or_check_metadata(output_dir, metadata)
+
+    rows: list[dict[str, Any]] = []
+    with GpuSampler(output_dir / "gpu_samples.csv"):
+        for repetition in range(1, repetitions + 1):
+            offset = (repetition - 1) % len(PATCH_SWEEP_CONFIGS)
+            order = PATCH_SWEEP_CONFIGS[offset:] + PATCH_SWEEP_CONFIGS[:offset]
+            for order_index, (name, patches, items) in enumerate(order, start=1):
+                cell_dir = output_dir / name / f"run{repetition}"
+                result_path = cell_dir / "result.json"
+                if result_path.is_file():
+                    rows.append(json.loads(result_path.read_text(encoding="utf-8")))
+                    continue
+                with _patch_sweep_encoder_service(cell_dir, patches, items):
+                    warmup_artifact = cell_dir / "warmup"
+                    _run_single(
+                        _aiperf_command(
+                            role=ENCODER_ONLY_ROLE,
+                            port=ENCODER_ONLY_PORT,
+                            concurrency=min(concurrency, WARMUP_REQUESTS),
+                            requests=WARMUP_REQUESTS,
+                            input_file=warmup_dir
+                            / f"image_custom_{WARMUP_REQUESTS}_isl{TARGET_ISL}.jsonl",
+                            artifact_dir=warmup_artifact,
+                        ),
+                        warmup_artifact,
+                    )
+                    measured_artifact = cell_dir / "measured"
+                    process_result = _run_single(
+                        _aiperf_command(
+                            role=ENCODER_ONLY_ROLE,
+                            port=ENCODER_ONLY_PORT,
+                            concurrency=concurrency,
+                            requests=REQUESTS,
+                            input_file=workload_dir
+                            / f"image_custom_{REQUESTS}_isl{TARGET_ISL}.jsonl",
+                            artifact_dir=measured_artifact,
+                        ),
+                        measured_artifact,
+                    )
+                exported = measured_artifact / "profile_export_aiperf.json"
+                validation = validate_aiperf(exported, ENCODER_ONLY_ROLE, concurrency)
+                if not validation["accepted"]:
+                    raise AssertionError(
+                        f"AIPerf validation failed for {name} run {repetition}: "
+                        f"{validation['failures']}"
+                    )
+                duration_s = (
+                    process_result.finished_ns - process_result.released_ns
+                ) / 1_000_000_000
+                row = {
+                    "config": name,
+                    "repetition": repetition,
+                    "order_index": order_index,
+                    "max_batch_patches": patches,
+                    "max_batch_items": items,
+                    "requests": REQUESTS,
+                    "full_command_duration_s": duration_s,
+                    "full_command_request_s": REQUESTS / duration_s,
+                    "aiperf": validation,
+                    "dispatch": _patch_sweep_dispatch_summary(cell_dir / "server.log"),
+                }
+                result_path.write_text(
+                    json.dumps(row, indent=2) + "\n", encoding="utf-8"
+                )
+                rows.append(row)
+
+    summaries = []
+    for name, patches, items in PATCH_SWEEP_CONFIGS:
+        selected = [row for row in rows if row["config"] == name]
+        durations = [float(row["full_command_duration_s"]) for row in selected]
+        throughputs = [float(row["aiperf"]["request_throughput"]) for row in selected]
+        summaries.append(
+            {
+                "config": name,
+                "max_batch_patches": patches,
+                "max_batch_items": items,
+                "runs": len(selected),
+                "duration_s_median": statistics.median(durations),
+                "duration_s_range": [min(durations), max(durations)],
+                "aiperf_request_s_median": statistics.median(throughputs),
+                "aiperf_request_s_range": [min(throughputs), max(throughputs)],
+                "real_patches_s_at_median_duration": 890_000
+                / statistics.median(durations),
+            }
+        )
+    report = {"summaries": summaries, "runs": rows}
+    (output_dir / "patch_budget_results.json").write_text(
+        json.dumps(report, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps({"summaries": summaries}, indent=2))
+    return rows
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1313,6 +1542,12 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("output_dir", type=Path)
     report.add_argument("--markdown", type=Path)
     report.add_argument("--csv", type=Path)
+    patch_sweep = subparsers.add_parser("patch-budget-sweep")
+    patch_sweep.add_argument("--workload-dir", type=Path, required=True)
+    patch_sweep.add_argument("--warmup-dir", type=Path, required=True)
+    patch_sweep.add_argument("--output-dir", type=Path, required=True)
+    patch_sweep.add_argument("--repetitions", type=int, default=PATCH_SWEEP_RUNS)
+    patch_sweep.add_argument("--concurrency", type=int, default=64)
     return parser
 
 
@@ -1331,6 +1566,14 @@ def main() -> None:
         )
     elif args.command == "validate":
         validate_matrix(args.output_dir.resolve())
+    elif args.command == "patch-budget-sweep":
+        run_patch_budget_sweep(
+            args.workload_dir.resolve(),
+            args.warmup_dir.resolve(),
+            args.output_dir.resolve(),
+            repetitions=args.repetitions,
+            concurrency=args.concurrency,
+        )
     else:
         output_dir = args.output_dir.resolve()
         summarize(

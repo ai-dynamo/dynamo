@@ -20,6 +20,8 @@ from examples.custom_encoder.benchmark.run_parallel_encoder_sweep import (
     ProcessResult,
     _aiperf_command,
     _arm_summary,
+    _patch_sweep_dispatch_summary,
+    _patch_sweep_encoder_service,
     _write_timing,
     audit_pool_disjointness,
     run_barrier_pair,
@@ -44,6 +46,33 @@ def test_aiperf_command_uses_explicit_external_warmup(tmp_path: Path) -> None:
     zmq_dir = command[command.index("--zmq-ipc-path") + 1]
     assert zmq_dir.startswith("/tmp/aiperf-combined-")
     assert len(f"{zmq_dir}/event_bus_proxy_frontend.ipc") <= 107
+
+
+def test_patch_sweep_service_separates_patch_and_item_limits(tmp_path: Path) -> None:
+    service = _patch_sweep_encoder_service(tmp_path, 41_472, 32)
+
+    assert service.env["DYN_QWEN2_VL_MAX_BATCH_PATCHES"] == "41472"
+    assert service.env["DYN_QWEN2_VL_MAX_BATCH_ITEMS"] == "32"
+    assert service.env["DYN_QWEN2_VL_GRAPH_IMAGE_SIZES"] == "300x300,500x500"
+
+
+def test_patch_sweep_dispatch_summary_reconciles_padded_work(tmp_path: Path) -> None:
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "CUDA graph capture complete: device_memory_delta_gib=20.250\n"
+        "custom_encoder_dispatch mode=graph batch_size=31 bucket=32 "
+        "grid=1x36x36 patch_cost=40176 padded_patch_cost=41472\n"
+        "custom_encoder_dispatch mode=graph batch_size=2 bucket=2 "
+        "grid=1x22x22 patch_cost=968 padded_patch_cost=968\n",
+        encoding="utf-8",
+    )
+
+    result = _patch_sweep_dispatch_summary(log_path)
+
+    assert result["calls"] == 2
+    assert result["actual_patches_including_warmup"] == 41_144
+    assert result["padded_patches_including_warmup"] == 42_440
+    assert result["capture_memory_delta_gib"] == 20.25
 
 
 def _write_manifest(root: Path, encoded: str, decoded: str) -> None:

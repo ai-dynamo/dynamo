@@ -328,9 +328,10 @@ def _qwen_benchmark_defaults() -> None:
     os.environ.setdefault("DYN_QWEN2_VL_ENCODER_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
     os.environ.setdefault("DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE", "1536")
     os.environ.setdefault("DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", "64")
-    os.environ.setdefault("DYN_QWEN2_VL_MAX_BATCH_COST", "64")
+    os.environ.setdefault("DYN_QWEN2_VL_MAX_BATCH_PATCHES", str(64 * 36 * 36))
+    os.environ.setdefault("DYN_QWEN2_VL_MAX_BATCH_ITEMS", "64")
     os.environ.setdefault("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,2,4,8,16,32,64")
-    os.environ.setdefault("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", "500x500")
+    os.environ.setdefault("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", "300x300,500x500")
 
 
 def build_parser() -> argparse.ArgumentParser:
