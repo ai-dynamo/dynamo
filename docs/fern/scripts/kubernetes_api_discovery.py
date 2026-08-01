@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic parser for the Dynamo Kubernetes API reference.
 
-The upstream source is ``docs/fern/kubernetes/api-reference.md`` -- crd-ref-docs
-output stitched with Dynamo's header/footer by
+The upstream source is
+``docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md``
+-- crd-ref-docs output stitched with Dynamo's header/footer by
 ``deploy/operator/Makefile::generate-api-docs`` and post-processed by
 ``deploy/operator/docs/fix-api-anchors.py`` so v1alpha1 / v1beta1 same-named
 types get distinct anchors. That Markdown file is the source of truth for

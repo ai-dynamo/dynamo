@@ -39,7 +39,9 @@ MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
 # Repo paths, not links: this page, its generator, and the raw Markdown all
 # land in the same change, so a github.com/.../blob/main deep link to any of
 # them 404s until that change merges and fails the link checker.
-SOURCE_PATH_MD = "docs/fern/kubernetes/api-reference.md"
+SOURCE_PATH_MD = (
+    "docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md"
+)
 GENERATOR_PATH = "docs/fern/scripts/gen_kubernetes_api.py"
 
 _FRONTMATTER = (
