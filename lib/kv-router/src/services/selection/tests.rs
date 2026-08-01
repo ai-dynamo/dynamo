@@ -5,9 +5,11 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -17,11 +19,14 @@ use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
-    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
+use crate::scheduling::selector::WorkerSelector;
+use crate::scheduling::{KvSchedulerError, RoutingEligibility, SchedulingRequest};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -36,6 +41,32 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
+}
+
+struct HighestWorkerSelector;
+
+impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let mut selected = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            selected = selected.max(Some(worker));
+        });
+        let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
+        Ok(WorkerSelectionResult {
+            worker,
+            required_blocks: request.request_blocks(block_size),
+            effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+            cached_tokens: request.effective_cached_tokens_for(worker),
+            potential_decode_blocks: request
+                .potential_decode_blocks_after_admission(worker, block_size),
+        })
+    }
 }
 
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
@@ -128,6 +159,77 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
         body["max_num_batched_tokens"] = serde_json::json!(max_tokens);
     }
     post(app, "/workers", &body.to_string()).await
+}
+
+#[tokio::test]
+async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&factory_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Box::new(HighestWorkerSelector)
+                as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"custom-selector"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    assert_eq!(response_json(reserved).await["worker_id"], 2);
+
+    let loads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads?model_name=model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads).await;
+    let selected = loads[0]["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|load| load["worker_id"] == 2)
+        .unwrap();
+    assert_eq!(selected["active_requests"], 1);
+
+    let other_partition = serde_json::json!({
+        "worker_id": 3,
+        "model_name": "other-model",
+        "endpoint": "http://worker-3:8000",
+        "block_size": 4
+    });
+    assert_eq!(
+        post(app, "/workers", &other_partition.to_string())
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
 }
 
 #[test]

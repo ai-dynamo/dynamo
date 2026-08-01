@@ -17,7 +17,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
-use crate::scheduling::selector::DefaultWorkerSelector;
+use crate::scheduling::selector::{DefaultWorkerSelector, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
     ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
@@ -46,10 +46,43 @@ use super::types::{
     WorkerPatchRequest, WorkerRequest,
 };
 
+pub(crate) type SelectionWorkerSelectorFactory = Box<
+    dyn Fn() -> Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync + 'static>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+// Keep the default selector inline so the default path does not add an allocation.
+#[allow(clippy::large_enum_variant)]
+enum SelectionWorkerSelector {
+    Default(DefaultWorkerSelector),
+    Custom(Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + Sync + 'static>),
+}
+
+impl WorkerSelector<SelectionWorkerConfig> for SelectionWorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
+        request: &crate::scheduling::SchedulingRequest,
+        eligibility: crate::scheduling::RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> Result<crate::protocols::WorkerSelectionResult, KvSchedulerError> {
+        match self {
+            Self::Default(selector) => {
+                selector.select_worker(workers, request, eligibility, block_size)
+            }
+            Self::Custom(selector) => {
+                selector.select_worker(workers, request, eligibility, block_size)
+            }
+        }
+    }
+}
+
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
     SelectionWorkerConfig,
-    DefaultWorkerSelector,
+    SelectionWorkerSelector,
     TieredOverlapRefresher<Indexer>,
 >;
 
@@ -114,6 +147,7 @@ pub struct SelectionCore {
     entries: RwLock<HashMap<RoutingPartitionId, Arc<SelectionEntry>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
+    worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -161,6 +195,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             None,
+            None,
             true,
             cache_config,
             tracking_hash,
@@ -172,6 +207,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
+        worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -180,17 +216,20 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             replica_config,
+            worker_selector_factory,
             false,
             cache_config,
             tracking_hash,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
+        worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
@@ -208,6 +247,7 @@ impl SelectionCore {
             entries: RwLock::new(HashMap::new()),
             indexer_registry,
             kv_router_config,
+            worker_selector_factory,
             cancel_token,
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
@@ -492,7 +532,15 @@ impl SelectionCore {
             self.kv_router_config.clone(),
             block_size,
         ));
-        let selector = DefaultWorkerSelector::new(Some(self.kv_router_config.clone()), WORKER_TYPE);
+        let selector = self.worker_selector_factory.as_ref().map_or_else(
+            || {
+                SelectionWorkerSelector::Default(DefaultWorkerSelector::new(
+                    Some(self.kv_router_config.clone()),
+                    WORKER_TYPE,
+                ))
+            },
+            |factory| SelectionWorkerSelector::Custom(factory()),
+        );
         let profile = self
             .kv_router_config
             .policy_profile(Some(&key.model_name))
