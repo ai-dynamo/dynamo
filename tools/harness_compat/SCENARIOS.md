@@ -31,7 +31,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C5a3 | Codex injected Responses history | inject an assistant `output_text` item, then have a coding turn derive a file from it | app-server’s raw Responses history injection remains accepted by Dynamo and preserves assistant context | P2 |
 | C5a4 | Codex injected agent handoff | inject Codex `agent_message` with `encrypted_content`, then have a coding turn derive a file from it | agent handoff normalization is exercised through native app-server persistence and the Responses tool loop | P1 |
 | C5b | Codex detached review | detached review thread emits entry/exit review items | reviewer-specific Responses stream and lifecycle remain accepted | P1 |
-| C5b1 | Codex inline review | inline review emits entry/exit items, then the same thread completes a tool turn | reviewer-specific Responses stream leaves root-thread history valid for later coding | P2 |
+| C5b1 | Codex inline review | inline review emits entry/exit items, then the same thread completes a tool turn | reviewer-specific Responses stream leaves root-thread history valid for later coding | P1 weekly |
 | C6 | Codex active-turn steering | `turn/steer` accepted while turn is active | cancellation/final SSE semantics leave next user item valid | P0 |
 | C7 | Codex interruption | `turn/interrupt` accepted before completion | canceled stream terminates without corrupting follow-up turn | P0 |
 | C8 | Codex invalid lifecycle preconditions | deliberately stale turn ID rejected by app-server | no orphaned in-flight request or malformed retry | P2 |
