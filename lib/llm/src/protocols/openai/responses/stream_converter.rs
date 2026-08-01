@@ -78,7 +78,7 @@ struct FunctionCallState {
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
     started: bool,
-    done: bool,
+    output_status: Option<OutputStatus>,
 }
 
 impl FunctionCallState {
@@ -408,7 +408,7 @@ impl ResponseStreamConverter {
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
                             started: false,
-                            done: false,
+                            output_status: None,
                         });
                     }
 
@@ -589,9 +589,9 @@ impl ResponseStreamConverter {
         let mut pending: Vec<_> = self
             .function_call_items
             .iter_mut()
-            .filter(|fc| fc.started && !fc.done)
+            .filter(|fc| fc.started && fc.output_status.is_none())
             .map(|fc| {
-                fc.done = true;
+                fc.output_status = Some(output_status);
                 (
                     fc.item_id.clone(),
                     fc.call_id.clone(),
@@ -695,7 +695,7 @@ impl ResponseStreamConverter {
                         namespace: None,
                         name: function_call.name.clone(),
                         arguments: function_call.accumulated_args.clone(),
-                        status: Some(output_status),
+                        status: Some(function_call.output_status.unwrap_or(output_status)),
                     }),
                 ));
             }
@@ -1358,6 +1358,30 @@ mod tests {
         let response = conv.make_response(conv.terminal_status(), conv.completed_output());
         assert_eq!(response.status, Status::Completed);
         let OutputItem::FunctionCall(call) = &response.output[0] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Completed));
+    }
+
+    #[test]
+    fn test_backend_error_preserves_completed_function_call_status() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF\"}"),
+        ));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+
+        let events = conv.emit_error_events(ErrorObject {
+            code: "server_error".to_string(),
+            message: "backend error".to_string(),
+        });
+        assert_eq!(event_types(&events), vec!["response.failed".to_string()]);
+
+        let output = conv.output_with_status(OutputStatus::Incomplete);
+        let OutputItem::FunctionCall(call) = &output[0] else {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Completed));
