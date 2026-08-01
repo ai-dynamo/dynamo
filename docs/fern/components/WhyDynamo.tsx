@@ -39,15 +39,21 @@ const FEATURES = [
   },
 ] as const;
 
+function StoryWindowBar({ title }: { title: string }) {
+  return (
+    <div className="dynamo-story-windowbar" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+      <strong className="dynamo-story-window-label">{title}</strong>
+    </div>
+  );
+}
+
 function PerformanceGraphic() {
   return (
     <div className="dynamo-story-graphic dynamo-story-graphic--performance">
-      <div className="dynamo-story-windowbar">
-        <span />
-        <span />
-        <span />
-        <span className="dynamo-story-window-label">dynamo metrics</span>
-      </div>
+      <StoryWindowBar title="Dynamo Metrics" />
       <div className="dynamo-story-metrics">
         <div>
           <span>Time to first token</span>
@@ -77,12 +83,7 @@ function PerformanceGraphic() {
 function EnginesGraphic() {
   return (
     <div className="dynamo-story-graphic dynamo-story-graphic--engines">
-      <div className="dynamo-story-windowbar">
-        <span />
-        <span />
-        <span />
-        <span className="dynamo-story-window-label">dynamo serve</span>
-      </div>
+      <StoryWindowBar title="Dynamo Serve" />
       <pre>
         <span className="prompt">$</span> dynamo serve --backend <b>vllm</b>
         {"\n"}

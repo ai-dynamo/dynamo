@@ -286,21 +286,30 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn execute_pass(
+    pub(crate) fn try_execute_pass(
         &mut self,
         collector: &mut crate::replay::TraceCollector,
         now_ms: f64,
-    ) -> EnginePassResult {
+    ) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.execute_pass(collector, now_ms),
-            Self::Sglang(core) => core.execute_pass(collector, now_ms),
+            Self::Vllm(core) => core.try_execute_pass(collector, now_ms),
+            Self::Sglang(core) => core.try_execute_pass(collector, now_ms),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
+        self.try_execute_hidden_pass(now_ms)
+            .expect("engine hidden scheduler pass failed")
+    }
+
+    pub(crate) fn try_execute_hidden_pass(
+        &mut self,
+        now_ms: f64,
+    ) -> anyhow::Result<EnginePassResult> {
         match self {
-            Self::Vllm(core) => core.execute_hidden_pass(now_ms),
-            Self::Sglang(core) => core.execute_hidden_pass(now_ms),
+            Self::Vllm(core) => core.try_execute_hidden_pass(now_ms),
+            Self::Sglang(core) => core.try_execute_hidden_pass(now_ms),
         }
     }
 
@@ -370,7 +379,10 @@ pub(crate) enum LiveEngineEvent {
 #[derive(Clone)]
 pub(crate) enum SchedulerEventSender {
     Outputs(SchedulerOutputSender),
-    Ordered(mpsc::Sender<LiveEngineEvent>),
+    Ordered {
+        tx: mpsc::Sender<LiveEngineEvent>,
+        forward_admissions: bool,
+    },
 }
 
 pub(crate) enum SchedulerEventSendError {
@@ -391,7 +403,11 @@ impl SchedulerEventSender {
                 // Legacy output-only consumers do not have an admission event sink.
                 Ok(())
             }
-            Self::Ordered(tx) => tx
+            Self::Ordered {
+                forward_admissions: false,
+                ..
+            } => Ok(()),
+            Self::Ordered { tx, .. } => tx
                 .send(LiveEngineEvent::Admissions(admissions.to_vec()))
                 .await
                 .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
@@ -407,7 +423,7 @@ impl SchedulerEventSender {
                 .send(signals)
                 .await
                 .map_err(SchedulerEventSendError::OutputClosed),
-            Self::Ordered(tx) => tx
+            Self::Ordered { tx, .. } => tx
                 .send(LiveEngineEvent::Outputs(signals))
                 .await
                 .map_err(|_| SchedulerEventSendError::OrderedLaneClosed),
@@ -482,26 +498,28 @@ pub async fn init_kvbm_live(
     kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
-    use crate::kvbm_offload::KvbmOffloadConfig;
+    use crate::kvbm_offload::{KvbmDriveMode, KvbmOffloadConfig};
     let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
-    let engine = std::thread::spawn(move || build_owned_offload_engine(config))
-        .join()
-        .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
+    let engine =
+        std::thread::spawn(move || build_owned_offload_engine(config, KvbmDriveMode::Live))
+            .join()
+            .map_err(|_| anyhow::anyhow!("kvbm-offload live init thread panicked"))??;
     Ok(Some(kv_manager.attach_new_offload_engine(engine)))
 }
 
 /// Attach a [`crate::kvbm_offload::MockOffloadEngine`] driven by
-/// virtual `now_ms` supplied by offline replay. The same engine hot path is
-/// used for live and offline; only the caller's clock source differs.
+/// virtual `now_ms` supplied by offline replay. Offline construction enables
+/// an explicit completion/settlement boundary; live construction retains its
+/// eager best-effort behavior.
 #[cfg(feature = "kvbm-offload")]
 pub fn init_kvbm_offline(
     args: &crate::common::protocols::MockEngineArgs,
     kv_manager: &mut crate::kv_manager::G1Manager,
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
-    use crate::kvbm_offload::KvbmOffloadConfig;
+    use crate::kvbm_offload::{KvbmDriveMode, KvbmOffloadConfig};
     let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
@@ -518,7 +536,7 @@ pub fn init_kvbm_offline(
         bw_g4_to_g2_gbps = config.bandwidth_g4_to_g2_gbps,
         "kvbm-offload: init_kvbm_offline attaching engine"
     );
-    let engine = build_owned_offload_engine(config)?;
+    let engine = build_owned_offload_engine(config, KvbmDriveMode::OfflineDeterministic)?;
     Ok(Some(kv_manager.attach_new_offload_engine(engine)))
 }
 
@@ -530,12 +548,15 @@ pub fn init_kvbm_offline(
 #[cfg(feature = "kvbm-offload")]
 fn build_owned_offload_engine(
     config: crate::kvbm_offload::KvbmOffloadConfig,
+    drive_mode: crate::kvbm_offload::KvbmDriveMode,
 ) -> anyhow::Result<crate::kvbm_offload::MockOffloadEngine> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()?;
-    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new(config))?;
+    let mut engine = rt.block_on(crate::kvbm_offload::MockOffloadEngine::new_with_drive_mode(
+        config, drive_mode,
+    ))?;
     engine.attach_runtime(rt);
     Ok(engine)
 }
@@ -1243,6 +1264,7 @@ mod offload_init_tests {
     use super::{init_kvbm_live, init_kvbm_offline};
     use crate::common::protocols::{KvEventPublishers, MockEngineArgs};
     use crate::kv_manager::G1Manager;
+    use crate::kvbm_offload::KvbmDriveMode;
 
     fn make_kv_manager() -> G1Manager {
         G1Manager::new_with_event_sink(8, 4, KvEventPublishers::default(), 0)
@@ -1273,6 +1295,7 @@ mod offload_init_tests {
         // Returned Arc shares the same engine as the one on kv_manager;
         // earliest_offload_deadline reflects an idle engine.
         assert!(engine.lock().unwrap().earliest_pending_deadline().is_none());
+        assert_eq!(engine.lock().unwrap().drive_mode(), KvbmDriveMode::Live);
         assert!(kv.earliest_offload_deadline().is_none());
     }
 
@@ -1323,6 +1346,10 @@ mod offload_init_tests {
         assert!(kv.has_offload_engine());
         // Engine is still callable post-init — no runtime-dropped hang.
         engine.lock().unwrap().tick(100.0);
+        assert_eq!(
+            engine.lock().unwrap().drive_mode(),
+            KvbmDriveMode::OfflineDeterministic
+        );
         assert!(kv.earliest_offload_deadline().is_none());
     }
 

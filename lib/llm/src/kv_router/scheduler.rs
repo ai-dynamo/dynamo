@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
-use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -63,7 +62,6 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -116,7 +114,6 @@ where
             cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
-            admission_policies,
         )?);
 
         let metrics_scheduler = Arc::clone(&inner);
@@ -325,6 +322,14 @@ where
         self.update_queue_metrics();
     }
 
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        self.inner.select_without_admission(request).await
+    }
+
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.inner.register_workers(worker_ids);
     }
@@ -493,7 +498,6 @@ mod tests {
             Some("test-model"),
             "decode",
             cancellation_token.clone(),
-            Default::default(),
         )
         .await
         .unwrap();
