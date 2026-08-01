@@ -122,6 +122,26 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl
+
+{# On ROCm the framework reaches for `rixl`, not `nixl`. RIXL is not the
+   implementation: this is a name-only namespace re-exporting the upstream
+   nixl_rocm built in wheel_builder. Mirrors the vllm_runtime block. Asserting
+   the re-export keeps a silently-broken KV path from shipping. #}
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    mkdir -p "${SITE_PACKAGES}/rixl" && \
+    printf 'from nixl_rocm import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/__init__.py" && \
+    printf 'from nixl_rocm._api import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_api.py" && \
+    printf 'from nixl_rocm._bindings import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_bindings.py" && \
+    python3 -c "import importlib.util, sys; \
+sys.exit('nixl_rocm not importable -- check -Dwheel_variant=rocm in wheel_builder') \
+if importlib.util.find_spec('nixl_rocm') is None else None" && \
+    python3 -c "import importlib.util, sys; \
+sys.exit('nixl_cu12 must not be co-installed with nixl_rocm: two NIXL pybind11 \
+extensions in one interpreter abort with \'nixl_thread_sync_t is already registered\'') \
+if importlib.util.find_spec('nixl_cu12') is not None else None" && \
+    python3 -c "from rixl._api import nixl_agent; from nixl_rocm._api import nixl_agent as direct; \
+assert nixl_agent is direct, 'rixl shim does not resolve to nixl_rocm'; \
+print('rixl -> nixl_rocm re-export OK')"
 {% endif %}
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
