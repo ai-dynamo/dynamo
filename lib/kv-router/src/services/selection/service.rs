@@ -8,19 +8,19 @@ use tokio_util::sync::CancellationToken;
 use crate::config::KvRouterConfig;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
-use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
+use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerSelectorFactory};
+use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerPolicyFactory};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, SelectionWorkerConfig, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
+    SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 
 pub struct SelectionServiceBuilder {
@@ -30,7 +30,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
-    worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
+    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -42,7 +42,7 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
-            worker_selector_factory: None,
+            worker_selection_policy_factory: None,
         }
     }
 
@@ -72,19 +72,7 @@ impl SelectionServiceBuilder {
         F: Fn(&KvRouterConfig) -> WorkerSelectionPolicy + Send + Sync + 'static,
     {
         let kv_router_config = self.kv_router_config.clone();
-        self.worker_selector_factory = Some(Box::new(move || {
-            Box::new(factory(&kv_router_config))
-                as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
-        }));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn worker_selector_factory(
-        mut self,
-        factory: SelectionWorkerSelectorFactory,
-    ) -> Self {
-        self.worker_selector_factory = Some(factory);
+        self.worker_selection_policy_factory = Some(Box::new(move || factory(&kv_router_config)));
         self
     }
 
@@ -113,7 +101,7 @@ impl SelectionServiceBuilder {
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
-            self.worker_selector_factory,
+            self.worker_selection_policy_factory,
             self.selection_cache,
             tracking_hash,
         ));
