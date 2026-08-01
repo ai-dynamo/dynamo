@@ -340,10 +340,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     ) -> None:
         """Read DGD-owned per-GPU caps once at startup; fail closed if bad.
 
-        Caps are startup-static for the Planner lifetime. DGD CRD transition
-        validation rejects changes to a power-annotated component's cap,
-        effective NVIDIA GPU count, or node count. Changing that tuple requires
-        deleting and recreating the DGD, then starting Planner against the new
+        Caps are startup-static for the Planner lifetime. The operator's DGD
+        validating webhook makes a power-annotated component's cap, effective
+        NVIDIA GPU count, and node count immutable, and rejects DRA-backed
+        allocation for power-annotated components. Changing these inputs requires
+        deleting and recreating the DGD, then restarting Planner against the
         settled deployment.
         """
         if not self.config.enable_power_awareness:
