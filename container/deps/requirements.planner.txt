@@ -4,9 +4,9 @@
 # Dependencies required by the planner, profiler, and global_planner services.
 
 # Keep both layers on the same immutable AIC source revision.
-aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@faa9350523495bb394d8ff1687f40e81e70345ac
+aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@0ee4eacf9079eff65cbe45cbbbd9cab1d98c06e3
 
-aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@faa9350523495bb394d8ff1687f40e81e70345ac#subdirectory=aic-core
+aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@0ee4eacf9079eff65cbe45cbbbd9cab1d98c06e3#subdirectory=aic-core
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5

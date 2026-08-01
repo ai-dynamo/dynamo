@@ -29,8 +29,8 @@ classifiers = [
 ]
 dependencies = [
     "ai-dynamo>=1.3.0,<2.0.0",
-    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@faa9350523495bb394d8ff1687f40e81e70345ac",
-    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@faa9350523495bb394d8ff1687f40e81e70345ac#subdirectory=aic-core",
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@0ee4eacf9079eff65cbe45cbbbd9cab1d98c06e3",
+    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@0ee4eacf9079eff65cbe45cbbbd9cab1d98c06e3#subdirectory=aic-core",
     "chex==0.1.87",
     "filterpy==1.4.5",
     "flax==0.10.0",
