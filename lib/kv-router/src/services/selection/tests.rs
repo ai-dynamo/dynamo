@@ -26,8 +26,13 @@ use crate::protocols::{
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
-use crate::scheduling::selector::WorkerSelector;
-use crate::scheduling::{KvSchedulerError, RoutingEligibility, SchedulingRequest};
+use crate::scheduling::selector::{
+    WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelector,
+};
+use crate::scheduling::{
+    KvSchedulerError, RoutingEligibility, SchedulingRequest, WorkerSelectionPolicyError,
+};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -70,6 +75,67 @@ impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
             potential_decode_blocks: request
                 .potential_decode_blocks_after_admission(worker, block_size),
         })
+    }
+}
+
+struct HighestWorkerScorer;
+
+impl WorkerScorer for HighestWorkerScorer {
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (row, worker) in candidates.workers().iter().enumerate() {
+            costs[row] -= worker.worker_id as f64;
+        }
+        Ok(())
+    }
+}
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidates: WorkerCandidates<'_>,
+        costs: &[f64],
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Ok(costs
+            .iter()
+            .enumerate()
+            .min_by(|left, right| left.1.total_cmp(right.1))
+            .expect("eligible candidate")
+            .0)
+    }
+}
+
+struct NonFiniteScorer;
+
+impl WorkerScorer for NonFiniteScorer {
+    fn score(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        costs[0] = f64::NAN;
+        Ok(())
+    }
+}
+
+struct InvalidRowPicker;
+
+impl WorkerPicker for InvalidRowPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        _costs: &[f64],
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Ok(candidates.len())
     }
 }
 
@@ -165,6 +231,41 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
     post(app, "/workers", &body.to_string()).await
 }
 
+async fn native_policy_app<F>(factory: F) -> Router
+where
+    F: Fn(&crate::config::KvRouterConfig) -> WorkerSelectionPolicy + Send + Sync + 'static,
+{
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selection_policy_factory(factory)
+        .build()
+        .await
+        .expect("build selection service");
+    create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }))
+}
+
+async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
+    let loads = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads?model_name=model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response_json(loads).await[0]["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|load| load["worker_id"] == worker_id)
+        .unwrap()["active_requests"]
+        .as_u64()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
@@ -235,6 +336,94 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
         StatusCode::CREATED
     );
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn native_worker_selection_policy_scores_picks_and_books() {
+    let app = native_policy_app(|config| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            vec![Box::new(HighestWorkerScorer)],
+            Box::new(LowestCostPicker),
+        )
+    })
+    .await;
+
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    let selected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"native-policy"}"#,
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    assert_eq!(response_json(selected).await["worker_id"], 2);
+    assert_eq!(active_requests(app, 2).await, 1);
+}
+
+#[tokio::test]
+async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
+    let app = native_policy_app(|config| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            vec![Box::new(NonFiniteScorer)],
+            Box::new(LowestCostPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"non-finite"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response_json(rejected).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("non-finite")
+    );
+    assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
+    let app = native_policy_app(|config| {
+        WorkerSelectionPolicy::new(config.clone(), Vec::new(), Box::new(InvalidRowPicker))
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"invalid-row"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response_json(rejected).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("candidate row")
+    );
+    assert_eq!(active_requests(app, 1).await, 0);
 }
 
 #[test]
