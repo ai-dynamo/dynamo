@@ -14,10 +14,23 @@ from pathlib import Path
 # do not install AI Simulate. Only the planner image installs the standalone wheel.
 # Ignore this optional suite before importing its test modules in those images.
 try:
+    _core_available = find_spec("aisimulate.runner") is not None
+except ModuleNotFoundError:
+    _core_available = False
+
+try:
     _sweeper_available = find_spec("aisimulate.sweeper.config") is not None
 except ModuleNotFoundError:
     _sweeper_available = False
 
 collect_ignore = []
+if not _core_available:
+    collect_ignore.extend(
+        str(Path(__file__).parent / test_file)
+        for test_file in (
+            "test_runner.py",
+            "test_traffic.py",
+        )
+    )
 if not _sweeper_available:
     collect_ignore.append(str(Path(__file__).parent / "sweeper"))

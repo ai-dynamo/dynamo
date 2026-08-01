@@ -65,6 +65,14 @@ class ReplayReport:
     metadata: dict[str, JSONValue] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ReplayOutputRequirements:
+    """Optional detail requested from a Runner without changing replay semantics."""
+
+    include_raw_report: bool = False
+    capture_per_request: bool = False
+
+
 @dataclass(frozen=True, order=True)
 class HookCapability:
     """One runtime-hook ABI supported by a runner composition."""
@@ -148,7 +156,12 @@ class RunnerCapabilities:
 class Runner(Protocol):
     """One worker-local replay executor."""
 
-    def run(self, spec: ReplaySpec) -> ReplayReport:
+    def run(
+        self,
+        spec: ReplaySpec,
+        *,
+        output_requirements: ReplayOutputRequirements | None = None,
+    ) -> ReplayReport:
         ...
 
     def close(self) -> None:
