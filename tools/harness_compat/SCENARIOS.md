@@ -25,6 +25,7 @@ Every scenario has a harness-owned reach signal, a wire-level expectation, and a
 | C3 | Codex nested child agent | child invokes its own child and root joins | all parent-child request edges preserve session lineage | P1 |
 | C4 | Codex parallel children | two children overlap then root joins | independent child contexts; no cross-request contamination | P1 |
 | C5 | Codex manual compaction | `contextCompaction` notification | post-compact request is accepted and continues the tool loop | P0 |
+| C5d | Codex child-agent then parent compaction | completed child-agent turn, parent compaction, and a completed parent follow-up | child lineage and compacted parent history remain accepted across Responses requests | P2 |
 | C5c | Codex thread rollback | rollback followed by a tool-using turn | model-visible history mutation leaves a valid Responses turn | P2 |
 | C5a | Codex forked coding thread | fork and original each complete a later tool turn | forked history/session lineage remains isolated and accepted | P1 |
 | C5a1 | Codex persisted-thread resume | fresh app-server process completes a later tool turn | stored Responses history remains accepted after process restart | P1 |
