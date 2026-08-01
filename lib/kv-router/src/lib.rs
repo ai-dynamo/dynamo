@@ -67,6 +67,12 @@ pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
-pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
-pub use selector::{DefaultWorkerSelector, WorkerSelector};
+pub use scheduling::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse,
+    WorkerSelectionPolicyError,
+};
+pub use selector::{
+    DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector, WorkerCandidates,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
+};
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
