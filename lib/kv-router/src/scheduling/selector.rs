@@ -116,21 +116,37 @@ struct WorkerSelectionInput<'a, C> {
     workers: &'a HashMap<WorkerId, C>,
     request: &'a SchedulingRequest,
     eligibility: RoutingEligibility<'a>,
+    context: WorkerSelectionContext<'a>,
+}
+
+struct WorkerSelectionContext<'a> {
+    request_id: &'a str,
+    request_blocks: u64,
     block_size: u32,
+    track_prefill_tokens: bool,
     weights: LogitWeights,
     min_active_prefill_tokens: usize,
 }
 
-trait WorkerScorer<C: WorkerConfigLike> {
-    fn score(
-        &self,
-        input: &WorkerSelectionInput<'_, C>,
-        worker: WorkerWithDpRank,
-        config: &C,
-    ) -> f64;
+struct WorkerSelectionRow {
+    worker: WorkerWithDpRank,
+    effective_overlap_blocks: f64,
+    device_overlap_blocks: f64,
+    host_overlap_blocks: f64,
+    disk_overlap_blocks: f64,
+    shared_beyond: u32,
+    raw_prefill_blocks: f64,
+    active_prefill_tokens: usize,
+    decode_cost_blocks: f64,
+    active_requests: usize,
+    preferred_taint_multiplier: Option<f64>,
 }
 
-trait WorkerPicker<C: WorkerConfigLike, S: WorkerScorer<C>> {
+trait WorkerScorer {
+    fn score(&self, context: &WorkerSelectionContext<'_>, row: &WorkerSelectionRow) -> f64;
+}
+
+trait WorkerPicker<C: WorkerConfigLike, S: WorkerScorer> {
     fn pick(&self, scorer: &S, input: &WorkerSelectionInput<'_, C>) -> (WorkerWithDpRank, f64);
 }
 
@@ -188,110 +204,45 @@ impl DefaultWorkerSelector {
 
     fn worker_logit(
         &self,
-        request: &SchedulingRequest,
-        worker: WorkerWithDpRank,
-        block_size: u32,
-        min_active_prefill_tokens: usize,
-        weights: LogitWeights,
+        context: &WorkerSelectionContext<'_>,
+        row: &WorkerSelectionRow,
         formula_name: &'static str,
     ) -> f64 {
-        let block_size_f64 = block_size as f64;
-        let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
-        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
-            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
-            || !request.overlap.tier_overlap_blocks.disk.is_empty();
-        let device_overlap_blocks = request
-            .overlap
-            .tier_overlap_blocks
-            .device
-            .get(&worker)
-            .copied()
-            .map(|blocks| blocks as f64)
-            .unwrap_or_else(|| {
-                if has_tier_overlap_blocks {
-                    0.0
-                } else {
-                    effective_overlap_blocks
-                }
-            });
-        // `shared_cache_hits::hits_beyond` expects an integer block count, so
-        // use the unweighted device prefix depth for this comparison.
-        let device_overlap_blocks_u32 = device_overlap_blocks.round().max(0.0) as u32;
-        let worker_load = request.worker_loads.get(&worker).copied();
-        let raw_prefill_tokens = if request.track_prefill_tokens {
-            match worker_load {
-                Some(load) => {
-                    let cached_tokens = request.effective_cached_tokens_for(worker);
-                    // Preserve the legacy operation order when overlap exceeds the prompt.
-                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
-                        request.isl_tokens,
-                        cached_tokens,
-                    );
-                    let projected_tokens = load.active_prefill_tokens + uncached_tokens;
-                    projected_tokens.saturating_add(cached_tokens)
-                }
-                None => request.isl_tokens,
-            }
-        } else {
-            0
-        } as f64;
-
-        let host_overlap_blocks = request
-            .overlap
-            .tier_overlap_blocks
-            .host_pinned
-            .get(&worker)
-            .copied()
-            .unwrap_or(0) as f64;
-        let disk_overlap_blocks = request
-            .overlap
-            .tier_overlap_blocks
-            .disk
-            .get(&worker)
-            .copied()
-            .unwrap_or(0) as f64;
-
-        // Credit shared cache hits beyond this worker's device prefix.
-        let (shared_overlap_blocks, shared_beyond) =
-            if let Some(ref shared_hits) = request.shared_cache_hits {
-                let beyond = shared_hits.hits_beyond(device_overlap_blocks_u32);
-                (weights.shared_cache_multiplier * (beyond as f64), beyond)
-            } else {
-                (0.0, 0)
-            };
-
-        let raw_prefill_blocks = raw_prefill_tokens / block_size_f64;
+        let weights = context.weights;
+        let worker = row.worker;
+        let effective_overlap_blocks = row.effective_overlap_blocks;
+        let shared_overlap_blocks = weights.shared_cache_multiplier * row.shared_beyond as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
-        let overlap_credit_decay =
-            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
-                let active_prefill_tokens = worker_load.unwrap_or_default().active_prefill_tokens;
-                let excess_active_prefill_blocks =
-                    active_prefill_tokens.saturating_sub(min_active_prefill_tokens) as f64
-                        / block_size_f64;
-                let normalized_prefill_load =
-                    excess_active_prefill_blocks / request.request_blocks(block_size) as f64;
-                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
-            } else {
-                1.0
-            };
+        let overlap_credit_decay = if context.track_prefill_tokens
+            && weights.overlap_score_credit_decay > 0.0
+        {
+            let excess_active_prefill_blocks =
+                row.active_prefill_tokens
+                    .saturating_sub(context.min_active_prefill_tokens) as f64
+                    / context.block_size as f64;
+            let normalized_prefill_load =
+                excess_active_prefill_blocks / context.request_blocks as f64;
+            1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+        } else {
+            1.0
+        };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
-            + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
-            + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit * row.device_overlap_blocks
+            + self.kv_router_config.host_cache_hit_weight * row.host_overlap_blocks
+            + self.kv_router_config.disk_cache_hit_weight * row.disk_overlap_blocks
             + shared_overlap_blocks;
-        let worker_load = worker_load.unwrap_or_default();
-        let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
+        let decode_cost_blocks = row.decode_cost_blocks;
         let active_request_cost_blocks =
-            self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
+            self.kv_router_config.decode_active_request_weight * row.active_requests as f64;
 
         // Decode routers normally force `overlap_score_credit=0` through the
         // per-request override, which preserves load-only disagg routing. When
         // conditional disagg leaves a positive overlap credit in place, prefer
         // cache-hot decode workers while still charging decode backlog.
         if self.worker_type == "decode"
-            && !request.track_prefill_tokens
+            && !context.track_prefill_tokens
             && weights.overlap_score_credit > 0.0
         {
             // Clamp at zero because downstream taint multipliers assume non-negative scores.
@@ -310,7 +261,7 @@ impl DefaultWorkerSelector {
             return logit;
         }
 
-        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let adjusted_prefill_blocks = (row.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
@@ -320,32 +271,35 @@ impl DefaultWorkerSelector {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if shared_beyond > 0 {
+        if row.shared_beyond > 0 {
             tracing::debug!(
-                request_id = request.mode.request_id().unwrap_or("-"),
+                request_id = context.request_id,
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
-                 {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
+                 {} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 (raw_prefill_blocks: {:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
+                row.shared_beyond,
+                row.raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
             );
         } else {
             tracing::debug!(
-                request_id = request.mode.request_id().unwrap_or("-"),
+                request_id = context.request_id,
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 (raw_prefill_blocks: {:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
+                row.raw_prefill_blocks,
                 prefill_load_scale = weights.prefill_load_scale
             );
         }
@@ -377,33 +331,104 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             workers,
             request,
             eligibility,
-            block_size,
-            min_active_prefill_tokens,
-            weights,
+            context: WorkerSelectionContext {
+                request_id: request.mode.request_id().unwrap_or("-"),
+                request_blocks: request.request_blocks(block_size),
+                block_size,
+                track_prefill_tokens: request.track_prefill_tokens,
+                weights,
+                min_active_prefill_tokens,
+            },
+        }
+    }
+
+    fn row(
+        &self,
+        worker: WorkerWithDpRank,
+        preferred_taint_multiplier: Option<f64>,
+    ) -> WorkerSelectionRow {
+        let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
+        let has_tier_overlap_blocks = !self.request.overlap.tier_overlap_blocks.device.is_empty()
+            || !self
+                .request
+                .overlap
+                .tier_overlap_blocks
+                .host_pinned
+                .is_empty()
+            || !self.request.overlap.tier_overlap_blocks.disk.is_empty();
+        let device_overlap_blocks = self
+            .request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .get(&worker)
+            .copied()
+            .map(|blocks| blocks as f64)
+            .unwrap_or_else(|| {
+                if has_tier_overlap_blocks {
+                    0.0
+                } else {
+                    effective_overlap_blocks
+                }
+            });
+        let worker_load = self.request.worker_loads.get(&worker).copied();
+        let cached_tokens = self.request.effective_cached_tokens_for(worker);
+        let raw_prefill_tokens = if self.request.track_prefill_tokens {
+            match worker_load {
+                Some(load) => {
+                    // Preserve the legacy operation order when overlap exceeds the prompt.
+                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
+                        self.request.isl_tokens,
+                        cached_tokens,
+                    );
+                    let projected_tokens = load.active_prefill_tokens + uncached_tokens;
+                    projected_tokens.saturating_add(cached_tokens)
+                }
+                None => self.request.isl_tokens,
+            }
+        } else {
+            0
+        } as f64;
+        let worker_load = worker_load.unwrap_or_default();
+        let shared_beyond = self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
+            // `hits_beyond` expects the unweighted device prefix depth.
+            hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+        });
+
+        WorkerSelectionRow {
+            worker,
+            effective_overlap_blocks,
+            device_overlap_blocks,
+            host_overlap_blocks: self
+                .request
+                .overlap
+                .tier_overlap_blocks
+                .host_pinned
+                .get(&worker)
+                .copied()
+                .unwrap_or(0) as f64,
+            disk_overlap_blocks: self
+                .request
+                .overlap
+                .tier_overlap_blocks
+                .disk
+                .get(&worker)
+                .copied()
+                .unwrap_or(0) as f64,
+            shared_beyond,
+            raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
+            active_prefill_tokens: worker_load.active_prefill_tokens,
+            decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
+            active_requests: worker_load.active_requests,
+            preferred_taint_multiplier,
         }
     }
 }
 
-impl<C: WorkerConfigLike> WorkerScorer<C> for DefaultWorkerScorer<'_> {
-    fn score(
-        &self,
-        input: &WorkerSelectionInput<'_, C>,
-        worker: WorkerWithDpRank,
-        config: &C,
-    ) -> f64 {
-        let base_score = self.selector.worker_logit(
-            input.request,
-            worker,
-            input.block_size,
-            input.min_active_prefill_tokens,
-            input.weights,
-            "Formula",
-        );
-        match input
-            .request
-            .routing_constraints
-            .preferred_taint_multiplier(config.taints())
-        {
+impl WorkerScorer for DefaultWorkerScorer<'_> {
+    fn score(&self, context: &WorkerSelectionContext<'_>, row: &WorkerSelectionRow) -> f64 {
+        let base_score = self.selector.worker_logit(context, row, "Formula");
+        match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
             Some(multiplier) => base_score * multiplier,
@@ -415,7 +440,7 @@ impl<C: WorkerConfigLike> WorkerScorer<C> for DefaultWorkerScorer<'_> {
 impl<C, S> WorkerPicker<C, S> for DefaultWorkerPicker<'_>
 where
     C: WorkerConfigLike,
-    S: WorkerScorer<C>,
+    S: WorkerScorer,
 {
     fn pick(&self, scorer: &S, input: &WorkerSelectionInput<'_, C>) -> (WorkerWithDpRank, f64) {
         let workers = input.workers;
@@ -426,7 +451,16 @@ where
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.selector.kv_router_config.router_temperature);
-        let get_score = |worker, config: &C| scorer.score(input, worker, config);
+        let get_score = |worker, config: &C| {
+            let preferred_taint_multiplier = input
+                .request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints());
+            scorer.score(
+                &input.context,
+                &input.row(worker, preferred_taint_multiplier),
+            )
+        };
 
         #[cfg(any(test, feature = "bench"))]
         let deterministic_choice = self.selector.deterministic_rng.as_ref().map(|rng| {
@@ -562,15 +596,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 Err(_) => return Err(KvSchedulerError::NoEndpoints),
             }
 
-            let min_active_prefill_tokens = request.worker_load_for(worker).active_prefill_tokens;
-            let logit = self.worker_logit(
-                request,
-                worker,
-                block_size,
-                min_active_prefill_tokens,
-                weights,
-                "Pinned formula",
-            );
+            let input =
+                WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
+            let row = input.row(worker, None);
+            let logit = self.worker_logit(&input.context, &row, "Pinned formula");
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
@@ -733,6 +762,24 @@ mod tests {
             shared_cache_hits: None,
             resp_tx: None,
         }
+    }
+
+    fn worker_logit(
+        selector: &DefaultWorkerSelector,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        weights: LogitWeights,
+    ) -> f64 {
+        let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
+        let input = WorkerSelectionInput::new(
+            &workers,
+            request,
+            request.eligibility(),
+            block_size,
+            weights,
+        );
+        selector.worker_logit(&input.context, &input.row(worker, None), "test")
     }
 
     fn worker_loads_with_active_decode(
@@ -1604,16 +1651,10 @@ mod tests {
             shared_cache_multiplier: 0.0,
         };
 
-        assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            7.0
-        );
+        assert_eq!(worker_logit(&selector, &request, worker, 16, weights), 7.0);
 
         request.track_prefill_tokens = false;
-        assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            5.0
-        );
+        assert_eq!(worker_logit(&selector, &request, worker, 16, weights), 5.0);
     }
 
     #[test]
@@ -1643,12 +1684,9 @@ mod tests {
             "test",
         );
 
+        assert_eq!(worker_logit(&default, &request, worker, 16, weights), 100.0);
         assert_eq!(
-            default.worker_logit(&request, worker, 16, 0, weights, "test"),
-            100.0
-        );
-        assert_eq!(
-            weighted.worker_logit(&request, worker, 16, 0, weights, "test"),
+            worker_logit(&weighted, &request, worker, 16, weights),
             228.0
         );
     }
@@ -1674,10 +1712,7 @@ mod tests {
             shared_cache_multiplier: 0.0,
         };
 
-        assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            7.0
-        );
+        assert_eq!(worker_logit(&selector, &request, worker, 16, weights), 7.0);
     }
 
     #[test]
