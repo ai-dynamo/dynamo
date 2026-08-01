@@ -213,6 +213,21 @@ def test_endpoint_invalid_format_raises(mock_vllm_cli):
         parse_args()
 
 
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--multimodal-encode-worker",
+        "--multimodal-worker",
+        "--multimodal-decode-worker",
+    ],
+)
+def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", flag)
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 # --connector removal tests
 
 
@@ -1231,8 +1246,7 @@ def _make_dynamo_config(**overrides):
         "enable_local_indexer": True,
         "embedding_worker": False,
         "headless": False,
-        "multimodal_worker": False,
-        "multimodal_decode_worker": False,
+        "enable_multimodal": False,
         "fpm_trace": False,
         "benchmark_mode": None,
         "benchmark_warmup_iterations": 5,
@@ -1568,6 +1582,24 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
+
+
+class TestRealtimeWorkerFlag:
+    """Parsing for the generic --realtime worker mode."""
+
+    def test_default_false(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+
+        config = parse_args()
+
+        assert config.realtime is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+
+        config = parse_args()
+
+        assert config.realtime is True
 
 
 def test_build_sampling_params_openai_maps_max_thinking_tokens():

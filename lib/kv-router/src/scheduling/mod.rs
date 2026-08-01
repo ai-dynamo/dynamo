@@ -34,10 +34,5 @@ pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use queue::RequestLifecycleLease;
-pub use queue_admission::{
-    AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionPolicyConfig,
-    AdmissionRequest, PolicyClassAdmissionPolicies, PolicyClassAdmissionPolicy, RequestProgress,
-    RequestProgressUpdater, WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
-};
+pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
 pub use types::*;
