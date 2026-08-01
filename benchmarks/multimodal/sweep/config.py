@@ -42,6 +42,7 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     env: Dict[str, str] = field(default_factory=dict)
+    aiperf_extra_args: List[str] = field(default_factory=list)
 
     @property
     def sweep_mode(self) -> str:
@@ -137,6 +138,7 @@ def load_config(
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         env=raw.get("env", {}),
+        aiperf_extra_args=[str(value) for value in raw.get("aiperf_extra_args", [])],
     )
 
     if cli_overrides:

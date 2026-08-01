@@ -9,8 +9,8 @@ coalesce into cost-bounded batches up to max_batch_cost (or pass-through when
 None), eager-drain pulls all queued work when free, errors reach every awaiting
 caller, and the shutdown lifecycle behaves.
 
-``fn`` is ``fn(items)``; ``cost`` is a precomputed scalar that rides on
-``submit(items, costs)`` (one-dimensional packing — no bucket_key, no ladder).
+``fn`` is ``fn(items)``; precomputed scalar costs and opaque compatibility keys
+ride on ``submit``. Packing is one-dimensional inside each key.
 """
 
 import asyncio
@@ -165,6 +165,61 @@ async def test_eager_drain_pulls_all_queued_when_free():
     assert ["a", "b", "c"] in batches
 
 
+async def test_timed_hold_collects_work_arriving_before_deadline():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_queue_delay_us=100_000)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["a"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["b"]))
+        assert await asyncio.gather(first, second) == [["a"], ["b"]]
+        assert batches == [["a", "b"]]
+    finally:
+        b.shutdown()
+
+
+async def test_timed_hold_dispatches_immediately_at_cost_ceiling():
+    b = ThreadedMicroBatcher(
+        _echo,
+        max_batch_cost=1,
+        max_queue_delay_us=500_000,
+    )
+    b.start()
+    try:
+        assert await asyncio.wait_for(b.submit(["a"]), timeout=0.2) == ["a"]
+    finally:
+        b.shutdown()
+
+
+def test_negative_queue_delay_rejected():
+    with pytest.raises(ValueError, match="max_queue_delay_us"):
+        ThreadedMicroBatcher(_echo, max_queue_delay_us=-1)
+
+
+def test_nonpositive_item_cap_rejected() -> None:
+    with pytest.raises(ValueError, match="max_batch_items"):
+        ThreadedMicroBatcher(_echo, max_batch_items=0)
+
+
+async def test_shutdown_wakes_timed_collection():
+    b = ThreadedMicroBatcher(_echo, max_queue_delay_us=5_000_000)
+    b.start()
+    task = asyncio.create_task(b.submit(["a"]))
+    await _wait_until(
+        lambda: bool(b._live) and b._queue.empty(),
+        "worker did not enter timed collection",
+    )
+    b.shutdown()
+    with pytest.raises(RuntimeError, match="shut down"):
+        await task
+
+
 async def test_cost_budget_caps_each_batch():
     """costs ride on submit; with budget 5, batches never exceed summed cost 5.
 
@@ -182,6 +237,71 @@ async def test_cost_budget_caps_each_batch():
         assert all(sum(batch) <= 5 for batch in g.batches)
         assert sum(len(batch) for batch in g.batches) == 3
         assert [3] in g.batches and [3, 1] in g.batches  # split actually happened
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_keys_partition_and_round_robin() -> None:
+    g = _Gate()
+    b = ThreadedMicroBatcher(g.fn, max_batch_cost=1)
+    b.start()
+    try:
+        gate = await g.park(b)
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "a2", "a3", "b1", "b2"],
+                bucket_keys=["a", "a", "a", "b", "b"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        g.release.set()
+        await asyncio.gather(gate, real)
+        assert g.batches == [["a1"], ["b1"], ["a2"], ["b2"], ["a3"]]
+    finally:
+        b.shutdown()
+
+
+async def test_item_cap_is_scheduler_visible_between_compatibility_keys() -> None:
+    g = _Gate()
+    b = ThreadedMicroBatcher(g.fn, max_batch_items=64)
+    b.start()
+    try:
+        gate = await g.park(b)
+        small = [f"small-{index}" for index in range(85)]
+        real = asyncio.ensure_future(
+            b.submit(
+                [*small, "large"],
+                bucket_keys=[*["small"] * len(small), "large"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        g.release.set()
+        await asyncio.gather(gate, real)
+        assert [len(batch) for batch in g.batches] == [64, 1, 21]
+        assert g.batches[0] == small[:64]
+        assert g.batches[1] == ["large"]
+        assert g.batches[2] == small[64:]
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_key_partitions_passthrough_mode() -> None:
+    g = _Gate()
+    b = ThreadedMicroBatcher(g.fn)
+    b.start()
+    try:
+        gate = await g.park(b)
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "b1", "a2"],
+                costs=[100, 100, 100],
+                bucket_keys=["a", "b", "a"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        g.release.set()
+        await asyncio.gather(gate, real)
+        assert g.batches == [["a1", "a2"], ["b1"]]
     finally:
         b.shutdown()
 
@@ -439,6 +559,18 @@ async def test_costs_length_mismatch_raises():
     try:
         with pytest.raises(ValueError, match="costs has"):
             await b.submit(["a", "b"], costs=[1])
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_keys_length_mismatch_and_hashability_are_validated() -> None:
+    b = ThreadedMicroBatcher(_echo)
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="bucket_keys has"):
+            await b.submit(["a", "b"], bucket_keys=["a"])
+        with pytest.raises(ValueError, match="must be hashable"):
+            await b.submit(["a"], bucket_keys=[["not-hashable"]])
     finally:
         b.shutdown()
 
