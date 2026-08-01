@@ -140,7 +140,15 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# ROCm's vllm-openai-rocm base uses the system interpreter (no /opt/venv), so it
    targets --system like cuda; xpu/cpu bases carry a venv at /opt/venv. #}
 {% set pip_target = "--system" if device in ("cuda", "rocm") else "--python /opt/venv/bin/python" %}
-{% if device != "cuda" %}
+{# Deliberately skipped on rocm. The wheel_builder emits a real nixl_rocm module
+   (-Dwheel_variant=rocm), so it no longer overwrites nixl_cu12 the way the
+   variant-less build did. Installing the PyPI nixl-cu12 alongside it puts two
+   NIXL pybind11 extensions in one interpreter, and whichever loads second dies
+   with:
+       ImportError: generic_type: type "nixl_thread_sync_t" is already registered!
+   vLLM reaches NIXL through `rixl` on ROCm (see the rixl re-export below), so
+   the meta package is not needed. #}
+{% if device not in ("cuda", "rocm") %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
 #
@@ -179,6 +187,10 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
     python3 -c "import importlib.util, sys; \
 spec = importlib.util.find_spec('nixl_rocm'); \
 sys.exit('nixl_rocm not importable -- check -Dwheel_variant=rocm in wheel_builder') if spec is None else None" && \
+    python3 -c "import importlib.util, sys; \
+sys.exit('nixl_cu12 must not be co-installed with nixl_rocm: two NIXL pybind11 \
+extensions in one interpreter abort with \'nixl_thread_sync_t is already registered\'') \
+if importlib.util.find_spec('nixl_cu12') is not None else None" && \
     python3 -c "from rixl._api import nixl_agent; from nixl_rocm._api import nixl_agent as direct; \
 assert nixl_agent is direct, 'rixl shim does not resolve to nixl_rocm'; \
 print('rixl -> nixl_rocm re-export OK')"
