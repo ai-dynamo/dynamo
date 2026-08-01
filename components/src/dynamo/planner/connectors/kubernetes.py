@@ -351,7 +351,7 @@ class KubernetesConnector(PlannerConnector):
 
         Not on the base ``PlannerConnector`` protocol — power awareness is
         Kubernetes-local and must not expand that ABC. The environment checks
-        ``is_power_aware_connector(controller)`` (all three methods present)
+        ``is_power_aware_connector(controller)`` (all four methods present)
         rather than duck-typing via ``getattr``.
         """
         return self.kube_api.get_graph_deployment(self.graph_deployment_name)

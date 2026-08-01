@@ -69,12 +69,13 @@ def _env(
 def _power_controller(**kwargs):
     """Minimal mock accepted by is_power_aware_connector().
 
-    All three protocol methods must be set explicitly on the instance so
+    All four protocol methods must be set explicitly on the instance so
     inspect.getattr_static can find them and callable() returns True.
     """
     controller = Mock(**kwargs)
     controller.get_graph_deployment = Mock()
     controller.wait_for_settled_graph_deployment = AsyncMock()
+    controller.get_power_aware_worker_counts = AsyncMock(return_value=(1, 1, True))
     return controller
 
 
@@ -134,6 +135,7 @@ def test_is_power_aware_connector_accepts_valid_connector():
     connector.get_graph_deployment = Mock()
     connector.get_component_power_configs = Mock()
     connector.wait_for_settled_graph_deployment = AsyncMock()
+    connector.get_power_aware_worker_counts = AsyncMock()
     assert is_power_aware_connector(connector) is True
 
 
@@ -141,6 +143,7 @@ def test_is_power_aware_connector_rejects_missing_method():
     connector = Mock()
     connector.get_graph_deployment = Mock()
     connector.get_component_power_configs = Mock()
+    connector.get_power_aware_worker_counts = AsyncMock()
     # wait_for_settled_graph_deployment absent from __dict__
     assert is_power_aware_connector(connector) is False
 
@@ -150,6 +153,7 @@ def test_is_power_aware_connector_rejects_non_callable_attribute():
     connector.get_graph_deployment = Mock()
     connector.get_component_power_configs = Mock()
     connector.wait_for_settled_graph_deployment = "not_a_function"
+    connector.get_power_aware_worker_counts = AsyncMock()
     assert is_power_aware_connector(connector) is False
 
 
@@ -198,7 +202,7 @@ def test_init_transient_apiexception_fails_closed():
 def test_init_requires_power_capable_connector():
     controller = Mock(spec=[])
     env = _env(controller)
-    with pytest.raises(DeploymentValidationError, match="get_component_power_configs"):
+    with pytest.raises(DeploymentValidationError, match="PowerAwareConnector"):
         env._load_static_power_caps_at_startup()
 
 
@@ -242,6 +246,7 @@ async def test_initialize_power_on_requires_power_aware_connector():
     controller.get_component_power_configs = Mock(
         return_value=(_cfg("prefill", 700), _cfg("decode", 300))
     )
+    controller.get_power_aware_worker_counts = AsyncMock()
     # wait_for_settled_graph_deployment intentionally absent from __dict__:
     # is_power_aware_connector(controller) → False.
 
@@ -375,6 +380,7 @@ async def test_initialize_caches_caps_from_settled_snapshot_not_lagging_get():
     controller.get_graph_deployment = Mock(return_value=lagging)
     controller.get_gpu_counts = get_gpu_counts
     controller.get_actual_worker_counts = AsyncMock(return_value=(1, 1, True))
+    controller.get_power_aware_worker_counts = AsyncMock(return_value=(1, 1, True))
     controller.get_model_name = Mock(return_value="test-model")
     controller.get_component_power_configs = get_power_configs
 

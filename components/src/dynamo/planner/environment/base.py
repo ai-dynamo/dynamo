@@ -392,8 +392,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             raise DeploymentValidationError(
                 [
                     "Power awareness requires a connector that implements "
-                    "PowerAwareConnector; this connector does not implement "
-                    "get_component_power_configs."
+                    "PowerAwareConnector (get_graph_deployment, "
+                    "get_component_power_configs, "
+                    "wait_for_settled_graph_deployment, "
+                    "get_power_aware_worker_counts); "
+                    "this connector does not."
                 ]
             )
 
