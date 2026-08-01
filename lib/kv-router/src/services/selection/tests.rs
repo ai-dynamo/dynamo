@@ -26,7 +26,7 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidate, WorkerCandidates, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    ScoredWorkerCandidate, WorkerCandidate, WorkerPicker, WorkerScorer, WorkerSelectionContext,
     WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
@@ -78,10 +78,13 @@ impl WorkerPicker for LowestCostPicker {
     fn pick(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
+        candidates: &[ScoredWorkerCandidate],
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        Ok((0..candidates.len())
-            .min_by(|left, right| candidates.cost(*left).total_cmp(&candidates.cost(*right)))
+        Ok(candidates
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
             .expect("eligible candidate"))
     }
 }
@@ -104,7 +107,7 @@ impl WorkerPicker for InvalidRowPicker {
     fn pick(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
+        candidates: &[ScoredWorkerCandidate],
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(candidates.len())
     }
@@ -204,7 +207,10 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
 
 async fn native_policy_app<F>(factory: F) -> Router
 where
-    F: Fn(&crate::config::KvRouterConfig) -> WorkerSelectionPolicy + Send + Sync + 'static,
+    F: Fn(&crate::config::KvRouterConfig, &'static str) -> WorkerSelectionPolicy
+        + Send
+        + Sync
+        + 'static,
 {
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
@@ -238,19 +244,22 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 }
 
 #[tokio::test]
-async fn worker_selection_policy_factory_is_per_partition_and_books_selected_worker() {
+async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&factory_calls);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
-        .worker_selection_policy_factory(move |config| {
+        .worker_selection_policy_factory(move |config, worker_type| {
             calls.fetch_add(1, Ordering::Relaxed);
             WorkerSelectionPolicy::new(
                 config.clone(),
-                "test",
-                vec![Box::new(HighestWorkerScorer {
-                    calls: Cell::new(0),
-                })],
+                worker_type,
+                vec![
+                    Box::new(WorkerIdScorer),
+                    Box::new(HighestWorkerScorer {
+                        calls: Cell::new(0),
+                    }),
+                ],
                 Box::new(LowestCostPicker),
             )
         })
@@ -315,47 +324,11 @@ async fn worker_selection_policy_factory_is_per_partition_and_books_selected_wor
 }
 
 #[tokio::test]
-async fn native_worker_selection_policy_scores_picks_and_books() {
-    let app = native_policy_app(|config| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            "test",
-            vec![
-                Box::new(WorkerIdScorer),
-                Box::new(HighestWorkerScorer {
-                    calls: Cell::new(0),
-                }),
-            ],
-            Box::new(LowestCostPicker),
-        )
-    })
-    .await;
-
-    assert_eq!(
-        register_worker_id(app.clone(), 1, None).await.status(),
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        register_worker_id(app.clone(), 2, None).await.status(),
-        StatusCode::CREATED
-    );
-    let selected = post(
-        app.clone(),
-        "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"native-policy"}"#,
-    )
-    .await;
-    assert_eq!(selected.status(), StatusCode::OK);
-    assert_eq!(response_json(selected).await["worker_id"], 2);
-    assert_eq!(active_requests(app, 2).await, 1);
-}
-
-#[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(|config| {
+    let app = native_policy_app(|config, worker_type| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            "test",
+            worker_type,
             vec![Box::new(NonFiniteScorer)],
             Box::new(LowestCostPicker),
         )
@@ -372,7 +345,7 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
         r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"non-finite"}"#,
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
         response_json(rejected).await["error"]
             .as_str()
@@ -384,10 +357,10 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(|config| {
+    let app = native_policy_app(|config, worker_type| {
         WorkerSelectionPolicy::new(
             config.clone(),
-            "test",
+            worker_type,
             Vec::new(),
             Box::new(InvalidRowPicker),
         )
@@ -404,7 +377,7 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
         r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"invalid-row"}"#,
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
         response_json(rejected).await["error"]
             .as_str()
