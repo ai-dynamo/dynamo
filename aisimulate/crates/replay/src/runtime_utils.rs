@@ -5,24 +5,14 @@ use std::collections::BinaryHeap;
 #[cfg(test)]
 use std::collections::VecDeque;
 
-use super::components::ScheduledWorkerCompletions;
-use super::core::{EngineEventBatch, EngineProgress};
+use super::components::ScheduledEngineCompletion;
+use super::core::EngineEventBatch;
 use super::events::{
-    SimulationEvent, SimulationEventKind, SimulationWorkerStage, WorkerCompletionPayload,
+    EnginePassCompletion, SimulationEvent, SimulationEventKind, SimulationWorkerStage,
 };
-use crate::common::handoff::HandoffId;
 #[cfg(test)]
-use crate::common::protocols::DirectRequest;
-#[cfg(test)]
-use crate::common::protocols::OutputSignal;
-
-// Keep the large singleton inline: boxing it would add an allocation to every
-// DP1 and disaggregated completion solely to shrink this transient pop result.
-#[allow(clippy::large_enum_variant)]
-pub(super) enum ReadyWorkerCompletions<Events: EngineEventBatch = ()> {
-    Single(WorkerCompletionPayload<Events>),
-    Batch(Box<[WorkerCompletionPayload<Events>]>),
-}
+use crate::protocol::DirectRequest;
+use aisimulate_engine::HandoffId;
 
 pub(super) fn next_timestamp(
     next_arrival_ms: Option<f64>,
@@ -68,103 +58,37 @@ pub(super) fn pop_next_concurrency_ready(
 pub(super) fn push_worker_completions<Events: EngineEventBatch>(
     events: &mut BinaryHeap<SimulationEvent<Events>>,
     next_event_seq: &mut u64,
-    scheduled: ScheduledWorkerCompletions<Events>,
+    scheduled: ScheduledEngineCompletion<Events>,
 ) {
-    let ScheduledWorkerCompletions {
-        at_ms,
-        mut payloads,
-    } = scheduled;
-    let payload_count =
-        u64::try_from(payloads.len()).expect("completion payload count must fit in u64");
-    assert!(
-        payload_count > 0,
-        "scheduled completion batch must not be empty"
-    );
-    let kind = if payloads.len() == 1 {
-        let payload = payloads
-            .pop()
-            .expect("singleton scheduled completion must contain one payload");
-        SimulationEventKind::WorkerCompletion {
-            stage: payload.stage,
-            worker_idx: payload.worker_idx,
-            completed_requests: payload.completed_requests,
-            output_signals: payload.output_signals,
-            lifecycle_events: payload.lifecycle_events,
-            engine_events: payload.engine_events,
-            made_progress: payload.progress.made_progress,
-            had_raw_observations: payload.progress.had_raw_observations,
-            fpm: payload.fpm.map(Box::new),
-            accept_length_output_tokens: payload.accept_length_output_tokens,
-            accept_length_decode_forwards: payload.accept_length_decode_forwards,
-        }
-    } else {
-        SimulationEventKind::WorkerCompletionBatch {
-            payloads: payloads.into_boxed_slice(),
-        }
-    };
+    let ScheduledEngineCompletion { at_ms, completion } = scheduled;
     events.push(SimulationEvent {
         at_ms,
         seq_no: *next_event_seq,
-        kind,
+        kind: SimulationEventKind::EnginePassCompletion(completion),
     });
-    // Preserve the sequence numbers that later events would have received
-    // before these payloads were represented by one heap entry.
     *next_event_seq = next_event_seq
-        .checked_add(payload_count)
+        .checked_add(1)
         .expect("offline replay event sequence overflow");
 }
 
 pub(super) fn pop_ready_worker_completions<Events: EngineEventBatch>(
     events: &mut BinaryHeap<SimulationEvent<Events>>,
     now_ms: f64,
-) -> Option<ReadyWorkerCompletions<Events>> {
+) -> Option<EnginePassCompletion<Events>> {
     let event = events.peek()?;
     if event.at_ms != now_ms {
         return None;
     }
-    if !matches!(
-        event.kind,
-        SimulationEventKind::WorkerCompletion { .. }
-            | SimulationEventKind::WorkerCompletionBatch { .. }
-    ) {
+    if !matches!(event.kind, SimulationEventKind::EnginePassCompletion(_)) {
         return None;
     }
     let event = events.pop().expect("event must exist after peek");
     match event.kind {
-        SimulationEventKind::WorkerCompletion {
-            stage,
-            worker_idx,
-            completed_requests,
-            output_signals,
-            lifecycle_events,
-            engine_events,
-            made_progress,
-            had_raw_observations,
-            fpm,
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
-        } => Some(ReadyWorkerCompletions::Single(WorkerCompletionPayload {
-            stage,
-            worker_idx,
-            completed_requests,
-            output_signals,
-            lifecycle_events,
-            engine_events,
-            progress: EngineProgress {
-                made_progress,
-                had_raw_observations,
-            },
-            fpm: fpm.map(|fpm| *fpm),
-            accept_length_output_tokens,
-            accept_length_decode_forwards,
-        })),
-        SimulationEventKind::WorkerCompletionBatch { payloads } => {
-            Some(ReadyWorkerCompletions::Batch(payloads))
-        }
+        SimulationEventKind::EnginePassCompletion(completion) => Some(completion),
         SimulationEventKind::TransferComplete { .. }
         | SimulationEventKind::WorkerReady { .. }
         | SimulationEventKind::ScalingTick => {
-            unreachable!("peeked worker completion event must match popped event")
+            unreachable!("peeked engine completion event must match popped event")
         }
     }
 }
@@ -269,7 +193,7 @@ pub(super) fn pop_ready_scaling_tick<Events: EngineEventBatch>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replay::offline::events::SimulationWorkerStage;
+    use crate::events::SimulationWorkerStage;
     use uuid::Uuid;
 
     fn direct_request(uuid: u128, arrival_timestamp_ms: Option<f64>) -> DirectRequest {
@@ -281,28 +205,6 @@ mod tests {
             dp_rank: 0,
             arrival_timestamp_ms,
             ..Default::default()
-        }
-    }
-
-    fn completion_payload(worker_idx: usize, completed_requests: usize) -> WorkerCompletionPayload {
-        WorkerCompletionPayload {
-            stage: SimulationWorkerStage::Aggregated,
-            worker_idx,
-            completed_requests,
-            output_signals: vec![OutputSignal {
-                uuid: Uuid::from_u128(worker_idx as u128),
-                token_id: None,
-                completed: true,
-                rejected: false,
-                cached_tokens: None,
-                handoff_delay_ms: None,
-            }],
-            lifecycle_events: Vec::new(),
-            engine_events: (),
-            progress: EngineProgress::default(),
-            fpm: None,
-            accept_length_output_tokens: 1,
-            accept_length_decode_forwards: 1,
         }
     }
 
@@ -348,54 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_completion_batch_preserves_payload_and_event_ordering() {
-        let mut events = BinaryHeap::new();
-        let mut next_event_seq = 0;
-
-        push_worker_completions(
-            &mut events,
-            &mut next_event_seq,
-            ScheduledWorkerCompletions {
-                at_ms: 10.0,
-                payloads: vec![completion_payload(7, 1), completion_payload(8, 2)],
-            },
-        );
-        assert_eq!(events.len(), 1);
-        assert_eq!(next_event_seq, 2);
-
-        push_worker_ready(
-            &mut events,
-            &mut next_event_seq,
-            10.0,
-            SimulationWorkerStage::Aggregated,
-            5,
-        );
-        assert_eq!(next_event_seq, 3);
-        push_scaling_tick(&mut events, &mut next_event_seq, 10.0);
-        assert_eq!(next_event_seq, 4);
-
-        assert!(pop_ready_worker_completions(&mut events, 9.0).is_none());
-        let ReadyWorkerCompletions::Batch(payloads) =
-            pop_ready_worker_completions(&mut events, 10.0).unwrap()
-        else {
-            panic!("DP2 completions must use one batched heap event");
-        };
-        assert_eq!(
-            payloads
-                .iter()
-                .map(|payload| (payload.worker_idx, payload.completed_requests))
-                .collect::<Vec<_>>(),
-            vec![(7, 1), (8, 2)]
-        );
-        assert_eq!(
-            pop_ready_worker_ready(&mut events, 10.0),
-            Some((SimulationWorkerStage::Aggregated, 5))
-        );
-        assert!(pop_ready_scaling_tick(&mut events, 10.0));
-        assert!(events.is_empty());
-    }
-
-    #[test]
     fn test_worker_ready_push_pop_round_trip() {
         let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
         let mut next_event_seq = 0;
@@ -436,42 +290,5 @@ mod tests {
         assert_eq!(events.len(), 1);
         // pop_ready_worker_ready should succeed.
         assert!(pop_ready_worker_ready(&mut events, 10.0).is_some());
-    }
-
-    #[test]
-    fn test_worker_ready_interleaved_with_completion() {
-        let mut events = BinaryHeap::new();
-        let mut next_event_seq = 0;
-
-        push_worker_completions(
-            &mut events,
-            &mut next_event_seq,
-            ScheduledWorkerCompletions {
-                at_ms: 10.0,
-                payloads: vec![completion_payload(0, 1)],
-            },
-        );
-        push_worker_ready(
-            &mut events,
-            &mut next_event_seq,
-            10.0,
-            SimulationWorkerStage::Aggregated,
-            5,
-        );
-
-        // The completion was pushed first (lower seq_no) so it pops first.
-        let ReadyWorkerCompletions::Single(completion) =
-            pop_ready_worker_completions(&mut events, 10.0).unwrap()
-        else {
-            panic!("singleton completion must retain its existing representation");
-        };
-        assert_eq!(completion.worker_idx, 0);
-
-        // Now the ready event is at the front.
-        assert!(pop_ready_worker_completions(&mut events, 10.0).is_none());
-        let (stage, worker_id) = pop_ready_worker_ready(&mut events, 10.0).unwrap();
-        assert_eq!(stage, SimulationWorkerStage::Aggregated);
-        assert_eq!(worker_id, 5);
-        assert!(events.is_empty());
     }
 }

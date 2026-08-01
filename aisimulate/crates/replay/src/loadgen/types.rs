@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
-};
-use dynamo_tokens::SequenceHash;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::trace::synthesize_validated_trace_tokens;
@@ -46,12 +41,6 @@ pub struct AgenticTrace {
     pub turns: Vec<AgenticTurnTrace>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum DynamoRequestTrace {
-    Standard(Trace),
-    Agentic(AgenticTrace),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,
@@ -67,6 +56,106 @@ pub enum TraceFileFormat {
     AgenticMooncake,
     AppliedComputeAgentic,
     Dynamo,
+}
+
+/// One producer-neutral Mooncake request row.
+///
+/// This mirrors the external JSONL schema without depending on Dynamo's
+/// producer-side `dynamo-data-gen` crate. Dynamo request-trace lowering lives
+/// in the Mocker adapter and converts into this DTO.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MooncakeRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_length: Option<usize>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub hash_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "created_time"
+    )]
+    pub timestamp: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
+    pub delay: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
+}
+
+/// Harness tool span attached to an agentic Mooncake row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgenticToolEvent {
+    pub tool_call_id: String,
+    pub tool_class: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub duration_ms: f64,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+}
+
+/// One producer-neutral agentic Mooncake request row.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgenticMooncakeRow {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_length: Option<usize>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
+    #[serde(default)]
+    pub hash_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "created_time"
+    )]
+    pub timestamp: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
+    pub delay: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_reset: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_events: Vec<AgenticToolEvent>,
+}
+
+impl AgenticMooncakeRow {
+    pub(crate) fn dependency_delay_ms(&self) -> f64 {
+        self.delay.unwrap_or(0.0) + self.tool_wait_ms.unwrap_or(0.0)
+    }
 }
 
 impl TraceFileFormat {
@@ -156,35 +245,58 @@ pub struct SyntheticTraceSpec {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum SequenceHashMode {
-    Raw,
-    Cumulative,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub enum SessionPartitionSpec {
     Random { num_partitions: usize, seed: u64 },
     RoundRobin { num_partitions: usize },
 }
 
-#[derive(Debug, Clone)]
-pub struct RouterSequence {
-    pub worker_id: WorkerId,
-    pub local_hashes: Vec<LocalBlockHash>,
-    pub external_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequestHashes {
-    pub local_block_hashes: Vec<LocalBlockHash>,
-    pub sequence_hashes: Vec<SequenceHash>,
+    /// Token-only hashes for complete engine blocks.
+    ///
+    /// These remain raw identities here; a Dynamo placement adapter converts
+    /// them to `LocalBlockHash` at its API boundary.
+    pub local_block_hashes: Vec<u64>,
+    /// Rolling, sequence-aware identities for the same complete blocks.
+    pub sequence_hashes: Vec<u64>,
 }
 
 impl ReplayRequestHashes {
-    pub(crate) fn from_tokens(tokens: &[u32], engine_block_size: u32) -> Self {
-        let local_block_hashes =
-            compute_block_hash_for_seq(tokens, engine_block_size, BlockHashOptions::default());
-        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+    /// Materialize stable replay block identities without importing a concrete
+    /// Router implementation or its wire types.
+    pub fn from_tokens(tokens: &[u32], engine_block_size: u32) -> Self {
+        if engine_block_size == 0 {
+            return Self {
+                local_block_hashes: Vec::new(),
+                sequence_hashes: Vec::new(),
+            };
+        }
+
+        let block_size = engine_block_size as usize;
+        let local_block_hashes = tokens
+            .chunks_exact(block_size)
+            .map(|block| {
+                let mut bytes = Vec::with_capacity(std::mem::size_of_val(block));
+                for token in block {
+                    bytes.extend_from_slice(&token.to_le_bytes());
+                }
+                xxhash_rust::xxh3::xxh3_64_with_seed(&bytes, 1337)
+            })
+            .collect::<Vec<_>>();
+        let mut sequence_hashes = Vec::with_capacity(local_block_hashes.len());
+        for &block_hash in &local_block_hashes {
+            let sequence_hash =
+                sequence_hashes
+                    .last()
+                    .copied()
+                    .map_or(block_hash, |parent: u64| {
+                        let mut bytes = [0_u8; std::mem::size_of::<[u64; 2]>()];
+                        bytes[..8].copy_from_slice(&parent.to_le_bytes());
+                        bytes[8..].copy_from_slice(&block_hash.to_le_bytes());
+                        xxhash_rust::xxh3::xxh3_64_with_seed(&bytes, 1337)
+                    });
+            sequence_hashes.push(sequence_hash);
+        }
 
         Self {
             local_block_hashes,
@@ -209,8 +321,9 @@ pub struct ReadyTurn {
 /// block. Offline replay keeps this compact form while an aggregated or
 /// prefill router queues the request and materializes tokens only when a
 /// worker admits it.
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) enum ReplayRequestPayload {
+pub enum ReplayRequestPayload {
     Materialized(DirectRequest),
     Deferred {
         request_metadata: DirectRequest,
@@ -221,11 +334,11 @@ pub(crate) enum ReplayRequestPayload {
 }
 
 impl ReplayRequestPayload {
-    pub(crate) fn materialized(request: DirectRequest) -> Self {
+    pub fn materialized(request: DirectRequest) -> Self {
         Self::Materialized(request)
     }
 
-    pub(super) fn deferred(
+    pub fn deferred(
         request_metadata: DirectRequest,
         input_length: usize,
         hash_ids: Vec<u32>,
@@ -240,14 +353,14 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn input_length(&self) -> usize {
+    pub fn input_length(&self) -> usize {
         match self {
             Self::Materialized(request) => request.tokens.len(),
             Self::Deferred { input_length, .. } => *input_length,
         }
     }
 
-    pub(crate) fn metadata(&self) -> &DirectRequest {
+    pub fn metadata(&self) -> &DirectRequest {
         match self {
             Self::Materialized(request) => request,
             Self::Deferred {
@@ -256,7 +369,7 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn metadata_mut(&mut self) -> &mut DirectRequest {
+    pub fn metadata_mut(&mut self) -> &mut DirectRequest {
         match self {
             Self::Materialized(request) => request,
             Self::Deferred {
@@ -265,21 +378,21 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn materialized_tokens(&self) -> Option<&[u32]> {
+    pub fn materialized_tokens(&self) -> Option<&[u32]> {
         match self {
             Self::Materialized(request) => Some(&request.tokens),
             Self::Deferred { .. } => None,
         }
     }
 
-    pub(crate) fn materialized_request(&self) -> Option<&DirectRequest> {
+    pub fn materialized_request(&self) -> Option<&DirectRequest> {
         match self {
             Self::Materialized(request) => Some(request),
             Self::Deferred { .. } => None,
         }
     }
 
-    pub(crate) fn prompt_tokens(&self) -> Vec<u32> {
+    pub fn prompt_tokens(&self) -> Vec<u32> {
         match self {
             Self::Materialized(request) => request.tokens.clone(),
             Self::Deferred {
@@ -291,7 +404,7 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn into_direct_request(self) -> DirectRequest {
+    pub fn into_direct_request(self) -> DirectRequest {
         match self {
             Self::Materialized(request) => request,
             Self::Deferred {
@@ -307,7 +420,7 @@ impl ReplayRequestPayload {
         }
     }
 
-    pub(crate) fn materialize(&mut self) -> Option<&DirectRequest> {
+    pub fn materialize(&mut self) -> Option<&DirectRequest> {
         if matches!(self, Self::Deferred { .. }) {
             let payload = std::mem::replace(self, Self::Materialized(DirectRequest::default()));
             *self = Self::Materialized(payload.into_direct_request());
@@ -316,20 +429,22 @@ impl ReplayRequestPayload {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) struct CompactReadyTurn {
-    pub(crate) request_uuid: Uuid,
-    pub(crate) session_id: String,
-    pub(crate) turn_index: usize,
-    pub(crate) replay_key: Option<String>,
-    pub(crate) scheduled_ready_at_ms: f64,
-    pub(crate) replay_hashes: Option<ReplayRequestHashes>,
-    pub(crate) emit_session_metadata: bool,
-    pub(crate) request: ReplayRequestPayload,
+pub struct CompactReadyTurn {
+    pub request_uuid: Uuid,
+    pub session_id: String,
+    pub turn_index: usize,
+    pub replay_key: Option<String>,
+    pub scheduled_ready_at_ms: f64,
+    pub replay_hashes: Option<ReplayRequestHashes>,
+    pub emit_session_metadata: bool,
+    pub request: ReplayRequestPayload,
 }
 
 impl CompactReadyTurn {
-    pub(crate) fn into_ready_turn(self) -> ReadyTurn {
+    #[doc(hidden)]
+    pub fn into_ready_turn(self) -> ReadyTurn {
         ReadyTurn {
             request_uuid: self.request_uuid,
             session_id: self.session_id,

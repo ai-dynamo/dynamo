@@ -11,11 +11,12 @@ use rand::rngs::StdRng;
 
 pub use driver::WorkloadDriver;
 pub use trace::validate_trace_files;
-pub(crate) use types::ReplayRequestPayload;
+#[doc(hidden)]
+pub use types::CompactReadyTurn;
 pub use types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
-    OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY, ReadyTurn,
-    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
+    AgenticMooncakeRow, AgenticToolEvent, AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec,
+    LengthSpec, MooncakeRow, OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY, OUTPUT_REPLAY_ID_ANNOTATION_KEY,
+    ReadyTurn, ReplayRequestHashes, ReplayRequestPayload, SessionPartitionSpec, SessionTrace,
     SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace, effective_replay_key,
     output_replay_id_annotation,
 };

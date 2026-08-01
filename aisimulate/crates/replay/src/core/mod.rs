@@ -9,22 +9,28 @@
 use anyhow::Result;
 use uuid::Uuid;
 
-pub(crate) mod round_robin;
+pub mod round_robin;
 
-pub(crate) trait RequestIdentity {
+pub trait RequestIdentity {
     fn request_id(&self) -> Option<Uuid>;
+
+    /// An authored attention-DP preference. Policies that do not provide
+    /// rank-affinity semantics may ignore it.
+    fn preferred_dp_rank(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[derive(Debug)]
-pub(crate) struct ReadyArrival<Request, Metadata> {
-    pub(in crate::replay::offline) request: Request,
-    pub(in crate::replay::offline) arrival_time_ms: f64,
-    pub(in crate::replay::offline) metadata: Metadata,
-    pub(in crate::replay::offline) session_id: Option<String>,
-    pub(in crate::replay::offline) turn_index: Option<usize>,
+pub struct ReadyArrival<Request, Metadata> {
+    pub request: Request,
+    pub arrival_time_ms: f64,
+    pub metadata: Metadata,
+    pub session_id: Option<String>,
+    pub turn_index: Option<usize>,
 }
 
-pub(crate) trait AdmissionSource {
+pub trait AdmissionSource {
     type Request;
     type Metadata;
 
@@ -41,38 +47,38 @@ pub(crate) trait AdmissionSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PlannerCacheSample {
-    pub(in crate::replay::offline) overlap_blocks: u32,
-    pub(in crate::replay::offline) isl_blocks: u32,
+pub struct PlacementCacheSample {
+    pub overlap_blocks: u32,
+    pub isl_blocks: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(in crate::replay::offline) request_id: Uuid,
-    pub(in crate::replay::offline) scheduler_id: usize,
-    pub(in crate::replay::offline) reported_overlap_tokens: usize,
-    pub(in crate::replay::offline) planner_cache_sample: Option<PlannerCacheSample>,
+pub struct Placement {
+    pub request_id: Uuid,
+    pub scheduler_id: usize,
+    pub reported_overlap_tokens: usize,
+    pub cache_sample: Option<PlacementCacheSample>,
 }
 
 #[derive(Debug)]
-pub(crate) enum PlacementDecision {
+pub enum PlacementDecision {
     Immediate(Placement),
     Queued,
 }
 
 #[derive(Debug)]
-pub(crate) struct PlacementEffects {
-    pub(crate) decision: PlacementDecision,
-    pub(crate) released: Vec<Placement>,
+pub struct PlacementEffects {
+    pub decision: PlacementDecision,
+    pub released: Vec<Placement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkerTopology {
-    pub(crate) worker_id: usize,
-    pub(crate) scheduler_ids: Vec<usize>,
+pub struct WorkerTopology {
+    pub worker_id: usize,
+    pub scheduler_ids: Vec<usize>,
 }
 
-pub(crate) trait PlacementPolicy<Request> {
+pub trait PlacementPolicy<Request> {
     type Metadata;
     type Observation;
 
@@ -96,11 +102,11 @@ pub(crate) trait PlacementPolicy<Request> {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct EngineProgress {
-    pub(in crate::replay::offline) made_progress: bool,
-    pub(in crate::replay::offline) had_raw_observations: bool,
+    pub(crate) made_progress: bool,
+    pub(crate) had_raw_observations: bool,
 }
 
-pub(crate) trait EngineEventBatch: Default {
+pub trait EngineEventBatch: Default {
     fn is_empty(&self) -> bool;
     fn append(&mut self, other: Self);
 }
@@ -116,4 +122,4 @@ impl EngineEventBatch for () {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct NoEngineEvents;
+pub struct NoEngineEvents;

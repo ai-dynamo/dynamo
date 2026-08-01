@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "aisimulate-python"
+description = "Python binding for the AISimulate native replay runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_runtime"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+aisimulate-engine = { workspace = true }
+aisimulate-replay = { workspace = true }
+anyhow = { workspace = true }
+pyo3 = { version = "0.23.4", features = ["abi3-py310"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

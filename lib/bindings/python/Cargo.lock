@@ -48,6 +48,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "aisimulate-engine"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "derive_builder",
+ "rand 0.9.4",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "aisimulate-replay"
+version = "1.4.0"
+dependencies = [
+ "aisimulate-engine",
+ "anyhow",
+ "blake3",
+ "ddsketchy",
+ "indicatif 0.18.4",
+ "rand 0.9.4",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,43 +263,6 @@ dependencies = [
 
 [[package]]
 name = "async-nats"
-version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86dde77d8a733a9dbaf865a9eb65c72e09c88f3d14d3dd0d2aecf511920ee4fe"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-util",
- "memchr",
- "nkeys",
- "nuid",
- "once_cell",
- "pin-project",
- "portable-atomic",
- "rand 0.8.6",
- "regex",
- "ring",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile",
- "rustls-webpki 0.102.8",
- "serde",
- "serde_json",
- "serde_nanos",
- "serde_repr",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-stream",
- "tokio-util",
- "tokio-websockets",
- "tracing",
- "tryhard",
- "url",
-]
-
-[[package]]
-name = "async-nats"
 version = "0.49.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fad3cd6df81292728e2a8cb1f1dcb4d7e7a1ab59b80c14fbbcba2baf9d5cf86a"
@@ -281,7 +278,7 @@ dependencies = [
  "rand 0.10.1",
  "regex",
  "ring",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-pki-types",
  "rustls-webpki 0.103.13",
  "serde",
@@ -565,7 +562,7 @@ dependencies = [
  "http 0.2.12",
  "http 1.4.2",
  "http-body 1.0.1",
- "lru 0.16.4",
+ "lru",
  "percent-encoding",
  "regex-lite",
  "sha2 0.10.9",
@@ -761,7 +758,7 @@ dependencies = [
  "pin-project-lite",
  "rustls 0.21.12",
  "rustls 0.23.40",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -2300,7 +2297,7 @@ dependencies = [
  "aligned-vec",
  "anyhow",
  "arc-swap",
- "async-nats 0.49.1",
+ "async-nats",
  "async-stream",
  "async-trait",
  "aws-config",
@@ -2343,7 +2340,7 @@ dependencies = [
  "json-five",
  "llm-multimodal",
  "llm-tokenizer",
- "lru 0.16.4",
+ "lru",
  "memfile",
  "minijinja",
  "modelexpress-client",
@@ -2412,34 +2409,26 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.4.0"
 dependencies = [
+ "aisimulate-engine",
+ "aisimulate-replay",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "ddsketchy",
- "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
- "dynamo-truthy",
  "futures",
- "indicatif 0.18.4",
- "kvbm-common",
- "kvbm-engine",
- "kvbm-logical",
- "kvbm-physical",
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",
- "rand 0.9.4",
+ "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_path_to_error",
- "slotmap",
- "smallvec",
  "tmq",
  "tokio",
  "tokio-timerfd",
@@ -2447,7 +2436,6 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
- "velo",
 ]
 
 [[package]]
@@ -2587,7 +2575,7 @@ version = "1.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-nats 0.49.1",
+ "async-nats",
  "async-once-cell",
  "async-stream",
  "async-trait",
@@ -2613,7 +2601,7 @@ dependencies = [
  "kube",
  "local-ip-address",
  "log",
- "lru 0.16.4",
+ "lru",
  "mio 1.1.1",
  "notify",
  "nuid",
@@ -3177,17 +3165,6 @@ checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
 dependencies = [
  "autocfg",
  "tokio",
-]
-
-[[package]]
-name = "fs4"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
-dependencies = [
- "rustix 1.1.4",
- "tokio",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4001,7 +3978,7 @@ dependencies = [
  "hyper-util",
  "log",
  "rustls 0.23.40",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
@@ -4712,119 +4689,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kvbm-common"
-version = "1.4.0"
-dependencies = [
- "dynamo-tokens",
- "serde",
-]
-
-[[package]]
-name = "kvbm-config"
-version = "1.4.0"
-dependencies = [
- "anyhow",
- "dynamo-memory",
- "figment",
- "nix 0.30.1",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "validator",
- "velo",
-]
-
-[[package]]
-name = "kvbm-engine"
-version = "1.4.0"
-dependencies = [
- "anyhow",
- "aws-config",
- "aws-sdk-s3",
- "bytes",
- "chrono",
- "crossbeam-queue",
- "dashmap",
- "derive_builder",
- "dynamo-memory",
- "futures",
- "kvbm-common",
- "kvbm-config",
- "kvbm-logical",
- "kvbm-physical",
- "oneshot",
- "parking_lot",
- "rayon",
- "rmp-serde",
- "serde",
- "serde_json",
- "tokio",
- "tokio-rayon",
- "tokio-stream",
- "tracing",
- "uuid",
- "velo",
-]
-
-[[package]]
-name = "kvbm-kernels"
-version = "1.4.0"
-dependencies = [
- "cudarc",
-]
-
-[[package]]
-name = "kvbm-logical"
-version = "1.4.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "bincode 2.0.1",
- "bytes",
- "derive_builder",
- "dynamo-tokens",
- "futures",
- "indexmap 2.14.0",
- "lru 0.16.4",
- "parking_lot",
- "prometheus",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
-name = "kvbm-physical"
-version = "1.4.0"
-dependencies = [
- "aligned-vec",
- "anyhow",
- "bincode 2.0.1",
- "blake3",
- "cudarc",
- "derive-getters",
- "derive_builder",
- "dynamo-memory",
- "futures",
- "kvbm-common",
- "kvbm-kernels",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "validator",
- "velo",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5004,15 +4868,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
-]
-
-[[package]]
-name = "lru"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
-dependencies = [
- "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -5472,7 +5327,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -5980,12 +5834,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "openssl-probe"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
 name = "openssl-probe"
@@ -7265,7 +7113,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.40",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -7522,27 +7370,14 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5bfb394eeed242e909609f56089eecfe5fda225042e8b171791b9c95f5931e5"
-dependencies = [
- "openssl-probe 0.1.6",
- "rustls-pemfile",
- "rustls-pki-types",
- "schannel",
- "security-framework 2.11.1",
-]
-
-[[package]]
-name = "rustls-native-certs"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
 dependencies = [
- "openssl-probe 0.2.1",
+ "openssl-probe",
  "rustls-pki-types",
  "schannel",
- "security-framework 3.7.0",
+ "security-framework",
 ]
 
 [[package]]
@@ -7576,10 +7411,10 @@ dependencies = [
  "log",
  "once_cell",
  "rustls 0.23.40",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-platform-verifier-android",
  "rustls-webpki 0.103.13",
- "security-framework 3.7.0",
+ "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
  "windows-sys 0.61.2",
@@ -7598,16 +7433,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
  "ring",
- "untrusted",
-]
-
-[[package]]
-name = "rustls-webpki"
-version = "0.102.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
-dependencies = [
- "rustls-pki-types",
  "untrusted",
 ]
 
@@ -7798,19 +7623,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
  "zeroize",
-]
-
-[[package]]
-name = "security-framework"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
-dependencies = [
- "bitflags 2.13.0",
- "core-foundation 0.9.4",
- "core-foundation-sys",
- "libc",
- "security-framework-sys",
 ]
 
 [[package]]
@@ -8756,7 +8568,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -8940,7 +8751,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "socket2 0.6.4",
  "sync_wrapper",
  "tokio",
@@ -9514,226 +9325,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "velo"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e0cc874c11ea3d03afd7adf90529bcf3df374039deff65bc02a26e71bb5814b"
-dependencies = [
- "anyhow",
- "bytes",
- "serde",
- "tokio",
- "tokio-util",
- "velo-common",
- "velo-discovery",
- "velo-events",
- "velo-messenger",
- "velo-observability",
- "velo-queue",
- "velo-rendezvous",
- "velo-streaming",
- "velo-transports",
-]
-
-[[package]]
-name = "velo-common"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc2824d7667c4ee992dfc58c30799518f504d39c91f1e83962d55cb8c44cfb67"
-dependencies = [
- "bytes",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "velo-discovery"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41107947fe3d15972c56815e42fd2485ca4ba58a5a69ec1a6fd61c00966f8734"
-dependencies = [
- "anyhow",
- "async-stream",
- "bytes",
- "fs4",
- "futures",
- "parking_lot",
- "rmp-serde",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "velo-common",
-]
-
-[[package]]
-name = "velo-events"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2504e857f1ed52ad96ce73792a724be880ba75f3579a27050395e81d38cb42d0"
-dependencies = [
- "anyhow",
- "dashmap",
- "futures",
- "parking_lot",
- "serde",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "velo-messenger"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ada8ea47ab39a82ef9101024452a3c605bcf5c0acad82c76afcf48a17c0450cf"
-dependencies = [
- "anyhow",
- "bs58",
- "bytes",
- "dashmap",
- "derive-getters",
- "derive_builder",
- "flume",
- "futures",
- "lru 0.12.5",
- "parking_lot",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "velo-common",
- "velo-discovery",
- "velo-events",
- "velo-observability",
- "velo-transports",
-]
-
-[[package]]
-name = "velo-observability"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57813414b19b0f845744fcf158ed4b87afe4f5c59ee99d58872c8e5d5534d61b"
-dependencies = [
- "prometheus",
- "tracing",
-]
-
-[[package]]
-name = "velo-queue"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7bcce33f5710d87e33e1eacc5472300cbe6acdfb5f2cd6929c12f2e4908ef38"
-dependencies = [
- "bytes",
- "dashmap",
- "flume",
- "futures",
- "rmp-serde",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "velo-rendezvous"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1eac77f329b0c3dba1b36114c969e0a7d680bb4a6436720754bef14a24fedde"
-dependencies = [
- "anyhow",
- "bytes",
- "dashmap",
- "futures",
- "serde",
- "serde_json",
- "tracing",
- "velo-common",
- "velo-messenger",
- "velo-observability",
-]
-
-[[package]]
-name = "velo-streaming"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd6dc0d71f73c6f369302bb94b05341a807a5693f6c321fc208d9c9a974d918a"
-dependencies = [
- "anyhow",
- "bytes",
- "dashmap",
- "derive_builder",
- "flume",
- "futures",
- "rmp-serde",
- "serde",
- "serde_json",
- "socket2 0.6.4",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tonic-build 0.13.1",
- "tracing",
- "uuid",
- "velo-common",
- "velo-messenger",
- "velo-observability",
- "velo-transports",
-]
-
-[[package]]
-name = "velo-transports"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb5a348cc2fe13fc560824f170d3bdc3d10ec3a11802bb32489a59f49eb12409"
-dependencies = [
- "anyhow",
- "async-nats 0.45.0",
- "axum",
- "bs58",
- "bytes",
- "dashmap",
- "flume",
- "futures",
- "http 1.4.2",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.10.1",
- "hyper-util",
- "nix 0.30.1",
- "parking_lot",
- "prost 0.13.5",
- "rmp-serde",
- "serde",
- "serde_json",
- "socket2 0.6.4",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tower",
- "tracing",
- "velo-common",
- "velo-observability",
-]
 
 [[package]]
 name = "version-compare"

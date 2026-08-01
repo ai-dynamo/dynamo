@@ -7,10 +7,9 @@ use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use crate::common::handoff::{HandoffId, HandoffTransferTiming};
 use crate::common::protocols::DirectRequest;
+use crate::{HandoffId, HandoffTransferTiming};
 
-#[allow(dead_code)]
 pub enum SchedulerCommand {
     Submit(DirectRequest),
     /// Remove an ordinary request from the live scheduler by its stable ID.
@@ -65,21 +64,12 @@ pub enum SchedulerLifecycleEvent {
     },
 }
 
-impl SchedulerLifecycleEvent {
-    pub fn handoff_id(&self) -> HandoffId {
-        match *self {
-            Self::SourceHeld { handoff_id, .. } | Self::DestinationReserved { handoff_id, .. } => {
-                handoff_id
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct SchedulerCommandEffects {
     pub result: SchedulerCommandResult,
     pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
-    pub kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+    pub kv_events: Vec<crate::KvEvent>,
+    pub retired_requests: Vec<Uuid>,
 }
 
 impl SchedulerCommandEffects {
@@ -88,7 +78,13 @@ impl SchedulerCommandEffects {
             result,
             lifecycle_events: Vec::new(),
             kv_events: Vec::new(),
+            retired_requests: Vec::new(),
         }
+    }
+
+    pub(crate) fn retire(mut self, request_id: Uuid) -> Self {
+        self.retired_requests.push(request_id);
+        self
     }
 }
 
@@ -122,7 +118,6 @@ impl<T> Default for SourceHolds<T> {
 }
 
 impl<T> SourceHolds<T> {
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         debug_assert_eq!(self.pending_by_request.len(), self.pending_by_handoff.len());
         debug_assert_eq!(self.held_prefills.len(), self.held_by_request.len());
@@ -442,7 +437,6 @@ impl<T> DestinationHolds<T> {
         Some((request_id, payload))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         debug_assert_eq!(self.by_handoff.len(), self.by_request.len());
         self.by_handoff.is_empty()
@@ -507,7 +501,11 @@ mod tests {
 
         holds.register(request_id, handoff_id).unwrap();
         assert!(holds.register(Uuid::from_u128(5), handoff_id).is_err());
-        assert!(holds.register(request_id, HandoffId::new()).is_err());
+        assert!(
+            holds
+                .register(request_id, HandoffId::from(Uuid::new_v4()))
+                .is_err()
+        );
         assert!(matches!(
             holds.remove(handoff_id),
             RemovedSource::Pending { request_id: pending } if pending == request_id
@@ -557,7 +555,7 @@ mod tests {
         }
         assert!(
             pending
-                .validate(Uuid::from_u128(200), HandoffId::new())
+                .validate(Uuid::from_u128(200), HandoffId::from(Uuid::new_v4()))
                 .is_err()
         );
         assert!(pending.validate(Uuid::new_v4(), handoffs[0]).is_err());

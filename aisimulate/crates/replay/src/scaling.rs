@@ -9,10 +9,9 @@
 //! component; this trait only observes a settled snapshot and returns desired
 //! non-draining capacity.
 
-use std::collections::BTreeMap;
-
 use super::components::TrafficStats;
-use crate::common::protocols::ForwardPassSnapshot;
+use crate::protocol::ForwardPassSnapshot;
+use std::collections::BTreeMap;
 
 const IDLE_FPM_INTERVAL_MS: f64 = 1_000.0;
 
@@ -78,7 +77,7 @@ impl LatestFpmBuffer {
 #[cfg(test)]
 mod tests {
     use super::LatestFpmBuffer;
-    use crate::common::protocols::ForwardPassSnapshot;
+    use crate::protocol::ForwardPassSnapshot;
 
     #[test]
     fn latest_fpm_buffer_coalesces_each_worker_rank() {
@@ -196,7 +195,7 @@ mod tests {
 /// consistent post-settlement snapshot (matching the old advance-then-tick ordering).
 #[derive(Debug)]
 pub struct ReplayScalingSnapshot {
-    /// Runtime-owned ordinal for this scaling callback.
+    /// Stable zero-based ordinal of this scaling tick within the execution.
     pub tick_ordinal: u64,
     /// Simulated clock at this tick (equals the scheduled tick time).
     pub now_ms: f64,
@@ -238,10 +237,34 @@ pub struct ReplayScalingDecision {
 /// Intentionally NOT `Send`: the simulation runs single-threaded and the PyO3 implementation
 /// holds Python state, so the runtime loop holds the GIL rather than crossing threads.
 pub trait ReplayScalingPolicy {
+    /// Whether the owning runtime should retain detailed worker lifecycle
+    /// operations for this policy. The default keeps fixed-capacity and
+    /// non-reporting policies allocation-free.
+    fn capture_lifecycle_evidence(&self) -> bool {
+        false
+    }
+
     /// First tick time (ms). A non-finite value disables scaling ticks.
     fn initial_tick_ms(&mut self) -> anyhow::Result<f64>;
 
     /// Drive one tick: decide scaling targets and the next tick time.
     fn on_tick(&mut self, snapshot: ReplayScalingSnapshot)
     -> anyhow::Result<ReplayScalingDecision>;
+}
+
+/// Scaling policy for replay compositions that keep capacity fixed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoScaling;
+
+impl ReplayScalingPolicy for NoScaling {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(f64::INFINITY)
+    }
+
+    fn on_tick(
+        &mut self,
+        _snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        Ok(ReplayScalingDecision::default())
+    }
 }
