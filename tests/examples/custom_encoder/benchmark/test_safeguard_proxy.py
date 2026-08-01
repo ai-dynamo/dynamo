@@ -55,7 +55,14 @@ def test_jpeg_generator_supports_300_pixel_workload(tmp_path: Path) -> None:
     path = tmp_path / "image_300x300.jpg"
     record = _generate_jpeg(path, seed=42, image_size=(300, 300))
     assert record["width"] == record["height"] == 300
-    assert 50 * 1024 <= path.stat().st_size <= 60 * 1024
+    assert 7 * 1024 - 256 <= path.stat().st_size <= 7 * 1024 + 256
+
+
+def test_jpeg_generator_supports_500_pixel_workload(tmp_path: Path) -> None:
+    path = tmp_path / "image_500x500.jpg"
+    record = _generate_jpeg(path, seed=42, image_size=(500, 500))
+    assert record["width"] == record["height"] == 500
+    assert 35 * 1024 - 256 <= path.stat().st_size <= 35 * 1024 + 256
 
 
 def test_workload_validation_rejects_requested_size_mismatch(tmp_path: Path) -> None:
@@ -177,6 +184,18 @@ def test_workload_generation_supports_balanced_unique_mixed_sizes(
     assert manifest["unique_encoded_sha256"] == 4
     assert manifest["unique_decoded_rgb_sha256"] == 4
     assert [entry["requests"] for entry in manifest["image_size_counts"]] == [2, 2]
+    assert manifest["encoding"]["size_bytes_by_image_size"] == {
+        "300x300": {
+            "target_bytes": 7 * 1024,
+            "min_bytes": 7 * 1024 - 256,
+            "max_bytes": 7 * 1024 + 256,
+        },
+        "500x500": {
+            "target_bytes": 35 * 1024,
+            "min_bytes": 35 * 1024 - 256,
+            "max_bytes": 35 * 1024 + 256,
+        },
+    }
     assert Counter(record["raw_patch_rows"] for record in manifest["images"]) == {
         484: 2,
         1296: 2,

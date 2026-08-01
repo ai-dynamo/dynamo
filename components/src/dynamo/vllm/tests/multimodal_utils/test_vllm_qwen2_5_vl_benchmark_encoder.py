@@ -288,7 +288,7 @@ def test_forward_batch_requires_build() -> None:
         Qwen2_5VLBenchmarkEncoder().forward_batch([_item((1, 4, 4))])
 
 
-def test_load_image_accepts_local_and_base64_sources(tmp_path) -> None:
+def test_load_image_accepts_raw_local_and_base64_sources(tmp_path) -> None:
     path = tmp_path / "source.png"
     Image.new("RGBA", (7, 5), color=(1, 2, 3, 255)).save(path)
 
@@ -296,9 +296,11 @@ def test_load_image_accepts_local_and_base64_sources(tmp_path) -> None:
     Image.new("RGB", (11, 9), color=(4, 5, 6)).save(buffer, format="PNG")
     data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
+    raw = Qwen2_5VLBenchmarkEncoder._load_image(buffer.getvalue())
     local = Qwen2_5VLBenchmarkEncoder._load_image(str(path))
     inline = Qwen2_5VLBenchmarkEncoder._load_image(data_url)
 
+    assert (raw.mode, raw.size) == ("RGB", (11, 9))
     assert (local.mode, local.size) == ("RGB", (7, 5))
     assert (inline.mode, inline.size) == ("RGB", (11, 9))
 

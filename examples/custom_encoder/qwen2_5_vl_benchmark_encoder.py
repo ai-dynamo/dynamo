@@ -34,6 +34,8 @@ from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 
 logger = logging.getLogger(__name__)
 
+ImageSource = str | bytes
+
 
 def _parse_graph_buckets() -> tuple[int, ...]:
     raw = os.environ.get("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,2,4,8,16,32,64")
@@ -542,7 +544,7 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             )
         return output_hidden_size
 
-    def preprocess(self, raw: str) -> Preprocessed[Qwen2VLImageInputs]:
+    def preprocess(self, raw: ImageSource) -> Preprocessed[Qwen2VLImageInputs]:
         """Fetch/decode one image and run the CPU Qwen2.5-VL image processor."""
         started = time.monotonic()
         result = (
@@ -566,7 +568,9 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             else None
         )
 
-    def _preprocess_uncached(self, raw: str) -> Preprocessed[Qwen2VLImageInputs]:
+    def _preprocess_uncached(
+        self, raw: ImageSource
+    ) -> Preprocessed[Qwen2VLImageInputs]:
         """Compute one read-only CPU input; optionally memoized by source string."""
         image = self._load_image(raw)
         item = self._process_image(image)
@@ -957,9 +961,11 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             torch.cuda.empty_cache()
 
     @staticmethod
-    def _load_image(source: str) -> Image.Image:
-        """Load local, inline, or remote image bytes as owned RGB pixels."""
-        if source.startswith("data:"):
+    def _load_image(source: ImageSource) -> Image.Image:
+        """Load raw, local, inline, or remote image bytes as owned RGB pixels."""
+        if isinstance(source, bytes):
+            raw = source
+        elif source.startswith("data:"):
             try:
                 header, payload = source.split(",", 1)
             except ValueError as exc:

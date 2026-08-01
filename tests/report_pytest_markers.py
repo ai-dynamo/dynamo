@@ -102,6 +102,7 @@ STUB_MODULES = [
     "msgspec.msgpack",
     "msgspec.json",
     "aiohttp",
+    "aiohttp.test_utils",
     "aiofiles",
     "httpx",
     "uvloop",
