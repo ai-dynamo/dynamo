@@ -100,8 +100,6 @@ navigation:
               path: pages/kubernetes/installation/rdma-setup/efa-on-aws.mdx
         - section: Model Storage
           contents:
-            - page: Overview
-              path: pages/kubernetes/installation/model-storage/overview.md
             - page: AKS Storage
               path: pages/kubernetes/installation/model-storage/aks-storage.md
             - page: Azure Lustre CSI Driver
@@ -929,8 +927,6 @@ navigation:
     layout:
       - page: Compatibility
         path: pages/reference/general/compatibility.mdx
-      - page: Examples
-        path: pages/reference/general/examples.md
       - page: Release Artifacts
         path: pages/reference/general/release-artifacts.mdx
       - section: Releases
