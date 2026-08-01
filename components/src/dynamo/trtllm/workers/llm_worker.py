@@ -782,6 +782,9 @@ async def init_llm_worker(
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
             conversation_affinity=config.conversation_affinity,
+            conversation_affinity_dp_rank_source=(
+                config.conversation_affinity_dp_rank_source
+            ),
         )
 
         media_decoder = None

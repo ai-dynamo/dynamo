@@ -249,7 +249,7 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha]
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -269,11 +269,16 @@ jobs:
       diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha]
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -290,11 +295,16 @@ jobs:
       diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [create-fresh-builder, resolve-source-sha]
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -311,10 +321,16 @@ jobs:
       diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
-  # OPERATOR + PLANNER (nightly-published non-runtime images)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, snapshot agent,
+  # runtime EFA variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -323,10 +339,11 @@ jobs:
   #   2. Tag isolation (same invariant as the runtime builds): the -nightly
   #      ECR tag suffix means a missing or failed nightly build can never
   #      fall through to — or overwrite — the post-merge image at the same SHA.
-  # Neither job gates the release below: release.yml copies both fail-soft
-  # (crane-manifest probe, warn-skip) so an operator/planner build flake
-  # cannot block the runtime nightly. resolve-source-sha is always GITHUB_SHA
-  # here, so github.sha-keyed tags match the resolved source.
+  # None of these jobs gates the release below: release.yml copies each
+  # fail-soft (build-result gate + crane-manifest probe, warn-skip) so a
+  # flake in any optional image cannot block the runtime nightly.
+  # resolve-source-sha is always GITHUB_SHA here, so github.sha-keyed tags
+  # match the resolved source.
 
   operator-build:
     name: kubernetes-operator
@@ -359,7 +376,7 @@ jobs:
 
   planner-build:
     name: dynamo-planner
-    needs: [create-fresh-builder, resolve-source-sha]
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -378,6 +395,137 @@ jobs:
       diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+    secrets: inherit
+
+  frontend-build:
+    name: dynamo-frontend
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
+      build_timeout_minutes: 45
+      archive_sources: false
+      # Compliance artifact is compliance-<sha>-dynamo-frontend
+      # (target_tag_plain — no -nightly suffix), matching the OSRB token.
+      diff_event_context: nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+    secrets: inherit
+
+  snapshot-build:
+    name: snapshot-agent
+    needs: [create-fresh-builder, resolve-source-sha]
+    runs-on: prod-default-v2
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+      - name: Build and push snapshot agent (nightly tag)
+        id: build
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent-nightly
+          # Canonical compliance artifact name — OSRB attach tokens and the
+          # nightly diff-baseline lookup key on compliance-<sha>-snapshot-agent,
+          # independent of the -nightly image-tag suffix.
+          artifact_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          # OSRB CSV diff baseline: previous successful scheduled nightly run
+          # (first nightly soft-degrades to baseline_unavailable).
+          diff_event_context: nightly
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+
+  vllm-efa-build:
+    name: vllm-runtime-efa
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
+      build_timeout_minutes: 120
+      archive_sources: false
+      diff_event_context: nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+    secrets: inherit
+
+  sglang-efa-build:
+    name: sglang-runtime-efa
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
+      build_timeout_minutes: 120
+      archive_sources: false
+      diff_event_context: nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+    secrets: inherit
+
+  trtllm-efa-build:
+    name: trtllm-runtime-efa
+    needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      make_efa: true
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
+      build_timeout_minutes: 120
+      archive_sources: false
+      diff_event_context: nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+      # Stamp the checkout with the shared nightly dev suffix BEFORE the build
+      # (apply_dev_version.py in shared-build-image), so the wheels embedded in
+      # the image report X.Y.Z.devYYYYMMDD — matching the Artifactory-published
+      # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
+      dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
   # ============================================================================
@@ -754,16 +902,22 @@ jobs:
       - dynamo-pipeline
       - operator-build
       - planner-build
+      - frontend-build
+      - snapshot-build
+      - vllm-efa-build
+      - sglang-efa-build
+      - trtllm-efa-build
     # !cancelled() lets the job evaluate the explicit gates below rather than
     # implicitly requiring every need to succeed (notify-slack-start is
     # best-effort). All three runtime builds and dynamo-pipeline are gated
     # strictly: release.yml copies their -nightly ECR images to NGC and extracts
     # wheels from the dynamo-pipeline image, so a failed build must not publish a
     # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
-    # operator-build and planner-build are ORDERING-ONLY needs (deliberately
-    # absent from the gate below): release.yml copies them fail-soft, so a
-    # flake in either must not block the runtime nightly — but the copy step
-    # has to run after they finish or the crane probe would race the builds.
+    # The optional-image builds (operator, planner, frontend, snapshot agent,
+    # EFA variants) are ORDERING-ONLY needs (deliberately absent from the
+    # gate below): release.yml copies them fail-soft, so a flake in any of
+    # them must not block the runtime nightly — but the copy step has to run
+    # after they finish or the crane probe would race the builds.
     if: ${{ !cancelled()
         && needs.compute-release-mode.outputs.release == 'true'
         && needs.vllm-build.result == 'success'
@@ -785,6 +939,11 @@ jobs:
       # existing -nightly ECR tags, matching the runtimes.)
       operator_build_result: ${{ needs.operator-build.result }}
       planner_build_result: ${{ needs.planner-build.result }}
+      frontend_build_result: ${{ needs.frontend-build.result }}
+      snapshot_build_result: ${{ needs.snapshot-build.result }}
+      vllm_efa_build_result: ${{ needs.vllm-efa-build.result }}
+      sglang_efa_build_result: ${{ needs.sglang-efa-build.result }}
+      trtllm_efa_build_result: ${{ needs.trtllm-efa-build.result }}
     secrets: inherit
 
   # ============================================================================
@@ -998,7 +1157,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, snapshot-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
