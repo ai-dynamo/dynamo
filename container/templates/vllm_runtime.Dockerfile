@@ -352,13 +352,17 @@ ENTRYPOINT []
 
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
-   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
-{% if target not in ("dev", "local-dev") %}
+   already skips them, and their pre_runtime carries no dynamo venv to scan.
+   Also skipped for rocm, matching the xpu precedent: the third-party accelerator
+   runtime image is not part of an NVIDIA release, and its vendored packages
+   (e.g. triton_kernels, which carries no license metadata) are not covered by
+   this policy's overrides. The publishing vendor runs its own audit. #}
+{% if target not in ("dev", "local-dev") and device != "rocm" %}
 {% include "templates/compliance.Dockerfile" %}
 {% endif %}
 
 
 FROM pre_runtime AS runtime
-{% if target not in ("dev", "local-dev") %}
+{% if target not in ("dev", "local-dev") and device != "rocm" %}
 COPY --from=licenses /legal /legal
 {% endif %}

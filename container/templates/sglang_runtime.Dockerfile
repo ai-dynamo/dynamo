@@ -244,7 +244,7 @@ CMD []
 {% endif %}
 
 
-{% if device != "xpu" %}
+{% if device != "xpu" and device != "rocm" %}
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
    already skips them, and their pre_runtime carries no dynamo venv to scan. #}
