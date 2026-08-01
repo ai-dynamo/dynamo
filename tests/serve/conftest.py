@@ -30,7 +30,29 @@ MULTIMODAL_VIDEO_H265_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10_h265.
 # availability dependency the test does not control.
 MULTIMODAL_VIDEO_URL = f"http://localhost:{IMAGE_SERVER_PORT}/240p_10.mp4"
 # Content of the synthetic clips above, for expected_response assertions.
-MULTIMODAL_VIDEO_EXPECTED = ["red", "static", "still"]
+#
+# The clips are ffmpeg `testsrc2` output (see the regeneration command in
+# lib/llm/src/preprocessor/media/decoders/video.rs): colour bars with a burned-in
+# timecode. Measured on GPU, frame 0 is mean RGB [121, 126, 122] with a
+# column-mean spread of 41.5 and 6715 distinct colours -- vertical bars, nothing
+# red and nothing still. An earlier ["red", "static", "still"] therefore never
+# described this content; it passed only when the model happened to say "still".
+#
+# These terms are taken from real model responses to these clips, not guessed.
+# Two runs of the same clip at temperature=0.0 gave:
+#   "a test pattern or a color calibration screen ... timecode 00:00:06.000"
+#   "a digital or pixel art animation ... Color Scheme ... Shapes and Patterns"
+# "color" and "pattern" each appear in both. Matching is case-insensitive
+# substring with OR logic (tests/utils/payloads.py), so "color" covers "Color
+# Scheme" and "colorful".
+#
+# Kept deliberately narrow so the assertion still discriminates: frames that
+# failed to decode would be described as a blank or black screen and match none
+# of these. It is still a weak check -- it confirms the model saw something
+# colourful, not that it saw the right video. A follow-up replaces these clips
+# with one source encoded to VP9/H.264/H.265 showing a moving triangle, so every
+# codec path can assert the same unambiguous word.
+MULTIMODAL_VIDEO_EXPECTED = ["color", "colour", "pattern", "shapes", "geometric"]
 
 
 def get_multimodal_test_image_bytes() -> bytes:
