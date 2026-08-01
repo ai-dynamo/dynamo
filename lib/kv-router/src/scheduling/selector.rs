@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+#[cfg(test)]
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
@@ -58,6 +59,7 @@ fn softmax_sample_with_sample(
     softmax_sample_entries(entries, temperature, sample)
 }
 
+#[cfg(any(test, feature = "bench"))]
 fn softmax_sample_entries<T: Copy>(
     entries: Vec<(T, f64)>,
     temperature: f64,
@@ -65,83 +67,66 @@ fn softmax_sample_entries<T: Copy>(
 ) -> (T, f64) {
     assert!(!entries.is_empty(), "Empty logits for softmax sampling");
 
-    let (min_val, max_val) = entries
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, v)| {
-            (lo.min(*v), hi.max(*v))
-        });
-
-    let mut probs = if min_val == max_val {
-        vec![1.0 / entries.len() as f64; entries.len()]
-    } else {
-        // Negate logits and rescale to [−1/temperature, 0] for numerical stability
-        // before softmax. Subtracting the max (which maps to min_val) keeps exp() inputs ≤ 0.
-        let scale = -1.0 / ((max_val - min_val) * temperature);
-        let max_scaled = min_val * scale;
-        entries
-            .iter()
-            .map(|(_, v)| (v * scale - max_scaled).exp())
-            .collect::<Vec<f64>>()
-    };
-
-    let sum: f64 = probs.iter().sum();
-    probs.iter_mut().for_each(|p| *p /= sum);
-
-    let mut cumsum = 0.0;
-    for (i, &prob) in probs.iter().enumerate() {
-        cumsum += prob;
-        if sample <= cumsum {
-            return entries[i];
-        }
-    }
-
-    *entries.last().unwrap()
+    let mut probabilities = Vec::with_capacity(entries.len());
+    let row = softmax_sample_index(
+        &entries,
+        |(_, cost)| *cost,
+        temperature,
+        sample,
+        &mut probabilities,
+    );
+    entries[row]
 }
 
-fn softmax_sample_scratch(
-    scratch: &mut DefaultSoftmaxScratch,
+fn softmax_sample_index<T>(
+    entries: &[T],
+    cost: impl Fn(&T) -> f64,
     temperature: f64,
     sample: f64,
-) -> (WorkerWithDpRank, f64) {
-    scratch.entries.clear();
-    scratch
-        .entries
-        .extend(scratch.costs.iter().map(|(worker, cost)| (*worker, *cost)));
-    let (min_cost, max_cost) = scratch
-        .entries
+    probabilities: &mut Vec<f64>,
+) -> usize {
+    assert!(!entries.is_empty(), "Empty entries for softmax sampling");
+    debug_assert_ne!(temperature, 0.0);
+
+    let (min_cost, max_cost) = entries
         .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, cost)| {
-            (lo.min(*cost), hi.max(*cost))
+        .map(&cost)
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), cost| {
+            (lo.min(cost), hi.max(cost))
         });
 
-    scratch.probabilities.clear();
+    probabilities.clear();
     if min_cost == max_cost {
-        scratch
-            .probabilities
-            .resize(scratch.entries.len(), 1.0 / scratch.entries.len() as f64);
+        probabilities.resize(entries.len(), 1.0 / entries.len() as f64);
     } else {
-        let scale = -1.0 / ((max_cost - min_cost) * temperature);
-        let max_scaled = min_cost * scale;
-        scratch.probabilities.extend(
-            scratch
-                .entries
+        let range = max_cost - min_cost;
+        let magnitude = if range.is_finite() {
+            1.0
+        } else {
+            min_cost.abs().max(max_cost.abs())
+        };
+        let min_normalized = min_cost / magnitude;
+        let scale = -1.0 / ((max_cost / magnitude - min_normalized) * temperature);
+        let max_scaled = min_normalized * scale;
+        probabilities.extend(
+            entries
                 .iter()
-                .map(|(_, cost)| (cost * scale - max_scaled).exp()),
+                .map(|entry| (cost(entry) / magnitude * scale - max_scaled).exp()),
         );
     }
 
-    let sum: f64 = scratch.probabilities.iter().sum();
-    for probability in &mut scratch.probabilities {
+    let sum: f64 = probabilities.iter().sum();
+    for probability in probabilities.iter_mut() {
         *probability /= sum;
     }
     let mut cumulative = 0.0;
-    for (row, probability) in scratch.probabilities.iter().enumerate() {
+    for (row, probability) in probabilities.iter().enumerate() {
         cumulative += probability;
         if sample <= cumulative {
-            return scratch.entries[row];
+            return row;
         }
     }
-    *scratch.entries.last().unwrap()
+    entries.len() - 1
 }
 
 /// Default implementation matching the Python _cost_function.
@@ -161,6 +146,7 @@ struct LogitWeights {
 
 struct WorkerSelectionInput<'a> {
     request: &'a SchedulingRequest,
+    has_tier_overlap_blocks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
@@ -196,25 +182,19 @@ pub struct DefaultWorkerScorer<C = KvRouterConfig> {
 pub struct DefaultWorkerPicker {
     default_temperature: f64,
     // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
-    softmax_scratch: Box<Mutex<DefaultSoftmaxScratch>>,
+    softmax_scratch: Mutex<DefaultSoftmaxScratch>,
     #[cfg(any(test, feature = "bench"))]
     deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 
 #[derive(Default)]
 struct DefaultSoftmaxScratch {
-    costs: FxHashMap<WorkerWithDpRank, f64>,
     entries: Vec<(WorkerWithDpRank, f64)>,
     probabilities: Vec<f64>,
 }
 
 #[derive(Clone, Copy)]
-pub struct WorkerCandidates<'a> {
-    entries: &'a [ScoredWorkerCandidate],
-}
-
-#[derive(Clone, Copy)]
-struct ScoredWorkerCandidate {
+pub struct ScoredWorkerCandidate {
     worker: WorkerWithDpRank,
     cost: f64,
 }
@@ -233,7 +213,7 @@ pub trait WorkerPicker: Send {
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
+        candidates: &[ScoredWorkerCandidate],
     ) -> Result<usize, WorkerSelectionPolicyError>;
 }
 
@@ -305,28 +285,20 @@ impl WorkerCandidate {
     }
 }
 
-impl<'a> WorkerCandidates<'a> {
-    pub fn len(&self) -> usize {
-        self.entries.len()
+impl ScoredWorkerCandidate {
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.worker
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn worker(&self, row: usize) -> WorkerWithDpRank {
-        self.entries[row].worker
-    }
-
-    pub fn cost(&self, row: usize) -> f64 {
-        self.entries[row].cost
+    pub fn cost(&self) -> f64 {
+        self.cost
     }
 }
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 enum WorkerSelectionPolicyState {
     Default(DefaultWorkerPicker),
-    Custom(Box<RefCell<CustomWorkerSelectionState>>),
+    Custom(RefCell<CustomWorkerSelectionState>),
 }
 
 enum WorkerSelectionPolicyStateRef<'a> {
@@ -360,13 +332,11 @@ impl WorkerSelectionPolicy {
         Self {
             kv_router_config,
             worker_type,
-            state: WorkerSelectionPolicyState::Custom(Box::new(RefCell::new(
-                CustomWorkerSelectionState {
-                    scorers,
-                    picker,
-                    candidates: Vec::new(),
-                },
-            ))),
+            state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
+                scorers,
+                picker,
+                candidates: Vec::new(),
+            })),
         }
     }
 
@@ -629,13 +599,16 @@ impl<'a> WorkerSelectionInput<'a> {
                 eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                     minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
                 });
-                debug_assert_ne!(minimum, usize::MAX);
-                minimum
+                if minimum == usize::MAX { 0 } else { minimum }
             } else {
                 0
             };
+        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
+            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+            || !request.overlap.tier_overlap_blocks.disk.is_empty();
         Self {
             request,
+            has_tier_overlap_blocks,
             context: WorkerSelectionContext {
                 request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
@@ -657,14 +630,6 @@ impl<'a> WorkerSelectionInput<'a> {
         preferred_taint_multiplier: Option<f64>,
     ) -> WorkerCandidate {
         let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
-        let has_tier_overlap_blocks = !self.request.overlap.tier_overlap_blocks.device.is_empty()
-            || !self
-                .request
-                .overlap
-                .tier_overlap_blocks
-                .host_pinned
-                .is_empty()
-            || !self.request.overlap.tier_overlap_blocks.disk.is_empty();
         let device_overlap_blocks = self
             .request
             .overlap
@@ -674,15 +639,15 @@ impl<'a> WorkerSelectionInput<'a> {
             .copied()
             .map(|blocks| blocks as f64)
             .unwrap_or_else(|| {
-                if has_tier_overlap_blocks {
+                if self.has_tier_overlap_blocks {
                     0.0
                 } else {
                     effective_overlap_blocks
                 }
             });
         let worker_load = self.request.worker_loads.get(&worker).copied();
-        let cached_tokens = self.request.effective_cached_tokens_for(worker);
         let raw_prefill_tokens = if self.request.track_prefill_tokens {
+            let cached_tokens = self.request.effective_cached_tokens_for(worker);
             match worker_load {
                 Some(load) => {
                     // Preserve the legacy operation order when overlap exceeds the prompt.
@@ -788,7 +753,7 @@ fn log_selection<C: WorkerConfigLike>(
             router_mode = "kv",
             request_id,
             worker_id = worker.worker_id,
-            worker_type,
+            worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
             logit = cost,
             host_pinned_blocks,
@@ -803,7 +768,7 @@ fn log_selection<C: WorkerConfigLike>(
             router_mode = "kv",
             request_id,
             worker_id = worker.worker_id,
-            worker_type,
+            worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
             logit = cost,
             effective_cached_blocks = effective_overlap_blocks,
@@ -829,14 +794,14 @@ where
 }
 
 fn minimum_cost_index(
-    candidates: WorkerCandidates<'_>,
+    candidates: &[ScoredWorkerCandidate],
     mut random_index: impl FnMut(usize) -> usize,
 ) -> usize {
     let mut best_row = 0;
     let mut best_cost = f64::INFINITY;
     let mut tie_count = 0;
-    for row in 0..candidates.len() {
-        let cost = candidates.cost(row);
+    for (row, candidate) in candidates.iter().enumerate() {
+        let cost = candidate.cost;
         if cost < best_cost {
             best_row = row;
             best_cost = cost;
@@ -849,20 +814,6 @@ fn minimum_cost_index(
         }
     }
     best_row
-}
-
-fn softmax_sample_cost_index(
-    candidates: WorkerCandidates<'_>,
-    temperature: f64,
-    sample: f64,
-) -> usize {
-    let entries = candidates
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(row, candidate)| (row, candidate.cost))
-        .collect();
-    softmax_sample_entries(entries, temperature, sample).0
 }
 
 fn collect_custom_candidates<C: WorkerConfigLike>(
@@ -935,7 +886,7 @@ fn pick_default_worker<C: WorkerConfigLike>(
     let temperature = input
         .context
         .router_temperature_override
-        .unwrap_or(picker.default_temperature);
+        .unwrap_or(scorer.kv_router_config.router_temperature);
     let get_score = |worker, config: &C| {
         let preferred_taint_multiplier = request
             .routing_constraints
@@ -1005,18 +956,25 @@ fn pick_default_worker<C: WorkerConfigLike>(
     }
 
     let mut scratch = picker.softmax_scratch.lock();
-    scratch.costs.clear();
+    scratch.entries.clear();
     eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
-        scratch.costs.insert(worker, get_score(worker, config));
+        scratch.entries.push((worker, get_score(worker, config)));
     });
-    if scratch.costs.is_empty() {
+    if scratch.entries.is_empty() {
         None
     } else {
-        Some(softmax_sample_scratch(
-            &mut scratch,
+        let DefaultSoftmaxScratch {
+            entries,
+            probabilities,
+        } = &mut *scratch;
+        let row = softmax_sample_index(
+            entries,
+            |(_, cost)| *cost,
             temperature,
             fastrand::f64(),
-        ))
+            probabilities,
+        );
+        Some(entries[row])
     }
 }
 
@@ -1027,7 +985,7 @@ impl DefaultWorkerPicker {
     ) -> Self {
         Self {
             default_temperature,
-            softmax_scratch: Box::default(),
+            softmax_scratch: Mutex::default(),
             #[cfg(any(test, feature = "bench"))]
             deterministic_rng,
         }
@@ -1038,30 +996,39 @@ impl WorkerPicker for DefaultWorkerPicker {
     fn pick(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
+        candidates: &[ScoredWorkerCandidate],
     ) -> Result<usize, WorkerSelectionPolicyError> {
-        if candidates.is_empty() {
-            return Err(WorkerSelectionPolicyError::rejected(
-                "picker received an empty candidate table",
-            ));
-        }
         let temperature = context
             .router_temperature_override
             .unwrap_or(self.default_temperature);
         #[cfg(any(test, feature = "bench"))]
         if let Some(rng) = &self.deterministic_rng {
             let mut rng = rng.lock();
-            return Ok(if temperature == 0.0 {
-                minimum_cost_index(candidates, |count| rng.usize(0..count))
-            } else {
-                softmax_sample_cost_index(candidates, temperature, rng.f64())
-            });
+            if temperature == 0.0 {
+                return Ok(minimum_cost_index(candidates, |count| rng.usize(0..count)));
+            }
+            let sample = rng.f64();
+            drop(rng);
+            return Ok(softmax_sample_index(
+                candidates,
+                |candidate| candidate.cost,
+                temperature,
+                sample,
+                &mut self.softmax_scratch.get_mut().probabilities,
+            ));
         }
-        Ok(if temperature == 0.0 {
-            minimum_cost_index(candidates, |count| fastrand::usize(0..count))
-        } else {
-            softmax_sample_cost_index(candidates, temperature, fastrand::f64())
-        })
+        if temperature == 0.0 {
+            return Ok(minimum_cost_index(candidates, |count| {
+                fastrand::usize(0..count)
+            }));
+        }
+        Ok(softmax_sample_index(
+            candidates,
+            |candidate| candidate.cost,
+            temperature,
+            fastrand::f64(),
+            &mut self.softmax_scratch.get_mut().probabilities,
+        ))
     }
 }
 
@@ -1163,14 +1130,11 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             if candidates.is_empty() {
                 None
             } else {
-                let candidate_view = WorkerCandidates {
-                    entries: candidates,
-                };
-                let row = picker.pick(&input.context, candidate_view)?;
-                let Some(candidate) = candidate_view.entries.get(row) else {
+                let row = picker.pick(&input.context, candidates)?;
+                let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
-                        candidate_count: candidate_view.len(),
+                        candidate_count: candidates.len(),
                     }
                     .into());
                 };
@@ -1410,6 +1374,12 @@ mod tests {
     }
 
     #[test]
+    fn softmax_sample_orders_extreme_finite_costs() {
+        let result = softmax_sample_entries(vec![(0, -f64::MAX), (1, f64::MAX)], 1.0, 0.6);
+        assert_eq!(result.0, 0);
+    }
+
+    #[test]
     fn test_default_selector_randomizes_zero_temperature_ties() {
         use crate::test_utils::SimpleWorkerConfig;
 
@@ -1492,7 +1462,15 @@ mod tests {
                 router_temperature: temperature,
                 ..Default::default()
             };
-            let first = DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42);
+            let mut first = DefaultWorkerSelector::new_seeded(
+                Some(KvRouterConfig {
+                    router_temperature: 0.0,
+                    ..Default::default()
+                }),
+                "test",
+                42,
+            );
+            first.kv_router_config.router_temperature = temperature;
             let second = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
             let first_workers = HashMap::from([
                 (30, SimpleWorkerConfig::default()),
@@ -1576,7 +1554,13 @@ mod tests {
     fn test_all_eligible_workers_overloaded_returns_overload_error() {
         use crate::test_utils::SimpleWorkerConfig;
 
-        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit_decay: 1.0,
+                ..Default::default()
+            }),
+            "test",
+        );
         let workers = HashMap::from([
             (0, SimpleWorkerConfig::default()),
             (1, SimpleWorkerConfig::default()),
