@@ -2522,6 +2522,12 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    // Validate sampling and output parameters
+    if let Err(err_response) = validate_responses_fields(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -2833,6 +2839,31 @@ pub fn validate_response_unsupported_fields(
         ));
     }
     None
+}
+
+/// Validates sampling and output parameters on the Responses API request.
+pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    use crate::protocols::openai::validate;
+
+    let map_err = |e: anyhow::Error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    };
+
+    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
+    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
+
+    if let Some(text) = &request.inner.text {
+        use crate::protocols::openai::responses::convert_text_format;
+        if let Some(response_format) = convert_text_format(text) {
+            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+        }
+    }
+
+    Ok(())
 }
 
 // todo - abstract this to the top level lib.rs to be reused
@@ -4359,6 +4390,84 @@ mod tests {
         );
 
         assert!(validate_response_unsupported_fields(&request).is_none());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_clean_request() {
+        assert!(validate_responses_fields(&make_base_request()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_max_output_tokens() {
+        let mut request = make_base_request();
+        request.inner.max_output_tokens = Some(0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("max_output_tokens: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Max tokens must be greater than 0, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_zero_top_p() {
+        let mut request = make_base_request();
+        request.inner.top_p = Some(0.0);
+
+        let (code, body) =
+            validate_responses_fields(&request).expect_err("top_p: 0 must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            format!("{VALIDATION_PREFIX}Top_p must be between 0 and 1, got 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_responses_fields_rejects_non_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!(42), // Invalid: not an object
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        let (code, body) = validate_responses_fields(&request)
+            .expect_err("non-object json_schema must be rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body.message.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn test_validate_responses_fields_accepts_object_json_schema() {
+        use dynamo_protocols::types::ResponseFormatJsonSchema;
+        use dynamo_protocols::types::responses::{
+            ResponseTextParam, TextResponseFormatConfiguration,
+        };
+
+        let mut request = make_base_request();
+        request.inner.text = Some(ResponseTextParam {
+            format: TextResponseFormatConfiguration::JsonSchema(ResponseFormatJsonSchema {
+                name: "city".into(),
+                description: None,
+                schema: serde_json::json!({"type": "object"}),
+                strict: None,
+            }),
+            verbosity: None,
+        });
+
+        assert!(validate_responses_fields(&request).is_ok());
     }
 
     #[test]
