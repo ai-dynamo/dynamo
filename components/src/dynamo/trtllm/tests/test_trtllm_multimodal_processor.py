@@ -169,3 +169,82 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+
+
+@pytest.mark.asyncio
+async def test_vp9_video_reports_an_unsupported_codec_error(monkeypatch) -> None:
+    """VP9 has no decoder in this image, and the request must say so.
+
+    The TensorRT-LLM images ship no cv2, and TensorRT-LLM decodes video through
+    it (`_load_video_by_cv2`). NVDEC covers H.264/H.265 only, so VP8/VP9/AV1 have
+    no decode path at all here -- a documented consequence of the codec-compliant
+    build, not an accident.
+
+    Assert the failure rather than leave the gap untested, the approach NVIDIA
+    DALI took when it trimmed its own FFmpeg build (NVIDIA/DALI#6352). Without
+    this, a base-image bump that quietly reintroduced cv2 -- or a routing change
+    that sent VP9 somewhere unexpected -- would go unnoticed, since no test
+    exercises a codec this image cannot decode.
+
+    The contract asserted is what a client sees: HTTP 400 naming the video,
+    not a 500 or a hang.
+
+    Confirmed against a real TensorRT-LLM image (1.3.0rc22, no cv2 installed),
+    which returned exactly:
+
+        HTTP 400 ... Failed to load video (<url>): OpenCV (cv2) is required for
+        video decoding but is not installed. Install it with
+        `pip install opencv-python-headless`.
+
+    Only the prefix and the 400 are ours (`multimodal_processor.py`); the rest is
+    TensorRT-LLM's own guard, so this asserts the wording we own and that the
+    upstream reason is *preserved* rather than swallowed -- not the vendor's
+    exact phrasing, which any version bump may reword.
+    """
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"vp9 bytes"))
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "vp9")
+    # Real routing: only H.264/H.265 are hardware-decoded.
+    monkeypatch.setattr(
+        mmp, "should_use_nvdec", lambda codec: codec in ("h264", "hevc")
+    )
+    nvdec = MagicMock()
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    # The vendor loader failing on an image with no cv2, reproducing the message
+    # observed on hardware verbatim. Our handler catches bare `Exception`, so the
+    # type is immaterial -- the message is what reaches the client.
+    upstream_error = ImportError(
+        "OpenCV (cv2) is required for video decoding but is not installed. "
+        "Install it with `pip install opencv-python-headless`."
+    )
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(side_effect=upstream_error))
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {
+                "multi_modal_data": {
+                    "video_url": [{"Url": "http://169.254.169.254/v.webm"}]
+                },
+                "token_ids": [1],
+            },
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    # A client-visible 400, not a 500: the input is unsupported, not broken server.
+    assert excinfo.value.status == 400
+    message = str(excinfo.value)
+    # Ours: the prefix and the offending URL, so the client knows which input failed.
+    assert "Failed to load video" in message
+    assert "http://169.254.169.254/v.webm" in message
+    # The upstream reason is preserved verbatim rather than swallowed. Asserted as
+    # "whatever the cause said survives", not as specific vendor wording.
+    assert str(upstream_error) in message
+
+    nvdec.assert_not_called()  # VP9 must never take the hardware path
