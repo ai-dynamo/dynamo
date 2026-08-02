@@ -63,7 +63,9 @@ use super::topology::TopologyPublisher;
 use super::transport::{KvDcRelayTransport, WanPublicationSource};
 #[cfg(feature = "kv-dc-relay-wan")]
 use super::transport_config::KvDcRelayTransportConfig;
-use crate::discovery::{KvSourceMembershipCoordinator, KvSourceMembershipWatch};
+use crate::discovery::{
+    KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
+};
 #[cfg(feature = "kv-dc-relay-wan")]
 use crate::kv_router::KV_METRICS_SUBJECT;
 #[cfg(feature = "ckf-diagnostics")]
@@ -460,6 +462,26 @@ impl HostTerminalState {
 struct ActorBinding {
     domain: KvCacheDomainKey,
     kv_state_endpoint: EndpointId,
+}
+
+fn desired_actor_binding(
+    membership: &EndpointMembership,
+    source_view: Option<&KvSourceMembershipView>,
+) -> Option<ActorBinding> {
+    if !membership.is_materializable() {
+        return None;
+    }
+    let domain = membership.domain.as_ref()?;
+    let source_view = source_view?;
+    let kv_state_endpoint = source_view.resolved_kv_state_endpoint()?;
+    source_view
+        .sources
+        .values()
+        .any(|source| source.active_source().is_some())
+        .then(|| ActorBinding {
+            domain: domain.clone(),
+            kv_state_endpoint: kv_state_endpoint.clone(),
+        })
 }
 
 const MAX_PENDING_SOURCE_FAULTS: usize = DEFAULT_FAULT_CAPACITY;
@@ -1291,26 +1313,9 @@ async fn run_endpoint_slot(
                 !source_view.matches_binding_inputs(&membership.runtime_configs)
             },
         );
-        let desired_binding = membership.as_ref().and_then(|membership| {
-            if !membership.is_materializable() {
-                return None;
-            }
-            let domain = membership.domain.clone()?;
-            let kv_state_endpoint = source_view.as_ref()?.resolved_kv_state_endpoint()?.clone();
-            let has_active_source = source_view
-                .as_ref()?
-                .sources
-                .values()
-                .any(|source| source.active_source().is_some());
-            let is_encode_only = membership.roles.as_slice() == [WorkerRole::Encode];
-            // Surface-less Encode workers currently advertise cache semantics but do not expose
-            // a backend-independent KV-publisher capability. Keep their endpoint-local pool
-            // visible with an empty CKF/load until discovery can distinguish that case reliably.
-            (has_active_source || is_encode_only).then_some(ActorBinding {
-                domain,
-                kv_state_endpoint,
-            })
-        });
+        let desired_binding = membership
+            .as_ref()
+            .and_then(|membership| desired_actor_binding(membership, source_view.as_ref()));
         if retry_binding.as_ref() != desired_binding.as_ref() {
             retry_binding = desired_binding.clone();
             retry_delay = Duration::from_millis(100);
@@ -1411,23 +1416,22 @@ async fn run_endpoint_slot(
         #[cfg(feature = "kv-dc-relay-wan")]
         if let (Some(active), Some(membership)) = (runtime.as_mut(), membership.as_ref())
             && let Some(wan) = active.wan.as_mut()
+            && wan.load_runtime_configs != membership.runtime_configs
         {
-            if wan.load_runtime_configs != membership.runtime_configs {
-                match pools.replace_load_capacity(
-                    active.attachment.pool_id,
-                    active.attachment.layout_generation,
-                    &membership.runtime_configs,
-                ) {
-                    Ok(true) => wan
-                        .load_runtime_configs
-                        .clone_from(&membership.runtime_configs),
-                    Ok(false) => {}
-                    Err(error) => tracing::warn!(
-                        %endpoint,
-                        %error,
-                        "Failed to refresh KV DC Relay pool load capacity"
-                    ),
-                }
+            match pools.replace_load_capacity(
+                active.attachment.pool_id,
+                active.attachment.layout_generation,
+                &membership.runtime_configs,
+            ) {
+                Ok(true) => wan
+                    .load_runtime_configs
+                    .clone_from(&membership.runtime_configs),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    %endpoint,
+                    %error,
+                    "Failed to refresh KV DC Relay pool load capacity"
+                ),
             }
         }
 
@@ -2329,6 +2333,7 @@ mod tests {
 
     use super::super::actor::ActorFaultCategory;
     use super::*;
+    use crate::discovery::{KvEventSource, KvSourceMembership};
     use crate::kv_router::indexer::SourceEpoch;
 
     fn membership(endpoint: &str, domain: KvCacheDomainKey) -> EndpointMembership {
@@ -2994,86 +2999,37 @@ mod tests {
             .unwrap();
     }
 
-    #[cfg(feature = "kv-dc-relay-wan")]
-    #[tokio::test]
-    async fn encode_without_kv_source_publishes_an_empty_encode_pool() {
-        let component = test_component("encode-phantom-pool").await;
+    #[test]
+    fn encode_pool_materializes_only_after_an_active_kv_source_appears() {
         let endpoint = EndpointId::from("production.encoder.generate");
-        let membership = EndpointMembership {
-            endpoint: endpoint.clone(),
-            generation: 1,
-            domain: Some(domain(1, "vision-language")),
-            registrations: vec![CanonicalModelRegistration::new(
-                super::super::identity::CanonicalModelId::new("vision-language").unwrap(),
-                Vec::new(),
-            )],
-            models: vec!["vision-language".to_string()],
-            aliases: Vec::new(),
-            roles: vec![WorkerRole::Encode],
-            runtime_configs: HashMap::new(),
-            worker_topology: HashMap::from([(
-                1,
-                super::super::discovery::DomainWorkerTopology {
-                    worker_type: Some(crate::worker_type::WorkerType::Encode),
-                    needs: vec![
-                        vec![
-                            crate::worker_type::WorkerType::Prefill,
-                            crate::worker_type::WorkerType::Decode,
-                        ],
-                        vec![crate::worker_type::WorkerType::Aggregated],
-                    ],
-                },
-            )]),
-            adapters: HashMap::new(),
-            conflicts: Vec::new(),
-        };
-        let topology_view = DcMembershipView {
-            endpoints: Arc::new(HashMap::from([(endpoint.clone(), membership.clone())])),
-        };
-        let (_metadata_tx, metadata_rx) = watch::channel(Some(membership));
-        let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
-        let registry = Arc::new(registry());
-        let mut catalog_rx = registry.watch_catalog();
-        let topology = Arc::new(TopologyPublisher::new(topology_view, &registry.catalog()));
-        let slot_cancel = CancellationToken::new();
-        let slot = tokio::spawn(run_endpoint_slot(
-            component,
-            DcId::new(7),
-            endpoint,
-            metadata_rx,
-            status.clone(),
-            Arc::new(Semaphore::new(1)),
-            Arc::new(Semaphore::new(1)),
-            registry.clone(),
-            Duration::from_secs(1),
-            slot_cancel.clone(),
-            WanFactsMode::Enabled,
-            topology,
-        ));
+        let cache_domain = domain(1, "vision-language");
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut membership = membership("production.encoder.generate", cache_domain.clone());
+        membership.roles = vec![WorkerRole::Encode];
+        membership
+            .runtime_configs
+            .insert(worker.worker_id, ModelRuntimeConfig::default());
 
-        let catalog =
-            wait_for_catalog(&mut catalog_rx, |catalog| !catalog.pools().is_empty()).await;
-        assert_eq!(catalog.pools().len(), 1);
-        assert_eq!(catalog.pools()[0].pool_roles(), [WorkerRole::Encode]);
-        let load = registry.load_snapshots();
-        assert_eq!(load.len(), 1);
-        assert_eq!(load[0].kv_expected_ranks, 0);
-        assert_eq!(load[0].kv_observed_ranks, 0);
-        let actor = status
-            .read()
-            .await
-            .actor
-            .clone()
-            .expect("Encode pool actor");
-        let stats = actor.state_stats().await.unwrap();
-        assert_eq!(stats.0.aggregation().unique_block_count(), 0);
-        assert!(stats.2.is_empty());
+        let mut sources = KvSourceMembership::new();
+        let missing = sources.view(&endpoint, &membership.runtime_configs);
+        assert_eq!(desired_actor_binding(&membership, Some(&missing)), None);
 
-        slot_cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), slot)
-            .await
-            .expect("Encode endpoint slot shutdown timed out")
+        sources
+            .add(KvEventSource {
+                kv_state_endpoint: endpoint.clone(),
+                worker,
+                publisher_id: 41,
+                recovery_target: None,
+            })
             .unwrap();
+        let active = sources.view(&endpoint, &membership.runtime_configs);
+        assert_eq!(
+            desired_actor_binding(&membership, Some(&active)),
+            Some(ActorBinding {
+                domain: cache_domain,
+                kv_state_endpoint: endpoint,
+            })
+        );
     }
 
     #[tokio::test]

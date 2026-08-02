@@ -61,10 +61,6 @@ impl WanPublicationSource {
         self.topology.watch()
     }
 
-    pub(crate) fn topology_snapshot(&self) -> TopologySnapshot {
-        self.topology.snapshot()
-    }
-
     pub(crate) async fn subscribe_pool(
         &self,
         pool_id: PoolId,

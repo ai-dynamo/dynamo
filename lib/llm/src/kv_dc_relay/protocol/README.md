@@ -92,9 +92,10 @@ The catalog and serving topology are two normalized projections:
 The Relay never merges CKFs across endpoints. In prefill/decode (PD) and
 encode/prefill/decode (EPD) deployments, Prefill and Decode pools both carry meaningful,
 independently queryable KV state. Consumers calculate hashes separately for each pool using that
-pool's `query_semantics`; Prefill and Decode formats can differ. A surface-less Encode endpoint is
-currently advertised with role `ENCODE` and an empty CKF/load pool because discovery has no
-backend-independent signal that reliably proves the absence of a KV publisher.
+pool's `query_semantics`; Prefill and Decode formats can differ. An Encode endpoint remains a
+topology member with role `ENCODE`, but its `pool_id` is present only while the Relay observes an
+active KV event source. This avoids allocating an empty CKF and load state while preserving
+automatic materialization if an Encode implementation publishes KV events later.
 
 `WatchKvPoolCatalog` sends the current complete snapshot immediately. Later updates are also
 complete snapshots and may skip revision numbers when watch notifications coalesce. A reconnecting

@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn epd_requires_encode_and_keeps_its_phantom_pool_link() {
+    fn epd_keeps_encode_readiness_without_materializing_an_empty_pool() {
         let encode = EndpointId::from("production.encoder.generate");
         let view = view(vec![
             endpoint(
@@ -798,7 +798,18 @@ mod tests {
                 vec![vec![WorkerType::Prefill]],
             ),
         ]);
-        let publisher = publisher(&view);
+        let complete_catalog = catalog(&view, 1);
+        let catalog_without_encode = DcPoolCatalog::new(
+            complete_catalog.identity(),
+            complete_catalog.revision(),
+            complete_catalog
+                .pools()
+                .iter()
+                .filter(|descriptor| descriptor.serving_endpoint() != &encode)
+                .cloned()
+                .collect(),
+        );
+        let publisher = TopologyPublisher::new(view.clone(), &catalog_without_encode);
         publish_live(&publisher, &view);
         let ready = publisher.snapshot();
         let topology = entry(&ready, "vision-language");
@@ -809,10 +820,16 @@ mod tests {
             .find(|member| member.endpoint == encode)
             .expect("encode member");
         assert_eq!(encode_member.roles, [WorkerRole::Encode]);
-        assert!(
-            encode_member.pool_id.is_some(),
-            "surface-less Encode remains an advertised phantom pool until a reliable publisher signal exists"
-        );
+        assert_eq!(encode_member.pool_id, None);
+
+        publisher.replace_catalog(&complete_catalog);
+        let materialized = publisher.snapshot();
+        let encode_member = entry(&materialized, "vision-language")
+            .members
+            .iter()
+            .find(|member| member.endpoint == encode)
+            .expect("encode member");
+        assert!(encode_member.pool_id.is_some());
 
         publisher.replace_availability(encode, Some(HashSet::new()));
         let unavailable = publisher.snapshot();

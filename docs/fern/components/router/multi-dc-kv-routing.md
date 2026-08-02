@@ -31,7 +31,8 @@ flowchart LR
 
 The Relay maintains these boundaries:
 
-- One serving endpoint contributes one atomic pool, actor, and physical KV stream.
+- One serving endpoint with an active KV event source contributes one atomic pool, actor, and
+  physical KV stream.
 - Independent endpoints stay separate even when they advertise the same canonical model.
 - The pool actor owns exact worker/rank membership, full-hash refcounts, CKF mutation, and
   publication sequencing.
@@ -94,7 +95,7 @@ canonical model therefore remain two candidate descriptors with independent prod
 
 ## Aggregated, PD, and EPD Topologies
 
-An aggregated deployment normally contributes one endpoint, one pool, and one
+An aggregated deployment normally contributes one KV-publishing endpoint, one pool, and one
 `AGGREGATED` topology member. Prefill/decode (PD) disaggregation contributes separate Prefill and
 Decode endpoints and therefore separate physical pools. Both CKFs are meaningful: the Prefill CKF
 describes prefill-side prefix reuse, while the Decode CKF describes decode-side reuse. Consumers
@@ -103,9 +104,10 @@ use different hash formats.
 
 Encode/prefill/decode (EPD) adds an `ENCODE` topology dependency. Encode is required for base-model
 readiness but is not an adapter-bearing role; Low-Rank Adaptation membership is evaluated only for
-Prefill, Decode, and Aggregated roles. Dynamo discovery does not yet expose a universal signal that
-reliably proves an Encode endpoint has no KV publisher. The Relay therefore advertises an
-Encode-only endpoint as an `ENCODE` pool with empty CKF and load state.
+Prefill, Decode, and Aggregated roles. An Encode-only endpoint remains an `ENCODE` topology member,
+but its `pool_id` is present only while the Relay observes an active KV event source. Without one,
+the Relay allocates no CKF or load state. If an Encode implementation starts publishing KV events,
+the Relay materializes its endpoint-local pool and updates the topology link.
 
 ## WAN API
 

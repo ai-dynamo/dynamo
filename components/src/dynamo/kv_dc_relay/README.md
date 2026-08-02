@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # DC KV Relay
 
 The DC KV Relay discovers NVIDIA Dynamo inference endpoints, consumes their ordered key-value (KV)
-events, and exports one pool stream for each endpoint-local KV domain. Each pool has one actor-owned
-Cuckoo-filter (CKF) producer.
+events, and exports one pool stream for each materialized endpoint-local KV domain. Each pool has
+one actor-owned Cuckoo-filter (CKF) producer.
 
 ## Pool Model
 
@@ -60,10 +60,10 @@ The Relay uses separate recovery boundaries for each exported fact:
 The Relay publishes pool facts and does not merge or rank independent pools. Consumers choose how
 to compare those streams.
 
-In prefill/decode (PD) and encode/prefill/decode (EPD) deployments, each endpoint retains its own
-pool. Prefill and Decode CKFs are both meaningful and may use different query semantics. Until
-discovery exposes a reliable backend-independent KV-publisher signal, an Encode-only endpoint is
-also advertised as an `ENCODE` pool with empty CKF and load state.
+In prefill/decode (PD) and encode/prefill/decode (EPD) deployments, each endpoint with an active KV
+event source has its own pool. Prefill and Decode CKFs are both meaningful and may use different
+query semantics. An Encode-only endpoint remains an `ENCODE` member of the serving topology, but
+has no pool link and allocates no CKF or load state unless it advertises an active KV event source.
 
 ## Usage
 
