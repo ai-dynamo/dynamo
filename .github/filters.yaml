@@ -27,9 +27,6 @@ docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
-  # Linter behind the filter-gated Docs Lint job. Must sit in `docs` (not
-  # `ignore`) so a change to the linter re-runs the job that executes it.
-  - 'scripts/docs_lint.py'
   # `**` skips dotfile directories, so the `**/*.md` rule above misses this one.
   - '.github/FILTERS.md'
   - '**/*.md'

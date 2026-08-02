@@ -129,7 +129,7 @@ Deleting a page also orphans any redirect that already pointed at it. Before rem
 ## Validate
 
 ```bash
-python3 scripts/docs_lint.py --scan docs              # SPDX, frontmatter, links, nav coverage
+python3 docs/fern/scripts/docs_lint.py --scan docs              # SPDX, frontmatter, links, nav coverage
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only

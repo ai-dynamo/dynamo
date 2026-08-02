@@ -14,8 +14,8 @@ docs/fern/pages/community/contributing/documentation/documentation-style-guide.m
   INTERNAL   no NVBug/JIRA-style IDs, internal hosts, or TODO/FIXME in shipped docs
 
 Usage:
-  python3 scripts/docs_lint.py [--scan docs,examples,recipes] [--json]
-  python3 scripts/docs_lint.py file1.md file2.md      # lint specific files (pre-commit mode)
+  python3 docs/fern/scripts/docs_lint.py [--scan docs,examples,recipes] [--json]
+  python3 docs/fern/scripts/docs_lint.py file1.md file2.md   # lint specific files
 
 Exit code: 1 if any error-severity findings, else 0.
 """
@@ -29,8 +29,10 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 
-# Repo root, derived from this file's location (scripts/docs_lint.py).
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Repo root, derived from this file's location (docs/fern/scripts/docs_lint.py): four levels up.
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 # Fern content root. Nav `path:` values are relative to this directory, not to docs/.
 FERN_DIR = os.path.join("docs", "fern")
@@ -384,7 +386,7 @@ def emit_github(out: list, errors: list, scanned: int) -> None:
         lines += [
             "",
             f"Full standard: [`{os.path.basename(STYLE_GUIDE)}`]({STYLE_GUIDE}). "
-            "Reproduce locally with `python3 scripts/docs_lint.py --scan docs`.",
+            "Reproduce locally with `python3 docs/fern/scripts/docs_lint.py --scan docs`.",
         ]
     else:
         lines.append(f"No errors across {scanned} scanned files.")
@@ -466,7 +468,7 @@ def main() -> int:
             for r in rules:
                 print(f"  {r:11} {RULE_HELP.get(r, '')}")
             print(f"\n  Standard:  {STYLE_GUIDE}")
-            print("  Reproduce: python3 scripts/docs_lint.py --scan docs")
+            print("  Reproduce: python3 docs/fern/scripts/docs_lint.py --scan docs")
             print(f"{bar}\n")
         else:
             print("\nDocs lint passed: 0 errors.")

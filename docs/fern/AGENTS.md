@@ -26,7 +26,7 @@ For **where** a new page belongs in the tab structure, read
 - No internal/sensitive refs (NVBug/JIRA IDs, internal hosts, secrets, TODO/FIXME) in shipped docs.
 - Write for humans: no marketing/bombast, no filler, be concrete.
 
-`scripts/docs_lint.py` enforces the deterministic subset as the `Docs Lint` job on every pull
+`docs/fern/scripts/docs_lint.py` enforces the deterministic subset as the `Docs Lint` job on every pull
 request, and `fern check` plus `fern docs broken-links` run alongside it. Reproduce all three
 locally before pushing (see [Validate](#validate)).
 
@@ -69,8 +69,8 @@ Two gates on the machinery:
 ## Validate
 
 ```bash
-python3 scripts/docs_lint.py --scan docs              # the `Docs Lint` pull request job
-python3 scripts/docs_lint.py                          # same rules over docs + examples + recipes
+python3 docs/fern/scripts/docs_lint.py --scan docs              # the `Docs Lint` pull request job
+python3 docs/fern/scripts/docs_lint.py                          # same rules over docs + examples + recipes
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only

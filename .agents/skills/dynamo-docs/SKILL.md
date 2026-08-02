@@ -36,7 +36,7 @@ The `docs-website` branch is CI-managed and must **never** be edited by hand.
 Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) follows the
 [Documentation Style Guide](../../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md)
 (`docs/fern/pages/community/contributing/documentation/documentation-style-guide.md`). Read it before
-writing content. The `Docs Lint` job (`scripts/docs_lint.py`) enforces a **must-fix** subset on every
+writing content. The `Docs Lint` job (`docs/fern/scripts/docs_lint.py`) enforces a **must-fix** subset on every
 PR — get these right or the checks fail:
 
 - **SPDX header** on every file, copyright range `2025-2026`. Fern pages put the two `#` lines
@@ -431,7 +431,7 @@ internal or sensitive references — and that every internal link and `#anchor` 
 **Tooling:**
 
 ```bash
-python3 scripts/docs_lint.py --scan docs   # SPDX, frontmatter, links, nav, internal refs
+python3 docs/fern/scripts/docs_lint.py --scan docs   # SPDX, frontmatter, links, nav, internal refs
 fern check                          # nav + frontmatter structure
 fern docs broken-links              # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py   # recipe/benchmark changes only — validates BOTH catalogs
@@ -481,7 +481,7 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | `docs/fern/pages/` | Content directory (`.md` and `.mdx`), one subdirectory per tab |
 | `docs/fern/assets/` | Images, SVGs, fonts |
 | `docs/fern/translations/` | Locale mirrors of `pages/` (`zh-CN/pages/<same path>`) |
-| `scripts/docs_lint.py` | Structural linter behind the `Docs Lint` PR job |
+| `docs/fern/scripts/docs_lint.py` | Structural linter behind the `Docs Lint` PR job |
 | `docs/fern/docs.yml` | Fern site configuration + `redirects:` |
 | `docs/fern/main.css` | Pure-CSS target-picker axis values (recipe/benchmark pages) |
 | `docs/fern/scripts/convert_callouts.py` | Callout conversion (GitHub -> Fern) |
