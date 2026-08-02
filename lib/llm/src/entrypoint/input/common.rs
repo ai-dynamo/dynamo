@@ -38,7 +38,7 @@ use crate::{
     },
 };
 
-use dynamo_kv_router::config::min_initial_workers_from_env;
+use dynamo_kv_router::{config::min_initial_workers_from_env, selector::WorkerSelector};
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -136,11 +136,14 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client(
+fn router_client<Sel>(
     client: &Client,
     router_mode: RouterMode,
-    chooser: Option<&Arc<KvRouter>>,
-) -> anyhow::Result<Client> {
+    chooser: Option<&Arc<KvRouter<Sel>>>,
+) -> anyhow::Result<Client>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     if router_mode == RouterMode::KV {
         let Some(chooser) = chooser else {
             anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -184,14 +187,16 @@ fn validate_router_mode_for_lora(
     }
 }
 
-fn preprocessed_backend_engine(
+fn preprocessed_backend_engine<Sel>(
     router: LlmPushRouter,
     router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter>>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -253,6 +258,35 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_with_selector(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_preprocessed_routing_with_selector<Sel>(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+) -> anyhow::Result<PreprocessedRouting>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.

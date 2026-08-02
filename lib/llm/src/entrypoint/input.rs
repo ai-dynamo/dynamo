@@ -14,7 +14,9 @@ use std::{
 };
 
 mod common;
-pub use common::{PreprocessedRouting, build_preprocessed_routing};
+pub use common::{
+    PreprocessedRouting, build_preprocessed_routing, build_preprocessed_routing_with_selector,
+};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
