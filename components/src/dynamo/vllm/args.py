@@ -25,7 +25,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
-from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.constants import CustomEncoderRoutingMode, DisaggregationMode
 
 from . import envs
 
@@ -162,6 +162,18 @@ def cross_validate_config(
         raise ValueError(
             "--gms-shadow-mode requires --load-format gms. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
+
+    routing_mode = CustomEncoderRoutingMode(dynamo_config.custom_encoder_routing_mode)
+    if (
+        not dynamo_config.custom_encoder_class
+        and routing_mode == CustomEncoderRoutingMode.FRONTEND
+        and dynamo_config.disaggregation_mode == DisaggregationMode.AGGREGATED
+        and not engine_config.enable_prompt_embeds
+    ):
+        raise ValueError(
+            "--custom-encoder-routing-mode=frontend requires "
+            "--enable-prompt-embeds on the aggregated PD worker"
         )
 
 

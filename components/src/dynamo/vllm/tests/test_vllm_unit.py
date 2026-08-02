@@ -1584,6 +1584,38 @@ class TestEmbeddingWorkerFlag:
             parse_args()
 
 
+class TestFrontendCustomEncoderRoutingArgs:
+    def test_aggregated_pd_parses_with_prompt_embeds(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "--enable-multimodal",
+            "--enable-prompt-embeds",
+            "--disaggregation-mode",
+            "agg",
+            "--custom-encoder-routing-mode",
+            "frontend",
+        )
+
+        config = parse_args()
+
+        assert config.engine_args.enable_prompt_embeds is True
+
+    def test_aggregated_pd_requires_prompt_embeds(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "--enable-multimodal",
+            "--disaggregation-mode",
+            "agg",
+            "--custom-encoder-routing-mode",
+            "frontend",
+        )
+
+        with pytest.raises(ValueError, match="enable-prompt-embeds"):
+            parse_args()
+
+
 def test_build_sampling_params_openai_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params_openai
 
