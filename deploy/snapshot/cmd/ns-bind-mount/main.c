@@ -1,0 +1,161 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ns-bind-mount: bind-mount or unmount a directory in another process's mount namespace.
+ *
+ * Mount:   ns-bind-mount <pid> <src> <dst> [ro]
+ * Unmount: ns-bind-mount umount <pid> <dst>
+ *
+ * Mount uses open_tree(OPEN_TREE_CLONE) to capture the source before entering
+ * the target namespace, then move_mount to attach it there.  Unmount enters
+ * the namespace the same way and calls umount2(MNT_DETACH).  Both subcommands
+ * run as single-threaded C processes so setns(CLONE_NEWNS) is allowed
+ * (prohibited in multithreaded Go programs).
+ *
+ * Requires Linux 5.2+ (open_tree / move_mount syscalls).
+ */
+
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <limits.h>
+#include <unistd.h>
+
+#ifndef __NR_open_tree
+#define __NR_open_tree 428
+#endif
+#ifndef __NR_move_mount
+#define __NR_move_mount 429
+#endif
+
+#define OPEN_TREE_CLONE         1
+#define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
+
+static int sys_open_tree(int dfd, const char *path, unsigned flags) {
+    return (int)syscall(__NR_open_tree, dfd, path, flags);
+}
+
+static int sys_move_mount(int from_dfd, const char *from_path,
+                          int to_dfd, const char *to_path, unsigned flags) {
+    return (int)syscall(__NR_move_mount, from_dfd, from_path, to_dfd, to_path, flags);
+}
+
+/* Enter the mount namespace of the given pid.  Returns 0 on success. */
+static int enter_mnt_ns(int pid) {
+    char ns_path[256];
+    snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/mnt", pid);
+    int ns_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+    if (ns_fd < 0) {
+        fprintf(stderr, "open %s: %s\n", ns_path, strerror(errno));
+        return -1;
+    }
+    if (setns(ns_fd, CLONE_NEWNS) < 0) {
+        fprintf(stderr, "setns %s: %s\n", ns_path, strerror(errno));
+        close(ns_fd);
+        return -1;
+    }
+    close(ns_fd);
+    return 0;
+}
+
+/* Parse a positive pid from str.  Returns the pid on success, -1 on error. */
+static int parse_pid(const char *str) {
+    char *end;
+    long val = strtol(str, &end, 10);
+    if (*end != '\0' || val <= 0 || val > INT_MAX) {
+        fprintf(stderr, "invalid pid: %s\n", str);
+        return -1;
+    }
+    return (int)val;
+}
+
+static int do_umount(int argc, char *argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "usage: ns-bind-mount umount <pid> <dst>\n");
+        return 1;
+    }
+    int pid = parse_pid(argv[2]);
+    if (pid < 0)
+        return 1;
+    const char *dst = argv[3];
+
+    if (enter_mnt_ns(pid) < 0)
+        return 1;
+
+    /* MNT_DETACH: lazy unmount — succeeds even if the path is busy. */
+    if (umount2(dst, MNT_DETACH) < 0) {
+        if (errno == ENOENT || errno == EINVAL) {
+            /* Already gone (CRIU removed it during namespace restore). */
+            return 0;
+        }
+        fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
+        return 1;
+    }
+
+    /* Remove the directory we created at mount time. Ignore errors — the
+     * directory may be non-empty or already gone, neither is fatal. */
+    rmdir(dst);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc >= 2 && strcmp(argv[1], "umount") == 0)
+        return do_umount(argc, argv);
+
+    if (argc < 4) {
+        fprintf(stderr, "usage: ns-bind-mount <pid> <src> <dst> [ro]\n"
+                        "       ns-bind-mount umount <pid> <dst>\n");
+        return 1;
+    }
+
+    int pid = parse_pid(argv[1]);
+    if (pid < 0)
+        return 1;
+    const char *src      = argv[2];
+    const char *dst      = argv[3];
+    int         readonly = (argc >= 5 && strcmp(argv[4], "ro") == 0);
+
+    /* Clone the source mount tree before entering the target namespace. */
+    int tree_fd = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | O_CLOEXEC);
+    if (tree_fd < 0) {
+        fprintf(stderr, "open_tree %s: %s\n", src, strerror(errno));
+        return 1;
+    }
+
+    /* Enter the target process's mount namespace. */
+    if (enter_mnt_ns(pid) < 0) {
+        close(tree_fd);
+        return 1;
+    }
+
+    /* Create the target directory inside the new namespace. */
+    if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir %s: %s\n", dst, strerror(errno));
+        return 1;
+    }
+
+    /* Move the cloned mount into the target namespace at dst. */
+    if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+        fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
+        rmdir(dst);
+        return 1;
+    }
+    close(tree_fd);
+
+    if (readonly) {
+        if (mount(NULL, dst, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) < 0) {
+            fprintf(stderr, "remount ro %s: %s\n", dst, strerror(errno));
+            return 1;
+        }
+    }
+
+    return 0;
+}
