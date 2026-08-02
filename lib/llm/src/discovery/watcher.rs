@@ -105,6 +105,16 @@ fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
     }
 }
 
+fn has_live_endpoint_card(
+    cards: &[(EndpointId, ModelDeploymentCard)],
+    namespace: &str,
+    component: &str,
+) -> bool {
+    cards
+        .iter()
+        .any(|(endpoint, _)| endpoint.namespace == namespace && endpoint.component == component)
+}
+
 fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
     match instance {
         DiscoveryInstance::Model {
@@ -1025,10 +1035,13 @@ impl ModelWatcher {
         // state. If discovery is temporarily unavailable, retaining the card
         // lets the next reconciliation pass retry this stale entry instead of
         // losing the key while leaving its WorkerSet behind.
-        let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
-            .await
-            .with_context(|| model_name.clone())?;
+        let all_cards = self.all_cards().await.with_context(|| model_name.clone())?;
+        let active_instances = all_cards
+            .iter()
+            .filter(|(endpoint_id, card)| {
+                card.name() == model_name && namespace_filter.matches(&endpoint_id.namespace)
+            })
+            .collect::<Vec<_>>();
 
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
@@ -1090,6 +1103,8 @@ impl ModelWatcher {
                 && eid.component == *worker_component
                 && worker_set_key(eid, other_card.model_type, other_card.worker_type) == ws_key
         });
+        let endpoint_has_instances =
+            has_live_endpoint_card(&all_cards, worker_namespace, worker_component);
 
         if !component_has_instances {
             // No more workers of this component in this namespace — remove its WorkerSet
@@ -1109,6 +1124,11 @@ impl ModelWatcher {
                         self.manager.unregister_alias_if_empty(alias, &model_name);
                     }
                 }
+            }
+
+            if !endpoint_has_instances {
+                self.manager
+                    .remove_hicache_caches(worker_namespace, worker_component);
             }
 
             // Activator-state cleanup depends on which component just went away.
@@ -2183,6 +2203,18 @@ mod tests {
             component: "workers".to_string(),
             name: name.to_string(),
         }
+    }
+
+    #[test]
+    fn endpoint_liveness_considers_all_models() {
+        // This is the discovery snapshot after the last adapter card was removed: its base
+        // model remains on the same worker endpoint, so the endpoint is still live.
+        let cards = vec![(
+            test_endpoint_id("generate"),
+            ModelDeploymentCard::with_name_only("base-model"),
+        )];
+
+        assert!(has_live_endpoint_card(&cards, "ns1", "workers"));
     }
 
     #[test]

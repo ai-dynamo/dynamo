@@ -176,7 +176,7 @@ async fn cancel_pending_pass(
         command_effects: false,
         midpass_kv_effects: false,
         execute_count: 0,
-        live_pass_limit: None,
+        live_pass_limit: Some(1),
         refill_command_tx: None,
         applied_command_count: 0,
     };
@@ -243,6 +243,63 @@ async fn explicit_discard_suppresses_pending_output_after_noop_cancellation() {
     assert!(pending.pass.output_signals.is_empty());
     assert_eq!(pending.pass.completed_requests, 0);
     assert_eq!(pending.pass.accept_length_output_tokens, 0);
+}
+
+#[tokio::test]
+async fn cancellation_does_not_end_pass_with_unrelated_pending_output() {
+    let (captured, buffering_publishers) = capture_deferred_kv_publish_sink(false, false);
+    let mut core = FakeCore {
+        publishers: buffering_publishers,
+        command_result: SchedulerCommandResult::Applied,
+        command_effects: false,
+        midpass_kv_effects: false,
+        execute_count: 0,
+        live_pass_limit: None,
+        refill_command_tx: None,
+        applied_command_count: 0,
+    };
+    let (output_tx, _output_rx) = mpsc::unbounded_channel();
+    let publisher = publisher(output_tx, captured, Arc::new(Mutex::new(Vec::new())));
+    let mut pending = publisher.capture_pass(pass());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let (cancellation_tx, mut cancellation_rx) = mpsc::channel(1);
+    let (reply, reply_rx) = tokio::sync::oneshot::channel();
+    cancellation_tx
+        .send(SchedulerCancellationEnvelope {
+            request_id: Uuid::from_u128(2),
+            discard_pending_output: true,
+            reply,
+        })
+        .await
+        .unwrap();
+
+    let cancel_token = CancellationToken::new();
+    let scheduler_start = Instant::now();
+    let mut deferred_commands = VecDeque::new();
+    let boundary = wait_for_live_pass_boundary(
+        &mut core,
+        &mut command_rx,
+        &mut cancellation_rx,
+        &mut deferred_commands,
+        &mut pending,
+        &publisher,
+        &scheduler_start,
+        &cancel_token,
+        Instant::now() + Duration::from_secs(5),
+    );
+    tokio::pin!(boundary);
+
+    let result = tokio::select! {
+        biased;
+        boundary_result = &mut boundary => {
+            panic!("cancellation ended a pass with unrelated pending output: {boundary_result}")
+        }
+        reply = reply_rx => reply.unwrap().unwrap().result,
+    };
+    assert_eq!(result, SchedulerCommandResult::Applied);
+
+    cancel_token.cancel();
+    assert!(!boundary.await);
 }
 
 #[tokio::test]

@@ -42,6 +42,10 @@ use ports::bind_random_port;
 
 struct CounterEngine {}
 
+struct FirstTokenGateEngine {
+    release: Arc<tokio::sync::Notify>,
+}
+
 // Add a new long-running test engine
 struct LongRunningEngine {
     delay_ms: u64,
@@ -58,6 +62,33 @@ impl LongRunningEngine {
 
     fn was_cancelled(&self) -> bool {
         self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for FirstTokenGateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let release = self.release.clone();
+
+        let stream = stream! {
+            release.notified().await;
+            let output = generator.create_choice(0, Some("choice 0".to_string()), None, None);
+            yield Annotated::from_data(output);
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
     }
 }
 
@@ -619,6 +650,100 @@ async fn wait_for_service_ready(port: u16) {
             Err(e) => panic!("Service failed to start within timeout: {}", e),
         }
     }
+}
+
+#[tokio::test]
+async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .sse_keep_alive(std::time::Duration::from_millis(25))
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let first_token_gate = Arc::new(tokio::sync::Notify::new());
+    let card = ModelDeploymentCard::with_name_only("idle-stream-model");
+    state
+        .manager()
+        .add_chat_completions_model(
+            "idle-stream-model",
+            card.mdcsum(),
+            Arc::new(FirstTokenGateEngine {
+                release: first_token_gate.clone(),
+            }),
+        )
+        .unwrap();
+
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                "hi".to_string(),
+            ),
+            name: None,
+        },
+    );
+    let mut request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+        .model("idle-stream-model")
+        .messages(vec![message])
+        .build()
+        .expect("failed to build request");
+    request.stream = Some(true);
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{response:?}");
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("idle stream did not emit an SSE comment frame")
+            .expect("idle stream ended before emitting an SSE comment frame")
+            .expect("failed to read stream");
+        body.extend_from_slice(&chunk);
+
+        let body_text = String::from_utf8_lossy(&body);
+        if body_text.contains(":\n\n") {
+            assert!(
+                !body_text.contains("data:"),
+                "model data arrived before the keep-alive comment: {body_text}"
+            );
+            break;
+        }
+    }
+
+    first_token_gate.notify_one();
+    while let Some(chunk) = timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream did not finish")
+    {
+        body.extend_from_slice(&chunk.expect("failed to read stream"));
+    }
+
+    let body = String::from_utf8(body).expect("SSE response was not UTF-8");
+    assert!(
+        body.contains("data:"),
+        "stream did not emit model data: {body}"
+    );
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream did not terminate with [DONE]: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
