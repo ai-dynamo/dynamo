@@ -34,7 +34,11 @@ pub(crate) fn parse_load_lora(body: &Value) -> Result<LoadLoraUpdate, DynamoErro
         .ok_or_else(|| client::invalid_argument("source.uri must be a local file URI"))?;
     let url = url::Url::parse(uri)
         .map_err(|_| client::invalid_argument("source.uri must be a local file URI"))?;
-    if url.scheme() != "file" || url.host_str().is_some_and(|host| host != "localhost") {
+    if url.scheme() != "file"
+        || url.host_str().is_some_and(|host| host != "localhost")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(client::invalid_argument(
             "source.uri must be a local file URI",
         ));

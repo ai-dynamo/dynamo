@@ -683,6 +683,8 @@ fn load_lora_payload_requires_a_local_file_uri() {
     for uri in [
         "https://example.com/adapter",
         "file://remote/adapter",
+        "file:///adapter?version=1",
+        "file:///adapter#fragment",
         "relative",
     ] {
         let error = parse_load_lora(&json!({
