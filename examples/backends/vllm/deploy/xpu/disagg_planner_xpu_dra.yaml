@@ -69,7 +69,7 @@ spec:
           - name: planner-profile-data
             configMap:
               name: planner-profile-data
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -111,7 +111,7 @@ spec:
             - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
             - --block-size
             - "64"
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

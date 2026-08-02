@@ -41,7 +41,7 @@ spec:
             # Enable KV Router for intelligent worker selection
             - name: DYN_ROUTER_MODE
               value: kv
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -82,7 +82,7 @@ spec:
             - decode
             - --block-size
             - "64"
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

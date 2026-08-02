@@ -3,7 +3,10 @@
 
 """Unit tests for the AIC-spec integration in profiler DGD generation."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 try:
     from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
@@ -440,24 +443,36 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "services": {
                     "Frontend": {},
-                    "VllmPrefillWorker": {},
-                    "VllmDecodeWorker": {},
+                    "prefill": {},
+                    "decode": {},
                 }
             }
         }
         enable_vllm_benchmark_mode(cfg)
         services = cfg["spec"]["services"]
-        assert _benchmark_mode(services["VllmPrefillWorker"]) == "prefill"
-        assert _benchmark_mode(services["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(services["prefill"]) == "prefill"
+        assert _benchmark_mode(services["decode"]) == "decode"
         # Frontend service is untouched — no env list injected.
         assert "env" not in services["Frontend"].get("extraPodSpec", {}).get(
             "mainContainer", {}
         )
 
     def test_agg_sets_single_worker(self):
-        cfg = {"spec": {"services": {"Frontend": {}, "VllmWorker": {}}}}
+        cfg = {"spec": {"services": {"Frontend": {}, "worker": {}}}}
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(cfg["spec"]["services"]["VllmWorker"]) == "agg"
+        assert _benchmark_mode(cfg["spec"]["services"]["worker"]) == "agg"
+
+    def test_real_agg_template_sets_single_worker(self):
+        repository_root = Path(__file__).resolve().parents[6]
+        template_path = repository_root / "examples/backends/vllm/deploy/agg.yaml"
+        cfg = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+
+        services = cfg["spec"]["services"]
+        assert "worker" in services
+        assert "decode" not in services
+
+        enable_vllm_benchmark_mode(cfg)
+        assert _benchmark_mode(services["worker"]) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
@@ -465,7 +480,7 @@ class TestEnableVllmBenchmarkMode:
         cfg = {
             "spec": {
                 "services": {
-                    "VllmDecodeWorker": {
+                    "decode": {
                         "extraPodSpec": {
                             "mainContainer": {
                                 "env": [
@@ -479,12 +494,10 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        env = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-            "mainContainer"
-        ]["env"]
+        env = cfg["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"]["env"]
         names = [e["name"] for e in env]
         assert names.count("DYN_BENCHMARK_MODE") == 1
-        assert _benchmark_mode(cfg["spec"]["services"]["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(cfg["spec"]["services"]["decode"]) == "decode"
         # Unrelated env vars are preserved.
         assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
 
@@ -492,8 +505,8 @@ class TestEnableVllmBenchmarkMode:
         cfg = {
             "spec": {
                 "services": {
-                    "prefill": {},
-                    "decode": {},
+                    "custom-svc-a": {},
+                    "custom-svc-b": {},
                     "Frontend": {},
                 }
             }
@@ -506,7 +519,7 @@ class TestEnableVllmBenchmarkMode:
         cfg = {
             "spec": {
                 "services": {
-                    "VllmPrefillWorker": {
+                    "prefill": {
                         "extraPodSpec": {
                             "mainContainer": {
                                 "image": "nvcr.io/foo:1.0",
@@ -518,11 +531,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        mc = cfg["spec"]["services"]["VllmPrefillWorker"]["extraPodSpec"][
-            "mainContainer"
-        ]
+        mc = cfg["spec"]["services"]["prefill"]["extraPodSpec"]["mainContainer"]
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]
-        assert (
-            _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
-        )
+        assert _benchmark_mode(cfg["spec"]["services"]["prefill"]) == "prefill"

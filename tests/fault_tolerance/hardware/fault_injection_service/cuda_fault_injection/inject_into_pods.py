@@ -422,8 +422,8 @@ def patch_deployment_env(
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
                 ]
 
-            # Patch worker services (VllmDecodeWorker and VllmPrefillWorker)
-            services_to_patch = ["VllmDecodeWorker", "VllmPrefillWorker"]
+            # Patch worker services (decode and prefill)
+            services_to_patch = ["decode", "prefill"]
             patched_services = []
 
             spec = dgd.get("spec", {})
