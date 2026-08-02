@@ -147,6 +147,40 @@ fn publish_overloaded_instances(
     }
 }
 
+fn overload_reconciliation_needed(
+    decode_client: &Client,
+    prefill_client_holder: &RwLock<Option<Client>>,
+) -> bool {
+    decode_client.overload_reconciliation_needed()
+        || prefill_client_holder
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(Client::overload_reconciliation_needed)
+}
+
+fn publish_overloaded_instances_if_needed(
+    decode_client: &Client,
+    prefill_client_holder: &RwLock<Option<Client>>,
+    overloaded_tracker: &OverloadedWorkerTracker,
+    overloaded_changed: bool,
+) -> bool {
+    // NOTE: Recovery still relies on load producers publishing after meaningful capacity or
+    // lifecycle changes. This only prevents the next observation from being suppressed when
+    // request-path backpressure changed Client state outside this monitor's cached set.
+    if !overloaded_changed && !overload_reconciliation_needed(decode_client, prefill_client_holder)
+    {
+        return false;
+    }
+
+    publish_overloaded_instances(
+        decode_client,
+        prefill_client_holder,
+        &overloaded_tracker.ids(),
+    );
+    true
+}
+
 /// Configuration for worker load thresholds used in overload detection.
 ///
 /// All thresholds are opt-in. An unset (`None`) field means the corresponding
@@ -1004,14 +1038,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             overloaded_tracker.update_worker(worker_id, worker_overloaded)
                         };
 
-                        if overloaded_changed {
-                            let overloaded_instances = overloaded_tracker.ids();
-                            publish_overloaded_instances(
-                                &client,
-                                &prefill_client_holder,
-                                &overloaded_instances,
-                            );
-                        }
+                        publish_overloaded_instances_if_needed(
+                            &client,
+                            &prefill_client_holder,
+                            &overloaded_tracker,
+                            overloaded_changed,
+                        );
                     }
 
                     // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
@@ -1164,7 +1196,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 mod tests {
     use super::{
         LoadMembership, LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
-        classify_load_membership, compute_overloaded_instances, publish_overloaded_instances,
+        classify_load_membership, compute_overloaded_instances, overload_reconciliation_needed,
+        publish_overloaded_instances, publish_overloaded_instances_if_needed,
     };
     use dynamo_kv_router::protocols::ActiveLoad;
     use std::collections::HashSet;
@@ -1594,6 +1627,53 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(overloaded, HashSet::from([1]));
+    }
+
+    #[tokio::test]
+    async fn unchanged_low_metric_reconciles_request_path_overload() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::sync::RwLock;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_request_path_overload_reconciliation".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let prefill_client_holder = RwLock::new(None);
+        let mut tracker = OverloadedWorkerTracker::default();
+
+        assert!(!tracker.update_worker(7, false));
+        client.mark_overloaded_immediate(7);
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+
+        let overloaded_changed = tracker.update_worker(7, false);
+        assert!(
+            !overloaded_changed,
+            "the monitor's cached set remains empty"
+        );
+        assert!(overload_reconciliation_needed(
+            &client,
+            &prefill_client_holder
+        ));
+
+        assert!(publish_overloaded_instances_if_needed(
+            &client,
+            &prefill_client_holder,
+            &tracker,
+            overloaded_changed,
+        ));
+
+        assert_eq!(client.overloaded_instance_ids(), None);
+        assert!(!client.overload_reconciliation_needed());
+        rt.shutdown();
     }
 
     /// Regression: the overloaded set must reach the prefill
