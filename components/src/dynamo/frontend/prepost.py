@@ -419,6 +419,7 @@ def _prepare_request(
     *,
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -495,6 +496,26 @@ def _prepare_request(
         ),
     )
 
+    # Let the reasoning parser adjust the sampling request, mirroring the tool-parser
+    # path above. Parsers that split thinking from the answer on text markers need
+    # `skip_special_tokens=False` so those markers survive detokenisation, and they
+    # declare that through adjust_request(). Without this call the reasoning channel
+    # only works when the *client* happens to send skip_special_tokens=false.
+    #
+    # Gated identically to StreamingPostProcessor's own parser construction below: if
+    # the sampling params were adjusted for a parser that then does not exist, the
+    # markers reach the client as visible text.
+    #
+    # ReasoningParser.adjust_request is `return request` by default, so this is a no-op
+    # for parsers that do not need it.
+    if reasoning_parser_class is not None and (
+        chat_template_kwargs.get("enable_thinking") is not False
+    ):
+        request_for_sampling = reasoning_parser_class(
+            tokenizer,
+            chat_template_kwargs=chat_template_kwargs,
+        ).adjust_request(request_for_sampling)
+
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
         tokenizer.__class__.__name__ == "MistralTokenizer"
@@ -536,6 +557,7 @@ async def preprocess_chat_request(
     tokenizer: TokenizerLike,
     renderer: _Renderer,
     tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -567,6 +589,7 @@ async def preprocess_chat_request(
         request,
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
+        reasoning_parser_class=reasoning_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
