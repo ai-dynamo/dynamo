@@ -41,6 +41,10 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        # Pin to the real Config default: an auto-created Mock attribute is
+        # truthy, which enables the GMS shadow-mode path and imports the
+        # optional gpu_memory_service package (absent in some test images).
+        "gms_shadow_mode": False,
         "realtime": False,
     }
     defaults.update(overrides)
