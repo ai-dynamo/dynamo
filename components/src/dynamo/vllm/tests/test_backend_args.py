@@ -48,6 +48,7 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    config.route_to_encoder = False
     return config
 
 
