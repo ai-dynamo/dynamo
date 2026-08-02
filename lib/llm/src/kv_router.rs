@@ -73,6 +73,9 @@ use crate::{
 };
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 
+pub(crate) type WorkerSelectorFactory<Sel> =
+    Arc<dyn Fn(&KvRouterConfig, &'static str) -> Sel + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,

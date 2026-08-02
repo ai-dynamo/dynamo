@@ -38,7 +38,10 @@ use crate::{
     },
 };
 
-use dynamo_kv_router::{config::min_initial_workers_from_env, selector::WorkerSelector};
+use dynamo_kv_router::{
+    config::min_initial_workers_from_env,
+    selector::{DefaultWorkerSelector, WorkerSelector},
+};
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -83,10 +86,13 @@ fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<Stri
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
-pub struct PreprocessedRouting {
+pub struct PreprocessedRouting<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
-    prefill_router: Arc<PrefillRouter>,
+    prefill_router: Arc<PrefillRouter<Sel>>,
     encoder_router: Arc<EncoderRouter>,
 }
 
@@ -273,17 +279,17 @@ pub async fn build_preprocessed_routing(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn build_preprocessed_routing_with_selector<Sel>(
+pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter<Sel>>>,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
-) -> anyhow::Result<PreprocessedRouting>
+) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
 {
@@ -338,7 +344,7 @@ where
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::disabled(
+        PrefillRouter::<Sel>::disabled_with_selector(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
@@ -511,7 +517,10 @@ where
         .link(frontend)?)
 }
 
-impl PreprocessedRouting {
+impl<Sel> PreprocessedRouting<Sel>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
