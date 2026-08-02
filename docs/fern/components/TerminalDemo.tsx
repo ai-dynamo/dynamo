@@ -25,7 +25,12 @@
  *   and hydration wires up the player. dispose() runs on unmount.
  *
  * USAGE (import — ambient JSX is unsupported, per the RecipeStyles note):
- *   import { TerminalDemo } from "@/components/TerminalDemo";
+ *   the named export from the components/TerminalDemo module
+ *
+ * Written as prose, not as an import example: Fern's bundler scans this file
+ * for import specifiers without skipping comments, and a non-relative one sends
+ * it to `npx rolldown`, which has no network on the runner and fails the docs
+ * preview for every PR.
  *
  *   <TerminalDemo
  *     src="/dynamo/assets/dynamo-demo.cast"

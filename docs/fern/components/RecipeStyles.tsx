@@ -14,7 +14,12 @@
  * `experimental.mdx-components: ./components`. IMPORT it (ambient use is
  * unsupported — renders "Unsupported JSX tag"); the @/ prefix resolves to the
  * fern/ root and is rewritten to a relative path at publish time:
- *   import { RecipeStyles } from "@/components/RecipeStyles";
+ *   the named export from the components/RecipeStyles module
+ *
+ * Written as prose, not as an import example: Fern's bundler scans this file
+ * for import specifiers without skipping comments, and a non-relative one sends
+ * it to `npx rolldown`, which has no network on the runner and fails the docs
+ * preview for every PR.
  * Then place <RecipeStyles /> once, right after the frontmatter, on every
  * recipe/benchmark page (and the two landing READMEs).
  */
