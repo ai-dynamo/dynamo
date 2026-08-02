@@ -5,16 +5,20 @@
  * Landing page component styles (Home and Community).
  *
  * Styles for WelcomeHero, WhyDynamo, EventsCalendar and CommunityLanding.
- * These rules also live in main.css, which is the local-preview and no-JS
- * baseline; this block is what reaches production.
+ * This block is their only home -- main.css carries none of these rules, so
+ * there is no fallback baseline. If this block does not render, both pages
+ * render unstyled. (CustomFooter.tsx is the one that genuinely mirrors
+ * main.css, enforced by the `sync-site-css` pre-commit hook.)
  *
  * Delivered as a page-level <style> block (NOT via the docs.yml `css:` field)
  * so it survives the shared NVIDIA global theme, which replaces project `css`
- * at publish. The same theme also replaces the custom `footer:`, so the
- * SITE_CSS block in CustomFooter.tsx does not reach these pages either --
- * that is why the Home and Community components rendered unstyled. Same
- * pattern as ReferenceStyles.tsx and RecipeStyles.tsx, which are unaffected
- * for exactly this reason.
+ * at publish (#11952) -- production ships no main.css <link> at all. Same
+ * pattern as ReferenceStyles.tsx and RecipeStyles.tsx.
+ *
+ * main.css content does still reach production, mirrored verbatim into
+ * CustomFooter.tsx's SITE_CSS by sync_site_css.py, and that block does render
+ * on these pages. It is not somewhere to put landing rules, though: it is
+ * generated, so any hand edit is overwritten on the next sync.
  *
  * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
  * child like ReferenceStyles.tsx. A text child is escaped on render, which
@@ -34,8 +38,8 @@
  * regex-scans this file for imports without skipping comments, and a quoted
  * non-relative specifier makes it shell out to `npx rolldown` on every build.
  *
- * Then place <LandingStyles /> once, right after the imports, on welcome.mdx
- * and community/README.mdx.
+ * Then place <LandingStyles /> once, right after the imports, on
+ * pages/home/index.mdx and pages/community/community.mdx.
  */
 const LANDING_CSS = `
 /* ===================== Welcome (Home) landing page ===================== */
@@ -102,27 +106,36 @@ article:has(.dynamo-welcome)::before {
 /* Turn Fern's generated title and subtitle into the first half of the hero. */
 article:has(.dynamo-welcome) > header {
   margin: 0;
-  padding: clamp(3rem, 6vh, 4.5rem) 1rem 0;
+  /* The extra top padding reserves the space the mark below occupies, since
+     the mark is taken out of the flow to sit above the heading. */
+  padding: calc(clamp(3rem, 6vh, 4.5rem) + 92px + 1.45rem) 1rem 0;
   text-align: center;
 }
 
-article:has(.dynamo-welcome) > header::before {
-  content: "";
+/* The Dynamo mark, rendered as an <img> from the page MDX. It cannot be a
+   background-image here: Fern rewrites asset paths only in MDX and docs.yml,
+   never inside a <style> string, so a url() reaches the browser verbatim and
+   404s. That puts the mark in the prose, below the heading, so pull it back up
+   over the heading; the header padding above holds its place. */
+article:has(.dynamo-welcome) .dynamo-welcome__mark {
+  position: absolute;
+  top: clamp(3rem, 6vh, 4.5rem);
+  left: 50%;
+  transform: translateX(-50%);
   display: block;
   width: 92px;
   height: 92px;
-  margin: 0 auto 1.45rem;
+  margin: 0;
   border: 1px solid rgba(118, 185, 0, 0.4);
   border-radius: 24px;
-  background: #f3fbdc
-    url("/dynamo/assets/img/dynamo-logo.svg") center /
-    cover no-repeat;
+  background-color: #f3fbdc;
+  object-fit: cover;
   box-shadow:
     0 18px 42px rgba(54, 86, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
-.dark article:has(.dynamo-welcome) > header::before {
+.dark article:has(.dynamo-welcome) .dynamo-welcome__mark {
   border-color: rgba(118, 185, 0, 0.4);
   background-color: #0c0d0b;
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
