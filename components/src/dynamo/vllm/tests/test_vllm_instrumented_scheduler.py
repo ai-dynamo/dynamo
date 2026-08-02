@@ -13,6 +13,9 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 import threading
 import uuid
 from collections import deque
@@ -3374,3 +3377,50 @@ def test_fpm_utility_argument_is_not_msgspec_converted():
     annotation = signature(_fpm_utility()).parameters["new_worker_id"].annotation
 
     assert not (isclass(annotation) and issubclass(annotation, msgspec.Struct))
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(300)
+def test_scheduler_cls_resolution_installs_the_patch():
+    """Resolving ``scheduler_cls`` is what carries the patch into the child.
+
+    The EngineCore process never imports ``dynamo.vllm.instrumented_scheduler``
+    directly. It arrives via ``EngineCore.__init__`` ->
+    ``SchedulerConfig.get_scheduler_cls()`` -> ``resolve_obj_by_qualname()`` ->
+    ``importlib.import_module()``, using the dotted string Dynamo sets in
+    ``args.py``. That single hop is the whole reason the monkeypatch runs in
+    the child, so it is asserted here directly.
+
+    Run in a fresh interpreter on purpose: this test module already imported
+    the scheduler module at collection time, which would make an in-process
+    assertion vacuous. The subprocess also proves the patch is not leaking in
+    from some unrelated import.
+    """
+    script = textwrap.dedent(
+        """
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+        from vllm.v1.engine.core import EngineCore
+
+        assert not hasattr(EngineCore, "set_fpm_worker_id"), (
+            "patch present before scheduler_cls resolution"
+        )
+
+        resolved = resolve_obj_by_qualname(
+            "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+        )
+
+        assert resolved.__name__ == "InstrumentedScheduler"
+        assert hasattr(EngineCore, "set_fpm_worker_id"), (
+            "resolving scheduler_cls did not install the FPM worker_id utility"
+        )
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=280,
+    )
+
+    assert result.returncode == 0, result.stderr
