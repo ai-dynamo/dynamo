@@ -310,8 +310,30 @@ class TestValidateCustomEncoder:
         config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
         config.enable_multimodal = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = argparse.Namespace(enable_prompt_embeds=True)
 
         config._validate_custom_encoder()
+
+    def test_frontend_pd_rejects_vllm_tokenizer(self):
+        config = create_config()
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.use_vllm_tokenizer = True
+        config.engine_args = argparse.Namespace(enable_prompt_embeds=True)
+
+        with pytest.raises(ValueError, match="token-in/token-out"):
+            config._validate_custom_encoder()
+
+    def test_frontend_pd_requires_prompt_embeds(self):
+        config = create_config()
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = argparse.Namespace(enable_prompt_embeds=False)
+
+        with pytest.raises(ValueError, match="enable-prompt-embeds"):
+            config._validate_custom_encoder()
 
     def test_frontend_pd_cannot_route_to_encoder_again(self):
         config = create_config()

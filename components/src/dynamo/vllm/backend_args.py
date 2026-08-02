@@ -674,6 +674,17 @@ class DynamoVllmConfig(ConfigBase):
                         "--custom-encoder-routing-mode=frontend requires "
                         "--enable-multimodal"
                     )
+                if self.use_vllm_tokenizer:
+                    raise ValueError(
+                        "--custom-encoder-routing-mode=frontend requires the "
+                        "token-in/token-out preprocessed route and cannot use "
+                        "--use-vllm-tokenizer"
+                    )
+                if not getattr(self.engine_args, "enable_prompt_embeds", False):
+                    raise ValueError(
+                        "--custom-encoder-routing-mode=frontend requires "
+                        "--enable-prompt-embeds on the aggregated PD worker"
+                    )
             return
         if not self.enable_multimodal:
             raise ValueError(

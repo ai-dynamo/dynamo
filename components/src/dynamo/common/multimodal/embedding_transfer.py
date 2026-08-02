@@ -429,6 +429,9 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         # tracker for the prepared embeddings
         self.transfer_tracker = {}
         self.transfer_created_at = {}
+        # A failed/cancelled in-flight WRITE must retain its source tensor and
+        # memory registration until NIXL reports a terminal handle state.
+        self.transfer_failures: dict[int, BaseException] = {}
 
         # Track dynamically registered descriptors for cleanup,
         # there can be case of the same tensor being requested to be transferred multiple times,
@@ -518,6 +521,14 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         time.perf_counter(),
                     ]
 
+                for tensor_id, error in list(self.transfer_failures.items()):
+                    if tensor_id not in self.transfer_tracker:
+                        self.transfer_failures.pop(tensor_id, None)
+                    elif tensor_id not in inflight_transfers:
+                        # No NIXL handle owns this registration yet, so retiring
+                        # an unclaimed descriptor is immediately safe.
+                        self._complete_transfer(tensor_id, error)
+
                 # check inflight transfer state, if completed, get another task to match
                 # remaining transfers count
                 # use list() to create a copy of the dict items since the dict will be modified in the loop
@@ -552,25 +563,24 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     else:
                         # still in-flight, check again later
                         if now_time - start_time > self.transfer_timeout:
-                            logger.warning(
-                                f"Transfer for tensor_id {tensor_id} exceeded the "
-                                f"{self.transfer_timeout} second timeout"
-                            )
-                            self._complete_transfer(
-                                tensor_id,
-                                TimeoutError("embedding transfer timed out"),
-                            )
-                            inflight_transfers.pop(tensor_id)
-                            continue
+                            if tensor_id not in self.transfer_failures:
+                                logger.warning(
+                                    f"Transfer for tensor_id {tensor_id} exceeded the "
+                                    f"{self.transfer_timeout} second timeout; retaining "
+                                    "registered memory until NIXL reaches a terminal state"
+                                )
+                                self.transfer_failures[tensor_id] = TimeoutError(
+                                    "embedding transfer timed out"
+                                )
                         continue
                     # NOTE future is set with result None in "ERR" and "DONE", so the sender will not
                     # be able to distinguish failure with success, we can consider
                     # adding more explicit failure signal in the future if needed.
-                    transfer_error = (
-                        RuntimeError(f"NIXL WRITE failed for tensor_id {tensor_id}")
-                        if state == "ERR"
-                        else None
-                    )
+                    transfer_error = self.transfer_failures.pop(tensor_id, None)
+                    if transfer_error is None and state == "ERR":
+                        transfer_error = RuntimeError(
+                            f"NIXL WRITE failed for tensor_id {tensor_id}"
+                        )
                     self._complete_transfer(tensor_id, transfer_error)
                     inflight_transfers.pop(tensor_id)
                     try:
@@ -615,7 +625,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     and len(decoded) == 2
                     and decoded[0] == "cancel"
                 ):
-                    self._complete_transfer(
+                    self.transfer_failures.setdefault(
                         decoded[1],
                         RuntimeError("embedding transfer cancelled by receiver"),
                     )
@@ -650,6 +660,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
     def _complete_transfer(self, tensor_id, error: BaseException | None = None):
         transfer_info = self.transfer_tracker.pop(tensor_id, None)
         self.transfer_created_at.pop(tensor_id, None)
+        self.transfer_failures.pop(tensor_id, None)
         if transfer_info is not None:
             # Clean up registered memory after transfer completion
             embeddings, _, fut = transfer_info
