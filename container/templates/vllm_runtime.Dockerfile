@@ -171,7 +171,15 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% if device != "cuda" %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
+{# On rocm install ONLY the built bindings wheel. The wheelhouse also holds the
+   `nixl` meta wheel, whose loader hunts for a CUDA backend and raises
+   "No NIXL CUDA backend found"; depending on resolver ordering it can also land
+   on top of the real nixl_rocm package and break it. #}
+{% if device == "rocm" %}
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl_rocm-*.whl
+{% else %}
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
 {% endif %}
 
 {% if device == "rocm" %}

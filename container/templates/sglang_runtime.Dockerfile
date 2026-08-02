@@ -121,7 +121,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
-        /opt/dynamo/wheelhouse/nixl/nixl*.whl
+        /opt/dynamo/wheelhouse/nixl/nixl_rocm-*.whl
 
 {# On ROCm the framework reaches for `rixl`, not `nixl`. RIXL is not the
    implementation: this is a name-only namespace re-exporting the upstream
