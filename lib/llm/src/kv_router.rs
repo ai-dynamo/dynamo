@@ -329,7 +329,7 @@ fn resolve_tracking_model_name(
 
 impl<Sel> KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -1392,7 +1392,7 @@ where
 impl<Sel> AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error>
     for KvRouter<Sel>
 where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn generate(
         &self,
