@@ -1026,9 +1026,9 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
-        if (
-            config.route_to_encoder
-            or config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+        if config.route_to_encoder or config.custom_encoder_routing_mode in (
+            CustomEncoderRoutingMode.FRONTEND,
+            CustomEncoderRoutingMode.WORKER,
         ):
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
@@ -1383,7 +1383,10 @@ class WorkerFactory:
         self, runtime: DistributedRuntime, config: Config
     ) -> Optional[Any]:
         """Helper function to get encode worker client if routing to encoder is enabled."""
-        if config.route_to_encoder:
+        if (
+            config.route_to_encoder
+            or config.custom_encoder_routing_mode == CustomEncoderRoutingMode.WORKER
+        ):
             # [gluo NOTE] hardcoded component name
             encode_worker_client = await runtime.endpoint(
                 f"{config.namespace}.encode.generate"

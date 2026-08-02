@@ -329,5 +329,24 @@ class TestValidateCustomEncoder:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.route_to_encoder = True
 
-        with pytest.raises(ValueError, match="frontend owns the encoder call"):
+        with pytest.raises(ValueError, match="routing mode already owns"):
             config._validate_custom_encoder()
+
+    def test_worker_encode_worker_owns_custom_encoder(self):
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.WORKER
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+
+        config._validate_custom_encoder()
+
+    def test_worker_pd_has_no_custom_encoder_class(self):
+        config = create_config()
+        config.custom_encoder_class = None
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.WORKER
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = argparse.Namespace(enable_prompt_embeds=True)
+
+        config._validate_custom_encoder()

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
@@ -176,3 +176,34 @@ async def test_linear_embeds_handoff_rejects_decoder_mismatch_before_receive():
             expected_decoder_revision=None,
             model_config=model_config,
         )
+
+
+async def test_worker_route_sends_complete_request_once_and_consumes_terminal():
+    class _Response:
+        def data(self):
+            return {
+                "finish_reason": "stop",
+                "token_ids": [],
+                "encoder_result": {"schema_version": 1},
+            }
+
+    async def _stream():
+        yield _Response()
+
+    client = SimpleNamespace(round_robin=AsyncMock(return_value=_stream()))
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.encode_worker_client = client
+    handler._consume_custom_encoder_handoff = AsyncMock(return_value="prompt")
+    request = {
+        "token_ids": [1, 99, 2],
+        "multi_modal_data": {"image_url": [{"Url": "data:image/png;base64,unique"}]},
+    }
+    context = Mock()
+
+    prompt = await handler._request_custom_encoder_handoff(request, context)
+
+    assert prompt == "prompt"
+    client.round_robin.assert_awaited_once_with(request, context=context)
+    handler._consume_custom_encoder_handoff.assert_awaited_once_with(
+        {"schema_version": 1}
+    )

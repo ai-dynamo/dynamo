@@ -34,6 +34,11 @@ TARGET_OSL = 7
 SEED = 42
 JPEG_MIN_BYTES = 50 * 1024
 JPEG_MAX_BYTES = 60 * 1024
+BENCHMARK_JPEG_TARGETS = {
+    (300, 300): 7 * 1024,
+    (500, 500): 35 * 1024,
+}
+BENCHMARK_JPEG_TOLERANCE = 512
 DEFAULT_IMAGE_SIZE = 500
 BENCHMARK_IMAGE_SIZE_COUNTS = ((300, 300, 500), (500, 500, 500))
 BASE_PROMPT = "Classify the image and briefly explain the label."
@@ -253,6 +258,17 @@ def generate_workload(
     records: list[dict[str, Any]] = []
     image_index = 0
     for width, height, count in normalized_sizes:
+        target_bytes = BENCHMARK_JPEG_TARGETS.get((width, height))
+        min_bytes = (
+            target_bytes - BENCHMARK_JPEG_TOLERANCE
+            if target_bytes is not None
+            else JPEG_MIN_BYTES
+        )
+        max_bytes = (
+            target_bytes + BENCHMARK_JPEG_TOLERANCE
+            if target_bytes is not None
+            else JPEG_MAX_BYTES
+        )
         for size_index in range(count):
             records.append(
                 _generate_jpeg(
@@ -264,6 +280,8 @@ def generate_workload(
                     ),
                     seed + image_index,
                     (width, height),
+                    min_bytes=min_bytes,
+                    max_bytes=max_bytes,
                 )
             )
             image_index += 1
@@ -365,6 +383,18 @@ def generate_workload(
             "subsampling": "4:2:0",
             "min_bytes": JPEG_MIN_BYTES,
             "max_bytes": JPEG_MAX_BYTES,
+            "size_targets": {
+                f"{width}x{height}": {
+                    "target_bytes": target,
+                    "min_bytes": target - BENCHMARK_JPEG_TOLERANCE,
+                    "max_bytes": target + BENCHMARK_JPEG_TOLERANCE,
+                }
+                for (width, height), target in BENCHMARK_JPEG_TARGETS.items()
+                if any(
+                    (entry_width, entry_height) == (width, height)
+                    for entry_width, entry_height, _ in normalized_sizes
+                )
+            },
         },
         "file_size_bytes": {
             "min": min(sizes),
@@ -439,8 +469,9 @@ def validate_workload(
             f"{expected_unique_images}"
         )
     target_isl = int(manifest["target_isl"])
-    min_bytes = int(manifest["encoding"]["min_bytes"])
-    max_bytes = int(manifest["encoding"]["max_bytes"])
+    default_min_bytes = int(manifest["encoding"]["min_bytes"])
+    default_max_bytes = int(manifest["encoding"]["max_bytes"])
+    size_targets = manifest["encoding"].get("size_targets", {})
     input_path = Path(manifest["input"]["path"])
     rows = [
         json.loads(line) for line in input_path.read_text(encoding="utf-8").splitlines()
@@ -478,6 +509,10 @@ def validate_workload(
     for record in manifest["images"]:
         path = Path(record["path"])
         payload = path.read_bytes()
+        size_key = f'{record["width"]}x{record["height"]}'
+        size_target = size_targets.get(size_key, {})
+        min_bytes = int(size_target.get("min_bytes", default_min_bytes))
+        max_bytes = int(size_target.get("max_bytes", default_max_bytes))
         if not min_bytes <= len(payload) <= max_bytes:
             raise AssertionError(f"JPEG size out of range: {path}")
         encoded_hash = hashlib.sha256(payload).hexdigest()
@@ -581,6 +616,7 @@ def main() -> None:
     generate.add_argument("--image-size", type=int, default=DEFAULT_IMAGE_SIZE)
     generate.add_argument("--unique-images", type=int, default=UNIQUE_IMAGES)
     generate.add_argument("--requests", type=int, default=REQUESTS)
+    generate.add_argument("--seed", type=int, default=SEED)
     generate.add_argument(
         "--image-size-count",
         action="append",
@@ -606,6 +642,7 @@ def main() -> None:
             image_size=args.image_size,
             unique_images=args.unique_images,
             requests=args.requests,
+            seed=args.seed,
             image_size_counts=(
                 tuple(args.image_size_count) if args.image_size_count else None
             ),

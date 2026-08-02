@@ -5,6 +5,7 @@ import asyncio
 import base64
 import functools
 import inspect
+import json
 import logging
 import math
 import os
@@ -1058,6 +1059,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: str = "initial"
+        self.encode_worker_client = encode_worker_client
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -1069,7 +1071,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._custom_encoder_handoff_receiver: AbstractEmbeddingReceiver | None = None
         self._custom_encoder_handoff_replay_guard: HandoffReplayGuard | None = None
         if (
-            config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+            config.custom_encoder_routing_mode
+            in (
+                CustomEncoderRoutingMode.FRONTEND,
+                CustomEncoderRoutingMode.WORKER,
+            )
             and config.disaggregation_mode == DisaggregationMode.AGGREGATED
         ):
             self._custom_encoder_handoff_receiver = EMBEDDING_RECEIVER_FACTORIES[
@@ -1179,6 +1185,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Initialize the embedding loader with the given encode worker client."""
         # Without encode worker, the embedding will be generated internally by vLLM.
         if encode_worker_client is None:
+            return None
+        if config.custom_encoder_routing_mode == CustomEncoderRoutingMode.WORKER:
+            # Worker-routed CustomEncoder sends the complete prompt to one E and
+            # receives one decoder-ready tensor. The legacy loader fans out images
+            # and therefore cannot preserve placeholder ordering for the adapter.
             return None
         logger.warning(
             "Separate multimodal encode-worker routing only applies to image_url "
@@ -3092,6 +3103,53 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return prepared, None
 
+    async def _consume_custom_encoder_handoff(
+        self, encoder_result: Mapping[str, Any]
+    ) -> EmbedsPrompt:
+        if (
+            self._custom_encoder_handoff_receiver is None
+            or self._custom_encoder_handoff_replay_guard is None
+            or self.model_config is None
+        ):
+            raise RuntimeError("custom-encoder handoff consumer was not initialized")
+        return await receive_linear_embeds_prompt(
+            encoder_result,
+            self._custom_encoder_handoff_receiver,
+            self._custom_encoder_handoff_replay_guard,
+            expected_transfer_mode=self.config.embedding_transfer_mode.value,
+            expected_decoder_model=self.config.model,
+            expected_decoder_revision=self.config.engine_args.revision,
+            model_config=self.model_config,
+        )
+
+    async def _request_custom_encoder_handoff(
+        self, request: Dict[str, Any], context: Any
+    ) -> EmbedsPrompt:
+        if self.encode_worker_client is None:
+            raise RuntimeError("custom Encode worker client is not configured")
+
+        stream = await self.encode_worker_client.round_robin(request, context=context)
+        terminal: Mapping[str, Any] | None = None
+        async for response in stream:
+            payload = response.data()
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, Mapping):
+                raise ValueError("custom Encode worker returned a non-object response")
+            if payload.get("finish_reason") is not None:
+                terminal = payload
+
+        if terminal is None:
+            raise RuntimeError(
+                "custom Encode worker stream ended without a terminal response"
+            )
+        encoder_result = terminal.get("encoder_result")
+        if not isinstance(encoder_result, Mapping):
+            raise ValueError("custom Encode worker terminal is missing encoder_result")
+        return await self._consume_custom_encoder_handoff(encoder_result)
+
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Firstly extract disaggregated params from prefill result if available
@@ -3144,23 +3202,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "token_ids": [],
                 }
                 return
-            if (
-                self._custom_encoder_handoff_receiver is None
-                or self._custom_encoder_handoff_replay_guard is None
-                or self.model_config is None
-            ):
-                raise RuntimeError(
-                    "frontend custom-encoder handoff consumer was not initialized"
-                )
             try:
-                custom_prompt = await receive_linear_embeds_prompt(
-                    encoder_result,
-                    self._custom_encoder_handoff_receiver,
-                    self._custom_encoder_handoff_replay_guard,
-                    expected_transfer_mode=self.config.embedding_transfer_mode.value,
-                    expected_decoder_model=self.config.model,
-                    expected_decoder_revision=self.config.engine_args.revision,
-                    model_config=self.model_config,
+                custom_prompt = await self._consume_custom_encoder_handoff(
+                    encoder_result
                 )
             except Exception as exc:
                 logger.exception(
@@ -3190,6 +3234,27 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "token_ids": [],
             }
             return
+        elif (
+            self.config.custom_encoder_routing_mode == CustomEncoderRoutingMode.WORKER
+            and has_mm_data
+        ):
+            try:
+                custom_prompt = await self._request_custom_encoder_handoff(
+                    request, context
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Request %s: worker-routed custom encoder failed", request_id
+                )
+                yield {
+                    "finish_reason": f"error: custom encoder worker failed: {exc}",
+                    "index": 0,
+                    "token_ids": [],
+                }
+                return
+            multi_modal_data = None
+            mm_processor_kwargs = None
+            pre_rendered = None
         elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None

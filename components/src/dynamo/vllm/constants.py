@@ -17,6 +17,7 @@ class CustomEncoderRoutingMode(str, Enum):
 
     INLINE = "inline"
     FRONTEND = "frontend"
+    WORKER = "worker"
 
 
 __all__ = [
