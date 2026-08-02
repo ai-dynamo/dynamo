@@ -347,6 +347,4 @@ class TestValidateCustomEncoder:
         config.custom_encoder_routing_mode = CustomEncoderRoutingMode.WORKER
         config.enable_multimodal = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
-        config.engine_args = argparse.Namespace(enable_prompt_embeds=True)
-
         config._validate_custom_encoder()

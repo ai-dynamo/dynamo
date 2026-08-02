@@ -1584,8 +1584,9 @@ class TestEmbeddingWorkerFlag:
             parse_args()
 
 
-class TestFrontendCustomEncoderRoutingArgs:
-    def test_aggregated_pd_parses_with_prompt_embeds(self, mock_vllm_cli):
+class TestCustomEncoderRoutingArgs:
+    @pytest.mark.parametrize("routing_mode", ["frontend", "worker"])
+    def test_aggregated_pd_parses_with_prompt_embeds(self, mock_vllm_cli, routing_mode):
         mock_vllm_cli(
             "--model",
             "Qwen/Qwen2.5-1.5B-Instruct",
@@ -1594,14 +1595,15 @@ class TestFrontendCustomEncoderRoutingArgs:
             "--disaggregation-mode",
             "agg",
             "--custom-encoder-routing-mode",
-            "frontend",
+            routing_mode,
         )
 
         config = parse_args()
 
         assert config.engine_args.enable_prompt_embeds is True
 
-    def test_aggregated_pd_requires_prompt_embeds(self, mock_vllm_cli):
+    @pytest.mark.parametrize("routing_mode", ["frontend", "worker"])
+    def test_aggregated_pd_requires_prompt_embeds(self, mock_vllm_cli, routing_mode):
         mock_vllm_cli(
             "--model",
             "Qwen/Qwen2.5-1.5B-Instruct",
@@ -1609,7 +1611,7 @@ class TestFrontendCustomEncoderRoutingArgs:
             "--disaggregation-mode",
             "agg",
             "--custom-encoder-routing-mode",
-            "frontend",
+            routing_mode,
         )
 
         with pytest.raises(ValueError, match="enable-prompt-embeds"):

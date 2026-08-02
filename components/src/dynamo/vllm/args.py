@@ -167,12 +167,13 @@ def cross_validate_config(
     routing_mode = CustomEncoderRoutingMode(dynamo_config.custom_encoder_routing_mode)
     if (
         not dynamo_config.custom_encoder_class
-        and routing_mode == CustomEncoderRoutingMode.FRONTEND
+        and routing_mode
+        in (CustomEncoderRoutingMode.FRONTEND, CustomEncoderRoutingMode.WORKER)
         and dynamo_config.disaggregation_mode == DisaggregationMode.AGGREGATED
         and not engine_config.enable_prompt_embeds
     ):
         raise ValueError(
-            "--custom-encoder-routing-mode=frontend requires "
+            f"--custom-encoder-routing-mode={routing_mode.value} requires "
             "--enable-prompt-embeds on the aggregated PD worker"
         )
 
