@@ -1566,13 +1566,13 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 
   article:has(.dynamo-welcome) > header {
-    padding-top: 2.75rem;
+    padding-top: calc(2.75rem + 60px + 1rem);
   }
 
-  article:has(.dynamo-welcome) > header::before {
+  article:has(.dynamo-welcome) .dynamo-welcome__mark {
+    top: 2.75rem;
     width: 60px;
     height: 60px;
-    margin-bottom: 1rem;
     border-radius: 14px;
   }
 

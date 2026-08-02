@@ -50,14 +50,20 @@ SELF = Path(__file__).resolve()  # skipped: the docstring must show the bad shap
 
 # A site-absolute reference into the asset tree. Anchored on the leading slash
 # so relative forms (../../assets/...) and docs.yml's ./assets/... are ignored;
-# those are the two shapes Fern does rewrite.
-ABSOLUTE_ASSET = re.compile(r"""["'(]\s*(/(?:[\w.-]+/)*assets/[^"')\s]+)""")
+# those are the two shapes Fern does rewrite. The backtick is an opening
+# delimiter too: these files hold CSS in template literals, so a bare
+# `/dynamo/assets/x.svg` assignment is as reachable as a quoted one.
+ABSOLUTE_ASSET = re.compile(r"""["'`(]\s*(/(?:[\w.-]+/)*assets/[^"'`)\s]+)""")
 
+# translations/ carries the zh-CN pages, which publish through the locale
+# configured in docs.yml and 404 the same way.
 DEFAULT_GLOBS = (
     "components/**/*.tsx",
     "components/**/*.ts",
     "pages/**/*.mdx",
     "pages/**/*.md",
+    "translations/**/*.mdx",
+    "translations/**/*.md",
     "main.css",
     "custom.js",
 )
