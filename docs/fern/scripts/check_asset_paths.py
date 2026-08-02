@@ -66,6 +66,9 @@ DEFAULT_GLOBS = (
     "translations/**/*.md",
     "main.css",
     "custom.js",
+    # logo:, favicon: and the font path: entries. Fern rewrites the ./assets/...
+    # form here, but a site-absolute one would ship verbatim.
+    "docs.yml",
 )
 
 
