@@ -821,29 +821,43 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
     }
 }
 
-#[test]
-fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
+#[tokio::test]
+async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
+    let server = FakeServer::start(FakeInference::default()).await;
     let component = |extra: &[&str]| {
+        let endpoint = server.endpoint.clone();
         let mut argv = vec![
-            "dynamo-vllm-sidecar",
-            "--vllm-endpoint",
-            "127.0.0.1:50051",
-            "--model-path",
-            "test-model",
-            "--component",
-            "custom",
+            "dynamo-vllm-sidecar".to_string(),
+            "--vllm-endpoint".to_string(),
+            endpoint,
+            "--model-path".to_string(),
+            "test-model".to_string(),
+            "--component".to_string(),
+            "custom".to_string(),
         ];
-        argv.extend_from_slice(extra);
-        VllmSidecarEngine::from_args(Some(argv.iter().map(|s| s.to_string()).collect()))
-            .expect("from_args")
-            .1
-            .component
+        argv.extend(extra.iter().map(ToString::to_string));
+        tokio::task::spawn_blocking(move || {
+            VllmSidecarEngine::from_args(Some(argv))
+                .expect("from_args")
+                .1
+                .component
+        })
     };
     // Aggregated keeps the operator-configured component.
-    assert_eq!(component(&[]), "custom");
+    assert_eq!(component(&[]).await.expect("component task"), "custom");
     // Disaggregated roles override to fixed names so the frontend can route.
-    assert_eq!(component(&["--disaggregation-mode", "prefill"]), "prefill");
-    assert_eq!(component(&["--disaggregation-mode", "decode"]), "backend");
+    assert_eq!(
+        component(&["--disaggregation-mode", "prefill"])
+            .await
+            .expect("component task"),
+        "prefill"
+    );
+    assert_eq!(
+        component(&["--disaggregation-mode", "decode"])
+            .await
+            .expect("component task"),
+        "backend"
+    );
 }
 
 #[tokio::test]
