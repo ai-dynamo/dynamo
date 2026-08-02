@@ -969,6 +969,9 @@ export const PLATFORM = {
     { name: "Ubuntu", version: "24.04", arch: "x86_64, ARM64", scope: "Containers and wheels", chip: "ubuntu" },
     { name: "Ubuntu", version: "22.04", arch: "x86_64", scope: "Wheels only", chip: "ubuntu" },
   ],
+  /* Cloud host images validated by CI. Scope matches the OS rows: AL2023 runs
+     the shipped containers, it is not itself a container base. */
+  csp: [{ provider: "AWS", os: "Amazon Linux 2023", arch: "x86_64", scope: "Containers and wheels" }],
   arch: ["x86_64", "ARM64 (Ubuntu 24.04 only)"],
   wheelsNote:
     "Wheels are built in a manylinux_2_28 environment (AlmaLinux 8, glibc 2.28+) and validated on Ubuntu 22.04 and 24.04. They install on any Linux distribution with glibc 2.28+ (Debian 11+, RHEL 9, etc.), but only Ubuntu 22.04/24.04 are officially verified.",

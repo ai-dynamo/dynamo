@@ -1678,6 +1678,14 @@
         "chip": "ubuntu"
       }
     ],
+    "csp": [
+      {
+        "provider": "AWS",
+        "os": "Amazon Linux 2023",
+        "arch": "x86_64",
+        "scope": "Containers and wheels"
+      }
+    ],
     "arch": [
       "x86_64",
       "ARM64 (Ubuntu 24.04 only)"

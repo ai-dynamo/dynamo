@@ -468,7 +468,8 @@ def platform_lines(data: dict) -> str:
     """Platform-support bullet lines (GPUs / OS / CPU arch / wheels).
 
     OS rows carry a ``scope`` field distinguishing shipped container bases
-    ("Containers and wheels") from wheels-only hosts ("Wheels only") — see
+    ("Containers and wheels") from wheels-only hosts ("Wheels only"); csp rows
+    carry the same field — see
     releases.data.ts for the reasoning.
     """
     plat = data["PLATFORM"]
@@ -476,6 +477,10 @@ def platform_lines(data: dict) -> str:
     for os_row in plat["os"]:
         lines.append(
             f"- OS: {os_row['name']} {os_row['version']} ({os_row['arch']}) — {os_row['scope']}"
+        )
+    for csp in plat.get("csp", []):
+        lines.append(
+            f"- CSP: {csp['provider']} — {csp['os']} ({csp['arch']}) — {csp['scope']}"
         )
     lines.append(f"- CPU architectures: {', '.join(plat['arch'])}")
     if plat.get("wheelsNote"):
