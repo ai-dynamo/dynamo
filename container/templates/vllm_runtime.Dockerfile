@@ -308,18 +308,40 @@ RUN set -eu; \
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
 # (set above) points imageio at the LGPL CLI copied from wheel_builder. The
 # --no-binary directive lives in the requirements file itself.
+{% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt
+{% else %}
+# PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
+# non-NVIDIA device. Drop it from the shared requirements rather than ship an
+# unusable NVIDIA codec wheel in, for example, the Intel XPU image. The pattern
+# is anchored to the line start so it cannot match inside another requirement,
+# and the import check fails the build if the package arrives by another route
+# -- a filter that silently stopped matching would otherwise look like success.
+#
+# Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
+# middle of a `\`-continued command emits a blank line that ends the command
+# early, and a `#` comment there is joined onto the previous line, commenting
+# out the rest. Both break the build in ways the template does not show.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    grep -v '^PyNvVideoCodec' /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.nonvidia.txt && \
+    ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.
 RUN rm -rf /workspace/vllm
 
+{% if device == "cuda" %}
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
@@ -358,6 +380,7 @@ RUN set -eux; \
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 
 USER dynamo
 
