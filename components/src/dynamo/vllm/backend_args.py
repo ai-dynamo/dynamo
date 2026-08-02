@@ -23,7 +23,11 @@ from .benchmark_points import (
     BenchmarkPoints,
     load_benchmark_points_file,
 )
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    CustomEncoderRoutingMode,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -154,6 +158,19 @@ class DynamoVllmArgGroup(ArgGroup):
                 "multimodal request, bypassing vLLM's built-in multimodal "
                 "processing. --model is passed verbatim to the backend's build(). "
                 "Example: 'my_package.encoders.MyEncoder'."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--custom-encoder-routing-mode",
+            env_var="DYN_CUSTOM_ENCODER_ROUTING_MODE",
+            default=CustomEncoderRoutingMode.INLINE.value,
+            choices=[mode.value for mode in CustomEncoderRoutingMode],
+            help=(
+                "Custom-encoder request owner: 'inline' runs the encoder and "
+                "LinearEmbedsAdapter in the aggregated worker; 'frontend' runs "
+                "both in an Encode worker before forwarding the prepared prompt "
+                "to the aggregated worker."
             ),
         )
         add_argument(
@@ -447,6 +464,9 @@ class DynamoVllmConfig(ConfigBase):
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
     custom_encoder_max_queue_delay_us: int = 0
+    custom_encoder_routing_mode: Union[
+        str, CustomEncoderRoutingMode
+    ] = CustomEncoderRoutingMode.INLINE
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -489,6 +509,7 @@ class DynamoVllmConfig(ConfigBase):
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
+        self._resolve_custom_encoder_routing_mode()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
         self._load_explicit_benchmark_points()
@@ -610,6 +631,12 @@ class DynamoVllmConfig(ConfigBase):
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED
 
+    def _resolve_custom_encoder_routing_mode(self) -> None:
+        if isinstance(self.custom_encoder_routing_mode, str):
+            self.custom_encoder_routing_mode = CustomEncoderRoutingMode(
+                self.custom_encoder_routing_mode
+            )
+
     def _validate_custom_encoder(self) -> None:
         """Validate the aggregated CustomEncoder configuration.
 
@@ -623,12 +650,30 @@ class DynamoVllmConfig(ConfigBase):
         """
         if self.custom_encoder_max_queue_delay_us < 0:
             raise ValueError("--custom-encoder-max-queue-delay-us must be >= 0")
+        routing_mode = CustomEncoderRoutingMode(self.custom_encoder_routing_mode)
         if not self.custom_encoder_class:
             if self.custom_encoder_max_queue_delay_us:
                 raise ValueError(
                     "--custom-encoder-max-queue-delay-us requires "
                     "--custom-encoder-class"
                 )
+            if routing_mode == CustomEncoderRoutingMode.FRONTEND:
+                if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+                    raise ValueError(
+                        "--custom-encoder-routing-mode=frontend without "
+                        "--custom-encoder-class is only valid on the aggregated "
+                        "PD worker"
+                    )
+                if self.route_to_encoder:
+                    raise ValueError(
+                        "--custom-encoder-routing-mode=frontend cannot be combined "
+                        "with --route-to-encoder; the frontend owns the encoder call"
+                    )
+                if not self.enable_multimodal:
+                    raise ValueError(
+                        "--custom-encoder-routing-mode=frontend requires "
+                        "--enable-multimodal"
+                    )
             return
         if not self.enable_multimodal:
             raise ValueError(
@@ -648,16 +693,26 @@ class DynamoVllmConfig(ConfigBase):
                 "the custom encoder consumes image URLs, but frontend decoding "
                 "pre-decodes images to tensors the encoder cannot accept."
             )
-        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+        expected_mode = (
+            DisaggregationMode.AGGREGATED
+            if routing_mode == CustomEncoderRoutingMode.INLINE
+            else DisaggregationMode.ENCODE
+        )
+        if self.disaggregation_mode != expected_mode:
             mode = (
                 self.disaggregation_mode.value
                 if isinstance(self.disaggregation_mode, DisaggregationMode)
                 else self.disaggregation_mode
             )
             raise ValueError(
-                f"--custom-encoder-class is only supported with "
-                f"--disaggregation-mode=agg (got {mode}). The custom encoder "
-                "runs in-process in a single aggregated worker."
+                "--custom-encoder-class with "
+                f"--custom-encoder-routing-mode={routing_mode.value} requires "
+                f"--disaggregation-mode={expected_mode.value} (got {mode})"
+            )
+        if routing_mode == CustomEncoderRoutingMode.FRONTEND and self.route_to_encoder:
+            raise ValueError(
+                "--custom-encoder-routing-mode=frontend cannot be combined with "
+                "--route-to-encoder; the frontend owns the encoder call"
             )
 
     def _validate_embedding_worker_exclusivity(self) -> None:

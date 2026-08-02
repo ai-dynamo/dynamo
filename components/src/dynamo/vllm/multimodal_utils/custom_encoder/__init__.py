@@ -15,14 +15,30 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     RawT,
     VisionEncoderBackend,
 )
+from dynamo.vllm.multimodal_utils.custom_encoder.handoff import (
+    HandoffReplayGuard,
+    LinearEmbedsHandoffV1,
+    receive_linear_embeds_prompt,
+    stage_linear_embeds_prompt,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.loader import (
+    extract_custom_encoder_image_urls,
+    load_custom_encoder,
+)
 
 __all__ = [
     "AsyncVisionEncoder",
     "build_mixed_embeds",
     "CustomEncoderAdapter",
     "create_custom_encoder_adapter",
+    "extract_custom_encoder_image_urls",
     "ItemT",
+    "HandoffReplayGuard",
+    "LinearEmbedsHandoffV1",
+    "load_custom_encoder",
     "Preprocessed",
     "RawT",
+    "receive_linear_embeds_prompt",
+    "stage_linear_embeds_prompt",
     "VisionEncoderBackend",
 ]

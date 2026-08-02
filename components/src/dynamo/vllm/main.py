@@ -56,6 +56,7 @@ from .capacity import (
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
 )
+from .constants import CustomEncoderRoutingMode, DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -727,6 +728,20 @@ async def register_vllm_model(
             SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
+
+    if (
+        worker_type == WorkerType.Aggregated
+        and config.disaggregation_mode == DisaggregationMode.AGGREGATED
+        and config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+    ):
+        # These capabilities belong to the downstream token worker. The generic
+        # frontend router uses them to make the Encode hop mandatory and to remove
+        # raw media after E has produced a decoder-ready prompt.
+        runtime_config.set_engine_specific("encoder_result_handoff", "true")
+        runtime_config.set_engine_specific(
+            "encoder_result_handoff_policy", json.dumps("required")
+        )
+        runtime_config.set_engine_specific("encoder_result_replaces_media", "true")
 
     runtime_config.data_parallel_start_rank = dp_range[0]
     runtime_config.data_parallel_size = dp_range[1]

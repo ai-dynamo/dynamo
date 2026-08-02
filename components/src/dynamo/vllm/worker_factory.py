@@ -30,7 +30,7 @@ from dynamo.runtime import DistributedRuntime
 from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
-from .constants import DisaggregationMode
+from .constants import CustomEncoderRoutingMode, DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -613,7 +613,7 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint]
 
         handler = EncodeWorkerHandler(
-            config.engine_args,
+            config,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
         )
         await handler.async_init(runtime)
@@ -1026,7 +1026,10 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
-        if config.route_to_encoder:
+        if (
+            config.route_to_encoder
+            or config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+        ):
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 

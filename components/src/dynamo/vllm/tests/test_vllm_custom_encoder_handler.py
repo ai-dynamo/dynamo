@@ -7,10 +7,17 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from dynamo.common.multimodal.embedding_transfer import (
+    LocalEmbeddingReceiver,
+    LocalEmbeddingSender,
+)
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
+    HandoffReplayGuard,
     VisionEncoderBackend,
     create_custom_encoder_adapter,
+    receive_linear_embeds_prompt,
+    stage_linear_embeds_prompt,
 )
 
 pytestmark = [
@@ -87,3 +94,85 @@ async def test_custom_encoder_handler_preserves_string_error_contract():
     assert prompt is None
     assert error is not None
     assert error["finish_reason"] == "error: CustomEncoder failed: encoder failed"
+
+
+async def test_linear_embeds_handoff_round_trip_is_owned_and_single_use():
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        get_hidden_size=lambda: 4,
+        is_multimodal_model=False,
+    )
+    prepared = _adapter().prepare_prompt(
+        [1, 99, 2],
+        [torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)],
+    )
+    sender = LocalEmbeddingSender()
+    receiver = LocalEmbeddingReceiver()
+    guard = HandoffReplayGuard()
+    handoff, transfer_future = await stage_linear_embeds_prompt(
+        prepared,
+        sender,
+        transfer_mode="local",
+        decoder_model="decoder",
+        decoder_revision="revision",
+        image_token_id=99,
+        model_config=model_config,
+    )
+
+    received = await receive_linear_embeds_prompt(
+        handoff,
+        receiver,
+        guard,
+        expected_transfer_mode="local",
+        expected_decoder_model="decoder",
+        expected_decoder_revision="revision",
+        model_config=model_config,
+    )
+    await transfer_future
+
+    assert torch.equal(received["prompt_embeds"], prepared["prompt_embeds"])
+    assert received["prompt_token_ids"] == prepared["prompt_token_ids"]
+    assert received["prompt_is_token_ids"] == prepared["prompt_is_token_ids"]
+    with pytest.raises(ValueError, match="reused"):
+        await receive_linear_embeds_prompt(
+            handoff,
+            receiver,
+            guard,
+            expected_transfer_mode="local",
+            expected_decoder_model="decoder",
+            expected_decoder_revision="revision",
+            model_config=model_config,
+        )
+
+
+async def test_linear_embeds_handoff_rejects_decoder_mismatch_before_receive():
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        get_hidden_size=lambda: 4,
+        is_multimodal_model=False,
+    )
+    prepared = _adapter().prepare_prompt(
+        [99], [torch.ones((2, 4), dtype=torch.bfloat16)]
+    )
+    sender = LocalEmbeddingSender()
+    receiver = LocalEmbeddingReceiver()
+    handoff, _ = await stage_linear_embeds_prompt(
+        prepared,
+        sender,
+        transfer_mode="local",
+        decoder_model="decoder-a",
+        decoder_revision=None,
+        image_token_id=99,
+        model_config=model_config,
+    )
+
+    with pytest.raises(ValueError, match="decoder model"):
+        await receive_linear_embeds_prompt(
+            handoff,
+            receiver,
+            HandoffReplayGuard(),
+            expected_transfer_mode="local",
+            expected_decoder_model="decoder-b",
+            expected_decoder_revision=None,
+            model_config=model_config,
+        )

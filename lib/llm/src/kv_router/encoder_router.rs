@@ -59,6 +59,8 @@ pub struct EncoderRouter {
     lifecycle: AtomicU8,
     model_name: String,
     namespace: String,
+    fail_closed: bool,
+    replace_media: bool,
 }
 
 impl Drop for EncoderRouter {
@@ -76,6 +78,8 @@ impl EncoderRouter {
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name: String::new(),
             namespace: String::new(),
+            fail_closed: false,
+            replace_media: false,
         })
     }
 
@@ -84,6 +88,8 @@ impl EncoderRouter {
         activation_rx: oneshot::Receiver<Endpoint>,
         model_name: String,
         namespace: String,
+        fail_closed: bool,
+        replace_media: bool,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
         let router = Arc::new(Self {
@@ -92,6 +98,8 @@ impl EncoderRouter {
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name,
             namespace,
+            fail_closed,
+            replace_media,
         });
 
         let router_weak = Arc::downgrade(&router);
@@ -224,8 +232,17 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (mut request, context) = request.into_parts();
-        if self.lifecycle_state() != EncoderLifecycleState::Active || !Self::should_encode(&request)
-        {
+        if !Self::should_encode(&request) {
+            return next.generate(context.map(|_| request)).await;
+        }
+        if self.lifecycle_state() != EncoderLifecycleState::Active {
+            if self.fail_closed {
+                anyhow::bail!(
+                    "Required custom encoder is unavailable for model {} in namespace {}",
+                    self.model_name,
+                    self.namespace
+                );
+            }
             return next.generate(context.map(|_| request)).await;
         }
 
@@ -251,8 +268,16 @@ impl
                 // receiver owns transfer completion and buffer release.
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
+                if self.replace_media {
+                    request.multi_modal_data = None;
+                    request.multi_modal_uuids = None;
+                }
             }
             Err(error) => {
+                if self.fail_closed {
+                    return Err(error)
+                        .context("Required custom encoder hop failed; downstream was not invoked");
+                }
                 tracing::error!(
                     %error,
                     model = %self.model_name,
@@ -333,7 +358,13 @@ mod tests {
     #[tokio::test]
     async fn pending_activation_does_not_keep_router_alive() {
         let (_activation_tx, activation_rx) = oneshot::channel();
-        let router = EncoderRouter::new(activation_rx, "model".into(), "namespace".into());
+        let router = EncoderRouter::new(
+            activation_rx,
+            "model".into(),
+            "namespace".into(),
+            false,
+            false,
+        );
         let weak = Arc::downgrade(&router);
 
         drop(router);
@@ -374,6 +405,31 @@ mod tests {
             .expect("downstream must receive the original request");
         assert!(request.encoder_result.is_none());
         assert!(request.multi_modal_data.is_some());
+    }
+
+    #[tokio::test]
+    async fn required_encoder_failure_does_not_invoke_downstream() {
+        let (_activation_tx, activation_rx) = oneshot::channel();
+        let router = EncoderRouter::new(
+            activation_rx,
+            "model".into(),
+            "namespace".into(),
+            true,
+            true,
+        );
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let downstream = Arc::new(CaptureEngine::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            downstream.clone();
+
+        let result = router
+            .generate(SingleIn::new(multimodal_request()), next)
+            .await;
+
+        assert!(result.is_err());
+        assert!(downstream.request.lock().unwrap().is_none());
     }
 
     #[tokio::test]

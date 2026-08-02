@@ -61,7 +61,10 @@ def torch_dtype_from_string(dtype_str: str) -> torch.dtype:
         >>> dtype = EncodeHelper.get_torch_dtype_from_string("torch.bfloat16")
         >>> # Result: torch.bfloat16
     """
-    return getattr(torch, dtype_str.removeprefix("torch."), torch.float32)
+    dtype = getattr(torch, dtype_str.removeprefix("torch."), None)
+    if not isinstance(dtype, torch.dtype):
+        raise ValueError(f"Unsupported torch dtype: {dtype_str!r}")
+    return dtype
 
 
 def torch_dtype_to_string(dtype: torch.dtype) -> str:
@@ -109,6 +112,11 @@ class AbstractEmbeddingReceiver(ABC):
             tensor_id: The ID of the tensor to release.
         """
         pass
+
+    async def cancel_embeddings(self, request: TransferRequest) -> None:
+        """Best-effort cancellation before a transfer buffer is received."""
+
+        del request
 
 
 class AbstractEmbeddingSender(ABC):
@@ -243,6 +251,14 @@ class LocalEmbeddingReceiver(AbstractEmbeddingReceiver):
             file_path = self.received_tensors[tensor_id]
             os.remove(file_path)  # Clean up the local file
             del self.received_tensors[tensor_id]
+
+    async def cancel_embeddings(self, request: TransferRequest) -> None:
+        tensor_path = request.serialized_request
+        if isinstance(tensor_path, str):
+            try:
+                await asyncio.to_thread(os.remove, tensor_path)
+            except FileNotFoundError:
+                pass
 
 
 class MonolithicCounter:
@@ -412,6 +428,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
         # tracker for the prepared embeddings
         self.transfer_tracker = {}
+        self.transfer_created_at = {}
 
         # Track dynamically registered descriptors for cleanup,
         # there can be case of the same tensor being requested to be transferred multiple times,
@@ -453,6 +470,12 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                 ) in write_requests:
+                    if tensor_id not in self.transfer_tracker:
+                        logger.debug(
+                            "Ignoring write request for retired tensor_id %s",
+                            tensor_id,
+                        )
+                        continue
                     # Just in time add remote agent if not added
                     if remote_agent_id not in self.remote_agents:
                         if len(remote_agent_metadata) == 0:
@@ -461,7 +484,12 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                             )
                             # Can't proceed with the transfer without receiver metadata,
                             # mark the transfer as completed to unblock the sender.
-                            self._complete_transfer(tensor_id)
+                            self._complete_transfer(
+                                tensor_id,
+                                RuntimeError(
+                                    "receiver metadata was missing for NIXL WRITE"
+                                ),
+                            )
                             continue
                         self.remote_agents[
                             remote_agent_id
@@ -494,6 +522,22 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                 # remaining transfers count
                 # use list() to create a copy of the dict items since the dict will be modified in the loop
                 now_time = time.perf_counter()
+                for tensor_id, created_at in list(self.transfer_created_at.items()):
+                    if tensor_id in inflight_transfers:
+                        continue
+                    if now_time - created_at <= self.transfer_timeout:
+                        continue
+                    logger.warning(
+                        "Prepared tensor_id %s was not claimed within %s seconds",
+                        tensor_id,
+                        self.transfer_timeout,
+                    )
+                    self._complete_transfer(
+                        tensor_id,
+                        TimeoutError(
+                            "embedding transfer was not claimed before expiry"
+                        ),
+                    )
                 for tensor_id, (
                     xfer_handle,
                     start_time,
@@ -509,14 +553,25 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         # still in-flight, check again later
                         if now_time - start_time > self.transfer_timeout:
                             logger.warning(
-                                f"Transfer for tensor_id {tensor_id} has been in-flight for more than {self.transfer_timeout} seconds, reseting its timer"
+                                f"Transfer for tensor_id {tensor_id} exceeded the "
+                                f"{self.transfer_timeout} second timeout"
                             )
-                            inflight_transfers[tensor_id][1] = now_time
+                            self._complete_transfer(
+                                tensor_id,
+                                TimeoutError("embedding transfer timed out"),
+                            )
+                            inflight_transfers.pop(tensor_id)
+                            continue
                         continue
                     # NOTE future is set with result None in "ERR" and "DONE", so the sender will not
                     # be able to distinguish failure with success, we can consider
                     # adding more explicit failure signal in the future if needed.
-                    self._complete_transfer(tensor_id)
+                    transfer_error = (
+                        RuntimeError(f"NIXL WRITE failed for tensor_id {tensor_id}")
+                        if state == "ERR"
+                        else None
+                    )
+                    self._complete_transfer(tensor_id, transfer_error)
                     inflight_transfers.pop(tensor_id)
                     try:
                         scheduled_transfer_task = self.transfer_queue.get_nowait()
@@ -531,6 +586,18 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                         scheduled_transfer_task = None
                         break
 
+                if not self.transfer_tracker and not inflight_transfers:
+                    # Queue entries are wake-up hints, not a transfer ledger. A
+                    # cancellation or unclaimed-descriptor expiry may retire the
+                    # last transfer without passing through the DONE branch above.
+                    # Drain stale hints before returning to the blocking wait.
+                    while True:
+                        try:
+                            self.transfer_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    scheduled_transfer_task = None
+
                 # short pause to yield control and allow cancellation
                 await asyncio.sleep(0.001)
             except Exception as e:
@@ -542,12 +609,23 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         notifs = self.nixl_agent.get_new_notifs()
         for remote_agent_id, notifs in notifs.items():
             for notif in notifs:
+                decoded = msgspec.msgpack.decode(notif)
+                if (
+                    isinstance(decoded, (list, tuple))
+                    and len(decoded) == 2
+                    and decoded[0] == "cancel"
+                ):
+                    self._complete_transfer(
+                        decoded[1],
+                        RuntimeError("embedding transfer cancelled by receiver"),
+                    )
+                    continue
                 (
                     tensor_id,
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                     remote_agent_metadata,
-                ) = msgspec.msgpack.decode(notif)
+                ) = decoded
                 write_requests.append(
                     (
                         # receiver contact
@@ -569,8 +647,9 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                 )
         return write_requests
 
-    def _complete_transfer(self, tensor_id):
+    def _complete_transfer(self, tensor_id, error: BaseException | None = None):
         transfer_info = self.transfer_tracker.pop(tensor_id, None)
+        self.transfer_created_at.pop(tensor_id, None)
         if transfer_info is not None:
             # Clean up registered memory after transfer completion
             embeddings, _, fut = transfer_info
@@ -582,7 +661,10 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
             # Future can be 'done' if the embeddings is not external
             # (send_embeddings with stage_embeddings=False)
             if not fut.done():
-                fut.set_result(None)
+                if error is None:
+                    fut.set_result(None)
+                else:
+                    fut.set_exception(error)
 
     async def send_embeddings(
         self,
@@ -617,6 +699,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         desc = self.nixl_agent.get_xfer_descs(embeddings)
         # use tracker to also extend lifecycle of transfer-related objects
         self.transfer_tracker[tensor_id] = (embeddings, desc, fut)
+        self.transfer_created_at[tensor_id] = time.perf_counter()
         self.transfer_queue.put_nowait("task_indicator")
 
         request = TransferRequest(
@@ -727,59 +810,78 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
             embeddings_shape
         )
 
-        # Request for transfer
-        tensor_id = self.id_counter.get_next_id()
-        notif_msg = msgspec.msgpack.encode(
-            (
-                nixl_request.tensor_id,
+        try:
+            # Request for transfer
+            tensor_id = self.id_counter.get_next_id()
+            notif_msg = msgspec.msgpack.encode(
                 (
-                    transfer_tensor.data_ptr(),
-                    nixl_request.tensor_size,
-                    # torch returns -1 for CPU device, need to normalized there
-                    max(transfer_tensor.get_device(), 0),
-                    "cuda" if str(transfer_tensor.device).startswith("cuda") else "cpu",
-                ),
-                tensor_id,
-                # side channel handshake fallback for receiver API consistency,
-                # this will increase message size for the first few transfers before handshake
-                self.agent_metadata if nixl_request.agent_metadata else b"",
-            )
-        )
-        self.nixl_agent.send_notif(nixl_request.sender_agent_id, notif_msg=notif_msg)
-
-        # await for write notification
-        start_time = time.perf_counter()
-        done_signal = str(tensor_id).encode()
-        found = False
-        while not found:
-            # parse notifications to find done signal, we can't use 'check_remote_xfer_done' API
-            # because it match requested string pattern in substring of the notifications instead
-            # of exact match, which is not what we want, i.e. for two done signal "1" and "11",
-            # 'check_remote_xfer_done("1")' will return True for both signal and "11" will be cleared
-            # as a result, leading the subsequent 'check_remote_xfer_done("1")' returns False.
-            notifs = self.nixl_agent.update_notifs()
-            if nixl_request.sender_agent_id in notifs:
-                for notif in notifs[nixl_request.sender_agent_id]:
-                    if notif == done_signal:
-                        self.nixl_agent.notifs[nixl_request.sender_agent_id].remove(
-                            notif
-                        )
-                        found = True
-                        break
-
-            await asyncio.sleep(0.001)
-            # Waited for too long without transfer completion, log for debugging
-            if (time.perf_counter() - start_time) > receive_timeout:
-                self.ring_buffer.release_buffer(buffer_id)
-                raise TimeoutError(
-                    f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
+                    nixl_request.tensor_id,
+                    (
+                        transfer_tensor.data_ptr(),
+                        nixl_request.tensor_size,
+                        # torch returns -1 for CPU device, need to normalized there
+                        max(transfer_tensor.get_device(), 0),
+                        "cuda"
+                        if str(transfer_tensor.device).startswith("cuda")
+                        else "cpu",
+                    ),
+                    tensor_id,
+                    # side channel handshake fallback for receiver API consistency,
+                    # this will increase message size for the first few transfers before handshake
+                    self.agent_metadata if nixl_request.agent_metadata else b"",
                 )
+            )
+            self.nixl_agent.send_notif(
+                nixl_request.sender_agent_id, notif_msg=notif_msg
+            )
+
+            # await for write notification
+            start_time = time.perf_counter()
+            done_signal = str(tensor_id).encode()
+            found = False
+            while not found:
+                # Match exact notifications; substring matching confuses IDs such as 1 and 11.
+                notifs = self.nixl_agent.update_notifs()
+                if nixl_request.sender_agent_id in notifs:
+                    for notif in notifs[nixl_request.sender_agent_id]:
+                        if notif == done_signal:
+                            self.nixl_agent.notifs[nixl_request.sender_agent_id].remove(
+                                notif
+                            )
+                            found = True
+                            break
+
+                await asyncio.sleep(0.001)
+                if (time.perf_counter() - start_time) > receive_timeout:
+                    raise TimeoutError(
+                        f"Timeout while waiting for transfer completion for tensor_id {tensor_id} for more than {receive_timeout} seconds"
+                    )
+        except BaseException:
+            self.ring_buffer.release_buffer(buffer_id)
+            raise
         logger.debug(
             f"Transfer completed for tensor_id {tensor_id}, total wait time: {time.perf_counter() - start_time:.2f} seconds"
         )
 
         self.to_buffer_id[tensor_id] = buffer_id
         return tensor_id, embedding_tensor
+
+    async def cancel_embeddings(self, request: TransferRequest) -> None:
+        nixl_request = NixlTransferRequest.model_validate_json(
+            request.serialized_request
+        )
+        if nixl_request.sender_agent_id not in self.remote_agents:
+            if nixl_request.agent_metadata is None:
+                return
+            self.remote_agents[
+                nixl_request.sender_agent_id
+            ] = self.nixl_agent.add_remote_agent(
+                base64.b64decode(nixl_request.agent_metadata)
+            )
+        self.nixl_agent.send_notif(
+            nixl_request.sender_agent_id,
+            notif_msg=msgspec.msgpack.encode(("cancel", nixl_request.tensor_id)),
+        )
 
     def release_tensor(self, tensor_id: int) -> None:
         """

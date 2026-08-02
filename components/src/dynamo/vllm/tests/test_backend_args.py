@@ -19,6 +19,7 @@ from dynamo.vllm.backend_args import (
     DynamoVllmConfig,
     _reject_removed_multimodal_env_vars,
 )
+from dynamo.vllm.constants import CustomEncoderRoutingMode
 
 pytestmark = [
     pytest.mark.unit,
@@ -293,3 +294,31 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
+
+    def test_frontend_encode_worker_owns_custom_encoder(self):
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+
+        config._validate_custom_encoder()
+
+    def test_frontend_pd_has_no_custom_encoder_class(self):
+        config = create_config()
+        config.custom_encoder_class = None
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_custom_encoder()
+
+    def test_frontend_pd_cannot_route_to_encoder_again(self):
+        config = create_config()
+        config.custom_encoder_routing_mode = CustomEncoderRoutingMode.FRONTEND
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.route_to_encoder = True
+
+        with pytest.raises(ValueError, match="frontend owns the encoder call"):
+            config._validate_custom_encoder()

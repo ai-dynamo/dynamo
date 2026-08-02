@@ -169,12 +169,32 @@ fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
+const ENCODER_RESULT_HANDOFF_POLICY: &str = "encoder_result_handoff_policy";
+const ENCODER_RESULT_REPLACES_MEDIA: &str = "encoder_result_replaces_media";
 
 fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
     matches!(
         card.runtime_config
             .runtime_data
             .get(ENCODER_RESULT_HANDOFF_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+fn requires_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(ENCODER_RESULT_HANDOFF_POLICY),
+        Some(serde_json::Value::String(policy)) if policy == "required"
+    )
+}
+
+fn encoder_result_replaces_media(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(ENCODER_RESULT_REPLACES_MEDIA),
         Some(serde_json::Value::Bool(true))
     )
 }
@@ -1689,7 +1709,15 @@ impl ModelWatcher {
                 }
                 self.manager
                     .register_encoder_router(&model_name, &namespace)
-                    .map(|rx| EncoderRouter::new(rx, model_name.clone(), namespace.clone()))
+                    .map(|rx| {
+                        EncoderRouter::new(
+                            rx,
+                            model_name.clone(),
+                            namespace.clone(),
+                            requires_encoder_result_handoff(card),
+                            encoder_result_replaces_media(card),
+                        )
+                    })
             } else {
                 None
             };
@@ -2216,6 +2244,22 @@ mod tests {
             .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, false)
             .unwrap();
         assert!(!supports_encoder_result_handoff(&card));
+    }
+
+    #[test]
+    fn encoder_result_handoff_policy_is_explicit() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert!(!requires_encoder_result_handoff(&card));
+        assert!(!encoder_result_replaces_media(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_HANDOFF_POLICY, "required")
+            .unwrap();
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_REPLACES_MEDIA, true)
+            .unwrap();
+        assert!(requires_encoder_result_handoff(&card));
+        assert!(encoder_result_replaces_media(&card));
     }
 
     #[test]

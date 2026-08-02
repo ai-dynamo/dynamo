@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import functools
-import importlib
 import inspect
 import logging
 import math
@@ -50,7 +49,9 @@ from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES
 from dynamo.common.multimodal.embedding_transfer import (
+    AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
@@ -87,19 +88,23 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    CustomEncoderRoutingMode,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     CustomEncoderAdapter,
-    VisionEncoderBackend,
-    create_custom_encoder_adapter,
+    HandoffReplayGuard,
+    extract_custom_encoder_image_urls,
+    load_custom_encoder,
+    receive_linear_embeds_prompt,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
-    IMAGE_URL_KEY,
-    URL_VARIANT_KEY,
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
@@ -1061,6 +1066,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # the actor thread) — see _load_custom_encoder below for why.
         self._custom_encoder: Optional[AsyncVisionEncoder] = None
         self._custom_encoder_adapter: Optional[CustomEncoderAdapter] = None
+        self._custom_encoder_handoff_receiver: AbstractEmbeddingReceiver | None = None
+        self._custom_encoder_handoff_replay_guard: HandoffReplayGuard | None = None
+        if (
+            config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+            and config.disaggregation_mode == DisaggregationMode.AGGREGATED
+        ):
+            self._custom_encoder_handoff_receiver = EMBEDDING_RECEIVER_FACTORIES[
+                config.embedding_transfer_mode
+            ]()
+            self._custom_encoder_handoff_replay_guard = HandoffReplayGuard()
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -1127,34 +1142,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _load_custom_encoder(self, config: Config) -> None:
         """Import, instantiate, and load the --custom-encoder-class encoder."""
         custom_encoder_class = config.custom_encoder_class
-        if not custom_encoder_class:
-            return
-        module_path, _, class_name = custom_encoder_class.rpartition(".")
-        backend_cls = getattr(importlib.import_module(module_path), class_name)
-        if not (
-            isinstance(backend_cls, type)
-            and issubclass(backend_cls, VisionEncoderBackend)
+        if (
+            not custom_encoder_class
+            or config.custom_encoder_routing_mode != CustomEncoderRoutingMode.INLINE
         ):
-            raise TypeError(
-                f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
-                f"VisionEncoderBackend subclass, got {backend_cls!r}."
-            )
-        # The author writes the VisionEncoderBackend; Dynamo wraps it in the
-        # AsyncVisionEncoder glue, which owns the preprocess pool and
-        # ThreadedMicroBatcher actor thread. load() runs backend.build() there
-        # (the backend picks its own device) and cleans that thread up on failure.
-        backend = backend_cls()
-        adapter = create_custom_encoder_adapter(
-            backend,
+            return
+        encoder, adapter = load_custom_encoder(
+            config,
             self.model_config,
-            config.engine_args,
-            self.engine_client.vllm_config,
+            vllm_config=self.engine_client.vllm_config,
         )
-        encoder = AsyncVisionEncoder(
-            backend,
-            max_queue_delay_us=config.custom_encoder_max_queue_delay_us,
-        )
-        encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
@@ -3060,35 +3057,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             raise RuntimeError(
                 "_assemble_custom_encoder_prompt called without an adapter"
             )
-        mm_map = request.get("multi_modal_data") or {}
-        # CustomEncoder handles images only. Reject any non-image modality
-        # (video/audio/...) explicitly instead of silently dropping it.
-        unsupported = sorted(k for k in mm_map if k != IMAGE_URL_KEY and mm_map.get(k))
-        if unsupported:
-            msg = (
-                "CustomEncoder supports image inputs only; got "
-                f"unsupported multimodal data: {unsupported}"
-            )
-            logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
-
-        image_items = mm_map.get(IMAGE_URL_KEY) or []
-        image_urls = [
-            item[URL_VARIANT_KEY]
-            for item in image_items
-            if isinstance(item, dict) and URL_VARIANT_KEY in item
-        ]
-        if len(image_urls) != len(image_items):
-            # At least one image item was malformed — not a dict with a 'Url'
-            # key (e.g. a pre-'Decoded' variant the CustomEncoder can't take).
-            # Reject the whole request instead of silently dropping images.
-            msg = (
-                "CustomEncoder received image multimodal data but only "
-                f"{len(image_urls)} of {len(image_items)} item(s) had a usable "
-                "'Url'; each item must be a dict with a 'Url' key"
-            )
-            logger.error("Request %s: %s", request_id, msg)
-            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+        try:
+            image_urls = extract_custom_encoder_image_urls(request)
+        except ValueError as exc:
+            logger.error("Request %s: %s", request_id, exc)
+            return None, {"finish_reason": f"error: {exc}", "token_ids": []}
 
         if not image_urls:
             # No image items at all — and non-image modalities were already
@@ -3144,10 +3117,80 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
-        has_mm_data = request.get("multi_modal_data") is not None
+        has_mm_data = bool(request.get("multi_modal_data"))
+        encoder_result = request.get("encoder_result")
         custom_prompt: EmbedsPrompt | TokensPrompt | None = None
 
-        if (
+        if encoder_result is not None:
+            if (
+                self.config.custom_encoder_routing_mode
+                != CustomEncoderRoutingMode.FRONTEND
+            ):
+                yield {
+                    "finish_reason": (
+                        "error: received an encoder_result outside frontend "
+                        "custom-encoder routing mode"
+                    ),
+                    "index": 0,
+                    "token_ids": [],
+                }
+                return
+            if has_mm_data:
+                yield {
+                    "finish_reason": (
+                        "error: frontend custom-encoder handoff must replace raw media"
+                    ),
+                    "index": 0,
+                    "token_ids": [],
+                }
+                return
+            if (
+                self._custom_encoder_handoff_receiver is None
+                or self._custom_encoder_handoff_replay_guard is None
+                or self.model_config is None
+            ):
+                raise RuntimeError(
+                    "frontend custom-encoder handoff consumer was not initialized"
+                )
+            try:
+                custom_prompt = await receive_linear_embeds_prompt(
+                    encoder_result,
+                    self._custom_encoder_handoff_receiver,
+                    self._custom_encoder_handoff_replay_guard,
+                    expected_transfer_mode=self.config.embedding_transfer_mode.value,
+                    expected_decoder_model=self.config.model,
+                    expected_decoder_revision=self.config.engine_args.revision,
+                    model_config=self.model_config,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Request %s: custom encoder handoff failed", request_id
+                )
+                yield {
+                    "finish_reason": f"error: custom encoder handoff failed: {exc}",
+                    "index": 0,
+                    "token_ids": [],
+                }
+                return
+            multi_modal_data = None
+            mm_processor_kwargs = None
+            pre_rendered = None
+        elif (
+            self.config.custom_encoder_routing_mode == CustomEncoderRoutingMode.FRONTEND
+            and has_mm_data
+        ):
+            # A frontend-routed deployment intentionally has no encoder or adapter
+            # on PD. Never fall through to vLLM's raw-media path.
+            yield {
+                "finish_reason": (
+                    "error: multimodal request is missing the required frontend "
+                    "custom-encoder handoff"
+                ),
+                "index": 0,
+                "token_ids": [],
+            }
+            return
+        elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
             and has_mm_data
