@@ -130,6 +130,7 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 5
         resources: {{- toYaml .Values.controllerManager.manager.resources | nindent
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext

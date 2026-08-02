@@ -13,7 +13,6 @@ from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
-    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
@@ -33,6 +32,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    image_token_metrics_payload,
     kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
@@ -42,15 +42,28 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import (
     ImageGenerationPayload,
     LoraTestChatPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
     VideoGenerationPayload,
 )
 
 logger = logging.getLogger(__name__)
 
+pytest_plugins = ("tests.utils.otel_plugin",)
+
 
 def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     return v.startswith("13")
+
+
+def _disable_responses_reasoning(
+    payload: ResponsesPayload | ResponsesStreamPayload,
+) -> ResponsesPayload | ResponsesStreamPayload:
+    # Keep the streaming and non-streaming smoke tests consistent by preventing
+    # reasoning from consuming the entire output token budget.
+    payload.body["reasoning"] = {"effort": "none"}
+    return payload
 
 
 @dataclass
@@ -121,33 +134,10 @@ sglang_configs = {
                 expected_num_choices=2,
             ),
             completion_payload_default(),
-            responses_payload_default(),
-            responses_stream_payload_default(),
+            _disable_responses_reasoning(responses_payload_default()),
+            _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
-        ],
-    ),
-    "aggregated_unified": SGLangConfig(
-        name="aggregated_unified",
-        directory=sglang_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
-            pytest.mark.timeout(340),  # 3x ~111s (sglang gpu_1 log)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        env={},
-        frontend_port=DefaultPort.FRONTEND.value,
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -472,6 +462,7 @@ sglang_configs = {
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            image_token_metrics_payload(),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(
@@ -824,6 +815,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(56.0),
+            pytest.mark.requested_sglang_vram_gib(56.0),
             # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
             pytest.mark.nightly,
@@ -894,66 +886,6 @@ def test_sglang_deployment(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-# ---------------------------------------------------------------------------
-# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
-# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
-# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
-# Also covers two SGLang specifics: the signal guard keeping SGLang's SIGTERM
-# handler from preempting the Worker, and is_quiescent() counting both the
-# bootstrap and completed prefill-stream paths.
-# ---------------------------------------------------------------------------
-_PREFILL_DRAIN_CONFIG = SGLangConfig(
-    name="prefill_drain_unified",
-    directory=sglang_dir,
-    script_name="disagg_same_gpu.sh",
-    script_args=["--unified"],
-    marks=[],  # applied on the test function below
-    model="Qwen/Qwen3-0.6B",
-    delayed_start=10,
-    health_check_workers=True,
-    env={
-        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        # Generous budget so the prefill queue can drain (is_quiescent -> True)
-        # within it rather than always timing out.
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
-        # Decode worker may disable its health canary; mark ready-on-liveness so
-        # the harness's worker health check passes (canary-having workers still
-        # gate on their canary).
-        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
-        # torch-memory-saver links libcudart.so.12 (absent on the cu13 image);
-        # the 48 GiB GPU fits both workers unpacked, so disable it.
-        "DYN_SGLANG_DISABLE_MEMORY_SAVER": "1",
-    },
-    request_payloads=[chat_payload_default()],
-)
-
-
-@pytest.mark.sglang
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.profiled_vram_gib(13.0)
-@pytest.mark.requested_sglang_kv_tokens(37472)
-@pytest.mark.timeout(470)
-@pytest.mark.post_merge
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_prefill_drain_unified(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    num_system_ports,
-    predownload_models,
-):
-    """Burst + mid-flight prefill SIGTERM; assert the Rust Worker drove
-    graceful shutdown (drain -> cleanup) — proving the signal guard and the
-    is_quiescent() bootstrap-path fix both hold."""
-    config = dataclasses.replace(
-        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 @pytest.mark.e2e

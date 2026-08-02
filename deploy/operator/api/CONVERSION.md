@@ -160,27 +160,13 @@ Allowed local helpers:
 - Saved entries for named lists must include the list-map key, such as
   `ComponentName` for DGD components.
 
-## Legacy DGDR Read Compatibility
+## DGDR Conversion
 
-- New conversions write only the structural `nvidia.com/dgdr-spec` and
-  `nvidia.com/dgdr-status` payloads.
-- Dynamo 1.0/1.1 DGDR annotations are a read-only forward-upgrade fallback for
-  stored objects that predate structural preservation. Never re-emit them.
-- Keep legacy keys named `legacyAnn*` and isolate their decoding in legacy
-  helpers.
-- Keep the legacy implementation and its focused fixtures in dedicated
-  `dynamographdeploymentrequest_legacy_read*` files so the eventual removal is
-  isolated from structural conversion.
-- Decode legacy data into the same typed `restored` model used by structural
-  conversion. Structural payloads take precedence when both formats exist.
-- Legacy data is an old-value cache only and must not override fields
-  representable by live `src`.
-- Controllers that need v1alpha1-only fields must obtain them through typed API
-  conversion so structural and legacy precedence remains centralized.
-- Keep focused fixtures for legacy reads. Do not retain the old converter as an
-  oracle or mask legacy annotations in the main round-trip fuzz tests.
-- Remove the read fallback only after the supported upgrade window or an
-  explicit stored-object migration guarantees that legacy-only objects are gone.
+- Preserve DGDR fields that the target version cannot represent only through
+  the structural `nvidia.com/dgdr-spec` and `nvidia.com/dgdr-status` payloads.
+- Dynamo 1.0/1.1 per-field DGDR conversion annotations are retired and ignored
+  as conversion inputs, but remain scrubbed from converted metadata. Do not
+  reintroduce per-field compatibility annotations.
 
 ## API Changes
 

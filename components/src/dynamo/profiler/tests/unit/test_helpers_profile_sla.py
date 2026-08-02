@@ -381,7 +381,7 @@ class TestValidateDgdrDynamoFeatures:
         with caplog.at_level(logging.WARNING):
             validate_dgdr_dynamo_features(dgdr, aic_supported=False)
         assert "AIC does not support" in caplog.text
-        assert "Rust perf shim fallback" in caplog.text
+        assert "AIC core fallback" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -530,6 +530,39 @@ class TestAssembleFinalConfig:
         )
 
         assert result is dgd_config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_final_trtllm_config_enables_chunked_prefill(self, tmp_path):
+        dgdr = _make_dgdr()
+        ops = _make_ops(tmp_path)
+        dgd_config = {
+            "kind": "DynamoGraphDeployment",
+            "spec": {
+                "services": {
+                    "decode": {
+                        "componentType": "worker",
+                        "subComponentType": "decode",
+                        "extraPodSpec": {"mainContainer": {"args": []}},
+                    }
+                }
+            },
+        }
+
+        result = assemble_final_config(
+            dgdr,
+            ops,
+            dgd_config,
+            PickedParallelConfig(tp=1),
+            PickedParallelConfig(tp=1),
+            resolved_backend="trtllm",
+        )
+
+        args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        idx = args.index("--trtllm.enable_chunked_prefill")
+        assert args[idx + 1] == "true"
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0

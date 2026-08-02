@@ -50,12 +50,31 @@ func GetOverlayUpperDir(pid int) (string, error) {
 }
 
 // CaptureRootfsDiff captures the overlay upperdir to a tar file.
+//
+// The archive is written to a temporary file first and renamed atomically on
+// success, so a partial or failed capture never leaves a corrupt archive at the
+// final path.
 func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlaySettings, bindMountDests []string) (string, error) {
 	if upperDir == "" {
 		return "", fmt.Errorf("upperdir is empty")
 	}
 
 	rootfsDiffPath := filepath.Join(checkpointDir, rootfsDiffFilename)
+
+	tmpFile, err := os.CreateTemp(checkpointDir, rootfsDiffFilename+".*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temporary rootfs diff: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to close temporary rootfs diff: %w", err)
+	}
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	tarArgs := []string{"--xattrs"}
 	for _, excl := range buildExclusions(exclusions) {
@@ -64,13 +83,26 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 	for _, dest := range bindMountDests {
 		tarArgs = append(tarArgs, "--exclude=."+dest)
 	}
-	tarArgs = append(tarArgs, "-C", upperDir, "-cf", rootfsDiffPath, ".")
+	tarArgs = append(tarArgs, "-C", upperDir, "-cf", tmpPath, ".")
 
 	cmd := exec.Command("tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
 	}
+
+	info, err := os.Stat(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat temporary rootfs diff: %w", err)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("tar produced empty rootfs diff")
+	}
+
+	if err := os.Rename(tmpPath, rootfsDiffPath); err != nil {
+		return "", fmt.Errorf("failed to publish rootfs diff: %w", err)
+	}
+	tmpPath = ""
 
 	return rootfsDiffPath, nil
 }
@@ -120,8 +152,16 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
-	if _, err := os.Stat(rootfsDiffPath); os.IsNotExist(err) {
+	info, err := os.Stat(rootfsDiffPath)
+	if os.IsNotExist(err) {
 		log.V(1).Info("No rootfs-diff.tar, skipping")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat rootfs diff: %w", err)
+	}
+	if info.Size() == 0 {
+		log.V(1).Info("rootfs-diff.tar is empty, skipping")
 		return nil
 	}
 

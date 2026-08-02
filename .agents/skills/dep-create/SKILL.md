@@ -36,8 +36,8 @@ This replaces the deprecated flow that filed DEPs as GitHub *issues* with
 Ground everything in the two canonical files (read both before writing; do not
 restate the whole model here):
 
-- `docs/proposals/README.mdx` — the model and where each artifact lives.
-- `docs/proposals/0001-dep-process.mdx` — the meta-DEP: lifecycle, roles,
+- `docs/fern/pages/proposals/README.mdx` — the model and where each artifact lives.
+- `docs/fern/pages/proposals/*-dep-process.mdx` — the meta-DEP: lifecycle, roles,
   front-matter specification, and the honest caveats on still-contested points.
 
 ## When to Use
@@ -143,13 +143,13 @@ gh pr create --repo ai-dynamo/enhancements \
 
 **DEP file skeleton.** Follow the KEP-style section layout the enhancements
 repo uses (its `NNNN-complete-template.md`), which is mirrored by
-`docs/proposals/TEMPLATE.mdx`. Carry the DEP-0001 metadata keys — `number`,
+`docs/fern/pages/proposals/TEMPLATE.mdx`. Carry the DEP-process meta-DEP's metadata keys — `number`,
 `title`, `status`, `category`, `owning-sig`, `participating-sigs` (optional),
 `authors`, `sponsor`, `required-reviewers`, `review-date`, `tracking-issue`,
 `pr` — and open with a status banner that matches `status`. The enhancements
 template writes each field as a `**Key**: Value` metadata block (this is what
-`fern/scripts/sync_deps.py` parses into the rendered metadata card); the exact
-serialization is settled by DEP-0001 and the enhancements template, so match
+`docs/fern/scripts/sync_deps.py` parses into the rendered metadata card); the exact
+serialization is settled by the DEP-process meta-DEP and the enhancements template, so match
 whatever the repo's current template uses rather than inventing a shape.
 
 ```md
@@ -208,7 +208,7 @@ issue. Create the Linear issue only with explicit user approval.
 ### 6. Report Back
 
 Report the **DEP PR** URL, the **tracking issue** URL, the optional
-**`DYN-####`**, and — once `fern/scripts/sync_deps.py` picks it up on the next
+**`DYN-####`**, and — once `docs/fern/scripts/sync_deps.py` picks it up on the next
 docs build — the rendered **Proposals page** at
 `docs.nvidia.com/dynamo/.../proposals/<slug>`. Getting the DEP rendered on the
 docs site is the `dep-render` skill.
@@ -219,8 +219,8 @@ docs site is the `dep-render` skill.
   docs page is a read-only mirror. Every reply happens on GitHub.
 - Reviewers leave line-level comments on the PR (the revision) and open-ended
   design discussion on the tracking issue. Both surface on the rendered page.
-- DEP-0001 is itself a *draft* proposal, but the lifecycle enum and the metadata
-  field set are settled — see `docs/proposals/0001-dep-process.mdx` for the full
+- The DEP-process meta-DEP is itself a *draft* proposal, but the lifecycle enum and the metadata
+  field set are settled — see `docs/fern/pages/proposals/*-dep-process.mdx` for the full
   specification, and match the enhancements repo's current template for the
   exact source serialization.
 - Retroactive DEP: same flow, but open it already reflecting the shipped state

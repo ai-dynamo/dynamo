@@ -3,8 +3,9 @@
 
 import asyncio
 import re as re_mod
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -23,8 +24,11 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
+from dynamo.trtllm.request_handlers.handler_base import (
+    BYPASS_REMOTE_PREFILL_ANNOTATION,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -52,6 +56,9 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    max_tokens: int | None = None
+    min_tokens: int | None = None
+    stop_token_ids: list[int] | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -106,6 +113,14 @@ class TestOverrideSamplingParams:
 
         assert result.temperature == original_temperature
         assert result.top_p == original_top_p
+
+    def test_disabled_top_k_sentinel_is_converted(self):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"top_k": -1}}
+
+        result = HandlerBase._override_sampling_params(sampling_params, request)
+
+        assert result.top_k == 0
 
     def test_truthy_values_are_applied(self):
         """Test that normal truthy values are correctly set."""
@@ -189,97 +204,6 @@ class TestOverrideSamplingParams:
             HandlerBase._override_sampling_params(sampling_params, request)
 
         mock_post_init.assert_called_once()
-
-
-class TestLLMEngineOverrideSamplingParams:
-    """Tests for the unified LLMEngine _override_sampling_params path."""
-
-    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
-        "type": "object",
-        "properties": {"answer": {"type": "string"}},
-        "required": ["answer"],
-    }
-    JSON_SCHEMA_STRING: ClassVar[str] = (
-        '{"type":"object","properties":{"answer":{"type":"string"}},'
-        '"required":["answer"]}'
-    )
-
-    def test_n_is_passed_through(self):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 2
-
-    def test_existing_best_of_greater_than_n_is_preserved(self):
-        sampling_params = MockSamplingParams(best_of=4)
-        request = {"sampling_options": {"n": 2}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert result.n == 2
-        assert result.best_of == 4
-
-    @pytest.mark.parametrize(
-        ("guided_decoding", "expected_attribute", "expected_value"),
-        [
-            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
-            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
-            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
-            (
-                {"grammar": 'root ::= "yes" | "no"'},
-                "grammar",
-                'root ::= "yes" | "no"',
-            ),
-            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
-        ],
-        ids=["json-object", "json-string", "regex", "grammar", "choice"],
-    )
-    def test_guided_decoding_constraints_are_converted(
-        self, guided_decoding, expected_attribute, expected_value
-    ):
-        sampling_params = MockSamplingParams()
-        request = {"sampling_options": {"guided_decoding": guided_decoding}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        assert not isinstance(result.guided_decoding, dict)
-        assert getattr(result.guided_decoding, expected_attribute) == expected_value
-
-    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
-        sampling_params = MockSamplingParams()
-        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
-        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
-
-        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
-
-        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
-        assert result.guided_decoding.regex == expected
-
-
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        (None, "xgrammar"),
-        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
-    ],
-    ids=["configured", "engine-override"],
-)
-def test_unified_guided_decoding_backend_matches_legacy(override, expected):
-    argv = [
-        "--model-path",
-        "Qwen/Qwen3-0.6B",
-        "--guided-decoding-backend",
-        "xgrammar",
-    ]
-    if override is not None:
-        argv.extend(["--override-engine-args", override])
-
-    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
-
-    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -466,6 +390,7 @@ class TestDeferredAbortGuard:
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     @pytest.mark.asyncio
@@ -587,6 +512,7 @@ class TestMultimodalGuard:
         config = MagicMock()
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     async def _prepare(self, handler, request, epd_metadata=None):
@@ -620,6 +546,29 @@ class TestMultimodalGuard:
         assert result == [10, 20, 30]
 
     @pytest.mark.asyncio
+    @pytest.mark.multimodal
+    async def test_rejected_cache_uuid_does_not_mutate_request(self):
+        handler = _ConcreteHandler.__new__(_ConcreteHandler)
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {"image_url": ["cached-image"]},
+            "max_tokens": 8,
+            "prefill_result": {
+                "disaggregated_params": {
+                    "worker_id": 7,
+                    "_epd_metadata": {"_prefill_prompt": "describe image"},
+                }
+            },
+        }
+        original_request = deepcopy(request)
+
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            async for _ in handler._generate_locally_impl(request, MagicMock()):
+                pass
+
+        assert request == original_request
+
+    @pytest.mark.asyncio
     async def test_decode_with_prefill_metadata_bypasses_guard(self):
         handler = self._make_handler(multimodal_processor=None)
         handler.disaggregation_mode = DisaggregationMode.DECODE
@@ -643,6 +592,7 @@ class TestPrefillPromptMetadata:
         config = MagicMock()
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
@@ -713,8 +663,16 @@ class TestDisaggRequestId:
         config = MagicMock()
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.PREFILL
+        return handler
+
+    def _make_decode_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.DECODE
         return handler
 
     def test_disagg_request_id_populated_in_prefill_mode(self):
@@ -782,6 +740,18 @@ class TestDisaggRequestId:
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
 
+    def test_decode_conditional_bypass_uses_request_disagg_params(self):
+        """Conditional-disagg bypass runs full context+generation on decode."""
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=None,
+        )
+        assert params.request_type == "context_and_generation"
+
 
 class TestHealthCheckPriority:
     """Verify generate_locally forwards the correct priority to generate_async.
@@ -796,6 +766,7 @@ class TestHealthCheckPriority:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -875,6 +846,59 @@ class TestHealthCheckPriority:
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
 
     @pytest.mark.asyncio
+    async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
+        """DECODE-style processed tokens size the remaining context correctly."""
+        handler = self._make_handler()
+        handler.max_seq_len = 100
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": list(range(40))}
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].max_tokens == 60
+
+    @pytest.mark.asyncio
+    async def test_expanded_prompt_len_is_not_forwarded_to_engine(self):
+        handler = self._make_handler()
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={
+                "prompt_token_ids": [1, 2, 3],
+                "expanded_prompt_len": 42,
+            }
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert "expanded_prompt_len" not in kwargs["inputs"]
+
+    @pytest.mark.asyncio
     async def test_routing_cache_salt_forwarded_to_generate_async(self):
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
@@ -896,8 +920,160 @@ class TestHealthCheckPriority:
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
 
+    @pytest.mark.asyncio
+    async def test_prefill_skips_generation_stop_conditions(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        handler.disagg_machine_id = 0
+        handler.default_sampling_params = MockSamplingParams(stop_token_ids=[300])
+        generation_result = MagicMock()
+
+        async def empty_aiter(_self):
+            for _ in ():
+                yield
+
+        generation_result.__aiter__ = empty_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": True,
+                "stop_token_ids_hidden": [100],
+                "stop_token_ids_visible": [200],
+            },
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks == []
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        sampling_params = kwargs["sampling_params"]
+        assert sampling_params.max_tokens == 1
+        assert sampling_params.min_tokens is None
+        assert sampling_params.ignore_eos is False
+        assert sampling_params.stop_token_ids == [300]
+        assert kwargs["streaming"] is False
+
+
+class TestDefaultMaxTokens:
+    """Unit tests for HandlerBase._default_max_tokens (omitted max_tokens sizing)."""
+
+    def test_text_fills_remaining_context(self):
+        # 100 - len([1,2,3]) = 97
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], False, None) == 97
+
+    def test_text_on_multimodal_worker_ignores_expanded(self):
+        # A text request (no images) uses len(token_ids) even if an expanded
+        # length is somehow present; it must not defer like an image request.
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], False, 40) == 97
+
+    def test_returns_none_without_max_seq_len(self):
+        assert HandlerBase._default_max_tokens(None, [1, 2, 3], False, None) is None
+
+    def test_image_uses_expanded_len(self):
+        # 100 - 40 = 60; token_ids ignored in favor of the expanded length
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, 40) == 60
+
+    def test_image_without_expanded_defers(self):
+        # No expanded length available -> defer to engine default (None)
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, None) is None
+
+    def test_image_zero_expanded_len_is_valid(self):
+        assert HandlerBase._default_max_tokens(100, [], True, 0) == 100
+
+    def test_floors_at_one(self):
+        # Prompt already at/over context -> never returns <= 0
+        assert HandlerBase._default_max_tokens(3, [1, 2, 3, 4, 5], False, None) == 1
+
+
+class TestExpandedPromptLen:
+    """Unit tests for MultimodalRequestProcessor._expanded_prompt_len."""
+
+    def _processor(self, mm_token_ids, tokens_per_image):
+        # Bypass __init__ (which would build a real input processor) and inject a mock.
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        ip = MagicMock()
+        ip.get_mm_token_ids.return_value = (
+            torch.tensor(mm_token_ids) if mm_token_ids is not None else None
+        )
+        ip.get_num_tokens_per_image.side_effect = lambda image: tokens_per_image
+        proc.input_processor = ip
+        return proc
+
+    def test_replaces_placeholders_with_image_tokens(self):
+        # token_ids has one placeholder (99); one image expands to 256 tokens.
+        # 4 tokens - 1 placeholder + 256 = 259
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=256)
+        assert proc._expanded_prompt_len([1, 2, 99, 3], images=["img"]) == 259
+
+    def test_multiple_images_sum(self):
+        # Two placeholders, two images x 10 tokens: 5 - 2 + 20 = 23
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=10)
+        assert proc._expanded_prompt_len([1, 99, 2, 99, 3], ["a", "b"]) == 23
+
+    def test_none_without_input_processor(self):
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        proc.input_processor = None
+        assert proc._expanded_prompt_len([1, 2, 3], ["img"]) is None
+
+    def test_none_without_images(self):
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=256)
+        assert proc._expanded_prompt_len([1, 2, 3], None) is None
+
+    def test_none_on_processor_error(self):
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        ip = MagicMock()
+        ip.get_mm_token_ids.side_effect = RuntimeError("boom")
+        proc.input_processor = ip
+        assert proc._expanded_prompt_len([1, 2, 3], ["img"]) is None
+
+
+class TestRequestHasImages:
+    """Unit tests for HandlerBase._request_has_images (image-vs-text classification).
+
+    Regression coverage for the bug where a text request to a multimodal worker
+    was mis-classified as multimodal and its omitted max_tokens deferred to the
+    engine default (32) instead of filling from len(token_ids).
+    """
+
+    def test_text_request_has_no_images(self):
+        # processed_input for text on a multimodal worker: no mm keys.
+        assert HandlerBase._request_has_images({"prompt_token_ids": [1, 2, 3]}) is False
+
+    def test_multi_modal_data_is_images(self):
+        assert (
+            HandlerBase._request_has_images({"multi_modal_data": {"image": ["x"]}})
+            is True
+        )
+
+    def test_multi_modal_embeddings_is_images(self):
+        assert (
+            HandlerBase._request_has_images(
+                {"multi_modal_embeddings": {"image": ["x"]}}
+            )
+            is True
+        )
+
+    def test_empty_mm_data_is_not_images(self):
+        # mm key present but falsy (text path sets these to None) -> not images.
+        assert HandlerBase._request_has_images({"multi_modal_data": None}) is False
+
+    def test_none_is_not_images(self):
+        assert HandlerBase._request_has_images(None) is False
+
+    def test_non_dict_is_not_images(self):
+        assert HandlerBase._request_has_images([1, 2, 3]) is False
+
 
 class _FakeConversationParams:
+
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 
@@ -915,10 +1091,17 @@ class TestConversationAffinity:
     ``SchedulingParams`` as before.
     """
 
-    def _make_handler(self, *, conversation_affinity: bool) -> HandlerBase:
+    def _make_handler(
+        self,
+        *,
+        conversation_affinity: bool,
+        dp_rank_source: str = "engine",
+    ) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
+        config.conversation_affinity_dp_rank_source = dp_rank_source
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -1028,6 +1211,60 @@ class TestConversationAffinity:
         assert conv_params.conversation_id == "run-42:agent-0"
 
     @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_forwards_rank(self, monkeypatch):
+        """Dynamo-owned placement forwards both the rank and conversation id."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-42:agent-0"},
+            },
+        )
+        scheduling_params = kwargs["scheduling_params"]
+        assert scheduling_params is not None
+        assert scheduling_params.attention_dp_rank == 3
+        assert scheduling_params.attention_dp_relax is False
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_dynamo_rank_source_and_no_session_suppresses_rank(
+        self, monkeypatch
+    ):
+        """Without a conversation id, preserve TRT-LLM's no-id balancing path."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(
+            conversation_affinity=True,
+            dp_rank_source="dynamo",
+        )
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert kwargs["conversation_params"] is None
+
+    @pytest.mark.asyncio
     async def test_affinity_on_without_session_id_passes_none_conversation_params(
         self, monkeypatch
     ):
@@ -1073,5 +1310,71 @@ class TestConversationAffinity:
         }
         with pytest.raises(RuntimeError, match="ConversationParams API"):
             async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
+        dp_rank suppressed, conversation_params forwarded on first request."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            True,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.engine_conversation_affinity_enabled",
+            lambda _: False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs on first request and folds in the override.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-99:agent-0"},
+            },
+        )
+        # Override must suppress the router rank just like auto-detection does.
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-99:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_override_raises_when_conversation_params_api_missing(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
+        RuntimeError on first request during lazy init."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs and hits the guard.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        handler.engine.llm.generate_async = MagicMock()
+
+        with pytest.raises(RuntimeError, match="DYN_ENGINE_CONV_AFFINITY"):
+            async for _ in handler.generate_locally(
+                {
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {"max_tokens": 10},
+                    "sampling_options": {"temperature": 0.7},
+                },
+                self._make_context(),
+            ):
                 pass
         handler.engine.llm.generate_async.assert_not_called()

@@ -55,6 +55,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
@@ -405,10 +406,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
-	if r == nil || r.Config == nil || r.Config.GPU.DiscoveryEnabled == nil {
-		return true
-	}
-	return *r.Config.GPU.DiscoveryEnabled
+	return r.RuntimeConfig.Gate.Enabled(features.GPUDiscovery)
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {
@@ -464,24 +462,35 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Check for spec changes (immutability enforcement)
-	if dgdr.Status.ObservedGeneration > 0 && dgdr.Status.ObservedGeneration != dgdr.Generation {
-		// Spec changed after initial processing
-		if dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
-			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady || dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed {
-			logger.Info("Spec change detected in immutable phase",
-				"phase", dgdr.Status.Phase,
-				"observedGeneration", dgdr.Status.ObservedGeneration,
-				"currentGeneration", dgdr.Generation)
+	// Admission permits deferred requests to select a runtime version while
+	// autoApply is disabled and Ready requests to enable autoApply.
+	immutablePhase := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeploying ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady ||
+		dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseDeployed
+	autoApplyDisabled := dgdr.Spec.AutoApply != nil && !*dgdr.Spec.AutoApply
+	deferredRuntimeVersionUpdate := autoApplyDisabled &&
+		(dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseProfiling ||
+			dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady)
+	readyAutoApplyActivation := dgdr.Status.Phase == nvidiacomv1beta1.DGDRPhaseReady &&
+		(dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply)
 
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
-				fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
+	// Reject unexpected generation changes after profiling starts.
+	if dgdr.Status.ObservedGeneration > 0 &&
+		dgdr.Status.ObservedGeneration != dgdr.Generation &&
+		immutablePhase &&
+		!deferredRuntimeVersionUpdate &&
+		!readyAutoApplyActivation {
+		logger.Info("Spec change detected in immutable phase",
+			"phase", dgdr.Status.Phase,
+			"observedGeneration", dgdr.Status.ObservedGeneration,
+			"currentGeneration", dgdr.Generation)
 
-			// Keep the old observedGeneration to continue rejecting changes
-			// No phase transition - stay in current phase with old spec
-			return ctrl.Result{}, nil
-		}
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonSpecChangeRejected,
+			fmt.Sprintf(MessageSpecChangeRejected, dgdr.Status.Phase))
+		return ctrl.Result{}, nil
 	}
+
 	// Phase machine: handle different phases
 	switch dgdr.Status.Phase {
 	case nvidiacomv1beta1.DGDRPhasePending, "":
@@ -781,6 +790,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleReadyPhase(ctx context.Co
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is ready", "name", dgdr.Name)
 
+	// Start deployment when autoApply is enabled after manual review.
+	if dgdr.Spec.AutoApply == nil || *dgdr.Spec.AutoApply {
+		logger.Info("AutoApply enabled, transitioning to Deploying phase")
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseDeploying, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionTrue, nvidiacomv1beta1.EventReasonSpecGenerated, MessageSpecGenerated)
+	}
+
 	// Nothing to monitor in Ready phase - spec is available for manual application
 	return ctrl.Result{}, nil
 }
@@ -957,6 +972,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -2054,6 +2070,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
+	applyDGDRRuntimeVersionOverride(dgdr, dgd)
 
 	// Override the profiler-generated name with a DGDR-scoped unique name.
 	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
@@ -2105,6 +2122,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	dgdr.ResourceVersion = apply.GetResourceVersion()
 	return profilingResults, dgd.Name, nil
+}
+
+// applyDGDRRuntimeVersionOverride fills missing component overrides without replacing existing values.
+func applyDGDRRuntimeVersionOverride(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) bool {
+	if dgdr.Spec.RuntimeVersionOverride == "" {
+		return false
+	}
+
+	changed := false
+	for i := range dgd.Spec.Components {
+		if dgd.Spec.Components[i].RuntimeVersionOverride == "" {
+			dgd.Spec.Components[i].RuntimeVersionOverride = dgdr.Spec.RuntimeVersionOverride
+			changed = true
+		}
+	}
+	return changed
 }
 
 // encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.

@@ -28,7 +28,7 @@ whose `status` field carries its lifecycle state, anchored by a tracking issue
 and rendered on the Dynamo docs site's Proposals tab. This replaces the
 deprecated flow that read DEP *issues* by `dep:*` labels in `ai-dynamo/dynamo`.
 
-See `docs/proposals/README.mdx` and `docs/proposals/0001-dep-process.mdx` for
+See `docs/fern/pages/proposals/README.mdx` and `docs/fern/pages/proposals/*-dep-process.mdx` for
 the model — do not restate it here.
 
 ## When to Use
@@ -64,8 +64,8 @@ gh api repos/ai-dynamo/enhancements/contents/deps/NNNN-slug.md \
 ```
 
 The lifecycle states are Draft → Under Review → Accepted / Rejected / Deferred
-→ Implemented → Replaced (standardized in DEP-0001, which the docs render layer
-implements; see `docs/proposals/0001-dep-process.mdx` for the full
+→ Implemented → Replaced (standardized in the DEP-process meta-DEP, which the docs render layer
+implements; see `docs/fern/pages/proposals/*-dep-process.mdx` for the full
 specification).
 
 ### 3. List Tracking Issues

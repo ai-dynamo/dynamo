@@ -199,7 +199,7 @@ struct PolicyClassQueue<T> {
 }
 
 impl<T> PolicyClassQueue<T> {
-    fn is_empty(&self) -> bool {
+    fn ready_is_empty(&self) -> bool {
         self.pending.is_empty() && self.ready_by_worker.is_empty()
     }
 
@@ -452,6 +452,27 @@ impl<T> PolicyQueue<T> {
         self.pending_count
     }
 
+    pub(crate) fn has_ready(&self) -> bool {
+        self.classes.iter().any(|class| !class.ready_is_empty())
+    }
+
+    pub(crate) fn any_ready_head(
+        &self,
+        mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> bool {
+        self.classes.iter().enumerate().any(|(class_index, class)| {
+            class
+                .pending
+                .peek()
+                .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                || class.ready_by_worker.values().any(|ready| {
+                    ready
+                        .peek()
+                        .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                })
+        })
+    }
+
     pub fn class_count(&self) -> usize {
         self.classes.len()
     }
@@ -477,7 +498,7 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn has_backlog(&self, class_index: usize) -> bool {
-        !self.classes[class_index].is_empty()
+        !self.classes[class_index].ready_is_empty()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
@@ -487,25 +508,8 @@ impl<T> PolicyQueue<T> {
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-        self.pending_count = 0;
-        for class in &mut self.classes {
-            class.pending.retain(|entry| keep(entry.payload()));
-            class.ready_by_worker.retain(|_, ready| {
-                ready.retain(|entry| keep(entry.payload()));
-                !ready.is_empty()
-            });
-            class.rebuild_worker_heads();
-            let mut stats = PolicyQueueStats::default();
-            let mut count = 0;
-            for entry in class.entries() {
-                add_stats(&mut stats, entry.snapshot);
-                count += 1;
-            }
-            class.stats = stats;
-            self.pending_count += count;
-            if class.is_empty() {
-                class.deficit = 0;
-            }
+        for class_index in 0..self.classes.len() {
+            drop(self.take_if_in_class(class_index, |payload| !keep(payload)));
         }
     }
 
@@ -545,6 +549,66 @@ impl<T> PolicyQueue<T> {
         Ok(())
     }
 
+    pub(crate) fn take_if_in_class(
+        &mut self,
+        class_index: usize,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
+        let class = &mut self.classes[class_index];
+        let remove_sequences: FxHashSet<u64> = class
+            .entries()
+            .filter(|entry| predicate(entry.payload()))
+            .map(|entry| entry.enqueue_seq)
+            .collect();
+        if remove_sequences.is_empty() {
+            return (Vec::new(), false);
+        }
+
+        let removed_ready_head = class
+            .pending
+            .peek()
+            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            || class.ready_by_worker.values().any(|ready| {
+                ready
+                    .peek()
+                    .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            });
+
+        let mut removed = Vec::new();
+        let mut retained = Vec::with_capacity(class.pending.len());
+        for entry in class.pending.drain() {
+            if remove_sequences.contains(&entry.enqueue_seq) {
+                removed.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        class.pending = BinaryHeap::from(retained);
+
+        class.ready_by_worker.retain(|_, ready| {
+            let mut retained = Vec::with_capacity(ready.len());
+            for entry in ready.drain() {
+                if remove_sequences.contains(&entry.enqueue_seq) {
+                    removed.push(entry);
+                } else {
+                    retained.push(entry);
+                }
+            }
+            *ready = BinaryHeap::from(retained);
+            !ready.is_empty()
+        });
+        class.rebuild_worker_heads();
+
+        for entry in &removed {
+            subtract_stats(&mut class.stats, entry.snapshot);
+            self.pending_count -= 1;
+        }
+        if class.ready_is_empty() {
+            class.deficit = 0;
+        }
+        (removed, removed_ready_head)
+    }
+
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
     /// enough credit, bulk-adds the minimum complete rounds needed for progress.
     /// `is_dispatchable` may be evaluated more than once for the same entry
@@ -570,7 +634,7 @@ impl<T> PolicyQueue<T> {
                 return Some(self.pop_candidate(class_index, candidate));
             }
             self.candidates[class_index] = candidate;
-            if class.is_empty() {
+            if class.ready_is_empty() {
                 class.deficit = 0;
             }
         }
@@ -586,7 +650,7 @@ impl<T> PolicyQueue<T> {
                 class.next_dispatchable(class_index, &mut is_dispatchable)
             };
             let Some(candidate) = candidate else {
-                if class.is_empty() {
+                if class.ready_is_empty() {
                     class.deficit = 0;
                 }
                 continue;
@@ -667,7 +731,7 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
-        if class.is_empty() {
+        if class.ready_is_empty() {
             class.deficit = 0;
         } else {
             self.carry_class = (class.deficit > 0).then_some(class_index);
@@ -687,13 +751,8 @@ fn make_entry<T>(
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
-    let policy_score = match queue_policy {
-        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
-        RouterQueuePolicy::Wspt => {
-            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
-        }
-        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-    };
+    let policy_score =
+        queue_policy_score(queue_policy, snapshot, arrival_offset_secs, priority_jump);
     PolicyQueueEntry {
         class_index,
         priority: QueuePriority {
@@ -703,6 +762,21 @@ fn make_entry<T>(
         enqueue_seq,
         snapshot,
         payload,
+    }
+}
+
+fn queue_policy_score(
+    queue_policy: RouterQueuePolicy,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+    priority_jump: f64,
+) -> f64 {
+    match queue_policy {
+        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+        RouterQueuePolicy::Wspt => {
+            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
+        }
+        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
     }
 }
 
@@ -775,8 +849,6 @@ policy_classes:
     policy_family: agents
     cache_bucket: all
     queue_policy: fcfs
-    queue_admission:
-      type: session_aware
     quantum: 10
 "#,
         )

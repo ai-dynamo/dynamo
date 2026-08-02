@@ -38,6 +38,7 @@ from dynamo.planner.config.planner_config import (
     PlannerPreDeploymentSweepMode,
 )
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
@@ -82,17 +83,19 @@ def assemble_final_config(
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
-    1. **Mocker** — swap the base to the mocker DGD template if enabled.
-    2. **vLLM self-benchmark** — when the resolved backend is vLLM, set
+    1. **TRT-LLM runtime defaults** — enable chunked prefill on generated
+       TRT-LLM workers so their token budget may be smaller than the request ISL.
+    2. **Mocker** — swap the base to the mocker DGD template if enabled.
+    3. **vLLM self-benchmark** — when the resolved backend is vLLM, set
        ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
-    3. **Planner** — inject the Planner service + planner-config ConfigMap.
+    4. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
-       initialize the Rust perf shim with native AIC identity. When
+       initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
-    4. **Profile data** — attach interpolation-data ConfigMap when mocker
+    5. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
        were produced on disk; rapid-mode deployments never emit it (the
@@ -106,7 +109,11 @@ def assemble_final_config(
     planner = is_planner_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
+    if not mocker and resolved_backend == "trtllm":
+        enable_trtllm_chunked_prefill(dgd_config)
+
     if not mocker and not planner:
+        apply_runtime_version_override(dgdr, dgd_config)
         return dgd_config
 
     # Save picked config for auditing
@@ -150,9 +157,22 @@ def assemble_final_config(
         if profile_cm:
             config_maps.append(profile_cm)
 
+    apply_runtime_version_override(dgdr, base)
     if config_maps:
         return config_maps + [base]
     return base
+
+
+def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
+    """Apply the DGDR runtime version to every generated DGD service."""
+    override = dgdr.runtimeVersionOverride
+    if not override:
+        return
+
+    services = config_dict.get("spec", {}).get("services", {})
+    for service_config in services.values():
+        if isinstance(service_config, dict):
+            service_config["runtimeVersionOverride"] = override
 
 
 def _vllm_worker_roles() -> dict[str, str]:
@@ -405,7 +425,7 @@ def add_planner_to_config(
         aic_spec: AIC interpolation spec (rapid mode). When set, the planner
             runs AIC in-process at bootstrap instead of reading NPZ files.
         aic_perf_model: Native AIC forward-pass perf model identity for
-            real-time Rust shim queries.
+            real-time Planner engine queries.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
@@ -639,10 +659,10 @@ def build_aic_perf_model_spec(
     resolved_backend: str,
     system: str,
 ) -> Optional[AICPerfModelSpec]:
-    """Build native AIC identity for the planner's Rust perf shim.
+    """Build native AIC identity for the Planner's AIC core integration.
 
     This is intentionally independent from AIC interpolation. It does not
-    request a sweep; it only gives the shim enough identity and parallelism
+    request a sweep; it only gives the Planner enough identity and parallelism
     data to try native forward-pass estimation before falling back to
     observed-FPM regression.
     """

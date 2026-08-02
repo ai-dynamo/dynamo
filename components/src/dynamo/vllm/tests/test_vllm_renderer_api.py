@@ -392,6 +392,12 @@ class TestVllmRendererApi:
             omni_fields,
             abort_omni_fields,
         )
+        # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
+        # reads EngineCoreRequest fields by name, so the append is compatible
+        # with every known request-shape variant above.
+        valid_request_fields = valid_request_fields + tuple(
+            (*fields, "model_intermediate_buffer") for fields in valid_request_fields
+        )
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields in valid_request_fields, (
             "EngineCoreRequest fields changed!\n"
@@ -410,6 +416,7 @@ class TestVllmRendererApi:
             "stop_reason",
             "events",
             "kv_transfer_params",
+            "ec_transfer_params",
             "trace_headers",
             "prefill_stats",
             "routed_experts",
@@ -425,6 +432,7 @@ class TestVllmRendererApi:
             "stop_reason",
             "events",
             "kv_transfer_params",
+            "ec_transfer_params",
             "trace_headers",
             "num_cached_tokens",
             "num_external_computed_tokens",

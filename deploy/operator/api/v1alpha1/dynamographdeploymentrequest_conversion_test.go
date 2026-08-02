@@ -63,10 +63,11 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
-			Model:     "meta-llama/Llama-3.1-8B",
-			Backend:   "vllm",
-			AutoApply: true,
-			UseMocker: true,
+			Model:                  "meta-llama/Llama-3.1-8B",
+			Backend:                "vllm",
+			RuntimeVersionOverride: "1.2.3",
+			AutoApply:              true,
+			UseMocker:              true,
 			ProfilingConfig: ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
 				OutputPVC:     "output-pvc",
@@ -112,10 +113,11 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			Namespace: "default",
 		},
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Model:     "Qwen/Qwen3-32B",
-			Backend:   v1beta1.BackendTypeVllm,
-			AutoApply: &autoApplyFalse,
-			Image:     "nvcr.io/nvidia/dynamo:0.3.2",
+			Model:                  "Qwen/Qwen3-32B",
+			Backend:                v1beta1.BackendTypeVllm,
+			AutoApply:              &autoApplyFalse,
+			Image:                  "nvcr.io/nvidia/dynamo:custom",
+			RuntimeVersionOverride: "1.2.3",
 			SLA: &v1beta1.SLASpec{
 				TTFT: &ttft,
 				ITL:  &itl,
@@ -165,6 +167,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
+	}
+	if dst.Spec.RuntimeVersionOverride != src.Spec.RuntimeVersionOverride {
+		t.Errorf("RuntimeVersionOverride: got %q, want %q", dst.Spec.RuntimeVersionOverride, src.Spec.RuntimeVersionOverride)
 	}
 
 	// ProfilerImage → Image
@@ -250,6 +255,28 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	// Alpha-only status uses the structural sparse payload.
 	if dst.Annotations[annDGDRStatus] == "" {
 		t.Error("annDGDRStatus structural annotation is empty")
+	}
+}
+
+func TestScrubDGDRInternalAnnotationsRemovesRetiredKeys(t *testing.T) {
+	metadata := &metav1.ObjectMeta{Annotations: map[string]string{
+		annDGDRSpec:        "spec",
+		annDGDRStatus:      "status",
+		"example.com/keep": "value",
+	}}
+	for _, key := range retiredDGDRAnnotationKeys {
+		metadata.Annotations[key] = "stale"
+	}
+
+	scrubDGDRInternalAnnotations(metadata)
+
+	for _, key := range append([]string{annDGDRSpec, annDGDRStatus}, retiredDGDRAnnotationKeys...) {
+		if _, ok := metadata.Annotations[key]; ok {
+			t.Errorf("internal annotation %q was not scrubbed", key)
+		}
+	}
+	if got := metadata.Annotations["example.com/keep"]; got != "value" {
+		t.Errorf("unrelated annotation = %q, want value", got)
 	}
 }
 
@@ -542,22 +569,6 @@ func TestStripDGDRTypedProfilingConfig(t *testing.T) {
 				t.Fatalf("input was mutated (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
-	t.Helper()
-	if raw == nil {
-		t.Fatal("profiling config is nil")
-	}
-	var got map[string]any
-	if err := json.Unmarshal(raw.Raw, &got); err != nil {
-		t.Fatalf("unmarshal profiling config: %v", err)
-	}
-	for key, wantValue := range want {
-		if diff := cmp.Diff(wantValue, got[key]); diff != "" {
-			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
-		}
 	}
 }
 

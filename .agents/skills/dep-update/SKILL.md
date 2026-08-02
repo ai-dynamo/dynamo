@@ -29,7 +29,7 @@ status-banner admonition together. This replaces the deprecated flow that
 flipped `dep:draft` / `dep:under-review` / `dep:approved` labels on a GitHub
 *issue* in `ai-dynamo/dynamo`.
 
-See `docs/proposals/README.mdx` and `docs/proposals/0001-dep-process.mdx` for
+See `docs/fern/pages/proposals/README.mdx` and `docs/fern/pages/proposals/*-dep-process.mdx` for
 the model, roles, and the status-banner convention. Do not restate the whole
 model here.
 
@@ -42,7 +42,7 @@ ships, or marking it Replaced when a later DEP supersedes it.
 ## Lifecycle
 
 The enum is standardized to this set (the docs render layer implements it); the
-DEP process around it is still under review in DEP-0001:
+DEP process around it is still under review in the DEP-process meta-DEP:
 
 **Draft → Under Review → Accepted / Rejected / Deferred → Implemented → Replaced**
 
@@ -118,11 +118,11 @@ the decision lives in the merged PR, not on the docs page.
 ### 4. Confirm the Rendered Pills Update
 
 No manual docs edit is needed. On the next Fern build,
-`fern/scripts/sync_deps.py` re-reads the DEP's status and regenerates
-`fern/js/dep-status-data.js` and `fern/js/dep-index-data.js`, so every surface
+`docs/fern/scripts/sync_deps.py` re-reads the DEP's status and regenerates
+`docs/fern/js/dep-status-data.js` and `docs/fern/js/dep-index-data.js`, so every surface
 updates to match the new status from one source: the on-page `<DepMetadata>`
 pill and its **lifecycle stepper**, the right-aligned Proposals-sidebar pill
-(`fern/js/dep-status-pills.js`), and the DEP's card in the **registry index**
+(`docs/fern/js/dep-status-pills.js`), and the DEP's card in the **registry index**
 (`/proposals/registry`). The `/proposals/<slug>` URL is stable across status
 changes. Getting a DEP rendered in the first place is the `dep-render` skill.
 
@@ -132,6 +132,6 @@ changes. Getting a DEP rendered in the first place is the `dep-render` skill.
 - The banner and the `status` field must never disagree — a page that reads
   "Draft" in the field but shows a Note banner misleads readers about whether a
   proposal is ratified.
-- DEP-0001 is a *draft* proposal, but the lifecycle enum itself is settled — the
+- The DEP-process meta-DEP is a *draft* proposal, but the lifecycle enum itself is settled — the
   render layer implements exactly this set. Phrase advice as that model and
-  point to `docs/proposals/0001-dep-process.mdx` for the full specification.
+  point to `docs/fern/pages/proposals/*-dep-process.mdx` for the full specification.

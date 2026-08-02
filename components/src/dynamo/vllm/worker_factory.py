@@ -46,6 +46,7 @@ from .health_check import (
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
+from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -563,6 +564,16 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
+        if config.realtime:
+            await self._create_realtime_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+            return
+
         # Embedding worker is selected first because it crosses worker shapes
         # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
         # of decode. Aggregated-only — exclusivity with disagg modes is
@@ -598,6 +609,102 @@ class WorkerFactory:
                 snapshot_engine=snapshot_engine,
             )
         return
+
+    async def _create_realtime_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        """Initialize an aggregated vLLM realtime worker."""
+        del shutdown_event  # Connection cancellation is carried by Dynamo Context.
+
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                component_gauges,
+            ) = snapshot_engine
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            factory = StatLoggerFactory(
+                endpoint=generate_endpoint,
+                component_gauges=component_gauges,
+            )
+        else:
+            factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                component_gauges,
+            ) = self.setup_vllm_engine(
+                config,
+                factory,
+                fpm_worker_id=fpm_worker_id,
+            )
+        await configure_kv_event_block_size(engine_client, vllm_config)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(num_gpu_blocks or 0)
+        factory.init_publish()
+
+        model_name = config.served_model_name or config.model
+        handler = RealtimeHandler(
+            {
+                "transcription": RealtimeTranscriptionHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model,
+                )
+            }
+        )
+        self.setup_metrics_collection(config, generate_endpoint, logger)
+
+        await self.register_vllm_model(
+            ModelInput.Text,
+            ModelType.Realtime,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+        logger.info(
+            "Starting realtime worker endpoint for model: %s",
+            model_name,
+        )
+        try:
+            await generate_endpoint.serve_bidirectional_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+            )
+        except Exception as exc:
+            logger.error("Realtime worker failed: %s", exc)
+            raise
+        finally:
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
 
     async def _create_multimodal_encode_worker(
         self,
@@ -755,18 +862,49 @@ class WorkerFactory:
         finally:
             handler.cleanup()
 
+    def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
+        """Create + register per-engine failover metrics (shadow mode only).
+
+        Called before the model loads so ``init`` spans the load and a restarted
+        engine re-exposes its persisted switch counters within seconds. Uses a
+        dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
+        """
+        if not config.gms_shadow_mode:
+            return None
+        from gpu_memory_service.failover_lock.failover_metrics import (
+            create_failover_metrics,
+        )
+
+        persist_dir = os.path.dirname(
+            os.path.abspath(
+                os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            )
+        )
+        failover_metrics = create_failover_metrics(
+            endpoint=generate_endpoint,
+            engine_id=os.environ.get("ENGINE_ID", "0"),
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+            persist_dir=persist_dir,
+        )
+        failover_metrics.set_state("init")
+        return failover_metrics
+
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
-    ) -> None:
-        # Shadow mode: lock-driven activation.
-        # Flow: sleep → startup probe passes → block on lock → wake → register.
+        failover_metrics=None,
+    ) -> bool:
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup.
         if not config.gms_shadow_mode:
-            return
+            return False
 
         await handler._pause_controller.pause(1)
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
 
         runtime.set_health_status(True)
         logger.info(
@@ -779,11 +917,18 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         lock = FlockFailoverLock(lock_path)
         await lock.acquire(engine_id=f"engine-{engine_id}")
+        was_failover = lock.was_contended
         logger.info("[Shadow] Lock acquired, waking engine")
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if was_failover:
+                # Only a contended acquire is a failover; a bootup is not a switch.
+                failover_metrics.record_switch_attempt()
 
         await handler._pause_controller.resume()
         handler._pause_controller.mark_resumed()
         logger.info("[Shadow] Engine awake, registering with discovery")
+        return was_failover
 
     async def _create_decode_worker(
         self,
@@ -835,6 +980,11 @@ class WorkerFactory:
                     list_loras_endpoint,
                 ]
             )
+
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -960,7 +1110,9 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = await self._maybe_wait_for_failover_lock(
+            handler, runtime, config, failover_metrics
+        )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -995,6 +1147,12 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -1096,6 +1254,22 @@ class WorkerFactory:
             if config.enable_rl
             else None
         )
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
+
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -1189,7 +1363,9 @@ class WorkerFactory:
             runtime, handler, lora_enabled=config.engine_args.enable_lora
         )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = await self._maybe_wait_for_failover_lock(
+            handler, runtime, config, failover_metrics
+        )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1204,6 +1380,10 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
+        if lora_enabled:
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
 
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
@@ -1230,6 +1410,12 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -1270,6 +1456,23 @@ class WorkerFactory:
                         handler.rl_dispatch,
                         metrics_labels=prefill_metrics_labels,
                     )
+                )
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                    ]
                 )
             await asyncio.gather(*serve_tasks)
             logger.debug("serve_endpoint completed for prefill worker")

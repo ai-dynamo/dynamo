@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -41,19 +42,16 @@ import (
 
 // DynamoGraphDeploymentValidator validates v1beta1 DynamoGraphDeployment resources.
 type DynamoGraphDeploymentValidator struct {
-	mgr          ctrl.Manager
-	groveEnabled bool
+	mgr ctrl.Manager
 }
 
 // NewDynamoGraphDeploymentValidator creates a validator for v1beta1 DynamoGraphDeployment.
 // mgr must not be nil.
 func NewDynamoGraphDeploymentValidator(
 	mgr ctrl.Manager,
-	groveEnabled bool,
 ) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		mgr:          mgr,
-		groveEnabled: groveEnabled,
+		mgr: mgr,
 	}
 }
 
@@ -61,7 +59,6 @@ func NewDynamoGraphDeploymentValidator(
 // API values and derived traversal state remain explicit validator arguments.
 type dynamoGraphDeploymentValidation struct {
 	sharedValidation
-	groveEnabled      bool
 	userInfo          *authenticationv1.UserInfo
 	operatorPrincipal string
 }
@@ -78,10 +75,10 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 func (v *DynamoGraphDeploymentValidator) Validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr},
-		groveEnabled:     v.groveEnabled,
+		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -95,7 +92,7 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 }
 
 // ValidateUpdate performs stateful validation comparing old and new v1beta1 DGD objects.
-// ctx, oldDGD, and newDGD must not be nil.
+// ctx, oldDGD, and newDGD must not be nil. runtimeVersionSource identifies the request's source API.
 // If userInfo is nil, replica changes for DGDSA-enabled components fail closed.
 func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
@@ -103,15 +100,30 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 	userInfo *authenticationv1.UserInfo,
 	operatorPrincipal string,
+	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr},
-		groveEnabled:      v.groveEnabled,
+		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
+	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+		oldAlpha, err := alphaDynamoGraphDeploymentForValidation(oldDGD)
+		if err != nil {
+			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
+		}
+		allErrs = append(allErrs, validation.validateDynamoGraphDeploymentSpecUpdateV1alpha1(
+			&newAlpha.Spec,
+			&oldAlpha.Spec,
+			field.NewPath("spec"),
+		)...)
+	}
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
@@ -126,7 +138,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		hasIntraPodFailover(&dgd.Spec),
 	)...)
 
-	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(v.groveEnabled, dgd)
+	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
+	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		dgdName:                 dgd.Name,
 		generation:              dgd.Generation,
@@ -138,7 +151,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	return allErrs
 }
 
-// validateObjectMeta validates objectMeta. objectMeta and fldPath must not be nil.
+// validateObjectMeta validates DGD objectMeta. objectMeta and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
@@ -266,13 +279,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	constraintPath := fldPath.Child("topologyConstraint")
-	hasAnyConstraint := spec.TopologyConstraint != nil
+	hasComponentConstraint := false
 	for i := range spec.Components {
 		if spec.Components[i].TopologyConstraint != nil {
-			hasAnyConstraint = true
+			hasComponentConstraint = true
 			break
 		}
 	}
+	hasAnyConstraint := spec.TopologyConstraint != nil || hasComponentConstraint
 	if hasAnyConstraint {
 		topologyErrs := field.ErrorList{}
 		if spec.TopologyConstraint == nil {
@@ -281,15 +295,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				"is required when any component topology constraint is set",
 			))
 		} else {
-			if spec.TopologyConstraint.PackDomain == "" {
-				for i := range spec.Components {
-					if spec.Components[i].TopologyConstraint == nil {
-						topologyErrs = append(topologyErrs, field.Required(
-							componentsPath.Index(i).Child("topologyConstraint"),
-							"is required because spec.topologyConstraint.packDomain is not set",
-						))
-					}
-				}
+			if spec.TopologyConstraint.PackDomain == "" && !hasComponentConstraint {
+				topologyErrs = append(topologyErrs, field.Required(
+					constraintPath.Child("packDomain"),
+					"is required when no component topologyConstraint is set",
+				))
 			}
 
 			var topologyInfo *clusterTopologyInfo

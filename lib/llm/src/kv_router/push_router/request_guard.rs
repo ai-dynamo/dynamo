@@ -17,11 +17,7 @@ use crate::{
     },
 };
 
-/// Post-selection owner of scheduler bookkeeping.
-///
-/// `KvPushRouter` installs this through [`RequestGuard`] before its next
-/// fallible await. At that point the scheduling response channel has completed
-/// its admission handoff and no longer represents request lifetime.
+/// Owns scheduler cleanup after a worker is selected.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
@@ -55,8 +51,7 @@ impl RequestCleanup {
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        let needs_free = !self.freed && self.scheduler_tracked;
-        if !needs_free {
+        if self.freed || !self.scheduler_tracked {
             return;
         }
 
@@ -71,7 +66,8 @@ impl Drop for RequestCleanup {
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
         handle.spawn(async move {
-            if let Err(error) = chooser.free(&context_id).await {
+            let result = chooser.free(&context_id).await;
+            if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
                     %error,
@@ -257,6 +253,7 @@ pub(super) struct RequestGuard {
 impl RequestGuard {
     pub(super) fn new(
         chooser: Arc<KvRouter>,
+        request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
@@ -271,8 +268,9 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let request_metrics =
-            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        if scheduler_tracked {
+            request_metrics.requests_started_total().inc();
+        }
 
         Self {
             cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
@@ -331,10 +329,8 @@ impl RequestGuard {
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
         self.observability.observe_tokens(new_tokens);
-        let Some(update) = self
-            .output_blocks
-            .observe(self.observability.cumulative_osl())
-        else {
+        let cumulative_osl = self.observability.cumulative_osl();
+        let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
         };
 
