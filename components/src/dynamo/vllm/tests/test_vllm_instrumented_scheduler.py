@@ -3255,3 +3255,122 @@ def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
     stub._bench_current_point = BenchmarkPoint(point_type="decode")
     stub._last_update_time = 0.0  # previous update was an empty step
     assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+
+# ---------------------------------------------------------------------------
+# FPM worker_id propagation into the EngineCore child (snapshot restore)
+# ---------------------------------------------------------------------------
+#
+# In snapshot mode the engine — and therefore the scheduler and its FPM
+# publisher — is built before the Dynamo runtime exists, so the scheduler bakes
+# ``_fpm_worker_id = ""``. A restored worker keeps publishing that empty id, the
+# planner's ``known_workers`` filter drops every sample, and autoscaling stalls
+# on ``worker_count_mismatch``. ``_install_fpm_worker_id_utility`` attaches a
+# utility method to vLLM's ``EngineCore`` so the parent can push the real
+# ``connection_id`` into the already-running child after wake-up.
+
+FPM_UTILITY_NAME = "set_fpm_worker_id"
+
+
+def _fpm_utility():
+    from vllm.v1.engine.core import EngineCore
+
+    return getattr(EngineCore, FPM_UTILITY_NAME)
+
+
+def _fpm_scheduler_stub(worker_id: str = ""):
+    """``InstrumentedScheduler`` carrying only the two FPM identity fields.
+
+    Built with ``object.__new__`` for the same reason as the other stubs in
+    this module: the real ``__init__`` needs a full ``VllmConfig`` and binds a
+    ZMQ socket.
+    """
+    scheduler = object.__new__(InstrumentedScheduler)
+    scheduler._fpm_worker_id = worker_id
+    scheduler._publisher = SimpleNamespace(_worker_id=worker_id)
+    return scheduler
+
+
+def test_fpm_utility_installed_on_engine_core_base_class():
+    """The patch must land on ``EngineCore``, not on ``EngineCoreProc``.
+
+    vLLM instantiates ``EngineCoreProc``, ``DPEngineCoreProc`` or a Ray actor
+    variant depending on deployment, and the utility dispatch resolves
+    ``getattr(self, name)`` on the concrete instance. Patching the base class
+    is what makes every variant inherit it.
+    """
+    from vllm.v1.engine.core import EngineCore, EngineCoreProc
+
+    assert FPM_UTILITY_NAME in vars(EngineCore)
+    assert hasattr(EngineCoreProc, FPM_UTILITY_NAME)
+
+
+def test_fpm_utility_install_is_idempotent():
+    """A second install must not rebind an already-patched class."""
+    before = _fpm_utility()
+
+    instrumented_scheduler_module._install_fpm_worker_id_utility()
+
+    assert _fpm_utility() is before
+
+
+def test_fpm_utility_updates_scheduler_and_publisher():
+    """Both identity fields must be updated, not just the scheduler's.
+
+    ``_extract_metrics`` reads ``scheduler._fpm_worker_id`` on every active
+    sample, while the publisher thread stamps idle heartbeats from its own
+    ``_worker_id``. Updating only the first leaves an idle worker invisible to
+    the planner.
+    """
+    scheduler = _fpm_scheduler_stub()
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    _fpm_utility()(engine_core, "8465209922961459")
+
+    assert scheduler._fpm_worker_id == "8465209922961459"
+    assert scheduler._publisher._worker_id == "8465209922961459"
+
+
+def test_fpm_utility_overwrites_a_previously_set_id():
+    """A pod may be restored more than once; the id must follow the new runtime."""
+    scheduler = _fpm_scheduler_stub(worker_id="1111111111111111")
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    _fpm_utility()(engine_core, "2222222222222222")
+
+    assert scheduler._fpm_worker_id == "2222222222222222"
+    assert scheduler._publisher._worker_id == "2222222222222222"
+
+
+@pytest.mark.parametrize(
+    "scheduler", [None, SimpleNamespace()], ids=["missing", "foreign"]
+)
+def test_fpm_utility_rejects_non_instrumented_scheduler(scheduler):
+    """Raise rather than no-op, so the failure reaches the caller.
+
+    vLLM's ``_invoke_utility_method`` catches the exception and returns it to
+    the parent as ``failure_message``. A silent return would leave the worker
+    publishing ``""`` with nothing in the logs to explain it.
+    """
+    engine_core = SimpleNamespace(scheduler=scheduler)
+
+    with pytest.raises(RuntimeError, match="not InstrumentedScheduler"):
+        _fpm_utility()(engine_core, "8465209922961459")
+
+
+def test_fpm_utility_argument_is_not_msgspec_converted():
+    """Guard vLLM's ``_convert_msgspec_args`` contract for the id parameter.
+
+    vLLM converts an argument only when its annotation is a ``msgspec.Struct``
+    subclass. Annotating the worker id with a Struct would make vLLM attempt a
+    conversion on a plain string and fail at dispatch. The annotation is the
+    *string* ``"str"`` here because this module uses PEP 563 — which is why
+    this asserts the contract rather than ``annotation is str``.
+    """
+    from inspect import isclass, signature
+
+    import msgspec
+
+    annotation = signature(_fpm_utility()).parameters["new_worker_id"].annotation
+
+    assert not (isclass(annotation) and issubclass(annotation, msgspec.Struct))

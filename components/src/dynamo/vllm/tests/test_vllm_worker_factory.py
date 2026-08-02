@@ -14,8 +14,10 @@ import pytest
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
+    FPM_SET_WORKER_ID_METHOD_NAME,
     EngineSetupResult,
     WorkerFactory,
+    _sync_fpm_worker_id,
     _wait_and_load_benchmark,
 )
 
