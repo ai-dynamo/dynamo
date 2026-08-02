@@ -1146,7 +1146,7 @@ impl ModelManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn kv_chooser_for_with_selector<Sel>(
+    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
@@ -3198,7 +3198,6 @@ mod tests {
             .and_then(|model| model.get_worker_set("decode-a"))
             .and_then(|worker_set| worker_set.prefill_router.clone())
             .expect("decode router");
-        router.mark_active_for_test();
 
         mm.add_worker_set(
             "llama",
