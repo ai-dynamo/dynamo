@@ -226,7 +226,9 @@ message TopologyEntry
   repeated WorkerRole present_roles = 4;
   repeated WorkerRole missing_roles = 5;
   repeated TopologyMember members = 6;
-  bool degraded_disagg = 7;
+  // Unique typed roles advertised by more than one endpoint in this topology.
+  // Only PREFILL and DECODE are valid values.
+  repeated WorkerRole duplicate_role_endpoints = 7;
   bool legacy_fallback_active = 8;
   repeated AdapterReadiness adapters = 9;
 }

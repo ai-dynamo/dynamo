@@ -90,7 +90,8 @@ impl RelayFixture {
             membership_view(endpoint.clone()),
             &registry.catalog(),
         ));
-        topology.replace_availability(endpoint, Some(HashSet::from([WORKER_ID])));
+        topology.claim_availability(endpoint.clone(), 1);
+        topology.replace_availability(endpoint, 1, Some(HashSet::from([WORKER_ID])));
         assert!(registry.observe_load(
             pool_id,
             attachment.layout_generation,

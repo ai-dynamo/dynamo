@@ -15,6 +15,7 @@
 
 #[cfg(feature = "kv-dc-relay-wan")]
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
@@ -353,6 +354,8 @@ struct EndpointSlotStatus {
     layout_generation: u64,
     membership: Option<EndpointMembership>,
     actor: Option<KvDcRelayHandle>,
+    #[cfg(test)]
+    settled_membership_generation: Option<u64>,
     #[cfg(feature = "ckf-diagnostics")]
     recovery: WorkerQueryHealthSnapshot,
 }
@@ -364,6 +367,8 @@ impl Default for EndpointSlotStatus {
             layout_generation: 0,
             membership: None,
             actor: None,
+            #[cfg(test)]
+            settled_membership_generation: None,
             #[cfg(feature = "ckf-diagnostics")]
             recovery: WorkerQueryHealthSnapshot::default(),
         }
@@ -375,6 +380,7 @@ type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
 struct EndpointSlotTask {
     metadata: watch::Sender<Option<EndpointMembership>>,
     status: SharedEndpointStatus,
+    cancel: CancellationToken,
     task: JoinHandle<()>,
 }
 
@@ -973,8 +979,10 @@ async fn run_host_supervisor(
     let mut retired_slots = JoinSet::new();
     #[cfg(feature = "kv-dc-relay-wan")]
     let mut catalog_rx = pools.watch_catalog();
+    #[cfg(feature = "kv-dc-relay-wan")]
+    let mut next_slot_incarnation = 1u64;
 
-    let outcome = loop {
+    let outcome = 'supervisor: loop {
         let mut view = membership_rx.borrow_and_update().clone();
         reject_duplicate_live_pools(&mut view, ckf_dc_id);
         #[cfg(feature = "kv-dc-relay-wan")]
@@ -983,31 +991,50 @@ async fn run_host_supervisor(
             topology.replace_catalog(&catalog_rx.borrow_and_update());
         }
         for (slot_id, membership) in view.endpoints.iter() {
-            let slot = slots.entry(slot_id.clone()).or_insert_with(|| {
-                let (metadata, metadata_rx) = watch::channel(None);
-                let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
-                let task = tokio::spawn(run_endpoint_slot(
-                    component.clone(),
-                    ckf_dc_id,
-                    slot_id.clone(),
-                    metadata_rx,
-                    status.clone(),
-                    Arc::new(Semaphore::new(1)),
-                    recovery_fetch_permit.clone(),
-                    pools.clone(),
-                    recovery_attempt_timeout,
-                    cancel.child_token(),
+            let slot = match slots.entry(slot_id.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let (metadata, metadata_rx) = watch::channel(None);
+                    let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
+                    let slot_cancel = cancel.child_token();
                     #[cfg(feature = "kv-dc-relay-wan")]
-                    wan_facts_mode,
-                    #[cfg(feature = "kv-dc-relay-wan")]
-                    topology.clone(),
-                ));
-                EndpointSlotTask {
-                    metadata,
-                    status,
-                    task,
+                    let slot_incarnation =
+                        match allocate_slot_incarnation(&mut next_slot_incarnation) {
+                            Ok(slot_incarnation) => {
+                                topology.claim_availability(slot_id.clone(), slot_incarnation);
+                                slot_incarnation
+                            }
+                            Err(error) => {
+                                record_host_failure(&fatal_cancel, &terminal, error.to_string());
+                                break 'supervisor Err(error);
+                            }
+                        };
+                    let task = tokio::spawn(run_endpoint_slot(
+                        component.clone(),
+                        ckf_dc_id,
+                        slot_id.clone(),
+                        metadata_rx,
+                        status.clone(),
+                        Arc::new(Semaphore::new(1)),
+                        recovery_fetch_permit.clone(),
+                        pools.clone(),
+                        recovery_attempt_timeout,
+                        slot_cancel.clone(),
+                        #[cfg(feature = "kv-dc-relay-wan")]
+                        slot_incarnation,
+                        #[cfg(feature = "kv-dc-relay-wan")]
+                        wan_facts_mode,
+                        #[cfg(feature = "kv-dc-relay-wan")]
+                        topology.clone(),
+                    ));
+                    entry.insert(EndpointSlotTask {
+                        metadata,
+                        status,
+                        cancel: slot_cancel,
+                        task,
+                    })
                 }
-            });
+            };
             publish_endpoint_metadata_if_changed(&slot.metadata, membership);
         }
         retire_departed_endpoint_slots(&view, &mut slots, &mut retired_slots);
@@ -1016,44 +1043,55 @@ async fn run_host_supervisor(
             .map(|(slot_id, slot)| (slot_id.clone(), slot.status.clone()))
             .collect();
 
-        let catalog_changed = async {
-            #[cfg(feature = "kv-dc-relay-wan")]
-            {
-                return catalog_rx.changed().await;
-            }
-            #[cfg(not(feature = "kv-dc-relay-wan"))]
-            std::future::pending::<Result<(), watch::error::RecvError>>().await
-        };
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break Ok(()),
-            changed = membership_rx.changed() => {
-                if changed.is_err() {
-                    if cancel.is_cancelled() {
-                        break Ok(());
-                    }
-                    let reason = "KV DC Relay membership watch closed unexpectedly".to_string();
-                    record_host_failure(&fatal_cancel, &terminal, reason.clone());
-                    break Err(anyhow::anyhow!(reason));
-                }
-            }
-            changed = catalog_changed => {
+        loop {
+            let catalog_changed = async {
                 #[cfg(feature = "kv-dc-relay-wan")]
-                if changed.is_err() && !cancel.is_cancelled() {
-                    let reason = "KV DC Relay pool catalog watch closed unexpectedly".to_string();
-                    record_host_failure(&fatal_cancel, &terminal, reason.clone());
-                    break Err(anyhow::anyhow!(reason));
+                {
+                    return catalog_rx.changed().await;
                 }
                 #[cfg(not(feature = "kv-dc-relay-wan"))]
-                let _ = changed;
-            }
-            retired = retired_slots.join_next(), if !retired_slots.is_empty() => {
-                report_retired_endpoint_slot(retired);
+                std::future::pending::<Result<(), watch::error::RecvError>>().await
+            };
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break 'supervisor Ok(()),
+                changed = membership_rx.changed() => {
+                    if changed.is_err() {
+                        if cancel.is_cancelled() {
+                            break 'supervisor Ok(());
+                        }
+                        let reason = "KV DC Relay membership watch closed unexpectedly".to_string();
+                        record_host_failure(&fatal_cancel, &terminal, reason.clone());
+                        break 'supervisor Err(anyhow::anyhow!(reason));
+                    }
+                    break;
+                }
+                changed = catalog_changed => {
+                    #[cfg(feature = "kv-dc-relay-wan")]
+                    {
+                        if changed.is_err() {
+                            if cancel.is_cancelled() {
+                                break 'supervisor Ok(());
+                            }
+                            let reason = "KV DC Relay pool catalog watch closed unexpectedly".to_string();
+                            record_host_failure(&fatal_cancel, &terminal, reason.clone());
+                            break 'supervisor Err(anyhow::anyhow!(reason));
+                        }
+                        topology.replace_catalog(&catalog_rx.borrow_and_update());
+                        continue;
+                    }
+                    #[cfg(not(feature = "kv-dc-relay-wan"))]
+                    let _ = changed;
+                }
+                retired = retired_slots.join_next(), if !retired_slots.is_empty() => {
+                    report_retired_endpoint_slot(retired);
+                }
             }
         }
     };
 
     for (slot_id, slot) in slots {
+        slot.cancel.cancel();
         drop(slot.metadata);
         report_endpoint_slot_exit(slot_id, slot.task.await);
     }
@@ -1062,6 +1100,15 @@ async fn run_host_supervisor(
     }
     pools.shutdown().await;
     outcome
+}
+
+#[cfg(feature = "kv-dc-relay-wan")]
+fn allocate_slot_incarnation(next: &mut u64) -> anyhow::Result<u64> {
+    let incarnation = *next;
+    *next = incarnation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("KV DC Relay endpoint-slot incarnation space exhausted"))?;
+    Ok(incarnation)
 }
 
 async fn supervise_host_task(
@@ -1164,6 +1211,7 @@ fn retire_departed_endpoint_slots(
         let Some(slot) = slots.remove(&slot_id) else {
             continue;
         };
+        slot.cancel.cancel();
         drop(slot.metadata);
         retired_slots.spawn(async move {
             let result = slot.task.await;
@@ -1235,6 +1283,7 @@ async fn run_endpoint_slot(
     pools: Arc<PoolRegistry>,
     recovery_attempt_timeout: Duration,
     cancel: CancellationToken,
+    #[cfg(feature = "kv-dc-relay-wan")] slot_incarnation: u64,
     #[cfg(feature = "kv-dc-relay-wan")] wan_facts_mode: WanFactsMode,
     #[cfg(feature = "kv-dc-relay-wan")] topology: Arc<TopologyPublisher>,
 ) {
@@ -1251,12 +1300,19 @@ async fn run_endpoint_slot(
     let mut retry_delay = Duration::from_millis(100);
     let mut start_failures = 0u64;
     let mut registration_refresh_failures = 0u64;
+    let mut role_refresh_failures = 0u64;
     let mut pending_faults = PendingActorFaults::default();
 
     loop {
         let membership = metadata_rx.borrow_and_update().clone();
+        #[cfg(test)]
+        let membership_generation = membership.as_ref().map(|membership| membership.generation);
         {
             let mut current = status.write().await;
+            #[cfg(test)]
+            if current.settled_membership_generation != membership_generation {
+                current.settled_membership_generation = None;
+            }
             current.membership = membership.clone();
             current.layout_generation = layout_generation;
             if runtime.is_none() {
@@ -1270,12 +1326,16 @@ async fn run_endpoint_slot(
                 Ok(receiver) => {
                     // Both runtime watchers carry an initial snapshot. An empty snapshot is an
                     // authoritative observation that the endpoint currently has no live workers.
-                    topology.replace_availability(endpoint.clone(), Some(receiver.live_workers()));
+                    topology.replace_availability(
+                        endpoint.clone(),
+                        slot_incarnation,
+                        Some(receiver.live_workers()),
+                    );
                     instance_rx = Some(receiver);
                     availability_retry_delay = Duration::from_millis(100);
                 }
                 Err(error) => {
-                    topology.replace_availability(endpoint.clone(), None);
+                    topology.replace_availability(endpoint.clone(), slot_incarnation, None);
                     tracing::debug!(
                         %endpoint,
                         %error,
@@ -1321,6 +1381,7 @@ async fn run_endpoint_slot(
             retry_delay = Duration::from_millis(100);
             start_failures = 0;
             registration_refresh_failures = 0;
+            role_refresh_failures = 0;
         }
 
         let binding_changed = runtime
@@ -1404,12 +1465,27 @@ async fn run_endpoint_slot(
             && active.roles != membership.roles
         {
             match pools.replace_roles(&mut active.attachment, membership.roles.clone()) {
-                Ok(()) => active.roles.clone_from(&membership.roles),
-                Err(error) => tracing::warn!(
-                    %endpoint,
-                    %error,
-                    "Failed to refresh KV DC Relay pool roles"
-                ),
+                Ok(()) => {
+                    role_refresh_failures = 0;
+                    active.roles.clone_from(&membership.roles);
+                }
+                Err(error) => {
+                    role_refresh_failures = role_refresh_failures.saturating_add(1);
+                    if role_refresh_failures == 1 {
+                        tracing::warn!(
+                            %endpoint,
+                            %error,
+                            "Failed to refresh KV DC Relay pool roles"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %endpoint,
+                            %error,
+                            role_refresh_failures,
+                            "KV DC Relay pool role refresh failed again"
+                        );
+                    }
+                }
             }
         }
 
@@ -1473,6 +1549,7 @@ async fn run_endpoint_slot(
                     retry_delay = Duration::from_millis(100);
                     start_failures = 0;
                     registration_refresh_failures = 0;
+                    role_refresh_failures = 0;
                     layout_generation = candidate.attachment.layout_generation;
                     let mut current = status.write().await;
                     current.layout_generation = layout_generation;
@@ -1495,6 +1572,11 @@ async fn run_endpoint_slot(
                     current.actor = None;
                 }
             }
+        }
+
+        #[cfg(test)]
+        {
+            status.write().await.settled_membership_generation = membership_generation;
         }
 
         enum SlotInput {
@@ -1582,6 +1664,7 @@ async fn run_endpoint_slot(
             SlotInput::Instance => {
                 topology.replace_availability(
                     endpoint.clone(),
+                    slot_incarnation,
                     instance_rx
                         .as_ref()
                         .map(EndpointAvailabilityWatch::live_workers),
@@ -1590,7 +1673,7 @@ async fn run_endpoint_slot(
             #[cfg(feature = "kv-dc-relay-wan")]
             SlotInput::AvailabilityRetry => {
                 instance_rx = None;
-                topology.replace_availability(endpoint.clone(), None);
+                topology.replace_availability(endpoint.clone(), slot_incarnation, None);
                 availability_retry_delay = availability_retry_delay
                     .saturating_mul(2)
                     .min(Duration::from_secs(5));
@@ -2428,7 +2511,7 @@ mod tests {
         component: &Component,
         endpoint: &EndpointId,
         worker: WorkerWithDpRank,
-    ) -> EventPublisher {
+    ) -> (EventPublisher, DiscoveryInstance) {
         let publisher = EventPublisher::for_endpoint_id_with_transport(
             component.drt(),
             endpoint,
@@ -2443,7 +2526,7 @@ mod tests {
             publisher_id: publisher.publisher_id(),
             recovery_target: None,
         };
-        component
+        let instance = component
             .drt()
             .discovery()
             .register(DiscoverySpec::EventSource {
@@ -2456,7 +2539,7 @@ mod tests {
             })
             .await
             .unwrap();
-        publisher
+        (publisher, instance)
     }
 
     fn projected_membership(
@@ -2530,16 +2613,36 @@ mod tests {
         .expect("Relay catalog transition timed out")
     }
 
+    async fn wait_for_slot_settled(
+        status: &SharedEndpointStatus,
+        membership_generation: u64,
+    ) -> EndpointSlotStatus {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = status.read().await.clone();
+                if current.settled_membership_generation == Some(membership_generation) {
+                    return current;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("endpoint slot did not settle")
+    }
+
     #[tokio::test]
-    async fn departed_endpoint_slots_are_reaped_instead_of_parked() {
+    async fn departed_endpoint_slots_are_cancelled_before_reaping() {
         let slot_id = EndpointId::from("prod.backend.generate");
-        let (metadata, mut metadata_rx) = watch::channel(None);
-        let task = tokio::spawn(async move { while metadata_rx.changed().await.is_ok() {} });
+        let (metadata, _metadata_rx) = watch::channel(None);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move { task_cancel.cancelled().await });
         let mut slots = HashMap::from([(
             slot_id.clone(),
             EndpointSlotTask {
                 metadata,
                 status: Arc::new(RwLock::new(EndpointSlotStatus::default())),
+                cancel: cancel.clone(),
                 task,
             },
         )]);
@@ -2552,6 +2655,7 @@ mod tests {
         );
 
         assert!(slots.is_empty());
+        assert!(cancel.is_cancelled());
         let (retired_slot, result) = retired_slots.join_next().await.unwrap().unwrap();
         assert_eq!(retired_slot, slot_id);
         result.unwrap();
@@ -2823,8 +2927,10 @@ mod tests {
         let serving_endpoint = EndpointId::from("relay-test.backend.generate");
         let old_kv_endpoint = EndpointId::from("relay-test.backend.kv-old");
         let new_kv_endpoint = EndpointId::from("relay-test.backend.kv-new");
-        let _old_publisher = register_live_source(&component, &old_kv_endpoint, worker).await;
-        let _new_publisher = register_live_source(&component, &new_kv_endpoint, worker).await;
+        let (_old_publisher, _old_instance) =
+            register_live_source(&component, &old_kv_endpoint, worker).await;
+        let (_new_publisher, _new_instance) =
+            register_live_source(&component, &new_kv_endpoint, worker).await;
         let old_membership = projected_membership(
             &serving_endpoint,
             worker_id,
@@ -2860,6 +2966,8 @@ mod tests {
             registry.clone(),
             Duration::from_secs(1),
             slot_cancel.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            1,
             #[cfg(feature = "kv-dc-relay-wan")]
             WanFactsMode::Disabled,
             #[cfg(feature = "kv-dc-relay-wan")]
@@ -2913,7 +3021,8 @@ mod tests {
         let worker = WorkerWithDpRank::new(worker_id, 0);
         let serving_endpoint = EndpointId::from("relay-test.backend.generate");
         let kv_endpoint = EndpointId::from("relay-test.backend.kv");
-        let _publisher = register_live_source(&component, &kv_endpoint, worker).await;
+        let (_publisher, _source_instance) =
+            register_live_source(&component, &kv_endpoint, worker).await;
         let old_membership = projected_membership_with_metadata(
             &serving_endpoint,
             worker_id,
@@ -2953,6 +3062,8 @@ mod tests {
             registry.clone(),
             Duration::from_secs(1),
             slot_cancel.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            1,
             #[cfg(feature = "kv-dc-relay-wan")]
             WanFactsMode::Disabled,
             #[cfg(feature = "kv-dc-relay-wan")]
@@ -3030,6 +3141,83 @@ mod tests {
                 kv_state_endpoint: endpoint,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn endpoint_slot_materializes_and_dematerializes_with_its_kv_source() {
+        let component = test_component("source-transition").await;
+        let worker_id = component.drt().connection_id();
+        let worker = WorkerWithDpRank::new(worker_id, 0);
+        let serving_endpoint = EndpointId::from("relay-test.backend.generate");
+        let kv_endpoint = EndpointId::from("relay-test.backend.kv");
+        let membership = projected_membership(
+            &serving_endpoint,
+            worker_id,
+            "llama",
+            "meta/llama",
+            kv_endpoint.clone(),
+        );
+        let membership_generation = membership.generation;
+        let (_metadata_tx, metadata_rx) = watch::channel(Some(membership));
+        let status = Arc::new(RwLock::new(EndpointSlotStatus::default()));
+        let registry = Arc::new(registry());
+        let mut catalog_rx = registry.watch_catalog();
+        let slot_cancel = CancellationToken::new();
+        #[cfg(feature = "kv-dc-relay-wan")]
+        let topology = Arc::new(TopologyPublisher::new(
+            DcMembershipView::default(),
+            &registry.catalog(),
+        ));
+        let slot = tokio::spawn(run_endpoint_slot(
+            component.clone(),
+            DcId::new(7),
+            serving_endpoint.clone(),
+            metadata_rx,
+            status.clone(),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+            registry.clone(),
+            Duration::from_secs(1),
+            slot_cancel.clone(),
+            #[cfg(feature = "kv-dc-relay-wan")]
+            1,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            WanFactsMode::Disabled,
+            #[cfg(feature = "kv-dc-relay-wan")]
+            topology,
+        ));
+
+        let settled = wait_for_slot_settled(&status, membership_generation).await;
+        assert_eq!(settled.lifecycle, SlotLifecycle::Discovered);
+        assert!(settled.actor.is_none());
+        assert!(catalog_rx.borrow_and_update().pools().is_empty());
+
+        let (_publisher, source_instance) =
+            register_live_source(&component, &kv_endpoint, worker).await;
+        let materialized = wait_for_catalog(&mut catalog_rx, |catalog| {
+            catalog
+                .pools()
+                .iter()
+                .any(|descriptor| descriptor.serving_endpoint() == &serving_endpoint)
+        })
+        .await;
+        assert_eq!(materialized.pools().len(), 1);
+
+        component
+            .drt()
+            .discovery()
+            .unregister(source_instance)
+            .await
+            .unwrap();
+        let withdrawn =
+            wait_for_catalog(&mut catalog_rx, |catalog| catalog.pools().is_empty()).await;
+        assert!(withdrawn.pools().is_empty());
+
+        slot_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), slot)
+            .await
+            .expect("endpoint slot shutdown timed out")
+            .unwrap();
     }
 
     #[tokio::test]

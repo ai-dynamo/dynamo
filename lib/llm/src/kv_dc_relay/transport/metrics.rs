@@ -310,7 +310,7 @@ impl TransportMetrics {
         let mut unknown = 0usize;
         let mut unavailable = 0usize;
         let mut ready = 0usize;
-        for entry in readiness.entries {
+        for entry in &readiness.entries {
             match entry.state {
                 TopologyReadinessState::Unknown => unknown += 1,
                 TopologyReadinessState::Unavailable => unavailable += 1,

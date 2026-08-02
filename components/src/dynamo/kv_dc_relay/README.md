@@ -28,6 +28,12 @@ namespace-wide dependencies can be evaluated without merging their CKFs. Topolog
 back to a pool by stable `PoolId`; consumers resolve the current producer generation through the
 catalog.
 
+The Relay materializes an endpoint pool only when the endpoint membership has a valid indexer
+domain and model registration with no structural conflict, its runtime configuration resolves one
+KV-state endpoint, and at least one expected worker/rank advertises an active KV event source. If
+any condition stops holding, the Relay withdraws the pool before teardown. The topology member can
+remain present while its `pool_id` changes from a value to `None`.
+
 For each pool, the Relay:
 
 - Tracks the exact full hashes owned by every `(worker, dp_rank)` member.
@@ -58,12 +64,16 @@ The Relay uses separate recovery boundaries for each exported fact:
   signal. A lagged load subscriber reconnects without affecting catalog, readiness, or CKF streams.
 
 The Relay publishes pool facts and does not merge or rank independent pools. Consumers choose how
-to compare those streams.
+to compare those streams. The readiness projection's `duplicate_role_endpoints` field reports which
+typed Prefill/Decode roles are advertised by multiple endpoints for one topology key. It is a
+topology fact, not a version-independent statement that the deployment is degraded or that local
+rendezvous is disabled.
 
 In prefill/decode (PD) and encode/prefill/decode (EPD) deployments, each endpoint with an active KV
 event source has its own pool. Prefill and Decode CKFs are both meaningful and may use different
 query semantics. An Encode-only endpoint remains an `ENCODE` member of the serving topology, but
 has no pool link and allocates no CKF or load state unless it advertises an active KV event source.
+Removing that source withdraws the Encode pool and returns the member to `pool_id: None`.
 
 ## Usage
 

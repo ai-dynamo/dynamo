@@ -97,6 +97,13 @@ topology member with role `ENCODE`, but its `pool_id` is present only while the 
 active KV event source. This avoids allocating an empty CKF and load state while preserving
 automatic materialization if an Encode implementation publishes KV events later.
 
+An endpoint has a materialized pool only while all three conditions hold: its membership has an
+indexer domain, at least one valid registration, and no structural conflict; its runtime configs
+resolve one unambiguous KV-state endpoint; and at least one expected worker/rank has an active KV
+event source. If the source disappears or either other condition stops holding, the Relay
+withdraws the pool generation and the topology member's `pool_id` changes from present to absent.
+The endpoint can remain in serving topology without a physical KV pool.
+
 `WatchKvPoolCatalog` sends the current complete snapshot immediately. Later updates are also
 complete snapshots and may skip revision numbers when watch notifications coalesce. A reconnecting
 consumer replaces its local catalog with the first snapshot on the new stream.
@@ -147,8 +154,11 @@ The evaluator mirrors Dynamo's `Model::evaluate_namespace` behavior:
 
 - Any legacy card activates the compatibility fallback: the entry is ready when any worker is
   live, and `legacy_fallback_active` exposes the weaker gating.
-- Multiple typed Prefill or Decode endpoints for one key remain serviceable but set
-  `degraded_disagg`, matching Dynamo's ambiguous rendezvous behavior.
+- `duplicate_role_endpoints` lists each typed Prefill or Decode role advertised by more than one
+  endpoint for the key. It is an observable topology fact, not a `degraded` verdict: whether a
+  particular Dynamo version or deployment disables local Prefill/Decode rendezvous is consumer
+  policy and cannot be inferred from this field alone. Other roles and duplicate values are
+  rejected by wire validation.
 - An adapter deployment card never creates a top-level entry. Its status appears under the base
   entry's `adapters` list. Prefill, Decode, and Aggregated roles can carry adapter membership;
   Encode remains a required base-topology dependency but is not adapter-bearing.

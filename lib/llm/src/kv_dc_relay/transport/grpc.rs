@@ -281,7 +281,7 @@ impl proto::KvEventRelay for KvEventRelayService {
         let stream = try_stream! {
             let _permit = permit;
             let _subscriber = metrics.subscriber_guard(StreamKind::Readiness);
-            yield readiness_to_wire(initial, relay);
+            yield readiness_to_wire(&initial, relay);
             let first_heartbeat = tokio::time::Instant::now() + heartbeat_interval;
             let mut heartbeat = tokio::time::interval_at(first_heartbeat, heartbeat_interval);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -297,7 +297,7 @@ impl proto::KvEventRelay for KvEventRelayService {
                     }
                     _ = heartbeat.tick() => snapshots.borrow().clone(),
                 };
-                yield readiness_to_wire(snapshot, relay);
+                yield readiness_to_wire(&snapshot, relay);
             }
         };
         Ok(Response::new(Box::pin(stream)))
@@ -456,7 +456,7 @@ fn catalog_to_wire(catalog: DcPoolCatalog, relay: DcRelayIdentity) -> proto::KvP
 }
 
 fn readiness_to_wire(
-    snapshot: TopologySnapshot,
+    snapshot: &TopologySnapshot,
     relay: DcRelayIdentity,
 ) -> proto::ServingReadinessUpdate {
     proto::ServingReadinessUpdate {
@@ -465,48 +465,58 @@ fn readiness_to_wire(
         revision: snapshot.revision,
         entries: snapshot
             .entries
-            .into_iter()
+            .iter()
             .map(|entry| proto::TopologyEntry {
-                namespace: entry.namespace,
+                namespace: entry.namespace.clone(),
                 canonical_model_id: entry.model.as_str().to_string(),
                 state: readiness_state_to_wire(entry.state) as i32,
                 present_roles: entry
                     .present_roles
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .map(worker_role_to_wire)
                     .map(|role| role as i32)
                     .collect(),
                 missing_roles: entry
                     .missing_roles
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .map(worker_role_to_wire)
                     .map(|role| role as i32)
                     .collect(),
                 members: entry
                     .members
-                    .into_iter()
+                    .iter()
                     .map(|member| proto::TopologyMember {
                         endpoint: Some(endpoint_to_wire(&member.endpoint)),
                         roles: member
                             .roles
-                            .into_iter()
+                            .iter()
+                            .copied()
                             .map(worker_role_to_wire)
                             .map(|role| role as i32)
                             .collect(),
                         pool_id: member.pool_id.map(pool_id_to_wire),
                     })
                     .collect(),
-                degraded_disagg: entry.degraded_disagg,
+                duplicate_role_endpoints: entry
+                    .duplicate_role_endpoints
+                    .iter()
+                    .copied()
+                    .map(worker_role_to_wire)
+                    .map(|role| role as i32)
+                    .collect(),
                 legacy_fallback_active: entry.legacy_fallback_active,
                 adapters: entry
                     .adapters
-                    .into_iter()
+                    .iter()
                     .map(|adapter| proto::AdapterReadiness {
                         canonical_model_id: adapter.model.as_str().to_string(),
                         state: readiness_state_to_wire(adapter.state) as i32,
                         missing_roles: adapter
                             .missing_roles
-                            .into_iter()
+                            .iter()
+                            .copied()
                             .map(worker_role_to_wire)
                             .map(|role| role as i32)
                             .collect(),

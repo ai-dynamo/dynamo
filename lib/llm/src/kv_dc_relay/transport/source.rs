@@ -57,7 +57,7 @@ impl WanPublicationSource {
         self.pools.watch_catalog()
     }
 
-    pub(crate) fn watch_readiness(&self) -> watch::Receiver<TopologySnapshot> {
+    pub(crate) fn watch_readiness(&self) -> watch::Receiver<Arc<TopologySnapshot>> {
         self.topology.watch()
     }
 

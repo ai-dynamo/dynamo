@@ -46,6 +46,16 @@ Combining KV state from independent endpoints would make a hit ambiguous: a cons
 one endpoint while the matching prefix exists only in another. Separate streams preserve the
 physical routing boundary and let the consumer apply its own policy.
 
+The Relay materializes an endpoint pool only while all of these conditions hold:
+
+- The endpoint membership has an indexer domain, at least one valid model registration, and no
+  structural conflict.
+- The endpoint's runtime configuration resolves one unambiguous KV-state endpoint.
+- At least one expected worker/rank advertises an active KV event source.
+
+If any condition stops holding, the Relay withdraws the pool before actor teardown. The endpoint
+can remain in serving topology while its member link changes from a `PoolId` to no pool link.
+
 ## Pool and Producer Identity
 
 An indexer domain combines cache semantics with a routing-isolation scope. The normal derived
@@ -107,7 +117,8 @@ readiness but is not an adapter-bearing role; Low-Rank Adaptation membership is 
 Prefill, Decode, and Aggregated roles. An Encode-only endpoint remains an `ENCODE` topology member,
 but its `pool_id` is present only while the Relay observes an active KV event source. Without one,
 the Relay allocates no CKF or load state. If an Encode implementation starts publishing KV events,
-the Relay materializes its endpoint-local pool and updates the topology link.
+the Relay materializes its endpoint-local pool and updates the topology link. Removing that source
+withdraws the pool and changes the member's `pool_id` from present to absent.
 
 ## WAN API
 
@@ -181,8 +192,10 @@ topology with the required live roles. Each entry is keyed by
 `TopologyEntry.members` lists each endpoint, its declared roles, and an optional stable
 `PoolId`. Consumers resolve the current `ProducerIdentity` through the catalog. Any legacy model
 card activates Dynamo's compatibility fallback—ready when any worker is live—and sets
-`legacy_fallback_active`. More than one typed Prefill or Decode endpoint keeps the entry ready but
-sets `degraded_disagg`, matching Dynamo's behavior when prefill/decode rendezvous is ambiguous.
+`legacy_fallback_active`. `duplicate_role_endpoints` lists each typed Prefill or Decode role that is
+advertised by more than one endpoint for the key. This is an observable topology fact, not a
+version-independent conclusion that serving is degraded or that local Prefill/Decode rendezvous is
+disabled. Consumers decide how to interpret it for their Dynamo version and deployment policy.
 
 For a LoRA target, the nested adapter status also requires adapter membership with the advertised
 backing base model on each applicable role. Readiness is a serving fact, not a CKF hit guarantee.

@@ -47,6 +47,8 @@ pub enum WireIdentityError {
     WorkerRole(i32),
     #[error("worker-role set repeats {0:?}")]
     DuplicateWorkerRole(WorkerRole),
+    #[error("duplicate endpoint role {0:?} is not supported")]
+    UnsupportedDuplicateEndpointRole(WorkerRole),
     #[error("serving topology has unsupported readiness state {0}")]
     ReadinessState(i32),
     #[error("serving topology must contain at least one member")]
@@ -215,6 +217,7 @@ pub fn validate_topology_entry(entry: &TopologyEntry) -> Result<(), WireIdentity
     validate_readiness_state(entry.state)?;
     validate_role_set(&entry.present_roles)?;
     validate_role_set(&entry.missing_roles)?;
+    validate_duplicate_endpoint_roles(&entry.duplicate_role_endpoints)?;
     if entry.members.is_empty() {
         return Err(WireIdentityError::MissingTopologyMembers);
     }
@@ -261,6 +264,17 @@ fn validate_readiness_state(value: i32) -> Result<(), WireIdentityError> {
     ServingReadinessState::try_from(value)
         .map(|_| ())
         .map_err(|_| WireIdentityError::ReadinessState(value))
+}
+
+fn validate_duplicate_endpoint_roles(roles: &[i32]) -> Result<(), WireIdentityError> {
+    validate_role_set(roles)?;
+    for &value in roles {
+        let role = WorkerRole::try_from(value).map_err(|_| WireIdentityError::WorkerRole(value))?;
+        if !matches!(role, WorkerRole::Prefill | WorkerRole::Decode) {
+            return Err(WireIdentityError::UnsupportedDuplicateEndpointRole(role));
+        }
+    }
+    Ok(())
 }
 
 fn validate_role_set(roles: &[i32]) -> Result<(), WireIdentityError> {
@@ -509,7 +523,7 @@ mod tests {
                 roles: vec![WorkerRole::Decode as i32],
                 pool_id: Some(pool_id()),
             }],
-            degraded_disagg: false,
+            duplicate_role_endpoints: vec![WorkerRole::Prefill as i32],
             legacy_fallback_active: false,
             adapters: vec![AdapterReadiness {
                 canonical_model_id: "tenant-a".into(),
@@ -545,6 +559,32 @@ mod tests {
             validate_topology_entry(&wrong_namespace),
             Err(WireIdentityError::TopologyNamespaceMismatch { .. })
         ));
+
+        let mut unsupported_duplicate_role = valid.clone();
+        unsupported_duplicate_role.duplicate_role_endpoints = vec![WorkerRole::Legacy as i32];
+        assert_eq!(
+            validate_topology_entry(&unsupported_duplicate_role),
+            Err(WireIdentityError::UnsupportedDuplicateEndpointRole(
+                WorkerRole::Legacy
+            ))
+        );
+
+        for unsupported_role in [WorkerRole::Unspecified as i32, 99] {
+            let mut unsupported_duplicate_role = valid.clone();
+            unsupported_duplicate_role.duplicate_role_endpoints = vec![unsupported_role];
+            assert_eq!(
+                validate_topology_entry(&unsupported_duplicate_role),
+                Err(WireIdentityError::WorkerRole(unsupported_role))
+            );
+        }
+
+        let mut repeated_duplicate_role = valid.clone();
+        repeated_duplicate_role.duplicate_role_endpoints =
+            vec![WorkerRole::Decode as i32, WorkerRole::Decode as i32];
+        assert_eq!(
+            validate_topology_entry(&repeated_duplicate_role),
+            Err(WireIdentityError::DuplicateWorkerRole(WorkerRole::Decode))
+        );
 
         let mut duplicate_adapter = valid;
         duplicate_adapter

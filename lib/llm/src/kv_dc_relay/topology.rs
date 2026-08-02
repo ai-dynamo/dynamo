@@ -4,6 +4,7 @@
 //! Namespace-scoped serving topology projected independently from endpoint-local CKF pools.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::protocols::WorkerId;
@@ -44,7 +45,7 @@ pub(crate) struct TopologyEntry {
     pub(crate) present_roles: Vec<WorkerRole>,
     pub(crate) missing_roles: Vec<WorkerRole>,
     pub(crate) members: Vec<TopologyMember>,
-    pub(crate) degraded_disagg: bool,
+    pub(crate) duplicate_role_endpoints: Vec<WorkerRole>,
     pub(crate) legacy_fallback_active: bool,
     pub(crate) adapters: Vec<AdapterReadiness>,
 }
@@ -158,6 +159,7 @@ impl TopologyAggregate {
 struct TopologyProjectionInputs {
     membership: DcMembershipView,
     availability: HashMap<EndpointId, Option<HashSet<WorkerId>>>,
+    availability_owners: HashMap<EndpointId, u64>,
     pools: HashMap<EndpointId, PoolId>,
     revision: u64,
 }
@@ -165,7 +167,7 @@ struct TopologyProjectionInputs {
 /// Host-owned publication state. PoolRegistry contributes only its read-only catalog projection.
 pub(crate) struct TopologyPublisher {
     state: Mutex<TopologyProjectionInputs>,
-    sender: watch::Sender<TopologySnapshot>,
+    sender: watch::Sender<Arc<TopologySnapshot>>,
 }
 
 impl TopologyPublisher {
@@ -173,7 +175,7 @@ impl TopologyPublisher {
         let pools = pool_links(catalog);
         let entries = derive_topology(&membership, &HashMap::new(), &pools);
         let revision = 1;
-        let (sender, _) = watch::channel(TopologySnapshot { revision, entries });
+        let (sender, _) = watch::channel(Arc::new(TopologySnapshot { revision, entries }));
         Self {
             state: Mutex::new(TopologyProjectionInputs {
                 membership,
@@ -185,11 +187,11 @@ impl TopologyPublisher {
         }
     }
 
-    pub(crate) fn watch(&self) -> watch::Receiver<TopologySnapshot> {
+    pub(crate) fn watch(&self) -> watch::Receiver<Arc<TopologySnapshot>> {
         self.sender.subscribe()
     }
 
-    pub(crate) fn snapshot(&self) -> TopologySnapshot {
+    pub(crate) fn snapshot(&self) -> Arc<TopologySnapshot> {
         self.sender.borrow().clone()
     }
 
@@ -201,8 +203,32 @@ impl TopologyPublisher {
         state
             .availability
             .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
+        state
+            .availability_owners
+            .retain(|endpoint, _| membership.endpoints.contains_key(endpoint));
         state.membership = membership;
         publish_if_changed(&mut state, &self.sender);
+    }
+
+    /// Claims readiness publication for one endpoint-slot incarnation.
+    ///
+    /// A later slot claim fences delayed writes from the retired slot. Replacing an owner also
+    /// clears its last availability snapshot until the new slot publishes an authoritative one.
+    pub(crate) fn claim_availability(&self, endpoint: EndpointId, slot_incarnation: u64) {
+        let mut state = self.state.lock();
+        if !state.membership.endpoints.contains_key(&endpoint) {
+            return;
+        }
+        if state
+            .availability_owners
+            .insert(endpoint.clone(), slot_incarnation)
+            == Some(slot_incarnation)
+        {
+            return;
+        }
+        if state.availability.remove(&endpoint).is_some() {
+            publish_if_changed(&mut state, &self.sender);
+        }
     }
 
     pub(crate) fn replace_catalog(&self, catalog: &DcPoolCatalog) {
@@ -220,10 +246,11 @@ impl TopologyPublisher {
     pub(crate) fn replace_availability(
         &self,
         endpoint: EndpointId,
+        slot_incarnation: u64,
         live_workers: Option<HashSet<WorkerId>>,
     ) {
         let mut state = self.state.lock();
-        if !state.membership.endpoints.contains_key(&endpoint) {
+        if state.availability_owners.get(&endpoint) != Some(&slot_incarnation) {
             return;
         }
         if state.availability.get(&endpoint) == Some(&live_workers) {
@@ -236,17 +263,17 @@ impl TopologyPublisher {
 
 fn publish_if_changed(
     state: &mut TopologyProjectionInputs,
-    sender: &watch::Sender<TopologySnapshot>,
+    sender: &watch::Sender<Arc<TopologySnapshot>>,
 ) {
     let entries = derive_topology(&state.membership, &state.availability, &state.pools);
     if sender.borrow().entries == entries {
         return;
     }
     state.revision = state.revision.saturating_add(1);
-    sender.send_replace(TopologySnapshot {
+    sender.send_replace(Arc::new(TopologySnapshot {
         revision: state.revision,
         entries,
-    });
+    }));
 }
 
 fn pool_links(catalog: &DcPoolCatalog) -> HashMap<EndpointId, PoolId> {
@@ -311,8 +338,7 @@ fn derive_topology(
             } else {
                 TopologyReadinessState::Unavailable
             };
-            let degraded_disagg = has_ambiguous_role(&group.members, WorkerRole::Prefill)
-                || has_ambiguous_role(&group.members, WorkerRole::Decode);
+            let duplicate_role_endpoints = duplicate_role_endpoints(&group.members);
             let adapters = derive_adapters(&group.adapters, &group.members, state, &evaluation);
             TopologyEntry {
                 namespace,
@@ -329,7 +355,7 @@ fn derive_topology(
                     evaluation.missing_roles
                 },
                 members: group.members,
-                degraded_disagg,
+                duplicate_role_endpoints,
                 legacy_fallback_active: evaluation.has_legacy,
                 adapters,
             }
@@ -442,14 +468,18 @@ fn derive_adapters(
         .collect()
 }
 
-fn has_ambiguous_role(members: &[TopologyMember], role: WorkerRole) -> bool {
-    members
-        .iter()
-        .filter(|member| member.roles.contains(&role))
-        .map(|member| &member.endpoint)
-        .collect::<HashSet<_>>()
-        .len()
-        > 1
+fn duplicate_role_endpoints(members: &[TopologyMember]) -> Vec<WorkerRole> {
+    [WorkerRole::Prefill, WorkerRole::Decode]
+        .into_iter()
+        .filter(|role| {
+            members
+                .iter()
+                .filter(|member| member.roles.contains(role))
+                .take(2)
+                .count()
+                > 1
+        })
+        .collect()
 }
 
 fn sorted_worker_roles(roles: HashSet<WorkerType>) -> Vec<WorkerRole> {
@@ -602,13 +632,19 @@ mod tests {
     }
 
     fn publisher(view: &DcMembershipView) -> TopologyPublisher {
-        TopologyPublisher::new(view.clone(), &catalog(view, 1))
+        let publisher = TopologyPublisher::new(view.clone(), &catalog(view, 1));
+        for membership in view.endpoints.values() {
+            publisher.claim_availability(membership.endpoint.clone(), membership.generation);
+        }
+        publisher
     }
 
     fn publish_live(publisher: &TopologyPublisher, view: &DcMembershipView) {
         for membership in view.endpoints.values() {
+            publisher.claim_availability(membership.endpoint.clone(), membership.generation);
             publisher.replace_availability(
                 membership.endpoint.clone(),
+                membership.generation,
                 Some(membership.worker_topology.keys().copied().collect()),
             );
         }
@@ -727,7 +763,7 @@ mod tests {
             entry.namespace == "production"
                 && entry.state == TopologyReadinessState::Ready
                 && entry.present_roles == [WorkerRole::Aggregated]
-                && !entry.degraded_disagg
+                && entry.duplicate_role_endpoints.is_empty()
         }));
     }
 
@@ -766,7 +802,7 @@ mod tests {
                 .iter()
                 .all(|member| member.pool_id.is_some())
         );
-        assert!(!topology.degraded_disagg);
+        assert!(topology.duplicate_role_endpoints.is_empty());
     }
 
     #[test]
@@ -831,7 +867,7 @@ mod tests {
             .expect("encode member");
         assert!(encode_member.pool_id.is_some());
 
-        publisher.replace_availability(encode, Some(HashSet::new()));
+        publisher.replace_availability(encode, 1, Some(HashSet::new()));
         let unavailable = publisher.snapshot();
         let topology = entry(&unavailable, "vision-language");
         assert_eq!(topology.state, TopologyReadinessState::Unavailable);
@@ -839,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_pd_endpoints_are_ready_but_marked_degraded() {
+    fn duplicate_pd_endpoints_report_each_duplicated_role() {
         let view = view(vec![
             endpoint(
                 "production.prefill-a.generate",
@@ -876,7 +912,45 @@ mod tests {
         let topology = entry(&snapshot, "llama");
 
         assert_eq!(topology.state, TopologyReadinessState::Ready);
-        assert!(topology.degraded_disagg);
+        assert_eq!(
+            topology.duplicate_role_endpoints,
+            [WorkerRole::Prefill, WorkerRole::Decode]
+        );
+    }
+
+    #[test]
+    fn duplicate_role_endpoints_reports_only_the_duplicated_role() {
+        let view = view(vec![
+            endpoint(
+                "production.prefill-a.generate",
+                "llama",
+                1,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.prefill-b.generate",
+                "llama",
+                2,
+                Some(WorkerType::Prefill),
+                vec![vec![WorkerType::Decode]],
+            ),
+            endpoint(
+                "production.decode.generate",
+                "llama",
+                3,
+                Some(WorkerType::Decode),
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+
+        assert_eq!(
+            entry(&snapshot, "llama").duplicate_role_endpoints,
+            [WorkerRole::Prefill]
+        );
     }
 
     #[test]
@@ -917,7 +991,8 @@ mod tests {
 
         assert_eq!(snapshot.entries.len(), 2);
         assert!(snapshot.entries.iter().all(|entry| {
-            entry.state == TopologyReadinessState::Ready && !entry.degraded_disagg
+            entry.state == TopologyReadinessState::Ready
+                && entry.duplicate_role_endpoints.is_empty()
         }));
     }
 
@@ -936,10 +1011,12 @@ mod tests {
         let mixed_publisher = publisher(&mixed);
         mixed_publisher.replace_availability(
             EndpointId::from("production.legacy.generate"),
+            1,
             Some(HashSet::from([1])),
         );
         mixed_publisher.replace_availability(
             EndpointId::from("production.decode.generate"),
+            1,
             Some(HashSet::new()),
         );
         let snapshot = mixed_publisher.snapshot();
@@ -1010,7 +1087,7 @@ mod tests {
         assert_eq!(topology.adapters[0].state, TopologyReadinessState::Ready);
         assert!(topology.adapters[0].missing_roles.is_empty());
 
-        publisher.replace_availability(encode, Some(HashSet::new()));
+        publisher.replace_availability(encode, 1, Some(HashSet::new()));
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "vision-language");
         assert_eq!(topology.state, TopologyReadinessState::Unavailable);
@@ -1047,6 +1124,7 @@ mod tests {
 
         publisher.replace_availability(
             EndpointId::from("production.prefill.generate"),
+            1,
             Some(HashSet::from([1])),
         );
         let partial = publisher.snapshot();
@@ -1057,6 +1135,7 @@ mod tests {
 
         publisher.replace_availability(
             EndpointId::from("production.decode.generate"),
+            1,
             Some(HashSet::from([2])),
         );
         let ready = publisher.snapshot();
@@ -1064,9 +1143,72 @@ mod tests {
         let revision = ready.revision;
         publisher.replace_availability(
             EndpointId::from("production.decode.generate"),
+            1,
             Some(HashSet::from([2])),
         );
         assert_eq!(publisher.snapshot().revision, revision);
+    }
+
+    #[test]
+    fn retired_slot_cannot_overwrite_readded_endpoint_availability() {
+        let endpoint_id = EndpointId::from("production.backend.generate");
+        let old_view = view(vec![endpoint(
+            "production.backend.generate",
+            "llama",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        )]);
+        let publisher = publisher(&old_view);
+        publisher.replace_availability(endpoint_id.clone(), 1, Some(HashSet::from([1])));
+        assert_eq!(
+            entry(&publisher.snapshot(), "llama").state,
+            TopologyReadinessState::Ready
+        );
+
+        publisher.replace_membership(DcMembershipView::default());
+        let mut replacement = old_view.endpoints[&endpoint_id].clone();
+        replacement.generation = 2;
+        publisher.replace_membership(view(vec![replacement]));
+        publisher.claim_availability(endpoint_id.clone(), 2);
+        publisher.replace_availability(endpoint_id.clone(), 2, Some(HashSet::new()));
+        let replacement_snapshot = publisher.snapshot();
+        assert_eq!(
+            entry(&replacement_snapshot, "llama").state,
+            TopologyReadinessState::Unavailable
+        );
+
+        publisher.replace_availability(endpoint_id, 1, Some(HashSet::from([1])));
+        let after_zombie_write = publisher.snapshot();
+        assert_eq!(after_zombie_write.revision, replacement_snapshot.revision);
+        assert_eq!(
+            entry(&after_zombie_write, "llama").state,
+            TopologyReadinessState::Unavailable
+        );
+    }
+
+    #[test]
+    fn membership_update_keeps_availability_owned_by_the_same_slot() {
+        let endpoint_id = EndpointId::from("production.backend.generate");
+        let old_view = view(vec![endpoint(
+            "production.backend.generate",
+            "llama",
+            1,
+            Some(WorkerType::Aggregated),
+            Vec::new(),
+        )]);
+        let publisher = publisher(&old_view);
+        publisher.replace_availability(endpoint_id.clone(), 1, Some(HashSet::from([1])));
+        let before = publisher.snapshot();
+        assert_eq!(entry(&before, "llama").state, TopologyReadinessState::Ready);
+
+        let mut updated = old_view.endpoints[&endpoint_id].clone();
+        updated.generation = 2;
+        publisher.replace_membership(view(vec![updated]));
+        let after = publisher.snapshot();
+
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(entry(&after, "llama").state, TopologyReadinessState::Ready);
     }
 
     #[test]
