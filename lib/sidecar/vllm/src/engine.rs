@@ -8,7 +8,8 @@ use dynamo_backend_common::{
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
-use tokio::sync::OnceCell;
+use serde_json::json;
+use tokio::sync::{Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
@@ -18,6 +19,7 @@ use crate::discovery::{
     BootstrapIdentity, bootstrap_discover, build_engine_config, inference_world_size, nonempty,
     validate_discovery,
 };
+use crate::lora::{next_lora_id, parse_load_lora, publish_lora_model};
 use crate::model::ConfiguredModel;
 
 pub struct VllmSidecarEngine {
@@ -27,6 +29,10 @@ pub struct VllmSidecarEngine {
     transport: GrpcTransportConfig,
     bootstrap_identity: Option<BootstrapIdentity>,
     client: OnceCell<VllmClient>,
+    runtime_endpoint: OnceCell<dynamo_runtime::component::Endpoint>,
+    lora_update_lock: Mutex<()>,
+    supports_lora: bool,
+    max_loras: u32,
     cancel: CancellationToken,
 }
 
@@ -51,6 +57,10 @@ impl VllmSidecarEngine {
             transport,
             bootstrap_identity: None,
             client: OnceCell::new(),
+            runtime_endpoint: OnceCell::new(),
+            lora_update_lock: Mutex::new(()),
+            supports_lora: false,
+            max_loras: 0,
             cancel: CancellationToken::new(),
         }
     }
@@ -124,7 +134,8 @@ impl VllmSidecarEngine {
             None
         };
         let engine = Self::new(endpoint, model.clone(), mode, transport)
-            .with_bootstrap_identity(BootstrapIdentity::from_discovery(&discovery));
+            .with_bootstrap_identity(BootstrapIdentity::from_discovery(&discovery))
+            .with_lora_support(discovery.model.supports_lora, discovery.server.max_loras);
         let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
             (None, None)
         } else {
@@ -164,6 +175,12 @@ impl VllmSidecarEngine {
 
     fn with_bootstrap_identity(mut self, identity: BootstrapIdentity) -> Self {
         self.bootstrap_identity = Some(identity);
+        self
+    }
+
+    fn with_lora_support(mut self, supports_lora: bool, max_loras: u32) -> Self {
+        self.supports_lora = supports_lora && max_loras > 0;
+        self.max_loras = max_loras;
         self
     }
 }
@@ -309,6 +326,68 @@ impl LLMEngine for VllmSidecarEngine {
                 }
             }
         }))
+    }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(if self.supports_lora {
+            vec!["load_lora".to_string()]
+        } else {
+            Vec::new()
+        })
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        if update != "load_lora" || !self.supports_lora {
+            return Ok(json!({
+                "status": "error",
+                "message": format!("unsupported engine update: {update}"),
+            }));
+        }
+        let request = parse_load_lora(&body)?;
+        let client = self
+            .client
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
+        let endpoint = self
+            .runtime_endpoint
+            .get()
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar runtime endpoint is not ready"))?;
+        let _guard = self.lora_update_lock.lock().await;
+        let adapters = client.list_loras().await?;
+        let lora_id = next_lora_id(&adapters, &request.name)?;
+        let response = client
+            .load_lora(
+                crate::proto::LoraAdapter {
+                    lora_id,
+                    lora_name: request.name,
+                    source_path: request.path.to_string_lossy().into_owned(),
+                },
+                request.load_inplace,
+            )
+            .await?;
+        let adapter = response.adapter.ok_or_else(|| {
+            client::protocol_error("LoadLora response did not contain the loaded adapter")
+        })?;
+        publish_lora_model(endpoint, &adapter, self.max_loras).await?;
+        Ok(json!({
+            "status": "success",
+            "lora_name": adapter.lora_name,
+            "lora_id": adapter.lora_id,
+            "already_loaded": response.already_loaded,
+        }))
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.runtime_endpoint.set(endpoint).map_err(|_| {
+            client::engine_shutdown("vLLM sidecar runtime endpoint was already initialized")
+        })
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

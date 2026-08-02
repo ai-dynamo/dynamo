@@ -3029,6 +3029,8 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -3040,6 +3042,7 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+ "url",
 ]
 
 [[package]]

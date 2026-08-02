@@ -82,6 +82,36 @@ impl VllmClient {
             .map_err(|status| status_to_dynamo("GetModelInfo", status))?;
         Ok(Discovery { server, model })
     }
+
+    pub(crate) async fn load_lora(
+        &self,
+        adapter: pb::LoraAdapter,
+        load_inplace: bool,
+    ) -> Result<pb::LoadLoraResponse, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .load_lora(pb::LoadLoraRequest {
+                adapter: Some(adapter),
+                load_inplace,
+            })
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("LoadLora", status))
+    }
+
+    pub(crate) async fn list_loras(&self) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
+        let mut client = pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .list_loras(pb::ListLorasRequest {})
+            .await
+            .map(tonic::Response::into_inner)
+            .map(|response| response.adapters)
+            .map_err(|status| status_to_dynamo("ListLoras", status))
+    }
 }
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
