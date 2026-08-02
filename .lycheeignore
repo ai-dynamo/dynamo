@@ -47,3 +47,8 @@
 # it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
+
+# The LMCache MP manifest is added in this same PR, so blob/main links to it 404
+# from CI until the PR merges. Remove this entry once agg_lmcache.yaml lands on
+# main (afterwards lychee validates the URL again, catching any later rename/move).
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lmcache\.yaml
