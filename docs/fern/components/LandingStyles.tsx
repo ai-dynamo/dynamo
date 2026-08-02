@@ -496,146 +496,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 }
 
-/* App-notification community stack on wide screens; it moves below the demo when space is tight. */
-.dynamo-welcome__community {
-  position: absolute;
-  top: -20rem;
-  right: calc((100vw - 1200px) / -2 + 1rem);
-  z-index: 30;
-  display: flex;
-  width: 242px;
-  flex-direction: column;
-  gap: 0.55rem;
-}
-
-.dynamo-welcome__notification {
-  display: grid;
-  grid-template-columns: 2.55rem 1fr;
-  gap: 0.7rem;
-  align-items: center;
-  min-height: 4.3rem;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 18px;
-  background:
-    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.74), transparent 45%),
-    linear-gradient(145deg, rgba(250, 250, 250, 0.72), rgba(231, 235, 226, 0.62));
-  color: var(--grayscale-a12) !important;
-  box-shadow:
-    0 18px 46px rgba(28, 38, 18, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.88);
-  text-decoration: none !important;
-  backdrop-filter: blur(24px) saturate(1.4);
-  transition:
-    transform 160ms ease,
-    border-color 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.dark .dynamo-welcome__notification {
-  border-color: rgba(255, 255, 255, 0.12);
-  background:
-    radial-gradient(circle at 14% 0%, rgba(255, 255, 255, 0.12), transparent 45%),
-    linear-gradient(145deg, rgba(35, 38, 31, 0.78), rgba(14, 16, 12, 0.7));
-  box-shadow:
-    0 18px 46px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-}
-
-.dynamo-welcome__notification:hover,
-.dynamo-welcome__notification:focus-visible {
-  transform: translateX(-4px);
-  border-color: rgba(118, 185, 0, 0.55);
-  box-shadow: 0 18px 42px rgba(54, 86, 0, 0.2);
-}
-
-.dynamo-welcome__notification:focus-visible {
-  outline: 3px solid rgba(118, 185, 0, 0.34);
-  outline-offset: 3px;
-}
-
-.dynamo-welcome__notification-icon {
-  display: grid;
-  width: 2.55rem;
-  height: 2.55rem;
-  place-items: center;
-  border-radius: 11px;
-  color: white;
-  box-shadow:
-    0 5px 14px rgba(0, 0, 0, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
-}
-
-.dynamo-welcome__notification--slack .dynamo-welcome__notification-icon {
-  background: #4a154b;
-}
-
-.dynamo-welcome__notification--calendar .dynamo-welcome__notification-icon {
-  background: #ff3b30;
-}
-
-.dynamo-welcome__notification-icon svg {
-  width: 1.42rem;
-  height: 1.42rem;
-  fill: currentColor;
-}
-
-.dynamo-welcome__calendar-app {
-  display: grid;
-  width: 1.55rem;
-  height: 1.65rem;
-  grid-template-rows: 0.55rem 1fr;
-  overflow: hidden;
-  border-radius: 5px;
-  background: white;
-  color: #171717;
-  text-align: center;
-}
-
-.dynamo-welcome__calendar-app > span {
-  display: grid;
-  place-items: center;
-  background: #ff3b30;
-  color: white;
-  font-size: 0.38rem;
-  font-weight: 800;
-  letter-spacing: 0.03em;
-}
-
-.dynamo-welcome__calendar-app strong {
-  display: grid;
-  place-items: center;
-  font-size: 0.72rem;
-  line-height: 1;
-}
-
-.dynamo-welcome__notification-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 0.18rem;
-  color: var(--grayscale-a11);
-  font-size: 0.76rem;
-  line-height: 1.25;
-}
-
-.dynamo-welcome__notification-app {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-  color: var(--grayscale-a12);
-  font-size: 0.78rem;
-  font-weight: 700;
-}
-
-.dynamo-welcome__notification-app small {
-  color: var(--grayscale-a9);
-  font-size: 0.65rem;
-  font-weight: 500;
-  text-transform: uppercase;
-}
-
 /* Scroll-driven feature story: copy advances on the left while one large visual stays pinned. */
 .dynamo-story {
   display: grid;
@@ -1500,21 +1360,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   margin: 0;
 }
 
-@media (max-width: 1360px) {
-
-  .dynamo-welcome__community {
-    position: static;
-    width: min(100%, 720px);
-    margin: 2rem auto 0;
-    flex-direction: row;
-  }
-
-  .dynamo-welcome__notification {
-    flex: 1;
-    min-width: 0;
-  }
-}
-
 @media (max-width: 960px) {
 
   .dynamo-story {
@@ -1612,14 +1457,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
     line-height: 1.65;
   }
 
-  .dynamo-welcome__community {
-    width: min(100%, 350px);
-    flex-direction: column;
-  }
-
-  .dynamo-welcome__notification {
-    width: 100%;
-  }
   .dynamo-story__step {
     margin-bottom: 3.5rem;
   }
@@ -1726,7 +1563,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 
   .dynamo-welcome__cta,
-  .dynamo-welcome__notification,
   .dynamo-story__step,
   .dynamo-story__step-copy,
   .dynamo-story__stage-panel {
