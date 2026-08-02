@@ -12,7 +12,15 @@ validation, Cuckoo Bucket Images v1 (CBI1), and the descriptor set used by gRPC 
 The protobuf package is `dynamo.kvrelay.v1`. `RELAY_PROTOCOL_VERSION` is `1`, and every top-level
 request and response carries `RELAY_CONTRACT_MARKER` (`0x4B565231`). The marker makes this schema a
 clean break from the retired prototype v1 contract. There is no compatibility mode for the old
-model-key streams, flat model bindings, or four-RPC API.
+model-key streams, flat model bindings, or four-RPC API. Until the contract ships to production,
+schema changes remain clean breaks within v1 — including re-typing existing fields (e.g.
+`TopologyEntry` field 7, `degraded_disagg` → `duplicate_role_endpoints`); version discipline
+starts at release.
+
+Companion documents: [`../docs/architecture.md`](../docs/architecture.md)
+(what the Relay derives from the DC and how deployment shapes map onto it),
+[`../docs/grpc-contract.md`](../docs/grpc-contract.md) (contract-level RPC and message
+semantics), and [`../docs/metrics.md`](../docs/metrics.md) (exported Prometheus metrics).
 
 ## RPC Contract
 
