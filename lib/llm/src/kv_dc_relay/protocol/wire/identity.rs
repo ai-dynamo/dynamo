@@ -560,14 +560,14 @@ mod tests {
             Err(WireIdentityError::TopologyNamespaceMismatch { .. })
         ));
 
-        let mut unsupported_duplicate_role = valid.clone();
-        unsupported_duplicate_role.duplicate_role_endpoints = vec![WorkerRole::Legacy as i32];
-        assert_eq!(
-            validate_topology_entry(&unsupported_duplicate_role),
-            Err(WireIdentityError::UnsupportedDuplicateEndpointRole(
-                WorkerRole::Legacy
-            ))
-        );
+        for role in [WorkerRole::Legacy, WorkerRole::Aggregated, WorkerRole::Encode] {
+            let mut unsupported_duplicate_role = valid.clone();
+            unsupported_duplicate_role.duplicate_role_endpoints = vec![role as i32];
+            assert_eq!(
+                validate_topology_entry(&unsupported_duplicate_role),
+                Err(WireIdentityError::UnsupportedDuplicateEndpointRole(role))
+            );
+        }
 
         for unsupported_role in [WorkerRole::Unspecified as i32, 99] {
             let mut unsupported_duplicate_role = valid.clone();

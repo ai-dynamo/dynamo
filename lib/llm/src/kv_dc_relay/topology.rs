@@ -954,6 +954,34 @@ mod tests {
     }
 
     #[test]
+    fn duplicated_aggregated_endpoints_are_legal_scale_out() {
+        let view = view(vec![
+            endpoint(
+                "production.backend-a.generate",
+                "llama",
+                1,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            ),
+            endpoint(
+                "production.backend-b.generate",
+                "llama",
+                2,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            ),
+        ]);
+        let publisher = publisher(&view);
+        publish_live(&publisher, &view);
+        let snapshot = publisher.snapshot();
+
+        let entry = entry(&snapshot, "llama");
+        assert_eq!(entry.state, TopologyReadinessState::Ready);
+        assert_eq!(entry.members.len(), 2);
+        assert!(entry.duplicate_role_endpoints.is_empty());
+    }
+
+    #[test]
     fn independent_pd_models_do_not_trigger_cross_model_ambiguity() {
         let view = view(vec![
             endpoint(
