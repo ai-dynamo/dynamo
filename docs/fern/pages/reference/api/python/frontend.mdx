@@ -107,12 +107,12 @@ from dynamo.frontend.sglang_processor import SglangEngineFactory
 SglangEngineFactory(config: FrontendConfig, debug_perf: bool = False, tool_call_parser_name: str | None = None, reasoning_parser_name: str | None = None, chat_template: str | None = None)
 ```
 
-[`components/src/dynamo/frontend/sglang_processor.py#L728`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L728)
+[`components/src/dynamo/frontend/sglang_processor.py#L764`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L764)
 
 **Public methods**
 
-- `__init__(config: FrontendConfig, debug_perf: bool = False, tool_call_parser_name: str | None = None, reasoning_parser_name: str | None = None, chat_template: str | None = None)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L729))
-- `chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, routed_engine: RoutedEngine) -> PythonAsyncEngine` — Called by Rust when a model is discovered. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L756))
+- `__init__(config: FrontendConfig, debug_perf: bool = False, tool_call_parser_name: str | None = None, reasoning_parser_name: str | None = None, chat_template: str | None = None)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L765))
+- `chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, routed_engine: RoutedEngine) -> PythonAsyncEngine` — Called by Rust when a model is discovered. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L792))
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-sglangpreprocessresult" title="SglangPreprocessResult (class)">
@@ -144,7 +144,7 @@ from dynamo.frontend.sglang_processor import SglangPreprocessWorkerResult
 SglangPreprocessWorkerResult(prompt_token_ids: list[int], dynamo_preproc: dict[str, Any], request: dict[str, Any], force_reasoning: bool = False, effective_reasoning_parser_name: str | None = None) -> None
 ```
 
-[`components/src/dynamo/frontend/sglang_processor.py#L176`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L176)
+[`components/src/dynamo/frontend/sglang_processor.py#L212`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L212)
 
 **Public methods**
 
@@ -162,12 +162,12 @@ from dynamo.frontend.sglang_processor import SglangProcessor
 SglangProcessor(tokenizer, routed_engine: RoutedEngine, tool_call_parser_name: str | None, reasoning_parser_name: str | None, eos_token_ids: list[int] | None, debug_perf: bool = False, preprocess_pool: ProcessPoolExecutor | None = None, preprocess_workers: int = 0, stream_interval: int = 1, default_thinking_mode: str | None = None)
 ```
 
-[`components/src/dynamo/frontend/sglang_processor.py#L355`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L355)
+[`components/src/dynamo/frontend/sglang_processor.py#L391`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L391)
 
 **Public methods**
 
-- `__init__(tokenizer, routed_engine: RoutedEngine, tool_call_parser_name: str | None, reasoning_parser_name: str | None, eos_token_ids: list[int] | None, debug_perf: bool = False, preprocess_pool: ProcessPoolExecutor | None = None, preprocess_workers: int = 0, stream_interval: int = 1, default_thinking_mode: str | None = None)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L356))
-- `generator(request: dict[str, Any], context: Any | None = None) -> AsyncGenerator[dict[str, Any], None]` — Main entry point: preprocess, route, post-process a chat request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L400))
+- `__init__(tokenizer, routed_engine: RoutedEngine, tool_call_parser_name: str | None, reasoning_parser_name: str | None, eos_token_ids: list[int] | None, debug_perf: bool = False, preprocess_pool: ProcessPoolExecutor | None = None, preprocess_workers: int = 0, stream_interval: int = 1, default_thinking_mode: str | None = None)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L392))
+- `generator(request: dict[str, Any], context: Any | None = None) -> AsyncGenerator[dict[str, Any], None]` — Main entry point: preprocess, route, post-process a chat request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L436))
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-sglangstreamingpostprocessor" title="SglangStreamingPostProcessor (class)">
@@ -186,12 +186,12 @@ Handles:
 - Reasoning content extraction via SGLang ReasoningParser
 - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L930`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L930)
+[`components/src/dynamo/frontend/sglang_prepost.py#L934`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L934)
 
 **Public methods**
 
-- `__init__(*, tokenizer, tool_call_parser: ToolCallParserType | None, reasoning_parser: ReasoningParser | None, history_tool_calls_count: int = 0, sglang_tools: list[SglangTool] | None = None, tool_call_parser_name: str | None = None, eos_token_ids: list[int] | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L945))
-- `process_output(engine_response: dict[str, Any]) -> dict[str, Any] | None` — Process a single engine response chunk into an OpenAI SSE choice dict. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1095))
+- `__init__(*, tokenizer, tool_call_parser: ToolCallParserType | None, reasoning_parser: ReasoningParser | None, history_tool_calls_count: int = 0, sglang_tools: list[SglangTool] | None = None, tool_call_parser_name: str | None = None, eos_token_ids: list[int] | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L949))
+- `process_output(engine_response: dict[str, Any]) -> dict[str, Any] | None` — Process a single engine response chunk into an OpenAI SSE choice dict. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1099))
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-streamingpostprocessor" title="StreamingPostProcessor (class)">
@@ -274,7 +274,7 @@ from dynamo.frontend.sglang_prepost import build_response_format_guided_decoding
 build_response_format_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L624`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L624)
+[`components/src/dynamo/frontend/sglang_prepost.py#L628`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L628)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
@@ -288,7 +288,7 @@ from dynamo.frontend.sglang_prepost import build_tool_call_guided_decoding
 build_tool_call_guided_decoding(request: dict[str, Any], *, tool_call_parser_name: str | None, sglang_tools: list[SglangTool] | None) -> dict[str, Any] | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L558`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L558)
+[`components/src/dynamo/frontend/sglang_prepost.py#L562`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L562)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-convert-tools" title="convert_tools (function)">
@@ -302,7 +302,7 @@ from dynamo.frontend.sglang_prepost import convert_tools
 convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L192`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L192)
+[`components/src/dynamo/frontend/sglang_prepost.py#L196`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L196)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-create-parsers" title="create_parsers (function)">
@@ -327,7 +327,7 @@ For ``tool_choice="required"`` or a named function, uses
 constrains the output to a JSON array.  Otherwise uses the model-specific
 `FunctionCallParser`.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L266`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L266)
+[`components/src/dynamo/frontend/sglang_prepost.py#L270`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L270)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-detect-force-reasoning-from-template" title="detect_force_reasoning_from_template (function)">
@@ -533,7 +533,7 @@ request-level thinking controls.
 
 Synchronous -- suitable for both main-process and worker-process execution.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L709`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L709)
+[`components/src/dynamo/frontend/sglang_prepost.py#L713`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L713)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
@@ -624,9 +624,9 @@ resolve_request_force_reasoning(request: dict[str, Any], reasoning_parser_name: 
 Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
 combined with template_manager.force_reasoning:
 
-* opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+* opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
 default, ``chat_template_kwargs.enable_thinking=False`` (or
-``thinking=False`` for ``kimi_k2``) disables it.
+``thinking=False`` for Kimi) disables it.
 * MiniMax-M3 defaults to adaptive, but SGLang still enables the
 reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
 explicitly ``"disabled"``.
@@ -636,7 +636,7 @@ explicitly ``"disabled"``.
 enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
 * anything else: follow the statically-detected template default.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L120`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L120)
+[`components/src/dynamo/frontend/sglang_prepost.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L122)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-thinking-runtime-default-thinking-mode" title="runtime_default_thinking_mode (function)">
