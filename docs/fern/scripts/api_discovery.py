@@ -160,7 +160,12 @@ class DocSection:
 
 @dataclass(frozen=True)
 class Method:
-    """One public method on a class, as surfaced in the expanded body."""
+    """One public method on a class, as surfaced in the expanded body.
+
+    ``docs`` carries the same parsed sections as :attr:`Symbol.docs`, so a
+    method's parameters, returns, raises, and admonitions render through the
+    one path rather than being flattened into :attr:`summary`.
+    """
 
     name: str
     signature: str
@@ -168,6 +173,7 @@ class Method:
     source_path: str
     source_line: int
     source_href: str
+    docs: tuple[DocSection, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -501,6 +507,7 @@ def _iter_public_methods(cls: Class) -> Iterator[Method]:
             source_path=source_path,
             source_line=source_line,
             source_href=_source_href(source_path, source_line),
+            docs=_docstring_sections(target),
         )
 
 

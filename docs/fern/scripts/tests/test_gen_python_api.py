@@ -850,3 +850,68 @@ def _collect_python_pages(node: object) -> set[str]:
         for value in node.values():
             found |= _collect_python_pages(value)
     return found
+
+
+def test_method_anchors_are_unique_within_a_page(
+    all_modules: list[api_discovery.Module],
+) -> None:
+    """Every anchor a module page emits must be unique on that page.
+
+    Method names repeat across classes -- ``initialize`` sits on both
+    ``Connection`` and ``Connector`` in ``dynamo.nixl_connect`` -- so an
+    anchor derived from the method name alone would collide and Fern would
+    resolve a deep link to whichever symbol rendered first.
+    """
+    for module in all_modules:
+        anchors = [api_rendering.symbol_anchor(sym) for sym in module.symbols]
+        anchors += [
+            api_rendering.method_anchor(sym, method)
+            for sym in module.symbols
+            for method in sym.methods
+        ]
+        duplicates = {a for a in anchors if anchors.count(a) > 1}
+        assert not duplicates, f"{module.name}: duplicate anchors {sorted(duplicates)}"
+
+
+def test_every_public_method_renders_through_one_shape(
+    modules_by_name: dict[str, api_discovery.Module],
+) -> None:
+    """Rendering must not depend on whether a docstring documents params.
+
+    Promoting only the documented methods would let docstring coverage decide
+    which methods look important, so a class whose trivial method happens to
+    carry ``Args:`` would outrank the load-bearing one beside it.
+    """
+    module = modules_by_name["dynamo.nixl_connect"]
+    page = api_rendering.render_module_page(module)
+    for symbol in module.symbols:
+        for method in symbol.methods:
+            anchor = api_rendering.method_anchor(symbol, method)
+            assert (
+                f'<h4 id="{anchor}">' in page
+            ), f"{symbol.name}.{method.name} rendered without its anchored heading"
+    assert "- `" not in page.split("**Public methods**", 1)[-1].split("</Accordion>")[0]
+
+
+def test_method_docstring_sections_reach_the_page(
+    modules_by_name: dict[str, api_discovery.Module],
+) -> None:
+    """A method's parameters, returns, and raises must survive to the MDX.
+
+    ``Method`` previously carried only a summary, so everything below a
+    docstring's first line was dropped. ``Connector.begin_read`` documents
+    all three section kinds, which makes it the regression canary.
+    """
+    module = modules_by_name["dynamo.nixl_connect"]
+    connector = next(s for s in module.symbols if s.name == "Connector")
+    begin_read = next(m for m in connector.methods if m.name == "begin_read")
+    kinds = {section.kind for section in begin_read.docs}
+    assert {"parameters", "returns", "raises"} <= kinds, f"got {sorted(kinds)}"
+
+    page = api_rendering.render_module_page(module)
+    body = page.split(
+        f'<h4 id="{api_rendering.method_anchor(connector, begin_read)}">'
+    )[1].split("<h4 ")[0]
+    assert '<ParamField path="remote_metadata"' in body
+    assert "**Returns**" in body
+    assert "**Raises**" in body

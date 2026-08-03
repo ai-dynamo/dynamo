@@ -29,8 +29,30 @@ Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
 
 **Public methods**
 
-- `__init__()` — Initialize health check payload. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L87))
-- `to_dict() -> Dict[str, Any]` — Get the health check payload as a dictionary. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L100))
+<h4 id="api-dynamo-health-check-healthcheckpayload-init">__init__</h4>
+
+```python
+__init__()
+```
+
+Initialize health check payload.
+
+Subclasses should call super().__init__() after setting self.default_payload.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L87)
+
+<h4 id="api-dynamo-health-check-healthcheckpayload-to-dict">to_dict</h4>
+
+```python
+to_dict() -> Dict[str, Any]
+```
+
+Get the health check payload as a dictionary.
+
+Returns the environment override if DYN_HEALTH_CHECK_PAYLOAD is set,
+otherwise returns the default payload.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/health_check.py#L100)
 </Accordion>
 
 <Accordion id="api-dynamo-health-check-load-health-check-from-env" title="load_health_check_from_env (function)">

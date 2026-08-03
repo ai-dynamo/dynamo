@@ -63,6 +63,18 @@ def symbol_anchor(symbol: Symbol) -> str:
     return f"api-{slug}"
 
 
+def method_anchor(symbol: Symbol, method: Method) -> str:
+    """Stable, page-unique DOM id for one method's deep link.
+
+    Qualifying by the owning symbol is what makes this page-unique: method
+    names repeat across classes on a module page (``initialize`` sits on both
+    ``Connection`` and ``Connector``), so a bare heading id would collide and
+    Fern would resolve the link to whichever came first.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", method.name.lower()).strip("-")
+    return f"{symbol_anchor(symbol)}-{slug}"
+
+
 def import_statement(symbol: Symbol) -> str:
     """Valid Python import statement, preserving a public alias name."""
     module_name, import_name = symbol.import_path.rsplit(".", 1)
@@ -129,12 +141,13 @@ def _symbol_body(symbol: Symbol) -> list[str]:
         f"[`{symbol.source_path}#L{symbol.source_line}`]({symbol.source_href})",
     ]
     if symbol.methods:
-        lines += ["", "**Public methods**", ""]
-        lines.extend(_method_line(method) for method in symbol.methods)
+        lines += ["", "**Public methods**"]
+        for method in symbol.methods:
+            lines += ["", *_method_block(symbol, method)]
     return lines
 
 
-def _split_lead(symbol: Symbol) -> tuple[str, tuple[DocSection, ...]]:
+def _split_lead(symbol: Symbol | Method) -> tuple[str, tuple[DocSection, ...]]:
     """The accordion's opening line, and the sections that follow it.
 
     :attr:`Symbol.summary` stops at the docstring's first newline because the
@@ -331,10 +344,34 @@ def _admonition(section: DocSection) -> list[str]:
     return [f"<{tag}>", *_prose_block(section.text), f"</{tag}>"]
 
 
-def _method_line(method: Method) -> str:
-    """One public method bullet with signature, summary, and source."""
-    summary = escape_mdx_prose(method.summary) or "No summary available."
-    return f"- `{method.signature}` — {summary} ([source]({method.source_href}))"
+def _method_block(symbol: Symbol, method: Method) -> list[str]:
+    """One public method as an anchored heading, signature, and its sections.
+
+    Every method renders through this one shape whether or not its docstring
+    documents parameters. Promoting only the documented ones would let
+    docstring coverage decide the page's visual rhythm, so a class whose
+    trivial method happens to carry ``Args:`` would give that method more
+    prominence than the load-bearing one beside it.
+
+    The heading is raw ``<h4>`` rather than Markdown because the id has to be
+    qualified by the owning class to stay unique, and Fern derives Markdown
+    heading ids from the text alone. It carries its name as visible text, so
+    it is not the empty ``<a id>`` this generator replaced.
+    """
+    lead, detail = _split_lead(method)
+    anchor = method_anchor(symbol, method)
+    return [
+        f'<h4 id="{anchor}">{mdx_attribute(method.name)}</h4>',
+        "",
+        "```python",
+        method.signature,
+        "```",
+        "",
+        lead,
+        *_docstring_detail(detail),
+        "",
+        f"[source]({method.source_href})",
+    ]
 
 
 def render_landing_page(modules: Iterable[Module]) -> str:

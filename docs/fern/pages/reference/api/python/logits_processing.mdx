@@ -41,7 +41,15 @@ positions.
 
 **Public methods**
 
-- `__init__(token_ids: Sequence[int], eos_token_id: int)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/forced_sequence.py#L27))
+<h4 id="api-dynamo-logits-processing-examples-forced-sequence-forcedsequencelogitsprocessor-init">__init__</h4>
+
+```python
+__init__(token_ids: Sequence[int], eos_token_id: int)
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/forced_sequence.py#L27)
 </Accordion>
 
 <Accordion id="api-dynamo-logits-processing-examples-hello-world-helloworldlogitsprocessor" title="HelloWorldLogitsProcessor (class)">
@@ -63,7 +71,15 @@ reuses the shared forced-sequence masking and per-request state.
 
 **Public methods**
 
-- `__init__(tokenizer: PreTrainedTokenizerBase)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py#L21))
+<h4 id="api-dynamo-logits-processing-examples-hello-world-helloworldlogitsprocessor-init">__init__</h4>
+
+```python
+__init__(tokenizer: PreTrainedTokenizerBase)
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py#L21)
 </Accordion>
 
 <Accordion id="api-dynamo-logits-processing-examples-temperature-temperatureprocessor" title="TemperatureProcessor (class)">
@@ -84,5 +100,13 @@ that can be used with any Dynamo backend.
 
 **Public methods**
 
-- `__init__(temperature: float = 1.0)` — Args: ([source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py#L19))
+<h4 id="api-dynamo-logits-processing-examples-temperature-temperatureprocessor-init">__init__</h4>
+
+```python
+__init__(temperature: float = 1.0)
+```
+
+Args: temperature: Scaling factor. Higher values make distribution more uniform, lower values make it more peaked. Must be positive.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py#L19)
 </Accordion>

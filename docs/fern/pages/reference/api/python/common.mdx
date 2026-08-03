@@ -20,8 +20,36 @@ from dynamo.common.multimodal import AbstractEmbeddingReceiver
 
 **Public methods**
 
-- `receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]` — Abstract method to receive precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L88))
-- `release_tensor(tensor_id: int) -> None` — Abstract method to indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L104))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingreceiver-receive-embeddings">receive_embeddings</h4>
+
+```python
+receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]
+```
+
+Abstract method to receive precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="request" type="TransferRequest">
+The TransferRequest object containing information to receive embeddings.
+</ParamField>
+
+**Returns**
+
+- `int` — A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
+- `torch.Tensor` — Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L88)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingreceiver-release-tensor">release_tensor</h4>
+
+```python
+release_tensor(tensor_id: int) -> None
+```
+
+Abstract method to indicate that the tensor associated with the ID is no longer in use. Args: tensor_id: The ID of the tensor to release.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L104)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingsender" title="AbstractEmbeddingSender (class)">
@@ -35,7 +63,27 @@ from dynamo.common.multimodal import AbstractEmbeddingSender
 
 **Public methods**
 
-- `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Abstract method to send precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L119))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-abstractembeddingsender-send-embeddings">send_embeddings</h4>
+
+```python
+send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]
+```
+
+Abstract method to send precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="embeddings" type="torch.Tensor">
+A torch.Tensor of the embeddings to send.
+</ParamField>
+<ParamField path="stage_embeddings" type="bool">
+A boolean indicating whether the embeddings should be staged for the transfer,
+</ParamField>
+
+Returns:
+A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L119)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-aiohttp-client-aiohttpclient" title="AiohttpClient (class)">
@@ -53,8 +101,25 @@ AiohttpClient(config = None) -> None
 
 **Public methods**
 
-- `__init__(config = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L31))
-- `close() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L130))
+<h4 id="api-dynamo-common-http-aiohttp-client-aiohttpclient-init">__init__</h4>
+
+```python
+__init__(config = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L31)
+
+<h4 id="api-dynamo-common-http-aiohttp-client-aiohttpclient-close">close</h4>
+
+```python
+close() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L130)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache" title="AsyncEncoderCache (class)">
@@ -79,9 +144,72 @@ asyncio event loop. All access must be from the same thread.
 
 **Public methods**
 
-- `__init__(cache: MultimodalEmbeddingCacheManager)` — Initialize the async encoder cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L57))
-- `get(key: str) -> Optional[CachedEmbedding]` — Synchronous get from underlying cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L67))
-- `get_or_compute(key: str, compute_fn: Callable[[], Awaitable[CachedEmbedding]]) -> CachedEmbedding` — Get from cache or compute with request coalescing. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L79))
+<h4 id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache-init">__init__</h4>
+
+```python
+__init__(cache: MultimodalEmbeddingCacheManager)
+```
+
+Initialize the async encoder cache.
+
+**Parameters**
+
+<ParamField path="cache" type="MultimodalEmbeddingCacheManager">
+Underlying MultimodalEmbeddingCacheManager for storage.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L57)
+
+<h4 id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache-get">get</h4>
+
+```python
+get(key: str) -> Optional[CachedEmbedding]
+```
+
+Synchronous get from underlying cache.
+
+**Parameters**
+
+<ParamField path="key" type="str">
+Cache key.
+</ParamField>
+
+**Returns**
+
+- `Optional[CachedEmbedding]` — Cached embedding or None if not found.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L67)
+
+<h4 id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache-get-or-compute">get_or_compute</h4>
+
+```python
+get_or_compute(key: str, compute_fn: Callable[[], Awaitable[CachedEmbedding]]) -> CachedEmbedding
+```
+
+Get from cache or compute with request coalescing.
+
+If the key is in cache, returns immediately.
+If another coroutine is already computing this key, waits for that result.
+Otherwise, computes and caches the result.
+
+**Parameters**
+
+<ParamField path="key" type="str">
+Cache key (typically content hash).
+</ParamField>
+<ParamField path="compute_fn" type="Callable[[], Awaitable[CachedEmbedding]]">
+Async function to compute the embedding if not cached.
+</ParamField>
+
+**Returns**
+
+- `CachedEmbedding` — The cached or computed embedding.
+
+**Raises**
+
+- `Exception` — Re-raises any exception from compute_fn.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/async_encoder_cache.py#L79)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-audio-loader-audioloader" title="AudioLoader (class)">
@@ -109,9 +237,47 @@ transferred via RDMA.
 
 **Public methods**
 
-- `__init__(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L84))
-- `load_audio(audio_url: str) -> tuple[np.ndarray, float]` — Load audio from a URL and return a (waveform, sample_rate) tuple. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L136))
-- `load_audio_batch(audio_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, float]]` — Load a batch of audio files from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L180))
+<h4 id="api-dynamo-common-multimodal-audio-loader-audioloader-init">__init__</h4>
+
+```python
+__init__(http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L84)
+
+<h4 id="api-dynamo-common-multimodal-audio-loader-audioloader-load-audio">load_audio</h4>
+
+```python
+load_audio(audio_url: str) -> tuple[np.ndarray, float]
+```
+
+Load audio from a URL and return a (waveform, sample_rate) tuple.
+
+Supports http(s), data: URIs, file:// paths, and bare filesystem paths.
+Audio is loaded at the native sample rate — no resampling is performed.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L136)
+
+<h4 id="api-dynamo-common-multimodal-audio-loader-audioloader-load-audio-batch">load_audio_batch</h4>
+
+```python
+load_audio_batch(audio_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, float]]
+```
+
+Load a batch of audio files from multimodal data items.
+
+Supports two paths:
+1. Url variant: Download and decode audio via vLLM's MediaConnector
+2. Decoded variant: Read pre-decoded audio via NIXL RDMA
+(requires enable_frontend_decoding=True)
+
+**Returns**
+
+- `List[tuple[np.ndarray, float]]` — List of (waveform, sample_rate) tuples.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/audio_loader.py#L180)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-baseengine" title="BaseEngine (class)">
@@ -141,20 +307,234 @@ immediately after start().
 
 **Public methods**
 
-- `from_args(cls, argv: list[str] | None = None) -> tuple[BaseEngine, WorkerConfig]` — Parse CLI args and construct the engine (not yet started). ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L173))
-- `start(worker_id: int) -> EngineConfig` — Start the engine and return registration metadata. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L188))
-- `abort(context: Context) -> None` — Abort an in-flight request (optional, default no-op). ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L207))
-- `is_quiescent() -> Optional[bool]` — Whether in-flight KV transfers are done, so `cleanup` may ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L219))
-- `cleanup() -> None` — Release all engine resources. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L234))
-- `register_prometheus(metrics: 'EngineMetrics') -> None` — Bridge a vendor-prefixed Prometheus registry into the runtime's ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L260))
-- `component_metrics_dp_ranks() -> list[int]` — Declare the data-parallel ranks this engine publishes ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L271))
-- `attach_snapshot_publisher(publisher: Any) -> None` — Framework hands the engine the Rust-owned ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L286))
-- `health_check_payload() -> Optional[dict[str, Any]]` — Canary payload the runtime sends through `generate` when ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L297))
-- `supported_controls() -> set[str]` — Return the set of engine-control capability keys this engine supports. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L305))
-- `engine_control(control: str, body: dict[str, Any]) -> dict[str, Any]` — Handle one advertised engine-control request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L313))
-- `supported_updates() -> set[str]` — Return the set of engine-update capability keys this engine supports. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L322))
-- `engine_update(update: str, body: dict[str, Any]) -> dict[str, Any]` — Handle one advertised engine-update request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L331))
-- `on_endpoint_ready(endpoint) -> None` — Receive the runtime serving ``Endpoint`` once, before serving begins. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L338))
+<h4 id="api-dynamo-common-backend-engine-baseengine-from-args">from_args</h4>
+
+```python
+from_args(cls, argv: list[str] | None = None) -> tuple[BaseEngine, WorkerConfig]
+```
+
+Parse CLI args and construct the engine (not yet started).
+
+**Parameters**
+
+<ParamField path="argv" type="list[str] | None">
+Command-line arguments.  ``None`` means ``sys.argv[1:]``.
+</ParamField>
+
+**Returns**
+
+- `tuple[BaseEngine, WorkerConfig]` — A ``(engine, worker_config)`` pair.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L173)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-start">start</h4>
+
+```python
+start(worker_id: int) -> EngineConfig
+```
+
+Start the engine and return registration metadata.
+
+After this returns the engine MUST be ready to accept ``generate()``
+calls.  ``Worker`` will register the model and begin serving
+immediately.
+
+``worker_id`` is an opaque, runtime-allocated unique identifier for
+this worker. It is stable from ``start()`` onward for the worker's
+lifetime and unique across replicas in the cluster. Engines that
+need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
+``disagg_machine_id`` snowflake field) should derive it from this
+value rather than hashing host/pid or asking operators for a CLI
+override. The internal mechanism (discovery instance ID) is not
+part of the contract — engines should treat it as opaque.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L188)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-abort">abort</h4>
+
+```python
+abort(context: Context) -> None
+```
+
+Abort an in-flight request (optional, default no-op).
+
+Called by Worker when the client disconnects or
+the request is cancelled.  Override to release engine resources
+(KV cache, scheduler slots, etc.).
+
+``context.metadata`` in this callback reflects the original
+propagated request metadata snapshot. Mutations made to
+``context.metadata`` during `generate` are not visible here.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L207)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-is-quiescent">is_quiescent</h4>
+
+```python
+is_quiescent() -> Optional[bool]
+```
+
+Whether in-flight KV transfers are done, so `cleanup` may release GPU memory. The Rust ``Worker`` polls this on prefill workers between the grace period and `cleanup`:
+
+- ``True``  — quiescent; exit the drain loop now.
+- ``False`` — busy; poll again next tick.
+- ``None``  — no introspection (default); poll until the drain budget
+(``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires. Never frees KV early.
+
+Aggregated/decode workers are never polled. Override only if the engine
+can observe transfer completion.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L219)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-cleanup">cleanup</h4>
+
+```python
+cleanup() -> None
+```
+
+Release all engine resources.
+
+``Worker`` guarantees:
+
+* ``cleanup()`` runs after a successful ``start()`` on shutdown —
+the common case.
+* ``cleanup()`` also runs after ``start()`` raised, on the partial
+state the engine may have allocated before failing (inner LLM
+handle, sockets, background tasks). Implementations **must**
+be null-safe: guard each resource with an ``is None`` check
+so a partially constructed engine can be released without
+raising.
+* ``cleanup()`` is **not** called when ``start()`` was never
+invoked (e.g. pre-start shutdown). Engines whose constructors
+allocate resources should release them via ``__del__`` /
+context-manager semantics rather than rely on ``cleanup()``.
+
+``cleanup()`` is never invoked concurrently with ``start()`` or
+another ``cleanup()`` — ``Worker``'s state machine serializes
+those transitions. The conformance kit asserts that a second
+``cleanup()`` call after a successful first is a safe no-op.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L234)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-register-prometheus">register_prometheus</h4>
+
+```python
+register_prometheus(metrics: 'EngineMetrics') -> None
+```
+
+Bridge a vendor-prefixed Prometheus registry into the runtime's ``/metrics`` output via `metrics.add_expfmt_callback`. Default no-op. See `dynamo.common.backend.metrics` for helpers. Do not retain ``metrics`` past return.
+
+Framework-owned lifecycle + per-rank gauges
+(``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds,total_blocks,gpu_cache_usage_percent,kv_cache_hit_rate}``)
+are owned and registered by the framework Rust-side — they do NOT
+require the engine to implement this method.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L260)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-component-metrics-dp-ranks">component_metrics_dp_ranks</h4>
+
+```python
+component_metrics_dp_ranks() -> list[int]
+```
+
+Declare the data-parallel ranks this engine publishes per-rank snapshots for. Empty (default) opts out.
+
+Stable for the engine's lifetime. ``Worker`` constructs a
+`SnapshotPublisher` sized to these ranks and hands it
+back via `attach_snapshot_publisher`. The engine then
+calls ``publisher.publish(rank, snap)`` from its stat-logger
+thread — event-driven, no polling.
+
+``ComponentSnapshot.kv_cache_hit_rate`` is tri-state:
+``None`` means "no data yet" or "no prefix cache" (gauge
+skipped), ``0.0`` is a legitimate measurement (zero hits).
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L271)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-attach-snapshot-publisher">attach_snapshot_publisher</h4>
+
+```python
+attach_snapshot_publisher(publisher: Any) -> None
+```
+
+Framework hands the engine the Rust-owned `SnapshotPublisher` once, after ``setup_metrics`` constructed it from `component_metrics_dp_ranks`. Stash the reference; call ``publisher.publish(rank, snap)`` from your stat-logger thereafter.
+
+Only invoked when `component_metrics_dp_ranks` returns
+non-empty. Default is no-op so engines that opt out don't need
+to override.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L286)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-health-check-payload">health_check_payload</h4>
+
+```python
+health_check_payload() -> Optional[dict[str, Any]]
+```
+
+Canary payload the runtime sends through `generate` when the endpoint is idle. Return ``None`` (default) to disable active probing. ``Worker`` calls this once after `start` and resolves ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides on top.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L297)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-supported-controls">supported_controls</h4>
+
+```python
+supported_controls() -> set[str]
+```
+
+Return the set of engine-control capability keys this engine supports.
+
+Controls are semantic operations on the engine's serving lifecycle.
+Engines advertise the keys they implement.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L305)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-engine-control">engine_control</h4>
+
+```python
+engine_control(control: str, body: dict[str, Any]) -> dict[str, Any]
+```
+
+Handle one advertised engine-control request.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L313)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-supported-updates">supported_updates</h4>
+
+```python
+supported_updates() -> set[str]
+```
+
+Return the set of engine-update capability keys this engine supports.
+
+Updates are a sibling surface to `supported_controls` for
+operations that mutate engine-managed assets rather than the engine's
+serving lifecycle. Engines advertise the keys they implement.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L322)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-engine-update">engine_update</h4>
+
+```python
+engine_update(update: str, body: dict[str, Any]) -> dict[str, Any]
+```
+
+Handle one advertised engine-update request.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L331)
+
+<h4 id="api-dynamo-common-backend-engine-baseengine-on-endpoint-ready">on_endpoint_ready</h4>
+
+```python
+on_endpoint_ready(endpoint) -> None
+```
+
+Receive the runtime serving ``Endpoint`` once, before serving begins.
+
+Default no-op. Engines that publish their own discovery records stash
+it for use from `engine_update`. ``Worker`` calls this exactly
+once; a raised exception is fatal to startup.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L338)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-diffusionengine" title="DiffusionEngine (class)">
@@ -206,7 +586,15 @@ apply to every modality; token-pipeline metadata lives in the optional
 
 **Public methods**
 
-- `__init__(model: str, served_model_name: Optional[str] = None, runtime_data: Optional[dict[str, Any]] = None, llm: Optional[LlmRegistration] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py))
+<h4 id="api-dynamo-common-backend-engine-engineconfig-init">__init__</h4>
+
+```python
+__init__(model: str, served_model_name: Optional[str] = None, runtime_data: Optional[dict[str, Any]] = None, llm: Optional[LlmRegistration] = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-engine-monitor-enginehealthmonitorconfig" title="EngineHealthMonitorConfig (class)">
@@ -224,8 +612,25 @@ EngineHealthMonitorConfig(interval: float, check_timeout: float, shutdown_timeou
 
 **Public methods**
 
-- `from_env(cls, *, interval: Optional[float] = None, check_timeout: Optional[float] = None, shutdown_timeout: Optional[float] = None) -> 'EngineHealthMonitorConfig'` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/engine_monitor.py#L46))
-- `__init__(interval: float, check_timeout: float, shutdown_timeout: float) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/engine_monitor.py))
+<h4 id="api-dynamo-common-engine-monitor-enginehealthmonitorconfig-from-env">from_env</h4>
+
+```python
+from_env(cls, *, interval: Optional[float] = None, check_timeout: Optional[float] = None, shutdown_timeout: Optional[float] = None) -> 'EngineHealthMonitorConfig'
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/engine_monitor.py#L46)
+
+<h4 id="api-dynamo-common-engine-monitor-enginehealthmonitorconfig-init">__init__</h4>
+
+```python
+__init__(interval: float, check_timeout: float, shutdown_timeout: float) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/engine_monitor.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-forwardpassmetrics" title="ForwardPassMetrics (class)">
@@ -320,9 +725,45 @@ is invisible past instantiation.
 
 **Public methods**
 
-- `__init__(config: Optional[HttpConfigBase] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L59))
-- `fetch_bytes(url: str, timeout: float, *, policy: Optional[UrlValidationPolicy] = None) -> bytes` — Fetch ``url`` and return the response body. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L63))
-- `close() -> None` — Close the backend session/client. Idempotent. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L135))
+<h4 id="api-dynamo-common-http-base-httpclient-init">__init__</h4>
+
+```python
+__init__(config: Optional[HttpConfigBase] = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L59)
+
+<h4 id="api-dynamo-common-http-base-httpclient-fetch-bytes">fetch_bytes</h4>
+
+```python
+fetch_bytes(url: str, timeout: float, *, policy: Optional[UrlValidationPolicy] = None) -> bytes
+```
+
+Fetch ``url`` and return the response body.
+
+Single-shot: no retries. Raises one of the unified exception
+classes above; callers never see native httpx/aiohttp classes.
+
+``policy=None``: use the backend's built-in redirect handling.
+
+``policy`` set: follow redirects manually and revalidate each
+hop against the policy via `url_validator.validate_url`.
+This is the SSRF-safe path; raises `UrlValidationError`
+if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L63)
+
+<h4 id="api-dynamo-common-http-base-httpclient-close">close</h4>
+
+```python
+close() -> None
+```
+
+Close the backend session/client. Idempotent.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L135)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpconnectionerror" title="HttpConnectionError (class)">
@@ -360,7 +801,15 @@ HttpStatusError(status: int, message: str, url: str) -> None
 
 **Public methods**
 
-- `__init__(status: int, message: str, url: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L43))
+<h4 id="api-dynamo-common-http-base-httpstatuserror-init">__init__</h4>
+
+```python
+__init__(status: int, message: str, url: str) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L43)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httptimeouterror" title="HttpTimeoutError (class)">
@@ -388,8 +837,25 @@ HttpxClient(config = None) -> None
 
 **Public methods**
 
-- `__init__(config = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/httpx_client.py#L39))
-- `close() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/httpx_client.py#L153))
+<h4 id="api-dynamo-common-http-httpx-client-httpxclient-init">__init__</h4>
+
+```python
+__init__(config = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/httpx_client.py#L39)
+
+<h4 id="api-dynamo-common-http-httpx-client-httpxclient-close">close</h4>
+
+```python
+close() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/httpx_client.py#L153)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-image-loader-imageloader" title="ImageLoader (class)">
@@ -407,9 +873,82 @@ ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, en
 
 **Public methods**
 
-- `__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None)` — Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L62))
-- `load_image(image_url: str) -> Image.Image` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L186))
-- `load_image_batch(image_mm_items: List[Dict[str, Any]], *, preserve_uuid_slots: bool = False) -> list[Any]` — Load a batch of images from multimodal data items. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L263))
+<h4 id="api-dynamo-common-multimodal-image-loader-imageloader-init">__init__</h4>
+
+```python
+__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None)
+```
+
+Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for receiving frontend decoding.
+
+**Parameters**
+
+<ParamField path="cache_size" type="int">
+Maximum number of images to store in the in-memory LRU cache.
+Defaults to CACHE_SIZE_MAXIMUM.
+</ParamField>
+<ParamField path="http_timeout" type="float">
+Timeout in seconds for HTTP requests when fetching remote images.
+Defaults to 30.0 seconds.
+</ParamField>
+<ParamField path="enable_frontend_decoding" type="bool">
+If True, enables NIXL RDMA for transferring
+decoded images directly from frontend memory, bypassing standard
+network transport. Defaults to False.
+</ParamField>
+<ParamField path="url_policy" type="UrlValidationPolicy | None">
+Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L62)
+
+<h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image">load_image</h4>
+
+```python
+load_image(image_url: str) -> Image.Image
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L186)
+
+<h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
+
+```python
+load_image_batch(image_mm_items: List[Dict[str, Any]], *, preserve_uuid_slots: bool = False) -> list[Any]
+```
+
+Load a batch of images from multimodal data items.
+
+Supports three paths:
+1. Url variant: Download and decode image from URL (default)
+2. Decoded variant: Read pre-decoded image via NIXL RDMA (requires enable_frontend_decoding=True)
+3. UuidOnly variant: Preserve an aligned empty slot for backend cache lookup
+when preserve_uuid_slots=True
+
+**Parameters**
+
+<ParamField path="image_mm_items" type="List[Dict[str, Any]]">
+List of multimodal data items for images
+</ParamField>
+<ParamField path="preserve_uuid_slots" type="bool">
+Allow UUID-only items and preserve their positions
+as None. This is enabled only by backends that resolve such slots.
+</ParamField>
+
+**Returns**
+
+- `list[Any]` — Loaded images, with None for UUID-only cache slots
+
+**Raises**
+
+- `HttpStatusError` — If any image fails with an HTTP status error (e.g. 415 Unsupported Media Type); the status is preserved so the frontend returns the correct client-error code instead of 500.
+- `UrlValidationError` — If a media URL is rejected by the SSRF policy; preserved as a ValueError so the frontend returns a 4xx, not 500.
+- `Exception` — If any image fails to load for any other reason
+- `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
+- `ValueError` — If a UUID-only slot is received without opting in
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L263)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
@@ -428,9 +967,55 @@ the Rust postprocessor detokenizes. Registered with
 
 **Public methods**
 
-- `generate(request: GenerateRequest, context: Context) -> AsyncGenerator[GenerateChunk, None]` — Yield streaming response chunks for a single request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L356))
-- `kv_event_sources() -> list[KvEventSource]` — KV event sources, one per data-parallel rank. Default opts out ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L371))
-- `logits_processor_spec() -> 'LogitsProcessorSpec | None'` — Engine-declared logits-processor activation. Default returns ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L376))
+<h4 id="api-dynamo-common-backend-engine-llmengine-generate">generate</h4>
+
+```python
+generate(request: GenerateRequest, context: Context) -> AsyncGenerator[GenerateChunk, None]
+```
+
+Yield streaming response chunks for a single request.
+
+Called concurrently for multiple in-flight requests.
+
+Each chunk: ``{"token_ids": [...], "index": 0}``
+Final chunk must include: ``&#123;"token_ids": [...], "index": 0,
+"finish_reason": "...", "completion_usage": &#123;...&#125;&#125;``
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L356)
+
+<h4 id="api-dynamo-common-backend-engine-llmengine-kv-event-sources">kv_event_sources</h4>
+
+```python
+kv_event_sources() -> list[KvEventSource]
+```
+
+KV event sources, one per data-parallel rank. Default opts out of KV-aware routing. ``Worker`` calls once after `start`.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L371)
+
+<h4 id="api-dynamo-common-backend-engine-llmengine-logits-processor-spec">logits_processor_spec</h4>
+
+```python
+logits_processor_spec() -> 'LogitsProcessorSpec | None'
+```
+
+Engine-declared logits-processor activation. Default returns ``None`` (no engine-level processors).
+
+Subclasses override to return a `LogitsProcessorSpec` whose
+``entries`` are backend-neutral activation data. Unlike
+framework-consumed hooks (`kv_event_sources`,
+`health_check_payload`), the result is consumed by the
+engine's own `generate`: resolve it once after engine init
+(typically in ``start()``), cache it, and pass it per request to
+`logits_processors_for_request`, which applies the shared
+generation-stage gating.
+
+Overrides typically delegate to
+`resolve_test_logits_processor_spec` to honour
+``DYN_ENABLE_TEST_LOGITS_PROCESSOR=1``; the future public
+CLI/config loader will resolve from that source instead.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L376)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmregistration" title="LlmRegistration (class)">
@@ -448,7 +1033,15 @@ LlmRegistration(context_length: Optional[int] = None, kv_cache_block_size: Optio
 
 **Public methods**
 
-- `__init__(context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, total_kv_blocks: Optional[int] = None, max_num_seqs: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, data_parallel_size: Optional[int] = None, data_parallel_start_rank: Optional[int] = None, bootstrap_host: Optional[str] = None, bootstrap_port: Optional[int] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py))
+<h4 id="api-dynamo-common-backend-engine-llmregistration-init">__init__</h4>
+
+```python
+__init__(context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, total_kv_blocks: Optional[int] = None, max_num_seqs: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, data_parallel_size: Optional[int] = None, data_parallel_start_rank: Optional[int] = None, bootstrap_host: Optional[str] = None, bootstrap_port: Optional[int] = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-lora-manager-lorainfo" title="LoRAInfo (class)">
@@ -466,7 +1059,15 @@ LoRAInfo(id: int, path: str) -> None
 
 **Public methods**
 
-- `__init__(id: int, path: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py))
+<h4 id="api-dynamo-common-lora-manager-lorainfo-init">__init__</h4>
+
+```python
+__init__(id: int, path: str) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-lora-manager-loramanager" title="LoRAManager (class)">
@@ -487,10 +1088,76 @@ sources, and allows registering custom Python sources for other protocols.
 
 **Public methods**
 
-- `__init__(cache_path: Optional[Path] = None)` — Initialize LoRA manager. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L44))
-- `register_custom_source(scheme: str, source: LoRASourceProtocol) -> None` — Register a custom Python source for a URI scheme. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L58))
-- `download_lora(lora_uri: str) -> Dict[str, Any]` — Download LoRA if needed, return local path. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L68))
-- `is_cached(lora_uri: str) -> bool` — Check if LoRA is already cached locally. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L114))
+<h4 id="api-dynamo-common-lora-manager-loramanager-init">__init__</h4>
+
+```python
+__init__(cache_path: Optional[Path] = None)
+```
+
+Initialize LoRA manager.
+
+**Parameters**
+
+<ParamField path="cache_path" type="Optional[Path]">
+Optional custom cache path. If not provided, uses DYN_LORA_PATH env var.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L44)
+
+<h4 id="api-dynamo-common-lora-manager-loramanager-register-custom-source">register_custom_source</h4>
+
+```python
+register_custom_source(scheme: str, source: LoRASourceProtocol) -> None
+```
+
+Register a custom Python source for a URI scheme.
+
+**Parameters**
+
+<ParamField path="scheme" type="str">
+URI scheme without "://" (e.g., "hf" for hf:// URIs)
+</ParamField>
+<ParamField path="source" type="LoRASourceProtocol">
+LoRA source implementing LoRASourceProtocol
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L58)
+
+<h4 id="api-dynamo-common-lora-manager-loramanager-download-lora">download_lora</h4>
+
+```python
+download_lora(lora_uri: str) -> Dict[str, Any]
+```
+
+Download LoRA if needed, return local path.
+
+The source is inferred from the URI scheme:
+- file:// -&gt; Local filesystem (Rust)
+- s3:// -&gt; S3 (Rust)
+- hf:// -&gt; Hugging Face Hub (Rust)
+- Custom schemes -&gt; Registered Python sources
+
+**Parameters**
+
+<ParamField path="lora_uri" type="str">
+Source URI (file://, s3://, hf://, or custom scheme)
+</ParamField>
+
+**Returns**
+
+- `Dict[str, Any]` — Dictionary with: - status: "success" or "error" - local_path: Local path to LoRA (if successful) - message: Error message (if error)
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L68)
+
+<h4 id="api-dynamo-common-lora-manager-loramanager-is-cached">is_cached</h4>
+
+```python
+is_cached(lora_uri: str) -> bool
+```
+
+Check if LoRA is already cached locally.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L114)
 </Accordion>
 
 <Accordion id="api-dynamo-common-lora-manager-lorasourceprotocol" title="LoRASourceProtocol (class)">
@@ -504,8 +1171,25 @@ from dynamo.common.lora import LoRASourceProtocol
 
 **Public methods**
 
-- `download(lora_uri: str, dest_path: Path) -> Path` — Download LoRA to dest_path, return actual path ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L27))
-- `exists(lora_uri: str) -> bool` — Check if LoRA exists in this source ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L31))
+<h4 id="api-dynamo-common-lora-manager-lorasourceprotocol-download">download</h4>
+
+```python
+download(lora_uri: str, dest_path: Path) -> Path
+```
+
+Download LoRA to dest_path, return actual path
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L27)
+
+<h4 id="api-dynamo-common-lora-manager-lorasourceprotocol-exists">exists</h4>
+
+```python
+exists(lora_uri: str) -> bool
+```
+
+Check if LoRA exists in this source
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/manager.py#L31)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver" title="LocalEmbeddingReceiver (class)">
@@ -523,9 +1207,52 @@ LocalEmbeddingReceiver()
 
 **Public methods**
 
-- `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L208))
-- `receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]` — Receive precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L213))
-- `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L235))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver-init">__init__</h4>
+
+```python
+__init__()
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L208)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver-receive-embeddings">receive_embeddings</h4>
+
+```python
+receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]
+```
+
+Receive precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="request" type="TransferRequest">
+The TransferRequest object containing information to receive embeddings for.
+</ParamField>
+
+**Returns**
+
+- `int` — A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
+- `torch.Tensor` — Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L213)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingreceiver-release-tensor">release_tensor</h4>
+
+```python
+release_tensor(tensor_id: int) -> None
+```
+
+Indicate that the tensor associated with the ID is no longer in use.
+
+**Parameters**
+
+<ParamField path="tensor_id" type="int">
+The ID of the tensor to release.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L235)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender" title="LocalEmbeddingSender (class)">
@@ -543,9 +1270,59 @@ LocalEmbeddingSender()
 
 **Public methods**
 
-- `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L141))
-- `save_embeddings_to_file(embedding_key: str, embeddings: torch.Tensor) -> str` — Save the embeddings to a local file and return the file path. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L145))
-- `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Send precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L168))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender-init">__init__</h4>
+
+```python
+__init__()
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L141)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender-save-embeddings-to-file">save_embeddings_to_file</h4>
+
+```python
+save_embeddings_to_file(embedding_key: str, embeddings: torch.Tensor) -> str
+```
+
+Save the embeddings to a local file and return the file path.
+
+**Parameters**
+
+<ParamField path="embedding_key" type="str">
+A unique key for the embeddings.
+</ParamField>
+<ParamField path="embeddings" type="torch.Tensor">
+A torch.Tensor of the embeddings to save.
+</ParamField>
+
+Returns:
+The file path where the embeddings are saved.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L145)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-localembeddingsender-send-embeddings">send_embeddings</h4>
+
+```python
+send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]
+```
+
+Send precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="embeddings" type="torch.Tensor">
+A torch.Tensor of the embeddings to send.
+</ParamField>
+<ParamField path="stage_embeddings" type="bool">
+A boolean indicating whether the embeddings should be staged for the transfer,
+</ParamField>
+
+Returns:
+A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L168)
 </Accordion>
 
 <Accordion id="api-dynamo-common-metadata-upload-metadatauploader" title="MetadataUploader (class)">
@@ -563,10 +1340,45 @@ MetadataUploader(url: str) -> None
 
 **Public methods**
 
-- `from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L153))
-- `from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L165))
-- `upload_choice(choice_index: int, metadata: dict[str, Any]) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L169))
-- `__init__(url: str) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py))
+<h4 id="api-dynamo-common-metadata-upload-metadatauploader-from-settings">from_settings</h4>
+
+```python
+from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L153)
+
+<h4 id="api-dynamo-common-metadata-upload-metadatauploader-from-backend-request">from_backend_request</h4>
+
+```python
+from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L165)
+
+<h4 id="api-dynamo-common-metadata-upload-metadatauploader-upload-choice">upload_choice</h4>
+
+```python
+upload_choice(choice_index: int, metadata: dict[str, Any]) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py#L169)
+
+<h4 id="api-dynamo-common-metadata-upload-metadatauploader-init">__init__</h4>
+
+```python
+__init__(url: str) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/metadata_upload.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager" title="MultimodalEmbeddingCacheManager (class)">
@@ -593,11 +1405,91 @@ implementation simple and avoid locking overhead.
 
 **Public methods**
 
-- `__init__(capacity_bytes: int)` — Initialize the encoder cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L57))
-- `get(key: str) -> Optional[CachedEmbedding]` — Get a cached embedding from the cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L95))
-- `keys() -> list[str]` — Return the current cache keys in LRU order. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L116))
-- `set(key: str, entry: CachedEmbedding) -> bool` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L120))
-- `set_with_delta(key: str, entry: CachedEmbedding) -> CacheMutation` — Store a cached embedding in the cache. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L123))
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-init">__init__</h4>
+
+```python
+__init__(capacity_bytes: int)
+```
+
+Initialize the encoder cache.
+
+**Parameters**
+
+<ParamField path="capacity_bytes" type="int">
+Maximum cache capacity in bytes.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L57)
+
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-get">get</h4>
+
+```python
+get(key: str) -> Optional[CachedEmbedding]
+```
+
+Get a cached embedding from the cache.
+
+If found, the entry is moved to the end (most recently used).
+
+**Parameters**
+
+<ParamField path="key" type="str">
+Cache key (typically content hash).
+</ParamField>
+
+**Returns**
+
+- `Optional[CachedEmbedding]` — The cached embedding, or None if not found.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L95)
+
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-keys">keys</h4>
+
+```python
+keys() -> list[str]
+```
+
+Return the current cache keys in LRU order.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L116)
+
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-set">set</h4>
+
+```python
+set(key: str, entry: CachedEmbedding) -> bool
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L120)
+
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-set-with-delta">set_with_delta</h4>
+
+```python
+set_with_delta(key: str, entry: CachedEmbedding) -> CacheMutation
+```
+
+Store a cached embedding in the cache.
+
+If the key already exists, the old value is replaced.
+If adding the entry would exceed capacity, LRU entries are evicted.
+If the tensor itself is larger than capacity, it is not stored.
+
+**Parameters**
+
+<ParamField path="key" type="str">
+Cache key (typically content hash).
+</ParamField>
+<ParamField path="entry" type="CachedEmbedding">
+CachedEmbedding to cache.
+</ParamField>
+
+**Returns**
+
+- `CacheMutation` — CacheMutation describing whether the entry was stored plus the
+- `CacheMutation` — authoritative add/remove delta caused by this mutation.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L123)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver" title="NixlReadEmbeddingReceiver (class)">
@@ -618,9 +1510,52 @@ Connection (NIXL agent) and reference-counted Remote agent lifecycle.
 
 **Public methods**
 
-- `__init__(embedding_hidden_size: int = 8 * 1024, max_item_mm_token: int = 1024, max_items: int = 1024) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L859))
-- `receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]` — Receive precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L883))
-- `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L942))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver-init">__init__</h4>
+
+```python
+__init__(embedding_hidden_size: int = 8 * 1024, max_item_mm_token: int = 1024, max_items: int = 1024) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L859)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver-receive-embeddings">receive_embeddings</h4>
+
+```python
+receive_embeddings(request: TransferRequest) -> tuple[int, torch.Tensor]
+```
+
+Receive precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="request" type="TransferRequest">
+The TransferRequest object containing information to receive embeddings for.
+</ParamField>
+
+**Returns**
+
+- `int` — A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
+- `torch.Tensor` — Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L883)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver-release-tensor">release_tensor</h4>
+
+```python
+release_tensor(tensor_id: int) -> None
+```
+
+Indicate that the tensor associated with the ID is no longer in use.
+
+**Parameters**
+
+<ParamField path="tensor_id" type="int">
+The ID of the tensor to release.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L942)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingsender" title="NixlReadEmbeddingSender (class)">
@@ -641,8 +1576,37 @@ Connection (NIXL agent) and reference-counted Remote agent lifecycle.
 
 **Public methods**
 
-- `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L802))
-- `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]` — Send precomputed embeddings. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L806))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingsender-init">__init__</h4>
+
+```python
+__init__()
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L802)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingsender-send-embeddings">send_embeddings</h4>
+
+```python
+send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, Awaitable[None]]
+```
+
+Send precomputed embeddings.
+
+**Parameters**
+
+<ParamField path="embeddings" type="torch.Tensor">
+A torch.Tensor of the embeddings to send.
+</ParamField>
+<ParamField path="stage_embeddings" type="bool">
+A boolean indicating whether the embeddings should be staged for the transfer,
+</ParamField>
+
+Returns:
+A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L806)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver" title="NixlWriteEmbeddingReceiver (class)">
@@ -660,9 +1624,55 @@ NixlWriteEmbeddingReceiver(buffer_size = 2 * 8 * 1024 * 1024 * 256 * 2)
 
 **Public methods**
 
-- `__init__(buffer_size = 2 * 8 * 1024 * 1024 * 256 * 2)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L642))
-- `receive_embeddings(request: TransferRequest, receive_timeout = 60) -> tuple[int, torch.Tensor]` — Receive precomputed embeddings for a given request ID. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L666))
-- `release_tensor(tensor_id: int) -> None` — Indicate that the tensor associated with the ID is no longer in use. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L784))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver-init">__init__</h4>
+
+```python
+__init__(buffer_size = 2 * 8 * 1024 * 1024 * 256 * 2)
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L642)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver-receive-embeddings">receive_embeddings</h4>
+
+```python
+receive_embeddings(request: TransferRequest, receive_timeout = 60) -> tuple[int, torch.Tensor]
+```
+
+Receive precomputed embeddings for a given request ID.
+
+**Parameters**
+
+<ParamField path="request" type="TransferRequest">
+The TransferRequest object containing information to receive embeddings for.
+</ParamField>
+<ParamField path="receive_timeout">
+Maximum time to wait for the transfer to complete before raising a TimeoutError.
+</ParamField>
+
+**Returns**
+
+- `int` — A tuple containing the tensor ID and the received embeddings as a torch.Tensor.
+- `torch.Tensor` — Caller should invoke release_tensor(tensor_id) when the tensor is no longer needed to free up resources.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L666)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingreceiver-release-tensor">release_tensor</h4>
+
+```python
+release_tensor(tensor_id: int) -> None
+```
+
+Indicate that the tensor associated with the ID is no longer in use.
+
+**Parameters**
+
+<ParamField path="tensor_id" type="int">
+The ID of the tensor to release.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L784)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingsender" title="NixlWriteEmbeddingSender (class)">
@@ -702,8 +1712,37 @@ receiver's buffer.
 
 **Public methods**
 
-- `__init__()` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L402))
-- `send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, asyncio.Future]` — Send precomputed embeddings. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L587))
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingsender-init">__init__</h4>
+
+```python
+__init__()
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L402)
+
+<h4 id="api-dynamo-common-multimodal-embedding-transfer-nixlwriteembeddingsender-send-embeddings">send_embeddings</h4>
+
+```python
+send_embeddings(embeddings: torch.Tensor, stage_embeddings: bool = False) -> tuple[TransferRequest, asyncio.Future]
+```
+
+Send precomputed embeddings.
+
+**Parameters**
+
+<ParamField path="embeddings" type="torch.Tensor">
+A torch.Tensor of the embeddings to send.
+</ParamField>
+<ParamField path="stage_embeddings" type="bool">
+A boolean indicating whether the embeddings should be staged for the transfer,
+</ParamField>
+
+Returns:
+A tuple containing the TransferRequest object and an awaitable that can be awaited to indicate the send is completed.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py#L587)
 </Accordion>
 
 <Accordion id="api-dynamo-common-protocols-video-protocol-nvcreatevideorequest" title="NvCreateVideoRequest (class)">
@@ -745,9 +1784,35 @@ OnceLock() -> None
 
 **Public methods**
 
-- `__init__() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L16))
-- `get_or_init(initializer: Callable[[], T]) -> T` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L20))
-- `get() -> T | None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L31))
+<h4 id="api-dynamo-common-lora-once-oncelock-init">__init__</h4>
+
+```python
+__init__() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L16)
+
+<h4 id="api-dynamo-common-lora-once-oncelock-get-or-init">get_or_init</h4>
+
+```python
+get_or_init(initializer: Callable[[], T]) -> T
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L20)
+
+<h4 id="api-dynamo-common-lora-once-oncelock-get">get</h4>
+
+```python
+get() -> T | None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/lora/once.py#L31)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-queuedrequestmetrics" title="QueuedRequestMetrics (class)">
@@ -788,12 +1853,65 @@ RLRouteRegistry(runtime: Any, *, logger_: logging.Logger | None = None) -> None
 
 **Public methods**
 
-- `__init__(runtime: Any, *, logger_: logging.Logger | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L91))
-- `add_route(name: str, handler: RLRouteHandler) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L101))
-- `add_routes(routes: Mapping[str, RLRouteHandler]) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L104))
-- `describe() -> dict[str, Any]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L108))
-- `dispatch(request: Mapping[str, Any] | None = None) -> dict[str, Any]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L122))
-- `dispatch_stream(request: Mapping[str, Any] | None = None) -> AsyncIterator[dict[str, Any]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L149))
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-init">__init__</h4>
+
+```python
+__init__(runtime: Any, *, logger_: logging.Logger | None = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L91)
+
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-add-route">add_route</h4>
+
+```python
+add_route(name: str, handler: RLRouteHandler) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L101)
+
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-add-routes">add_routes</h4>
+
+```python
+add_routes(routes: Mapping[str, RLRouteHandler]) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L104)
+
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-describe">describe</h4>
+
+```python
+describe() -> dict[str, Any]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L108)
+
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-dispatch">dispatch</h4>
+
+```python
+dispatch(request: Mapping[str, Any] | None = None) -> dict[str, Any]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L122)
+
+<h4 id="api-dynamo-common-rl-admin-rlrouteregistry-dispatch-stream">dispatch_stream</h4>
+
+```python
+dispatch_stream(request: Mapping[str, Any] | None = None) -> AsyncIterator[dict[str, Any]]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L149)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-rawengine" title="RawEngine (class)">
@@ -817,7 +1935,21 @@ one. Subclasses like `DiffusionEngine` add no contract.
 
 **Public methods**
 
-- `generate(request: RawRequest, context: Context) -> AsyncGenerator[RawResponseChunk, None]` — Yield response object(s) for a single raw-media request. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L419))
+<h4 id="api-dynamo-common-backend-engine-rawengine-generate">generate</h4>
+
+```python
+generate(request: RawRequest, context: Context) -> AsyncGenerator[RawResponseChunk, None]
+```
+
+Yield response object(s) for a single raw-media request.
+
+``request`` is the raw OpenAI-shaped request body (see
+`RawRequest`); yield the response body object(s) (see
+`RawResponseChunk`). For non-streaming modalities yield exactly
+one (terminal) object; for streaming modalities yield intermediate
+progress objects ending with the terminal one.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L419)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-scheduledrequestmetrics" title="ScheduledRequestMetrics (class)">
@@ -877,9 +2009,35 @@ VideoLoader(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, en
 
 **Public methods**
 
-- `__init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L79))
-- `load_video(video_url: str) -> tuple[np.ndarray, Dict[str, Any]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L135))
-- `load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L171))
+<h4 id="api-dynamo-common-multimodal-video-loader-videoloader-init">__init__</h4>
+
+```python
+__init__(http_timeout: float = 60.0, num_frames: int = NUM_FRAMES_DEFAULT, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L79)
+
+<h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video">load_video</h4>
+
+```python
+load_video(video_url: str) -> tuple[np.ndarray, Dict[str, Any]]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L135)
+
+<h4 id="api-dynamo-common-multimodal-video-loader-videoloader-load-video-batch">load_video_batch</h4>
+
+```python
+load_video_batch(video_mm_items: List[Dict[str, Any]]) -> List[tuple[np.ndarray, Dict[str, Any]]]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/video_loader.py#L171)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-welfordaccumulator" title="WelfordAccumulator (class)">
@@ -909,9 +2067,35 @@ print(acc.n, acc.s, acc.variance())
 
 **Public methods**
 
-- `__init__() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L64))
-- `add(v: int) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L70))
-- `variance() -> float` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L78))
+<h4 id="api-dynamo-common-forward-pass-metrics-welfordaccumulator-init">__init__</h4>
+
+```python
+__init__() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L64)
+
+<h4 id="api-dynamo-common-forward-pass-metrics-welfordaccumulator-add">add</h4>
+
+```python
+add(v: int) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L70)
+
+<h4 id="api-dynamo-common-forward-pass-metrics-welfordaccumulator-variance">variance</h4>
+
+```python
+variance() -> float
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/forward_pass_metrics.py#L78)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-worker-worker" title="Worker (class)">
@@ -934,8 +2118,25 @@ selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
 
 **Public methods**
 
-- `__init__(engine: BaseEngine, config: WorkerConfig)` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L236))
-- `run() -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L240))
+<h4 id="api-dynamo-common-backend-worker-worker-init">__init__</h4>
+
+```python
+__init__(engine: BaseEngine, config: WorkerConfig)
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L236)
+
+<h4 id="api-dynamo-common-backend-worker-worker-run">run</h4>
+
+```python
+run() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L240)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-worker-workerconfig" title="WorkerConfig (class)">
@@ -953,8 +2154,28 @@ WorkerConfig(namespace: str, component: str = 'backend', endpoint: str = 'genera
 
 **Public methods**
 
-- `from_runtime_config(cls, runtime_cfg, model_name: str, served_model_name: Optional[str] = None, model_input: Optional[ModelInput] = None, **overrides) -> 'WorkerConfig'` — Build from any object that carries DynamoRuntimeConfig fields. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L151))
-- `__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None` — No summary available. ([source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py))
+<h4 id="api-dynamo-common-backend-worker-workerconfig-from-runtime-config">from_runtime_config</h4>
+
+```python
+from_runtime_config(cls, runtime_cfg, model_name: str, served_model_name: Optional[str] = None, model_input: Optional[ModelInput] = None, **overrides) -> 'WorkerConfig'
+```
+
+Build from any object that carries DynamoRuntimeConfig fields.
+
+Works with vllm.Config, trtllm.Config (inherit DynamoRuntimeConfig
+directly) and sglang DynamoConfig (nested in config.dynamo_args).
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py#L151)
+
+<h4 id="api-dynamo-common-backend-worker-workerconfig-init">__init__</h4>
+
+```python
+__init__(namespace: str, component: str = 'backend', endpoint: str = 'generate', model_name: str = '', served_model_name: Optional[str] = None, model_input: ModelInput = (lambda: ModelInput.Tokens)(), endpoint_types: str = 'chat,completions', discovery_backend: str = 'etcd', request_plane: str = 'tcp', event_plane: Optional[str] = None, use_kv_events: bool = False, custom_jinja_template: Optional[str] = None, tool_call_parser: Optional[str] = None, reasoning_parser: Optional[str] = None, exclude_tools_when_tool_choice_none: bool = True, enable_local_indexer: bool = True, enable_kv_routing: bool = True, metrics_labels: list[tuple[str, str]] = list(), disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED, health_check_payload: Optional[dict] = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', route_to_encoder: bool = False, media_decoder: Optional[MediaDecoder] = None, media_fetcher: Optional[MediaFetcher] = None, kv_state_endpoint: Optional[str] = None, default_thinking_mode: Optional[str] = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/worker.py)
 </Accordion>
 
 <Accordion id="api-dynamo-common-config-dump-config-dumper-add-config-dump-args" title="add_config_dump_args (function)">
