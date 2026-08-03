@@ -100,26 +100,31 @@ spec:
           containers:
             - name: main
               image: dynamo-riva:latest
-              command: [bash, -c]
+              command: [python3, -m, dynamo.vllm]
               args:
-                - |
-                  exec python3 -m dynamo.vllm \
-                    --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
-                    --served-model-name nvidia/nemotron-3-nano \
-                    --tensor-parallel-size "${LLM_TP_SIZE}" \
-                    --trust-remote-code \
-                    --enable-auto-tool-choice \
-                    --tool-call-parser qwen3_coder \
-                    --reasoning-parser nemotron_v3 \
-                    --kv-cache-dtype fp8 \
-                    --max-model-len 32768 \
-                    --max-num-seqs 256 \
-                    --use-vllm-tokenizer
+                - --model
+                - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+                - --served-model-name
+                - nvidia/nemotron-3-nano
+                - --tensor-parallel-size
+                - "1"
+                - --trust-remote-code
+                - --enable-auto-tool-choice
+                - --tool-call-parser
+                - qwen3_coder
+                - --reasoning-parser
+                - nemotron_v3
+                - --kv-cache-dtype
+                - fp8
+                - --max-model-len
+                - "32768"
+                - --max-num-seqs
+                - "256"
+                - --use-vllm-tokenizer
               env:
                 - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
                 - {name: VLLM_USE_FLASHINFER_MOE_FP8, value: "1"}
               envFrom:
-                - configMapRef: {name: riva-cascaded-profile}
                 - secretRef: {name: hf-token-secret}
               resources:
                 limits:
@@ -164,8 +169,7 @@ spec:
                     secretKeyRef: {key: NGC_API_KEY, name: ngc-api}
                 - {name: NIM_GRPC_API_PORT, value: "50051"}
                 - {name: NIM_HTTP_API_PORT, value: "9000"}
-              envFrom:
-                - configMapRef: {name: riva-cascaded-profile}
+                - {name: NIM_TAGS_SELECTOR, value: "name=magpie-tts-multilingual,batch_size=8"}
               resources: *nimResources
               startupProbe:
                 httpGet: {path: /v1/health/ready, port: 9000}
