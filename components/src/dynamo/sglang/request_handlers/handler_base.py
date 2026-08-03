@@ -592,8 +592,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         # in-flight elastic-EP scale phase on the tokenizer manager; two callers
         # racing through it would corrupt that state. One handler exists per
         # worker process, so all concurrent HTTP callers share this lock and
-        # only one scale operation runs at a time. Mirrors the vLLM worker's
-        # _scale_ep_lock.
+        # only one scale operation runs at a time.
         self._scale_ep_lock = asyncio.Lock()
 
         # LoRA tracking (via LoraMixin)
@@ -865,11 +864,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         """Whether the underlying SGLang engine exposes runtime elastic-EP
         scaling.
 
-        Requires ``tokenizer_manager.scale_elastic_ep`` (SGLang >= 0.5.16).
-        The pinned 0.5.14 lacks it, so the elastic-EP routes are simply not
-        registered there and a caller gets a 404 instead of an
-        ``AttributeError``. Mirrors the vLLM worker gating scale_elastic_ep on
-        ``hasattr(engine_client, "scale_elastic_ep")``.
+        The runtime API ``tokenizer_manager.scale_elastic_ep`` only exists on
+        SGLang >= 0.5.16. Older builds lack it, so the elastic-EP routes are not
+        registered and a caller gets a 404 rather than an ``AttributeError``.
         """
         if self.engine is None:
             return False
@@ -881,15 +878,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     async def scale_elastic_ep(self, body: dict) -> dict:
         """Scale up the expert-parallel group to ``new_ep_size`` ranks.
 
-        Mirrors the vLLM worker's ``scale_elastic_ep`` control, but drives
-        SGLang's native runtime API instead. SGLang integrates the GPUs
-        contributed by a separately-launched joining group
-        (``--elastic-ep-join-mode scale``), redistributes experts (ePLB) across
-        the widened EP group, and keeps serving on the leader — no restart.
+        SGLang integrates the GPUs contributed by a separately-launched joining
+        group (``--elastic-ep-join-mode scale``), redistributes experts (ePLB)
+        across the widened EP group, and keeps serving on the leader — no
+        restart.
 
         Only scale-up is supported today: SGLang rejects a target smaller than
-        the current EP size. The request field is ``new_ep_size`` (SGLang counts
-        EP ranks), not vLLM's ``new_data_parallel_size``.
+        the current EP size. ``new_ep_size`` is the target number of EP ranks.
         """
         body = body or {}
         if not isinstance(body, dict):
@@ -953,10 +948,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         }
 
     async def is_scaling_elastic_ep(self, body: dict) -> dict:
-        """Return the engine's mirrored elastic-EP scale state.
+        """Return the engine's current elastic-EP scale state.
 
         Lets a caller poll for scale-up completion (``scale_phase`` reaches
-        ``serving_expanded``), mirroring SGLang's ``GET /is_scaling_elastic_ep``.
+        ``serving_expanded``).
         """
         tokenizer_manager = self.engine.tokenizer_manager
         if getattr(tokenizer_manager.server_args, "elastic_ep_backend", None) is None:
@@ -990,7 +985,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weight_version": self.update_weight_version,
         }
         # Elastic-EP scale-up is only exposed when the engine actually supports
-        # it (SGLang >= 0.5.16). Capability-gated so the pinned 0.5.14 and
+        # it (SGLang >= 0.5.16). Capability-gated so older SGLang builds and
         # non-EP deployments don't advertise a route that would 500.
         if self._supports_elastic_ep():
             built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep

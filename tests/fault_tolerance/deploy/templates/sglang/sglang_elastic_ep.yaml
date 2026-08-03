@@ -3,26 +3,21 @@
 #
 # SGLang Elastic EP Scale-Up Deployment (single node, warm standby)
 #
-# This is the SGLang counterpart of the vLLM elastic-EP demo
-# (../vllm/moe_elastic_ep_demo.yaml). It drives the Dynamo SGLang worker's
-# elastic-EP scale-up control, which mirrors the vLLM worker's scale_elastic_ep
-# but calls SGLang's native runtime API instead:
+# Drives the Dynamo SGLang worker's elastic-EP scale-up control, which calls
+# SGLang's native runtime API:
 #
 #   POST /engine/control/scale_elastic_ep {"new_ep_size": <int>}   (leader system port 9090)
 #   GET  /engine/control/is_scaling_elastic_ep                     (poll for completion)
 #
-# HOW SGLANG ELASTIC EP DIFFERS FROM vLLM
-# ---------------------------------------
-#   * vLLM (Ray): one server owns all GPUs; a scale request spawns/kills DP Ray
-#     actors on GPUs already in the Ray cluster.
-#   * SGLang: the running server is the "primary group". Scaling up requires a
-#     SEPARATE "joining group" process, launched with
+# HOW SGLANG ELASTIC EP WORKS
+# ---------------------------
+#   * The running server is the "primary group". Scaling up requires a SEPARATE
+#     "joining group" process, launched with
 #       --elastic-ep-join-mode scale --elastic-ep-join-rank-offset <current_ep_size>
 #     pointing at the primary's --dist-init-addr. Once the joiner's GPUs are up,
 #     POSTing scale_elastic_ep integrates them and redistributes experts (ePLB).
-#   * Only SCALE-UP is supported today. SGLang rejects a target below the
-#     current EP size. The request field is "new_ep_size" (EP ranks), not vLLM's
-#     "new_data_parallel_size".
+#   * Only SCALE-UP is supported today: SGLang rejects a target below the
+#     current EP size. The request field is "new_ep_size" (the target EP ranks).
 #
 # REQUIREMENTS
 # ------------
@@ -38,9 +33,9 @@
 #     serves /engine/control/*.
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
-# tracked separately, mirroring the vLLM operator-elastic-ep-follower work). The
-# accompanying run_sglang_elastic_ep_scale_up_test.sh launches it manually via
-# `kubectl exec` on the worker pod's idle GPUs, then drives the scale-up.
+# tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
+# launches it manually via `kubectl exec` on the worker pod's idle GPUs, then
+# drives the scale-up.
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -77,8 +72,7 @@ spec:
           value: "1"
         - name: HF_HOME
           value: "/model-cache"
-        # Point NCCL at the pod network if RDMA GIDs are not cross-routable.
-        # See ../vllm/multinode-elastic-ep-test-results doc for the AKS GID story.
+        # Rendezvous address the joining group dials on scale-up.
         - name: SGLANG_ELASTIC_SCALE_DIST_INIT
           value: "127.0.0.1:24555"
       extraPodSpec:

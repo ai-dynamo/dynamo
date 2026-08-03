@@ -4,10 +4,9 @@
 #
 # SGLang Elastic EP Scale-Up Regression Test (scale-up only)
 #
-# SGLang counterpart of ../vllm/run_elastic_ep_scale_test.sh, but scale-UP only:
-# SGLang supports elastic-EP scale-up (attach a joining group, integrate its
-# GPUs, redistribute experts) but NOT scale-down. The scale sequence is therefore
-# monotonic:
+# Scale-UP only: SGLang supports elastic-EP scale-up (attach a joining group,
+# integrate its GPUs, redistribute experts) but NOT scale-down. The scale
+# sequence is therefore monotonic:
 #
 #   Baseline ep=4  ->  ep=6  ->  ep=8
 #
@@ -17,7 +16,7 @@
 #      NOTE: the Dynamo operator does not launch joiners yet, so the script does
 #      it manually via `kubectl exec` (tracked gap; see the Linear issue).
 #   2. POSTs /engine/control/scale_elastic_ep {"new_ep_size": <target>} to the
-#      leader system port (9090), mirroring the vLLM scale test.
+#      leader system port (9090).
 #   3. Polls /engine/control/is_scaling_elastic_ep until scale_phase reaches
 #      "serving_expanded".
 #   4. Snapshots GPU memory and runs a live inference to confirm serving.

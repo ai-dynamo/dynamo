@@ -3,11 +3,10 @@
 
 """Unit tests for the SGLang worker's elastic-EP scale-up control.
 
-Mirrors ``test_vllm_engine_routes.py`` on the vLLM side: the validation
-paths are exercised without a real SGLang engine (they return before the
-``ScaleElasticEPReqInput`` import), and the success path runs against a
-stubbed ``sglang.srt.managers.io_struct`` module so it does not require the
-elastic-EP-capable SGLang 0.5.16+.
+The validation paths are exercised without a real SGLang engine (they return
+before the ``ScaleElasticEPReqInput`` import), and the success path runs
+against a stubbed ``sglang.srt.managers.io_struct`` module so it does not
+require the elastic-EP-capable SGLang 0.5.16+.
 """
 
 import asyncio
