@@ -225,8 +225,16 @@ fn build_kv_parameters(
                     )
                 })?
                 .disaggregated_params;
-            // The prefill handoff carries the NIXL side-channel port; normalize it
-            // so vLLM builds a valid ZMQ URL (see stringify_remote_port).
+            // vLLM's NixlConnector builds its handshake socket path with an
+            // f-string (`make_zmq_path` -> f"tcp://{host}:{port}"). This
+            // `kv_transfer_params` handoff crosses the gRPC contract as a
+            // `google.protobuf.Struct`, whose numbers are all IEEE-754 doubles,
+            // and vLLM's gRPC frontend surfaces those to Python as `float`. An
+            // integer `remote_port` (e.g. 7100) therefore arrives on the decode
+            // engine as `7100.0`, yielding the path `tcp://host:7100.0` which
+            // urllib3 rejects with `LocationParseError`. Stringify the port so it
+            // survives the round-trip as an exact, dot-free token (mirrors the
+            // request-plane fix).
             stringify_remote_port(&mut params);
             Some(params)
         }
@@ -244,31 +252,28 @@ fn build_kv_parameters(
     })
 }
 
-/// vLLM's NIXL connector builds the decode->prefill side-channel address by
-/// f-stringing `remote_port` (`f"tcp://{host}:{port}"`). The value reaches the
-/// engine through a `google.protobuf.Struct`, whose numbers are always `double`,
-/// so an integer port arrives as `5600.0` and the ZMQ URL fails to parse. Send it
-/// as a string instead — vLLM renders `5600` and only ever uses it to build that
-/// URL. Remove once vLLM coerces the port itself.
+/// Rewrite a numeric `remote_port` in a decode handoff to a string so it
+/// survives the `google.protobuf.Struct` round-trip without acquiring a
+/// fractional part. See the call site in [`build_kv_parameters`] for why vLLM's
+/// decode engine cannot tolerate a float port. A missing, already-string, or
+/// non-numeric `remote_port` is left untouched — the field only matters to
+/// NixlConnector, and other connectors ignore it.
 fn stringify_remote_port(params: &mut serde_json::Value) {
-    let serde_json::Value::Object(map) = params else {
+    let Some(port) = params
+        .as_object_mut()
+        .and_then(|map| map.get_mut("remote_port"))
+    else {
         return;
     };
-    // struct_to_json recovers a whole port as an integer; coerce a whole float
-    // defensively so a bare `5600.0` never slips through unmodified.
-    let port = map.get("remote_port").and_then(|value| {
-        value.as_u64().or_else(|| {
-            value
-                .as_f64()
-                .filter(|f| f.fract() == 0.0 && *f >= 0.0)
-                .map(|f| f as u64)
-        })
-    });
-    if let Some(port) = port {
-        map.insert(
-            "remote_port".to_string(),
-            serde_json::Value::String(port.to_string()),
-        );
+    let as_int = port
+        .as_u64()
+        .map(|value| value.to_string())
+        .or_else(|| port.as_i64().map(|value| value.to_string()))
+        // A whole-valued float (e.g. the Struct decoded `7100.0`) still names an
+        // integer port; render it without the fractional part.
+        .or_else(|| port.as_f64().map(|value| (value as i64).to_string()));
+    if let Some(as_int) = as_int {
+        *port = serde_json::Value::String(as_int);
     }
 }
 

@@ -525,9 +525,10 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
         let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
-        // Every field round-trips opaquely except remote_port, which the sidecar
-        // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
-        // Struct number would reach the engine as `20097.0`).
+        // The decode hop forwards the prefill handoff verbatim except for
+        // `remote_port`, which is stringified so vLLM's decode engine never sees
+        // a float port after the protobuf-`Struct` round-trip (numbers cross as
+        // doubles). See `build_kv_parameters` for the failure mode.
         let mut expected = handoff.clone();
         expected["remote_port"] = json!("20097");
         assert_eq!(decoded, expected);
