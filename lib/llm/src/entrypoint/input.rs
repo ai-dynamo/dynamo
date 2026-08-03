@@ -123,9 +123,7 @@ pub async fn run_input_with_frontend_route_extensions(
 
     match in_opt {
         Input::Http => {
-            http::HttpFrontend::default()
-                .frontend_route_extensions(frontend_route_extensions)
-                .run(drt, engine_config)
+            http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
                 .await?;
         }
         Input::Grpc => {
