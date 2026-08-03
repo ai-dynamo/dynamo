@@ -104,9 +104,10 @@ launch_topology() {
 }
 
 wait_ready() {
+    local response
     for _ in $(seq 1 1200); do
-        if curl -fsS "http://127.0.0.1:$HTTP_PORT/v1/models" \
-            | python -c '
+        if response=$(curl -fsS "http://127.0.0.1:$HTTP_PORT/v1/models" 2>/dev/null) \
+            && python -c '
 import json
 import sys
 
@@ -115,7 +116,7 @@ payload = json.load(sys.stdin)
 raise SystemExit(
     0 if any(item.get("id") == model for item in payload.get("data", [])) else 1
 )
-' "$MODEL"; then
+' "$MODEL" <<<"$response"; then
             return 0
         fi
         kill -0 "$SERVER_PID" 2>/dev/null || return 1

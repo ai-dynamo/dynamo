@@ -92,7 +92,7 @@ done
 # (_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES) when set, else falls back to a sane
 # local default. Required for VRAM-safe parallel test scheduling.
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-[[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization 0.8"
+[[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization ${DYN_VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
 
 print_launch_banner --no-curl "CustomEncoder — Aggregated Serving" "$MODEL" "$HTTP_PORT" \
     "Worker GPU:  $WORKER_GPU" \
