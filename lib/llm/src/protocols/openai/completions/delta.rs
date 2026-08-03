@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_tokens_are_authoritative_from_backend_usage() {
+    fn test_completion_tokens_use_backend_usage_when_higher() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-backend-usage".to_string());
 
@@ -372,6 +372,30 @@ mod tests {
             prompt_tokens: 5,
             completion_tokens: 1,
             total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-zero-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 0,
+            total_tokens: 5,
             prompt_tokens_details: None,
             completion_tokens_details: None,
         });
