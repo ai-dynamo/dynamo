@@ -2200,8 +2200,8 @@ impl VllmCore {
         let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
             (Duration::ZERO, decode_start_ms)
         } else {
-            let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
+            let active_kv_tokens = total_length;
             let context_length = total_length / ready.len();
             let decode_ms = self.args.perf_model.predict_decode_time(
                 ready.len(),
@@ -2435,12 +2435,8 @@ impl VllmCore {
         let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
             (Duration::ZERO, decode_start_ms)
         } else {
-            let active_kv_tokens = self
-                .kv_manager
-                .num_active_blocks()
-                .saturating_sub(reservation.len())
-                * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
+            let active_kv_tokens = total_length;
             let context_length = total_length / ready.len();
             let decode_ms = self.args.perf_model.predict_decode_time(
                 ready.len(),

@@ -143,12 +143,6 @@ pub(crate) struct NativeDecodeBlockReservation {
     pool: BlockReservation,
 }
 
-impl NativeDecodeBlockReservation {
-    pub(crate) fn len(&self) -> usize {
-        self.pool.fresh_len()
-    }
-}
-
 pub(crate) struct NativeDestinationReservation {
     request_id: Uuid,
     pool: BlockReservation,

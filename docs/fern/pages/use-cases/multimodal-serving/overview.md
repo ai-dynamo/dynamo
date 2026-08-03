@@ -13,7 +13,7 @@ Dynamo provides support for improving latency and throughput for multimodal work
 
 | Workload | Feature | Benefit |
 |----------|---------|---------|
-| Workload where significant time is spent preprocessing. | Frontend media decoding | Move base64 decoding and pixel conversion off the worker's critical path, and use all CPU cores to preprocess in parallel. |
+| Workload where significant time is spent preprocessing. | [Parallel media decoding](parallel-media-decoding.md) | Move image fetching and decompression off the worker's critical path. |
 | Workload includes repeated multimodal content across requests. | [Embedding cache](embedding-cache.md) | Skip re-encoding repeated multimodal content. |
 | Workload includes repeated multimodal content across requests, and multiple backend workers serve multimodal requests. | [Multimodal KV routing](multimodal-kv-routing.md) | Maximize KV cache hit rates for multimodal content. |
 | Workload where media encoding is a bottleneck. | [EPD disaggregation](encoder-disaggregation.md) | Scale encoders independently of LLM workers. |
@@ -25,8 +25,8 @@ Dynamo provides support for improving latency and throughput for multimodal work
 ## Multimodal Performance Optimization Features
 
 <CardGroup cols={2}>
-  <Card title="Frontend Media Decoding" icon="regular image">
-    Move base64 decoding and pixel conversion off the worker's critical path. Documentation coming soon.
+  <Card title="Parallel Media Decoding" icon="regular image" href="parallel-media-decoding.md">
+    Decode image inputs concurrently in the Rust frontend and transfer pixels through NIXL
   </Card>
   <Card title="Embedding Cache" icon="regular database" href="embedding-cache.md">
     Cache vision encoder embeddings to skip re-encoding repeated multimodal content
