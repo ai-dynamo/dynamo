@@ -1399,6 +1399,32 @@ func TestGenerateComponentContext(t *testing.T) {
 	}
 }
 
+func TestGenerateComponentContextIncludesRuntimeProfile(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName:          "worker",
+		ComponentType:          commonconsts.ComponentTypeWorker,
+		RuntimeVersionOverride: "1.5.0",
+		PodTemplate: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "registry.example/runtime:custom",
+				}},
+			},
+		},
+	}
+
+	ctx := generateComponentContext(
+		component,
+		"test-dgd",
+		"default",
+		1,
+		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes, Mode: configv1alpha1.KubeDiscoveryModePod},
+	)
+
+	assert.True(t, ctx.RuntimeProfile.CanaryHealthChecks)
+}
+
 func Test_updateDynDeploymentConfig(t *testing.T) {
 	type args struct {
 		dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment

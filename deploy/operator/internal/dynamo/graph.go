@@ -1880,6 +1880,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
+		RuntimeProfile:                 runtimeProfileForComponent(component),
 	}
 	return componentContext
 }

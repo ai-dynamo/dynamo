@@ -30,6 +30,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const testRuntimeVersion15 = "1.5.0"
+
 func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) *v1alpha1.DynamoGraphDeployment {
 	return &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -88,6 +90,26 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) 
 	assert.NoError(t, err)
 	assert.Equal(t, expectedLegacyHash, legacyHash)
 	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, beta), legacyHash)
+}
+
+func TestComputeLegacyAlphaDGDWorkersSpecHash_IgnoresRuntimeProfile(t *testing.T) {
+	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{Image: "registry.example/runtime:custom"},
+			},
+			RuntimeVersionOverride: "1.4.0",
+		},
+	})
+	baseHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
+	assert.NoError(t, err)
+
+	alpha.Spec.Services["worker"].RuntimeVersionOverride = testRuntimeVersion15
+	changedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
+	assert.NoError(t, err)
+
+	assert.Equal(t, baseHash, changedHash, "legacy alpha hash must remain frozen")
 }
 
 func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversNameOnlyMainContainerHash(t *testing.T) {
@@ -296,16 +318,62 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_KeepsLegacyRuntimeProfileEmpty(t *testing.T) {
 	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	}))
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
 
-	withOverride := base.DeepCopy()
-	withOverride.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+	runtime14 := base.DeepCopy()
+	runtime14.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
 
-	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, runtime14))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_UsesCanonicalResolvedRuntimeProfile(t *testing.T) {
+	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	base.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			}},
+		},
+	}
+	implicitHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+
+	explicit := base.DeepCopy()
+	explicit.Spec.Components[0].RuntimeVersionOverride = testRuntimeVersion15
+
+	assert.Equal(t, implicitHash, mustComputeBetaDGDWorkersSpecHash(t, explicit), "equivalent implicit and explicit versions must hash identically")
+}
+
+func TestComputeBetaDGDWorkersSpecHash_ChangesWithRuntimeProfile(t *testing.T) {
+	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	base.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "registry.example/runtime:custom",
+			}},
+		},
+	}
+	base.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+	legacyProfileHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+
+	versioned := base.DeepCopy()
+	versioned.Spec.Components[0].RuntimeVersionOverride = testRuntimeVersion15
+	versionedProfileHash := mustComputeBetaDGDWorkersSpecHash(t, versioned)
+	assert.NotEqual(t, legacyProfileHash, versionedProfileHash, "a different effective rendering profile must change the hash")
+
+	newerSameProfile := base.DeepCopy()
+	newerSameProfile.Spec.Components[0].RuntimeVersionOverride = "2.0.0"
+
+	assert.Equal(t, versionedProfileHash, mustComputeBetaDGDWorkersSpecHash(t, newerSameProfile), "version changes with the same effective profile must not change the hash")
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {
