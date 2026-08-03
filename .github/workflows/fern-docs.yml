@@ -472,9 +472,10 @@ jobs:
           yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' "$VERSION_FILE"
           yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-'"$TAG"'/${1}")' "$VERSION_FILE"
 
-          # Update the comment at the top
-          sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
-          sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
+          # The version file is a copy of the tag's index.yml, whose nav header
+          # points at /dynamo/dev/. Rewrite that line so the snapshot does not
+          # claim to be the dev navigation.
+          sed -i "s|^# Navigation structure matching https://docs.nvidia.com/dynamo/dev/|# Navigation structure snapshot from tag $TAG|" "$VERSION_FILE"
 
           echo "Created $VERSION_FILE"
           echo "First 30 lines:"
