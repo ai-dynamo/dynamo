@@ -12,10 +12,12 @@
 //! `protocol.rs` helpers) and its gRPC connection [`Pool`] verbatim, one pool
 //! per discovered worker instance.
 //!
-//! Aggregated serving only: the direct path carries no disaggregation handoff,
-//! so [`build_generate_request`] is always driven with
-//! [`DisaggregationMode::Aggregated`] and the engine rejects `--direct` against
-//! a prefill/decode SGLang server.
+//! Disaggregation-aware: each dispatch is built for one role (aggregated,
+//! prefill, or decode) from the model card's `worker_type`, and drives
+//! [`build_generate_request`] with that [`DisaggregationMode`]. A prefill
+//! dispatch also carries the discovery-resolved bootstrap host/port as a
+//! fallback; in practice the frontend's `PrefillRouter` stamps
+//! `request.bootstrap_info` upfront, which `resolve_disaggregated_params` prefers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +29,7 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::discovery::{DirectDispatchProvider, LlmStreamingDispatch};
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::{
     component::{Instance, TransportType},
     discovery::EndpointInstanceId,
@@ -95,15 +98,31 @@ fn status_to_top_level(rpc: &str, status: tonic::Status) -> DynamoError {
 /// connection [`Pool`] per discovered worker instance.
 pub struct GrpcDispatch {
     transport: TransportConfig,
+    /// Disaggregation role this dispatch drives (`build_generate_request` switches
+    /// the KV-transfer handoff on it).
+    mode: DisaggregationMode,
+    /// Prefill bootstrap host/port from discovery — a fallback for a prefill
+    /// dispatch when a request arrives without `bootstrap_info`. `None` for
+    /// decode / aggregated dispatches.
+    bootstrap_host: Option<String>,
+    bootstrap_port: Option<u16>,
     /// Per-instance gRPC connection pools, keyed by discovery `instance_id`.
     /// Built lazily from the address carried on each `AddressedRequest`.
     clients: Mutex<HashMap<u64, Arc<Pool>>>,
 }
 
 impl GrpcDispatch {
-    pub fn new(transport: TransportConfig) -> Self {
+    pub fn new(
+        transport: TransportConfig,
+        mode: DisaggregationMode,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
+    ) -> Self {
         Self {
             transport,
+            mode,
+            bootstrap_host,
+            bootstrap_port,
             clients: Mutex::new(HashMap::new()),
         }
     }
@@ -183,8 +202,16 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
             .output_options
             .return_tokens_as_token_ids
             .unwrap_or(false);
-        // Aggregated only: no disaggregation handoff on the direct path.
-        let proto = build_generate_request(&req, &request_id, DisaggregationMode::Aggregated, None, None)?;
+        // Drive the request for this dispatch's role; `resolve_disaggregated_params`
+        // prefers the request's own `bootstrap_info` / `prefill_result` and only
+        // falls back to the dispatch's discovery-resolved host/port.
+        let proto = build_generate_request(
+            &req,
+            &request_id,
+            self.mode,
+            self.bootstrap_host.as_deref(),
+            self.bootstrap_port,
+        )?;
 
         let mut stream = grpc_client
             .generate(proto)
@@ -353,20 +380,26 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
     }
 }
 
+/// Per-(model, role) cache of direct dispatches, keyed by
+/// `(card.name(), card.worker_type)`.
+type DispatchCache = Mutex<HashMap<(String, Option<WorkerType>), Arc<GrpcDispatch>>>;
+
 /// Composition-root provider that builds a [`GrpcDispatch`] for models whose
 /// worker advertises `runtime_data["direct_backend"] = "sglang"`. Register it
 /// with `dynamo_llm::discovery::register_direct_dispatch_provider` in the
 /// frontend composition root before serving.
 pub struct SglangDirectDispatchProvider {
     transport: TransportConfig,
-    /// One shared [`GrpcDispatch`] per model, keyed by `card.name()`. The router
-    /// rebuilds its dispatch on every worker-set change, but the per-endpoint
-    /// instance-removal watcher is first-wins and lives for the whole runtime —
-    /// so a fresh dispatch per rebuild would never receive `on_instance_removed`
-    /// and its connection pools would leak. Reusing one dispatch keeps the
-    /// watcher wired to the live pool, mirroring the request plane's per-DRT
-    /// shared state.
-    dispatches: Mutex<HashMap<String, Arc<GrpcDispatch>>>,
+    /// One shared [`GrpcDispatch`] per (model, role), keyed by
+    /// `(card.name(), card.worker_type)`. The router rebuilds its dispatch on
+    /// every worker-set change, but the per-endpoint instance-removal watcher is
+    /// first-wins and lives for the whole runtime — so a fresh dispatch per
+    /// rebuild would never receive `on_instance_removed` and its connection pools
+    /// would leak. Reusing one dispatch keeps the watcher wired to the live pool,
+    /// mirroring the request plane's per-DRT shared state. The role is part of the
+    /// key because a prefill card and a decode card share a model name but need
+    /// different [`DisaggregationMode`]s (and bootstrap endpoints).
+    dispatches: DispatchCache,
 }
 
 impl SglangDirectDispatchProvider {
@@ -391,13 +424,38 @@ impl DirectDispatchProvider for SglangDirectDispatchProvider {
     }
 
     async fn build(&self, card: &ModelDeploymentCard) -> anyhow::Result<LlmStreamingDispatch> {
+        let (mode, bootstrap_host, bootstrap_port) = dispatch_role(card);
+        let transport = self.transport.clone();
         let dispatch: LlmStreamingDispatch = self
             .dispatches
             .lock()
-            .entry(card.name().to_string())
-            .or_insert_with(|| Arc::new(GrpcDispatch::new(self.transport.clone())))
+            .entry((card.name().to_string(), card.worker_type))
+            .or_insert_with(|| {
+                Arc::new(GrpcDispatch::new(
+                    transport,
+                    mode,
+                    bootstrap_host,
+                    bootstrap_port,
+                ))
+            })
             .clone();
         Ok(dispatch)
+    }
+}
+
+/// Resolve the [`DisaggregationMode`] and prefill bootstrap fallback for a card's
+/// role. A prefill card carries its discovery-published bootstrap host/port on
+/// `runtime_config.disaggregated_endpoint`; decode / aggregated cards carry none.
+fn dispatch_role(card: &ModelDeploymentCard) -> (DisaggregationMode, Option<String>, Option<u16>) {
+    match card.worker_type {
+        Some(WorkerType::Prefill) => {
+            let endpoint = card.runtime_config.disaggregated_endpoint.as_ref();
+            let host = endpoint.and_then(|e| e.bootstrap_host.clone());
+            let port = endpoint.and_then(|e| e.bootstrap_port);
+            (DisaggregationMode::Prefill, host, port)
+        }
+        Some(WorkerType::Decode) => (DisaggregationMode::Decode, None, None),
+        _ => (DisaggregationMode::Aggregated, None, None),
     }
 }
 

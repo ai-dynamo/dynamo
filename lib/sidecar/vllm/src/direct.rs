@@ -20,6 +20,9 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, ErrorType, LLMEngineOutput, LLMEngineOutputExt,
     PreprocessedRequest, usage,
 };
+use dynamo_llm::discovery::{DirectDispatchProvider, LlmStreamingDispatch};
+use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::{
     component::{Instance, TransportType},
     discovery::EndpointInstanceId,
@@ -30,8 +33,6 @@ use dynamo_runtime::{
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
-use dynamo_llm::discovery::{DirectDispatchProvider, LlmStreamingDispatch};
-use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use parking_lot::Mutex;
 
@@ -43,10 +44,6 @@ use crate::convert::{ResponseState, build_generate_request};
 /// [`DirectDispatchProvider::backend`] returns it — single source so they can't
 /// diverge.
 pub const VLLM_BACKEND: &str = "vllm";
-
-/// Direct dispatch always drives the vLLM engine in aggregated mode: KV-aware
-/// routing and disaggregated prefill/decode handoff stay off on the direct hop.
-const DIRECT_MODE: DisaggregationMode = DisaggregationMode::Aggregated;
 
 fn top_level(kind: ErrorType, message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
@@ -98,15 +95,20 @@ fn status_to_top_level(rpc: &str, status: tonic::Status) -> DynamoError {
 /// one connection pool per discovered worker instance.
 pub struct GrpcDispatch {
     transport: GrpcTransportConfig,
+    /// Disaggregation role this dispatch drives. `build_kv_parameters` switches on
+    /// it: a prefill dispatch stamps `do_remote_decode`, a decode dispatch reads
+    /// the request's `prefill_result` KV payload, aggregated passes neither.
+    mode: DisaggregationMode,
     /// Per-instance gRPC channel pools, keyed by discovery `instance_id`. Built
     /// lazily from the address carried on each `AddressedRequest`.
     clients: Mutex<HashMap<u64, Arc<VllmClient>>>,
 }
 
 impl GrpcDispatch {
-    pub fn new(transport: GrpcTransportConfig) -> Self {
+    pub fn new(transport: GrpcTransportConfig, mode: DisaggregationMode) -> Self {
         Self {
             transport,
+            mode,
             clients: Mutex::new(HashMap::new()),
         }
     }
@@ -183,8 +185,8 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
         // consumes the request; `ResponseState` borrows it just before the move.
         let model = req.model.clone();
         let input_tokens = req.token_ids.len();
-        let mut state = ResponseState::new(&req, DIRECT_MODE);
-        let proto = build_generate_request(req, request_id.clone(), DIRECT_MODE)?;
+        let mut state = ResponseState::new(&req, self.mode);
+        let proto = build_generate_request(req, request_id.clone(), self.mode)?;
         let mut stream = client
             .generate_stream_raw(proto)
             .await
@@ -265,19 +267,26 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
     }
 }
 
+/// Per-(model, role) cache of direct dispatches, keyed by
+/// `(card.name(), card.worker_type)`.
+type DispatchCache = Mutex<HashMap<(String, Option<WorkerType>), Arc<GrpcDispatch>>>;
+
 /// Composition-root provider that builds a [`GrpcDispatch`] for models whose
 /// worker advertises `runtime_data["direct_backend"] = "vllm"`. Register it with
 /// `dynamo_llm::discovery::register_direct_dispatch_provider` in the frontend
 /// composition root before serving.
 pub struct VllmDirectDispatchProvider {
     transport: GrpcTransportConfig,
-    /// One shared [`GrpcDispatch`] per model, keyed by `card.name()`. The router
-    /// rebuilds its dispatch on every worker-set change, but the per-endpoint
-    /// instance-removal watcher is first-wins and lives for the whole runtime —
-    /// so a fresh dispatch per rebuild would never receive `on_instance_removed`
-    /// and its channel pools would leak. Reusing one dispatch keeps the watcher
-    /// wired to the live pool, mirroring the request plane's per-DRT shared state.
-    dispatches: Mutex<HashMap<String, Arc<GrpcDispatch>>>,
+    /// One shared [`GrpcDispatch`] per (model, role), keyed by
+    /// `(card.name(), card.worker_type)`. The router rebuilds its dispatch on
+    /// every worker-set change, but the per-endpoint instance-removal watcher is
+    /// first-wins and lives for the whole runtime — so a fresh dispatch per
+    /// rebuild would never receive `on_instance_removed` and its channel pools
+    /// would leak. Reusing one dispatch keeps the watcher wired to the live pool,
+    /// mirroring the request plane's per-DRT shared state. The role is part of the
+    /// key because a prefill card and a decode card share a model name but drive
+    /// different [`DisaggregationMode`]s.
+    dispatches: DispatchCache,
 }
 
 impl VllmDirectDispatchProvider {
@@ -302,13 +311,26 @@ impl DirectDispatchProvider for VllmDirectDispatchProvider {
     }
 
     async fn build(&self, card: &ModelDeploymentCard) -> anyhow::Result<LlmStreamingDispatch> {
+        let mode = dispatch_mode(card);
+        let transport = self.transport;
         let dispatch: LlmStreamingDispatch = self
             .dispatches
             .lock()
-            .entry(card.name().to_string())
-            .or_insert_with(|| Arc::new(GrpcDispatch::new(self.transport)))
+            .entry((card.name().to_string(), card.worker_type))
+            .or_insert_with(|| Arc::new(GrpcDispatch::new(transport, mode)))
             .clone();
         Ok(dispatch)
+    }
+}
+
+/// Resolve the [`DisaggregationMode`] a card's role drives. vLLM transfers KV via
+/// `prefill_result` (NixlConnector), so no bootstrap endpoint is needed — only
+/// the mode differs between prefill and decode dispatches.
+fn dispatch_mode(card: &ModelDeploymentCard) -> DisaggregationMode {
+    match card.worker_type {
+        Some(WorkerType::Prefill) => DisaggregationMode::Prefill,
+        Some(WorkerType::Decode) => DisaggregationMode::Decode,
+        _ => DisaggregationMode::Aggregated,
     }
 }
 
