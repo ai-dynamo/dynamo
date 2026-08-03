@@ -354,7 +354,7 @@ export function FeatureInteractions({ backend }: { backend: string }) {
     <div className="dynref-panel">
       <style dangerouslySetInnerHTML={{ __html: FI_CSS }} />
       <div className="dynref-panel-header">
-        <span className="dynref-h">{matrix.backend} feature interactions</span>
+        <span className="dynref-h">{matrix.backend} Feature Interactions</span>
         <div className="dynref-fi-legend">
           <span className="dynref-fi-legend-item">
             <span className="dynref-fi-swatch dynref-fi-swatch--yes" />

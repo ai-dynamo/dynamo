@@ -13,12 +13,17 @@
  * same rows as a flat markdown table so agent-facing exports never lose
  * the matrix; this component is deliberately the human-only rendering.
  *
- * Deliberately unstyled: plain <table>, <details>, and <small> so the
- * matrix inherits the docs theme's table typography and matches every
- * other table on the page. It ships no CSS of its own and claims no
- * .dynref-* classes -- an earlier revision rendered bordered cards with
- * ~250 lines of .dynref-rsm-* rules, which read as a separate widget
- * bolted onto the page rather than part of it.
+ * The table itself is deliberately unstyled -- it inherits the docs theme's
+ * table typography and matches every other table on the page. The only CSS
+ * here dresses the minor-line disclosure rows and the release cell, because
+ * a bare <summary> gives no click target and no open/closed affordance. An
+ * earlier revision rendered bordered cards from ~250 lines of .dynref-rsm-*
+ * rules and read as a separate widget bolted onto the page; this is the
+ * smaller treatment that keeps the rows legible without that.
+ *
+ * CSS is injected via dangerouslySetInnerHTML, not as a <style> text child:
+ * a text child is escaped on render, which turns any `>` child combinator
+ * into &gt; and silently drops the rule (see #12402).
  *
  * Server component (no "use client"); minor lines use native
  * <details>/<summary> for progressive disclosure, so no client JS is
@@ -37,6 +42,88 @@ import {
 // support matrix. Platform previews and model-specific builds are excluded;
 // CUDA_NOTES calls out the ones whose toolkit support differs, and the
 // machine-readable releases page carries the full inventory.
+/* Just enough to make each minor line read as a disclosure row: a rule
+ * between lines, a target big enough to click, and a marker that turns. The
+ * table inside stays the theme's own -- this is deliberately not the bordered
+ * card treatment an earlier revision carried. */
+const RSM_CSS = `
+.dynref-rsm-line {
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynref-rsm-line[open] {
+    padding-bottom: 14px;
+}
+
+.dynref-rsm-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    padding: 9px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.dynref-rsm-summary::-webkit-details-marker { display: none; }
+
+.dynref-rsm-summary::before {
+    content: "›";
+    display: inline-block;
+    width: 10px;
+    color: var(--pst-color-text-muted);
+    font-size: 15px;
+    line-height: 1;
+    transition: transform 120ms ease;
+}
+
+.dynref-rsm-line[open] > .dynref-rsm-summary::before {
+    transform: rotate(90deg);
+}
+
+.dynref-rsm-summary:hover { background: rgba(118, 185, 0, 0.06); }
+.dark .dynref-rsm-summary:hover { background: rgba(118, 185, 0, 0.10); }
+
+.dynref-rsm-summary:focus-visible {
+    outline: 2px solid var(--nv-color-green, #76B900);
+    outline-offset: -2px;
+}
+
+.dynref-rsm-minor {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.dynref-rsm-meta {
+    color: var(--pst-color-text-muted);
+    font-size: 12.5px;
+}
+
+.dynref-rsm-cudas { margin-left: auto; }
+
+/* The release cell stacks version over kind/date/UCX; without this the small
+ * lines crowd the version and the row loses its anchor. */
+.dynref-rsm-release-version {
+    display: block;
+    font-variant-numeric: tabular-nums;
+}
+
+.dynref-rsm-release-meta {
+    display: block;
+    margin-top: 3px;
+    color: var(--pst-color-text-muted);
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+    .dynref-rsm-cudas { margin-left: 0; }
+}
+`;
+
+
 const SUPPORT_KINDS: ReadonlySet<Release["kind"]> = new Set(["stable", "patch"]);
 
 // CUDA majors the matrix knows how to render, in display order. A toolkit
@@ -245,9 +332,8 @@ function ReleaseMeta({ block }: { block: ReleaseBlock }) {
   const { release, postTrains } = block;
   return (
     <>
-      v{block.version}
-      <br />
-      <small>
+      <span className="dynref-rsm-release-version">v{block.version}</span>
+      <span className="dynref-rsm-release-meta">
         {kindLabel(release.kind)}
         {release.date && ` · ${release.date}`}
         <br />
@@ -260,7 +346,7 @@ function ReleaseMeta({ block }: { block: ReleaseBlock }) {
             {postTrains.length === 1 ? "s" : ""} this CUDA support
           </>
         )}
-      </small>
+      </span>
     </>
   );
 }
@@ -317,14 +403,19 @@ export function ReleaseSupportMatrix() {
   }
   return (
     <>
+      <style dangerouslySetInnerHTML={{ __html: RSM_CSS }} />
       {groups.map((group, index) => (
-        <details key={group.minor} open={index === 0}>
-          <summary>
-            <strong>{group.minor}</strong> — {group.releaseCount} release
-            {group.releaseCount === 1 ? "" : "s"} ·{" "}
-            {group.majors.length > 0
-              ? `CUDA ${group.majors.join(", ")}`
-              : "CUDA not recorded"}
+        <details className="dynref-rsm-line" key={group.minor} open={index === 0}>
+          <summary className="dynref-rsm-summary">
+            <span className="dynref-rsm-minor">{group.minor}</span>
+            <span className="dynref-rsm-meta">
+              {group.releaseCount} release{group.releaseCount === 1 ? "" : "s"}
+            </span>
+            <span className="dynref-rsm-meta dynref-rsm-cudas">
+              {group.majors.length > 0
+                ? `CUDA ${group.majors.join(", ")}`
+                : "CUDA not recorded"}
+            </span>
           </summary>
           <MinorLineTable group={group} />
         </details>
