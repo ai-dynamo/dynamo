@@ -89,6 +89,13 @@ spec:
                 - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
                 - --served-model-name=Qwen/Qwen3.5-122B-A10B
                 - --trust-remote-code
+                # Enables the vision path for Image/Video input.
+                - --enable-multimodal
+                # Disaggregation needs this: the prefill worker computes the vision
+                # embeddings and hands `image_embeds` to the decode worker, which vLLM
+                # rejects unless mm-embeds input is enabled. Aggregated serving does not
+                # need it because one worker does both halves.
+                - --enable-mm-embeds
                 - --dyn-tool-call-parser
                 - qwen3_coder
                 - --dyn-reasoning-parser
@@ -215,6 +222,13 @@ spec:
                 - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
                 - --served-model-name=Qwen/Qwen3.5-122B-A10B
                 - --trust-remote-code
+                # Enables the vision path for Image/Video input.
+                - --enable-multimodal
+                # Disaggregation needs this: the prefill worker computes the vision
+                # embeddings and hands `image_embeds` to the decode worker, which vLLM
+                # rejects unless mm-embeds input is enabled. Aggregated serving does not
+                # need it because one worker does both halves.
+                - --enable-mm-embeds
                 - --dyn-tool-call-parser
                 - qwen3_coder
                 - --dyn-reasoning-parser
