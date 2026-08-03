@@ -77,7 +77,7 @@ If workers do not publish KV events, configure the frontend with `--no-router-kv
 `--kv-transfer-config` is a native vLLM engine argument rather than a `DynamoVllmConfig` field, so it has no `DYN_VLLM_*` environment variable. It selects the KV connector that moves cache blocks between prefill and decode workers.
 
 <Warning>
-A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. The other modes — `agg`, `decode`, and `encode` — do not enforce this check.
+A worker started with `--disaggregation-mode prefill` must be passed `--kv-transfer-config` explicitly. Without it, the worker raises a `ValueError` during argument parsing and never starts. All non-prefill modes — `agg`, `pd`, `decode`, and `encode` — do not enforce this check.
 </Warning>
 
 The value is a JSON object. For NIXL-based prefill/decode disaggregation:
@@ -91,7 +91,11 @@ python -m dynamo.vllm \
 
 Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
 
-The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` whose message includes the equivalent `--kv-transfer-config` value to use instead.
+The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
+
+- An active connector, such as `--connector nixl` or `DYN_CONNECTOR=nixl`, reports the equivalent `--kv-transfer-config` JSON to use instead.
+- `--connector none` or `--connector null` reports that the flag is no longer needed, because no connector is already the default. There is no equivalent value to migrate to, so none is shown.
+- `DYN_CONNECTOR` set to an empty or whitespace-only value reports that the variable is no longer supported, without an equivalent value.
 
 ## Worker role and disaggregation
 
