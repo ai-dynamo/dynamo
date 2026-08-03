@@ -342,6 +342,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 RUN rm -rf /workspace/vllm
 
 {% if device == "cuda" %}
+# Transitional: this exists only until the base image stops shipping these.
+# The permanent statement of what may ship is
+# tests/dependencies/test_no_software_video_codecs.py -- when this purge
+# becomes redundant, delete it and keep those assertions.
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component

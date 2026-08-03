@@ -210,13 +210,22 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
 # five absent and vp8/vp9/mjpeg/av1 retained.
 #
-# A floor rather than a pin, matching how PyNvVideoCodec is constrained. 2.1.1 is
-# where the fix landed, but pip resolves this to the newest available (2.2.0 at
-# the time of writing), and a pin would DOWNGRADE the package if TensorRT-LLM
-# later ships a base image newer than the pin -- reintroducing nothing, but
-# diverging from their choice for no reason. The guard below is what makes the
-# floating upper end safe for the codec question specifically; functional
-# regressions are the TRT-LLM CI lane's job.
+# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest -- 2.2.0
+# at the time of writing -- which is a minor-version jump into a component this
+# repo does not own, taken silently at build time. 2.1.1 is the smallest change
+# that removes the decoders, so it is the one to take.
+#
+# A pin can go stale in the one direction that matters: if TensorRT-LLM later
+# ships a base image with a newer DALI, installing 2.1.1 over it is a downgrade.
+# The check below turns that into a build failure with instructions rather than a
+# silent regression, which also makes this block self-retiring -- when upstream
+# catches up, the build tells whoever is looking to delete it.
+#
+# THIS BLOCK IS TRANSITIONAL. It exists because the base image predates upstream's
+# own cleanup. The guards after it and the bundled-libavcodec assertion in
+# tests/dependencies/test_no_software_video_codecs.py are NOT transitional: they
+# are the permanent statement of what this image may contain, and they must
+# outlive the workaround.
 #
 # System interpreter for the same reason as the opencv removal above: with
 # VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
@@ -228,10 +237,22 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # beside the new one.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
+    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
+    echo "DALI in base image: $before"; \
+    newest=$(printf '%s\n2.1.1\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.1.1" ]; then \
+        echo "ERROR: base image already carries DALI $before, so pinning 2.1.1 would" >&2; \
+        echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
+        echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
+        echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
+        echo "       this from regressing." >&2; \
+        exit 1; \
+    fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130>=2.1.1'; \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.1.1'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
+    [ "$v" = "2.1.1" ] || { echo "ERROR: wanted DALI 2.1.1, got $v" >&2; exit 1; }; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \

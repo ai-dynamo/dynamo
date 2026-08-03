@@ -18,6 +18,16 @@ longer supports, it asserts the failure, so a silent reintroduction is caught.
 Every negative assertion here is paired with a positive one. A missing or broken
 FFmpeg would otherwise satisfy "no H.264 decoder" trivially and the test would
 pass while proving nothing.
+
+This module is the PERMANENT half of the codec work. The removal logic in the
+image templates is not: purging wheels the vLLM and SGLang base images preinstall,
+and pinning DALI past its own cleanup, are all workarounds for upstreams that had
+not yet trimmed their own builds. Each is expected to disappear as those upstreams
+catch up -- the DALI pin already fails the build with instructions when its base
+image passes it. What must survive every one of those removals is this file: it
+states what the shipped images may contain, independently of which upstream
+currently needs help meeting it. Delete the workarounds as they become redundant;
+do not delete the assertions with them.
 """
 
 from __future__ import annotations

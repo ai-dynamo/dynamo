@@ -150,6 +150,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # soundfile and uses torchaudio only for resampling, so those paths remain
 # available for formats supported by libsndfile (for example WAV and FLAC).
 # AAC-backed M4A stays removed; video encode is VP9 only.
+# Transitional: this exists only until the base image stops shipping these.
+# The permanent statement of what may ship is
+# tests/dependencies/test_no_software_video_codecs.py -- when this purge
+# becomes redundant, delete it and keep those assertions.
 RUN set -eux; \
     python3 -m pip uninstall --yes \
         av \
