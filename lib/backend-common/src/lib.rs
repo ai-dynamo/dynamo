@@ -43,4 +43,4 @@ pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::{run, run_raw};
 pub use snapshot_publisher::SnapshotPublisher;
-pub use worker::{DIRECT_GRPC_ENDPOINT_KEY, RuntimeConfig, Worker, WorkerConfig};
+pub use worker::{RuntimeConfig, Worker, WorkerConfig};

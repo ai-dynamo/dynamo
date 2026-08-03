@@ -60,9 +60,8 @@ pub struct Args {
     /// Run in "direct" mode: register this worker in discovery with a gRPC
     /// transport and health-check the SGLang gRPC server, but do NOT serve the
     /// Dynamo request plane. The frontend dispatches inference straight to
-    /// SGLang's native gRPC endpoint. Aggregated serving only. Reuses the
-    /// generic `--direct` registrar in `backend-common` via
-    /// `WorkerConfig.is_direct`.
+    /// SGLang's native gRPC endpoint. Aggregated serving only. Driven by the
+    /// `dynamo-direct-register` shim (`run_direct`).
     #[arg(long = "direct", default_value_t = false, env = "DYN_DIRECT")]
     pub direct: bool,
 

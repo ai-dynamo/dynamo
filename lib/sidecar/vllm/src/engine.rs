@@ -91,13 +91,6 @@ impl VllmSidecarEngine {
                 "route-to-encoder is not supported by the vLLM sidecar",
             ));
         }
-        if args.sidecar.common.is_direct
-            && args.sidecar.common.disaggregation_mode != DisaggregationMode::Aggregated
-        {
-            return Err(client::invalid_argument(
-                "--direct supports aggregated serving only for the vLLM sidecar",
-            ));
-        }
 
         let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
         let transport = args.sidecar.grpc.config();

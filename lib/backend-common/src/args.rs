@@ -90,20 +90,4 @@ pub struct CommonArgs {
     /// shim does not read this env var.
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
-
-    /// Run in "direct" mode: register this worker in discovery with a gRPC
-    /// transport and health-check the engine's gRPC server, but do NOT serve
-    /// the Dynamo request plane. The frontend dispatches inference straight to
-    /// the engine's gRPC endpoint. Requires an engine that surfaces its gRPC
-    /// address via `EngineConfig.runtime_data["direct_grpc_endpoint"]`.
-    #[arg(long = "direct", default_value_t = false, env = "DYN_DIRECT")]
-    pub is_direct: bool,
-
-    /// Address the frontend dials for this worker's engine gRPC in `--direct`
-    /// mode, when it differs from the engine's local endpoint — e.g. a routable
-    /// pod IP:port for multi-node, where the sidecar itself connects over
-    /// loopback. Defaults to the engine's own gRPC endpoint. Ignored without
-    /// `--direct`.
-    #[arg(long, env = "DYN_ADVERTISE_GRPC_ENDPOINT")]
-    pub advertise_grpc_endpoint: Option<String>,
 }

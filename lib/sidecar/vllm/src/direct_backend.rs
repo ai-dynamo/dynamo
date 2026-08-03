@@ -104,7 +104,7 @@ pub enum Launch {
 /// Parse process args and decide the run mode. Called from `main`.
 pub fn launch_from_env() -> Result<Launch, DynamoError> {
     let args = VllmSidecarEngine::parse(None)?;
-    if args.sidecar.common.is_direct {
+    if args.direct {
         let (backend, config) = direct_from_args(args)?;
         Ok(Launch::Direct(backend, config))
     } else {
@@ -137,7 +137,7 @@ fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig)
         custom_jinja_template: args.sidecar.common.custom_jinja_template,
         tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
         reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
-        advertise_grpc_endpoint: args.sidecar.common.advertise_grpc_endpoint,
+        advertise_grpc_endpoint: args.advertise_grpc_endpoint,
     };
     Ok((backend, config))
 }

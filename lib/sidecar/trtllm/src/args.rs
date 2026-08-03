@@ -27,4 +27,18 @@ pub(crate) struct Args {
     /// omit `max_tokens` are rejected. See the note in `convert.rs`.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH")]
     pub context_length: Option<u32>,
+
+    /// Run in "direct" mode: register this worker in discovery with a gRPC
+    /// transport and health-check the engine's gRPC server, but do NOT serve
+    /// the Dynamo request plane. The frontend dispatches inference straight to
+    /// TensorRT-LLM's native gRPC endpoint. Aggregated serving only.
+    #[arg(long = "direct", default_value_t = false, env = "DYN_DIRECT")]
+    pub direct: bool,
+
+    /// Address the frontend dials for the engine's gRPC in `--direct` mode, when
+    /// it differs from `--trtllm-endpoint` (e.g. a routable pod IP:port for
+    /// multi-node, where the sidecar itself connects over loopback). Defaults to
+    /// the endpoint the sidecar connects to. Ignored without `--direct`.
+    #[arg(long, env = "DYN_ADVERTISE_GRPC_ENDPOINT")]
+    pub advertise_grpc_endpoint: Option<String>,
 }
