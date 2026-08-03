@@ -318,6 +318,8 @@ navigation:
         contents:
           - page: Observability
             path: pages/cli/operations/observability.mdx
+          - page: Performance Analysis
+            path: pages/cli/operations/performance-analysis.md
           - page: Benchmarking with AIPerf
             path: pages/cli/operations/benchmarking-with-aiperf.mdx
           - page: LoRA Adapters
