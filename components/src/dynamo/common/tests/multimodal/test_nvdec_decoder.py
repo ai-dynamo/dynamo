@@ -200,6 +200,44 @@ def test_decode_caps_at_total_frames(monkeypatch):
     assert frames.shape[0] == 3  # cannot sample more frames than exist
 
 
+@pytest.mark.parametrize(
+    "total,num_frames,expect_flag,expect_returned",
+    [
+        (3, 32, True, 3),  # fewer frames than asked for -> every source frame
+        (32, 32, True, 32),  # exactly as many -> still every source frame
+        (100, 10, False, 10),  # more than asked for -> we already sampled
+        (1, 5, True, 1),  # single-frame clip
+    ],
+)
+def test_decode_reports_whether_it_already_sampled(
+    monkeypatch, total, num_frames, expect_flag, expect_returned
+):
+    """`do_sample_frames` must say whether the consumer may still sample.
+
+    vLLM's own loader reports `len(frames_indices) == total_num_frames`, and
+    Qwen3-VL reads a MISSING flag as False. Omitting it therefore made short
+    clips -- exactly the case where every source frame is returned -- look
+    pre-sampled, so the model's fps policy never ran and all frames were consumed
+    instead of the four it would have chosen.
+
+    Asserted here rather than end to end on purpose: the serve tests check what
+    the model says about the clip, and that answer does not change when the frame
+    count does. This is the level that can see it.
+    """
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=total))
+    monkeypatch.setattr(
+        nd, "_frame_to_rgb_hwc", lambda f: np.asarray(f, dtype=np.uint8)
+    )
+    frames, meta = nd.decode_video_nvdec(b"x", num_frames=num_frames)
+
+    assert meta["do_sample_frames"] is expect_flag
+    assert frames.shape[0] == expect_returned
+    # The flag is exactly vLLM's rule, restated against what we returned.
+    assert meta["do_sample_frames"] == (
+        len(meta["frames_indices"]) == meta["total_num_frames"]
+    )
+
+
 def test_decode_raises_on_empty_stream(monkeypatch):
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=0))
     with pytest.raises(RuntimeError):

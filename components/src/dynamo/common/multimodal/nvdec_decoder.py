@@ -266,5 +266,18 @@ def decode_video_nvdec(
         "fps": fps,
         "frames_indices": indices.tolist(),
         "total_num_frames": int(total),
+        # Whether the consumer may still sample these frames. vLLM's own video
+        # loader reports `len(frames_indices) == total_num_frames`: true when the
+        # loader handed over every source frame, false when it already picked a
+        # subset. Qwen3-VL treats a MISSING flag as false, so omitting it here
+        # made short clips -- the case where we return everything -- look
+        # pre-sampled, and the model's own fps policy never ran. Reported with a
+        # reproduction against vLLM 0.26.0's Qwen3-VL processor: the 10-frame
+        # fixture yielded video_grid_thw [[5,16,20]] instead of [[2,16,20]].
+        #
+        # Reported by @Chokoyo on #11836. Note the E2E video tests cannot see
+        # this: they assert on what the model says about the clip, which does not
+        # change when the frame count does. The unit test is the check that can.
+        "do_sample_frames": len(indices) == total,
     }
     return stacked, metadata

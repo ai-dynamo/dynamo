@@ -131,16 +131,11 @@ RUN python3 -m compliance.policy.validate \
 # Files, not just the SBOM, because statically-bundled codec .so's don't appear
 # as components.
 #
-# CUDA only, and deliberately so -- state the limit plainly rather than let the
-# gate read as covering every image. The purge this gate depends on (the
-# `device == "cuda"` block in vllm_runtime.Dockerfile) removes the base image's
-# media packages and installs the in-tree LGPL ffmpeg in their place. The XPU
-# image gets neither, so it still carries its base image's ffmpeg stack --
-# libavcodec, libx264 and libx265 among them -- and running the gate there would
-# fail the build on packages this repo does not choose or control. That image's
-# base is owned by Intel; bringing it into the allowlist is their call, not a
-# side effect of a Dynamo compliance change. Extending the purge to `xpu` is the
-# fix if that ownership question is ever settled the other way.
+# CUDA only for now. The XPU image is not currently published on NGC, so it does
+# not yet require the codecs to be removed. It would also fail this gate today:
+# the purge the gate depends on sits in the `device == "cuda"` block of
+# vllm_runtime.Dockerfile, so the XPU image still carries its base image's media
+# stack. Enable both together if that changes.
 {% if device == "cuda" %}
 RUN python3 -m compliance.scan_codecs \
         --root / \
