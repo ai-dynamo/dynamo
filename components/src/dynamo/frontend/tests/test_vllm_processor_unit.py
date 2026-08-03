@@ -1104,3 +1104,19 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+@pytest.mark.core
+class TestMmProcessorKwargsForwarding:
+    def test_mm_processor_kwargs_forwarded_to_renderer(self, tokenizer):
+        """Per-request multimodal overrides are applied during media rendering."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "mm_processor_kwargs": {"max_soft_tokens": 1120},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert chat_params.mm_processor_kwargs == {"max_soft_tokens": 1120}

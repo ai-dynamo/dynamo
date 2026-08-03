@@ -185,6 +185,11 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
+        # Multimodal processor overrides must be present during rendering. The
+        # renderer fetches and preprocesses media here, so attaching these only
+        # to the later EngineInput leaves the already-rendered image placeholders
+        # at the model default (for example Gemma 4 stays at 280 soft tokens).
+        mm_processor_kwargs=request_for_sampling.mm_processor_kwargs,
         # Renderer-managed keys last so a nested duplicate can't raise TypeError.
         chat_template_kwargs={
             **chat_template_kwargs,
