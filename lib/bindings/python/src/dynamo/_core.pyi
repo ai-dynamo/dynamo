@@ -2228,9 +2228,10 @@ async def register_model(
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
 
-    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
-    and a minimal model card is registered directly. Use model_path as the display name
-    for these models. Pass tensor protocol metadata through `tensor_model_config`.
+    For TensorBased, Images, Audios, Videos, and Realtime models, Hugging Face
+    downloads are skipped and a minimal model card is registered directly. Their
+    model_path may be an external service identifier. Pass tensor protocol metadata
+    through `tensor_model_config` for TensorBased models.
 
     Model serving readiness:
         `worker_type` and `needs` describe the worker's processing stage and
