@@ -38,17 +38,6 @@ Dynamo routing:
 | LLM | NVIDIA Nemotron 3 Nano 30B A3B FP8 |
 | TTS | Magpie TTS Multilingual 1.8.0 |
 
-Two DGD profiles keep model selection fixed while making resource intent clear:
-
-| Profile | LLM | Magpie batch | Total GPUs | Purpose |
-| --- | --- | ---: | ---: | --- |
-| `latency` | TP=1 | 8 | 3 | Functional checks and single-session latency |
-| `throughput` | TP=2 | 64 | 4 | Comparison with the Blueprint performance profile |
-
-The throughput profile requires an 80 GB-class GPU for Magpie batch size 64.
-The latency profile uses the same models and API contracts but is not a
-throughput comparison target.
-
 ## Build
 
 The Riva Python client is not included in the vLLM runtime. Build one image for
@@ -87,15 +76,14 @@ then launch all public endpoints:
 ```bash
 ASR_RIVA_SERVER=localhost:50152 \
 TTS_RIVA_SERVER=localhost:50151 \
-LLM_GPU_DEVICES=2,3 \
-LLM_TP_SIZE=2 \
+LLM_GPU_DEVICES=2 \
+LLM_TP_SIZE=1 \
   ./launch_workers.sh
 ```
 
-This layout uses GPUs 0 and 1 for the NIM containers and GPUs 2 and 3 for vLLM.
-For a three-GPU latency setup, use `LLM_GPU_DEVICES=2 LLM_TP_SIZE=1`. Each speech
-worker waits for its Riva gRPC channel before registering the model, so the
-frontend cannot route traffic to an unready NIM.
+This layout uses GPUs 0 and 1 for the NIM containers and GPU 2 for vLLM. Each
+speech worker waits for its Riva gRPC channel before registering the model, so
+the frontend cannot route traffic to an unready NIM.
 
 The resulting contracts are:
 
@@ -138,10 +126,8 @@ Before applying it:
 Render the image reference without editing the tracked manifest:
 
 ```bash
-export PROFILE=latency  # or throughput
 export DYNAMO_IMAGE=<registry>/dynamo-riva:<tag>
-kubectl kustomize "deploy/${PROFILE}" \
-  | sed "s|dynamo-riva:latest|${DYNAMO_IMAGE}|g" \
+sed "s|dynamo-riva:latest|${DYNAMO_IMAGE}|g" deploy/agg.yaml \
   | kubectl apply -f -
 kubectl get dgd,pods
 ```
@@ -152,10 +138,6 @@ Forward the generated frontend service after all model containers are ready:
 kubectl get services
 kubectl port-forward service/<frontend-service> 8000:8000
 ```
-
-If the Prometheus Operator is installed, apply
-`deploy/observability/podmonitor.yaml` to scrape Dynamo component metrics every
-15 seconds.
 
 ## Use the Blueprint UI
 
@@ -170,11 +152,6 @@ docker compose --profile generic-assistant/dynamo up -d
 Open `http://localhost:7860`. This is the same application, browser UI,
 Pipecat pipeline, prompt, VAD, and turn processor used by the direct NIM
 profile; only the service endpoints differ.
-
-For a controlled latency comparison, use the Blueprint scaling benchmark for
-both `generic-assistant/workstation-perf` and `generic-assistant/dynamo-perf`.
-Warm all models, keep the GPU type and workload fixed, and compare ASR TTFB,
-LLM TTFT, TTS TTFB, server E2E, client E2E, and throughput.
 
 The recorded NIM image digests are:
 
@@ -193,8 +170,7 @@ python3 -m pip install -r examples/riva_cascaded_pipeline/requirements.txt \
 PYTHONPATH=components/src:lib/bindings/python/src \
   python3 -m pytest -xvv examples/riva_cascaded_pipeline/tests
 bash -n examples/riva_cascaded_pipeline/{launch_workers.sh,container/build.sh}
-kubectl kustomize examples/riva_cascaded_pipeline/deploy/latency >/dev/null
-kubectl kustomize examples/riva_cascaded_pipeline/deploy/throughput >/dev/null
+pre-commit run check-yaml --files examples/riva_cascaded_pipeline/deploy/agg.yaml
 ```
 
 For functional validation, run `smoke_speech_loop.py` and confirm that the
