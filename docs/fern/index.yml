@@ -601,6 +601,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/communication-planes/event-plane.md
               - page: Observability Architecture
                 path: pages/developer-guide/knowledge-base/concepts/observability-architecture.md
+              - page: Performance Analysis Method
+                path: pages/developer-guide/knowledge-base/concepts/performance-analysis-method.md
               - section: Simulation
                 collapsed: true
                 contents:
