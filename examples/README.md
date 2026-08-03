@@ -45,6 +45,10 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 - **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
 - **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
 
+## Use Case Examples
+
+- **[Riva Cascaded Voice Pipeline](riva_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for Riva speech NIMs
+
 ## Deployment Examples
 
 Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.

@@ -1,0 +1,196 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: riva-cascaded
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      runtimeVersionOverride: &runtimeVersion "1.4.0"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-riva:latest
+              command: [python3, -m, dynamo.frontend]
+              args: [--http-port, "8000"]
+          imagePullSecrets: &imagePullSecrets
+            - name: dynamo-image-pull-secret
+            - name: ngc-secret
+      replicas: 1
+      type: frontend
+    - name: RivaAsrWorker
+      runtimeVersionOverride: *runtimeVersion
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-riva:latest
+              command: [python3, -m, riva_nim.asr_worker]
+              args:
+                - --riva-server
+                - localhost:50052
+                - --model-name
+                - nemotron-asr-streaming
+              resources:
+                limits: {cpu: "2", memory: 4Gi}
+                requests: {cpu: "1", memory: 2Gi}
+            - name: riva-asr
+              image: nvcr.io/nim/nvidia/nemotron-asr-streaming:1.2.0
+              env:
+                - name: NGC_API_KEY
+                  valueFrom:
+                    secretKeyRef: {key: NGC_API_KEY, name: ngc-api}
+                - {name: NIM_GRPC_API_PORT, value: "50052"}
+                - {name: NIM_HTTP_API_PORT, value: "9001"}
+                - {name: NIM_TAGS_SELECTOR, value: "type=en-US,mode=str"}
+              resources: &nimResources
+                limits:
+                  nvidia.com/gpu: "1"
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+              startupProbe: &asrStartupProbe
+                httpGet: {path: /v1/health/ready, port: 9001}
+                failureThreshold: 360
+                initialDelaySeconds: 40
+                periodSeconds: 10
+                timeoutSeconds: 5
+              livenessProbe: &asrLivenessProbe
+                httpGet: {path: /v1/health/live, port: 9001}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe: &asrReadinessProbe
+                httpGet: {path: /v1/health/ready, port: 9001}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              volumeMounts:
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: riva-cascaded-asr}
+                - {mountPath: /dev/shm, name: shared-memory}
+          imagePullSecrets: *imagePullSecrets
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
+    - name: VllmWorker
+      runtimeVersionOverride: *runtimeVersion
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-riva:latest
+              command: [bash, -c]
+              args:
+                - |
+                  exec python3 -m dynamo.vllm \
+                    --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8 \
+                    --served-model-name nvidia/nemotron-3-nano \
+                    --tensor-parallel-size "${LLM_TP_SIZE}" \
+                    --trust-remote-code \
+                    --enable-auto-tool-choice \
+                    --tool-call-parser qwen3_coder \
+                    --reasoning-parser nemotron_v3 \
+                    --kv-cache-dtype fp8 \
+                    --max-model-len 32768 \
+                    --max-num-seqs 256 \
+                    --use-vllm-tokenizer
+              env:
+                - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
+                - {name: VLLM_USE_FLASHINFER_MOE_FP8, value: "1"}
+              envFrom:
+                - configMapRef: {name: riva-cascaded-profile}
+                - secretRef: {name: hf-token-secret}
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - {mountPath: /home/dynamo/.cache/huggingface, name: model-cache, subPath: riva-cascaded-llm}
+          imagePullSecrets: *imagePullSecrets
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
+    - name: RivaTtsWorker
+      runtimeVersionOverride: *runtimeVersion
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamo-riva:latest
+              command: [python3, -m, riva_nim.tts_worker]
+              args:
+                - --riva-server
+                - localhost:50051
+                - --model-name
+                - nvidia/magpie-tts-multilingual
+                - --sample-rate-hz
+                - "24000"
+              resources:
+                limits: {cpu: "2", memory: 4Gi}
+                requests: {cpu: "1", memory: 2Gi}
+            - name: riva-tts
+              image: nvcr.io/nim/nvidia/magpie-tts-multilingual:1.8.0
+              env:
+                - name: NGC_API_KEY
+                  valueFrom:
+                    secretKeyRef: {key: NGC_API_KEY, name: ngc-api}
+                - {name: NIM_GRPC_API_PORT, value: "50051"}
+                - {name: NIM_HTTP_API_PORT, value: "9000"}
+              envFrom:
+                - configMapRef: {name: riva-cascaded-profile}
+              resources: *nimResources
+              startupProbe:
+                httpGet: {path: /v1/health/ready, port: 9000}
+                failureThreshold: 360
+                initialDelaySeconds: 40
+                periodSeconds: 10
+                timeoutSeconds: 5
+              livenessProbe:
+                httpGet: {path: /v1/health/live, port: 9000}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                httpGet: {path: /v1/health/ready, port: 9000}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              volumeMounts:
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: riva-cascaded-tts}
+                - {mountPath: /dev/shm, name: shared-memory}
+          imagePullSecrets: *imagePullSecrets
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
