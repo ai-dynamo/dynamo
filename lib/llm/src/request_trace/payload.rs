@@ -109,11 +109,25 @@ impl RequestPayloadHandle {
     }
 }
 
+/// Create a payload handle for a request that carries no route marker, which
+/// resolves to [`CHAT_COMPLETION_ENDPOINT_LABEL`]. This is the stable public
+/// entry point; its signature is deliberately unchanged from before endpoint
+/// labelling existed, so out-of-tree callers keep compiling and keep the
+/// chat-completions default.
+pub fn create_handle(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+) -> Option<RequestPayloadHandle> {
+    create_handle_with_endpoint(req, request_id, None, http_request_headers)
+}
+
 /// `endpoint` is the route label planted by the HTTP layer under
 /// [`ENDPOINT_LABEL_CONTEXT_KEY`]; `None` means no marker was planted, which is
 /// the `/v1/chat/completions` path and resolves to
-/// [`CHAT_COMPLETION_ENDPOINT_LABEL`].
-pub fn create_handle(
+/// [`CHAT_COMPLETION_ENDPOINT_LABEL`]. Crate-internal: only the preprocessor
+/// reads the marker back, so the endpoint-aware shape stays off the public API.
+pub(crate) fn create_handle_with_endpoint(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
     endpoint: Option<&str>,
