@@ -290,24 +290,7 @@ async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
     assert_eq!(reserved.status(), StatusCode::OK);
     assert_eq!(response_json(reserved).await["worker_id"], 2);
 
-    let loads = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/loads?model_name=model")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let loads = response_json(loads).await;
-    let selected = loads[0]["loads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|load| load["worker_id"] == 2)
-        .unwrap();
-    assert_eq!(selected["active_requests"], 1);
+    assert_eq!(active_requests(app.clone(), 2).await, 1);
 
     let other_partition = serde_json::json!({
         "worker_id": 3,

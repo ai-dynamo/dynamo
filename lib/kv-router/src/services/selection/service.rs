@@ -20,7 +20,7 @@ use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, WORKER_TYPE, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
+    SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 
 pub struct SelectionServiceBuilder {
@@ -71,9 +71,7 @@ impl SelectionServiceBuilder {
     where
         F: Fn(&KvRouterConfig, &'static str) -> WorkerSelectionPolicy + Send + Sync + 'static,
     {
-        let kv_router_config = self.kv_router_config.clone();
-        self.worker_selection_policy_factory =
-            Some(Box::new(move || factory(&kv_router_config, WORKER_TYPE)));
+        self.worker_selection_policy_factory = Some(Box::new(factory));
         self
     }
 

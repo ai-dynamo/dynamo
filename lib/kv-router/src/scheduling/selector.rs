@@ -17,9 +17,11 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
-/// A trait that users can implement to define custom selection logic.
+/// Low-level worker-selection contract used by the scheduler.
 ///
 /// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
+/// External policies should compose [`WorkerScorer`] and [`WorkerPicker`] implementations with
+/// [`WorkerSelectionPolicy`] instead of implementing this trait directly.
 pub trait WorkerSelector<C: WorkerConfigLike> {
     fn select_worker(
         &self,
@@ -28,36 +30,6 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
-}
-
-/// Helper function for softmax sampling.
-/// Returns the selected worker and its logit.
-#[cfg(test)]
-fn softmax_sample(
-    logits: &FxHashMap<WorkerWithDpRank, f64>,
-    temperature: f64,
-) -> (WorkerWithDpRank, f64) {
-    softmax_sample_with_sample(logits, temperature, fastrand::f64())
-}
-
-#[cfg(test)]
-fn softmax_sample_with_sample(
-    logits: &FxHashMap<WorkerWithDpRank, f64>,
-    temperature: f64,
-    sample: f64,
-) -> (WorkerWithDpRank, f64) {
-    assert!(!logits.is_empty(), "Empty logits for softmax sampling");
-
-    if temperature == 0.0 {
-        let (worker, logit) = logits
-            .iter()
-            .min_by(|a, b| a.1.total_cmp(b.1))
-            .expect("logits non-empty");
-        return (*worker, *logit);
-    }
-
-    let entries: Vec<(WorkerWithDpRank, f64)> = logits.iter().map(|(w, l)| (*w, *l)).collect();
-    softmax_sample_entries(entries, temperature, sample)
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -457,16 +429,8 @@ impl WorkerSelectionPolicy {
     }
 
     #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
-    pub(crate) fn default(
-        kv_router_config: KvRouterConfig,
-        worker_type: &'static str,
-        #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    ) -> Self {
-        let picker = DefaultWorkerPicker::from_parts(
-            kv_router_config.router_temperature,
-            #[cfg(any(test, feature = "bench"))]
-            deterministic_rng,
-        );
+    pub(crate) fn default(kv_router_config: KvRouterConfig, worker_type: &'static str) -> Self {
+        let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
         Self {
             kv_router_config,
             worker_type,
@@ -711,17 +675,20 @@ impl<'a> WorkerSelectionInput<'a> {
         eligibility: RoutingEligibility<'a>,
         block_size: u32,
         weights: LogitWeights,
+        inputs: WorkerInputs,
     ) -> Self {
-        let min_active_prefill_tokens =
-            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
-                let mut minimum = usize::MAX;
-                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
-                });
-                if minimum == usize::MAX { 0 } else { minimum }
-            } else {
-                0
-            };
+        let min_active_prefill_tokens = if inputs.contains(WorkerInputs::LOAD)
+            && request.track_prefill_tokens
+            && weights.overlap_score_credit_decay > 0.0
+        {
+            let mut minimum = usize::MAX;
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+            });
+            if minimum == usize::MAX { 0 } else { minimum }
+        } else {
+            0
+        };
         let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
             || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
             || !request.overlap.tier_overlap_blocks.disk.is_empty();
@@ -1290,7 +1257,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     }
 
     let weights = selection_weights(kv_router_config, request);
-    let input = WorkerSelectionInput::new(workers, request, eligibility, block_size, weights);
+    let inputs = match &state {
+        WorkerSelectionPolicyStateRef::Default(_) => WorkerInputs::ALL,
+        WorkerSelectionPolicyStateRef::Custom(state) => RefCell::borrow(state).worker_inputs,
+    };
+    let input =
+        WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
@@ -1450,6 +1422,7 @@ mod tests {
             request.eligibility(),
             block_size,
             weights,
+            WorkerInputs::ALL,
         );
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
@@ -1477,112 +1450,51 @@ mod tests {
     }
 
     #[test]
-    fn test_softmax_sample_single_key() {
-        let mut logits = FxHashMap::default();
-        let worker = WorkerWithDpRank::from_worker_id(42);
-        for (logit, temperature) in [
-            (0.5, 0.1),
-            (0.5, 1.0),
-            (0.5, 10.0),
-            (-100.0, 1.0),
-            (100.0, 1.0),
-            (0.0, 1.0),
-            (0.0, 0.0),
-        ] {
-            logits.clear();
-            logits.insert(worker, logit);
+    fn minimum_prefill_load_is_only_computed_when_requested() {
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(64);
+        request.worker_loads.insert(
+            WorkerWithDpRank::from_worker_id(0),
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 7,
+                ..Default::default()
+            },
+        );
+        request.worker_loads.insert(
+            WorkerWithDpRank::from_worker_id(1),
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 11,
+                ..Default::default()
+            },
+        );
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 1.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
 
-            let result = softmax_sample(&logits, temperature);
-            assert_eq!(result.0, worker, "Should return the only available worker");
-            assert_eq!(result.1, logit, "Should return the selected worker's logit");
-        }
-    }
-
-    #[test]
-    fn test_softmax_sample_zero_temperature() {
-        let mut logits = FxHashMap::default();
-        let worker1 = WorkerWithDpRank::from_worker_id(1);
-        let worker2 = WorkerWithDpRank::from_worker_id(2);
-        let worker3 = WorkerWithDpRank::from_worker_id(3);
-        let worker4 = WorkerWithDpRank::from_worker_id(4);
-        logits.insert(worker1, 5.0);
-        logits.insert(worker2, 3.0);
-        logits.insert(worker3, 7.0);
-        logits.insert(worker4, 3.5);
-
-        let result = softmax_sample(&logits, 0.0);
+        let input = |inputs| {
+            WorkerSelectionInput::new(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+                weights,
+                inputs,
+            )
+        };
         assert_eq!(
-            result.0, worker2,
-            "Should return worker with smallest logit when temperature is 0"
+            input(WorkerInputs::CACHE).context.min_active_prefill_tokens,
+            0
         );
         assert_eq!(
-            result.1, 3.0,
-            "Should return the smallest logit when temperature is 0"
+            input(WorkerInputs::LOAD).context.min_active_prefill_tokens,
+            7
         );
-
-        logits.clear();
-        let worker5 = WorkerWithDpRank::from_worker_id(5);
-        let worker6 = WorkerWithDpRank::from_worker_id(6);
-        logits.insert(worker1, 5.0);
-        logits.insert(worker2, 3.0);
-        logits.insert(worker5, 3.0);
-        logits.insert(worker6, 7.0);
-
-        let result = softmax_sample(&logits, 0.0);
-        assert!(
-            result.0 == worker2 || result.0 == worker5,
-            "Should return one of the workers tied for the smallest logit"
-        );
-        assert_eq!(result.1, 3.0, "Should return the tied minimum logit");
-
-        logits.clear();
-        let worker10 = WorkerWithDpRank::from_worker_id(10);
-        let worker20 = WorkerWithDpRank::from_worker_id(20);
-        let worker30 = WorkerWithDpRank::from_worker_id(30);
-        logits.insert(worker10, -1.0);
-        logits.insert(worker20, -5.0);
-        logits.insert(worker30, 0.0);
-
-        let result = softmax_sample(&logits, 0.0);
-        assert_eq!(
-            result.0, worker20,
-            "Should handle negative logits correctly"
-        );
-        assert_eq!(result.1, -5.0, "Should return the minimum negative logit");
-    }
-
-    #[test]
-    fn test_softmax_sample_with_sample_returns_selected_logit() {
-        let worker1 = WorkerWithDpRank::from_worker_id(1);
-        let worker2 = WorkerWithDpRank::from_worker_id(2);
-        let worker3 = WorkerWithDpRank::from_worker_id(3);
-
-        let logits = FxHashMap::from_iter([(worker1, 0.0), (worker2, 3.0), (worker3, 9.0)]);
-        let entries: Vec<_> = logits
-            .iter()
-            .map(|(worker, logit)| (*worker, *logit))
-            .collect();
-        let values: Vec<_> = entries.iter().map(|(_, logit)| *logit).collect();
-
-        let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let temperature = 1.0;
-        let range = max_val - min_val;
-        let scaled: Vec<f64> = values.iter().map(|&v| -(v / range) / temperature).collect();
-        let max_scaled = scaled.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let mut probabilities: Vec<f64> = scaled.iter().map(|&v| (v - max_scaled).exp()).collect();
-        let sum: f64 = probabilities.iter().sum();
-        probabilities.iter_mut().for_each(|p| *p /= sum);
-
-        let target_idx = entries
-            .iter()
-            .position(|(_, logit)| *logit > min_val)
-            .expect("expected at least one non-minimum logit");
-        let cumsum_before: f64 = probabilities.iter().take(target_idx).sum();
-        let sample = cumsum_before + probabilities[target_idx] / 2.0;
-
-        let result = softmax_sample_with_sample(&logits, temperature, sample);
-        assert_eq!(result, entries[target_idx]);
     }
 
     #[test]
