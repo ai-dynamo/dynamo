@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * ReleaseSupportMatrix — human-facing release compatibility log for the
- * Compatibility reference page. Renders one panel that lists every stable
- * release and patch, grouped by minor line, with CUDA major (12 vs 13) as
- * the dominant visual anchor rather than a number buried mid-row.
+ * Compatibility reference page. Lists every stable release and patch,
+ * grouped by minor line, one table per line: a release's backends sit on
+ * adjacent rows under a single rowspan'd release cell.
  *
  * Every row is derived from CUDA_HISTORY and RELEASES in releases.data.ts;
  * nothing is transcribed or duplicated here. The Compatibility page's
@@ -13,15 +13,16 @@
  * same rows as a flat markdown table so agent-facing exports never lose
  * the matrix; this component is deliberately the human-only rendering.
  *
- * CSS is injected via dangerouslySetInnerHTML, not as a <style> text child:
- * a text child is escaped on render, which turns any `>` child combinator
- * into &gt; and silently drops the rule (see #12402).
+ * Deliberately unstyled: plain <table>, <details>, and <small> so the
+ * matrix inherits the docs theme's table typography and matches every
+ * other table on the page. It ships no CSS of its own and claims no
+ * .dynref-* classes -- an earlier revision rendered bordered cards with
+ * ~250 lines of .dynref-rsm-* rules, which read as a separate widget
+ * bolted onto the page rather than part of it.
  *
- * Server component (no "use client"); shares the .dynref-* base vocabulary
- * from ReferenceStyles.tsx (panels, eyebrow, chips, badges, muted text,
- * mono, dark-mode variables) and carries only its own .dynref-rsm-* layout
- * rules. Minor lines use native <details>/<summary> for progressive
- * disclosure, so no client JS is required.
+ * Server component (no "use client"); minor lines use native
+ * <details>/<summary> for progressive disclosure, so no client JS is
+ * required.
  */
 
 import {
@@ -31,259 +32,6 @@ import {
   type CudaRow,
   type Release,
 } from "./releases.data";
-
-const RSM_CSS = `
-.dynref-rsm-legend {
-    display: inline-flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px 12px;
-    font-size: 12px;
-    color: var(--pst-color-text-muted);
-}
-
-.dynref-rsm-legend-caption {
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    font-weight: 700;
-}
-
-.dynref-rsm-line {
-    margin: 12px 0 0;
-    padding: 0;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 10px;
-    background: var(--pst-color-surface);
-}
-
-.dark .dynref-rsm-line {
-    background: #161616;
-    border-color: #2b2b2b;
-}
-
-.dynref-rsm-line[open] { padding-bottom: 12px; }
-
-.dynref-rsm-line-summary {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px 14px;
-    padding: 10px 14px;
-    cursor: pointer;
-    list-style: none;
-    color: var(--pst-color-text-base);
-    font-size: 14px;
-    border-radius: 10px;
-}
-
-.dynref-rsm-line-summary::-webkit-details-marker { display: none; }
-
-.dynref-rsm-line-summary::before {
-    content: "▸";
-    display: inline-block;
-    width: 12px;
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-    transition: transform 0.15s ease;
-}
-
-.dynref-rsm-line[open] > .dynref-rsm-line-summary::before {
-    transform: rotate(90deg);
-}
-
-.dynref-rsm-line-summary:hover { background: rgba(118, 185, 0, 0.06); }
-.dark .dynref-rsm-line-summary:hover { background: rgba(118, 185, 0, 0.10); }
-
-.dynref-rsm-line-summary:focus-visible {
-    outline: 2px solid var(--nv-color-green, #76B900);
-    outline-offset: -2px;
-}
-
-.dynref-rsm-line-title {
-    font-weight: 700;
-    letter-spacing: 0.01em;
-}
-
-.dynref-rsm-line-meta {
-    color: var(--pst-color-text-muted);
-    font-size: 12.5px;
-}
-
-.dynref-rsm-line-cudas {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-}
-
-.dynref-rsm-release {
-    margin: 8px 14px 0;
-    padding: 12px 14px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 10px;
-    background: var(--pst-color-surface);
-}
-
-.dark .dynref-rsm-release {
-    background: #1c1c1c;
-    border-color: #2e2e2e;
-}
-
-.dynref-rsm-release-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 12px;
-    margin-bottom: 12px;
-}
-
-.dynref-rsm-release-version {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--pst-color-text-base);
-    font-size: 15px;
-    font-weight: 700;
-}
-
-.dynref-rsm-release-meta {
-    color: var(--pst-color-text-muted);
-    font-size: 12.5px;
-}
-
-.dynref-rsm-release-ucx {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-    color: var(--pst-color-text-muted);
-    font-size: 12.5px;
-}
-
-.dynref-rsm-cuda-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 12px;
-}
-
-.dynref-rsm-cuda-block {
-    padding: 12px 14px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: 10px;
-    background: rgba(147, 51, 234, 0.03);
-}
-
-.dark .dynref-rsm-cuda-block {
-    background: rgba(168, 85, 247, 0.05);
-    border-color: #333;
-}
-
-.dynref-rsm-cuda-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 10px;
-    margin-bottom: 10px;
-    padding-bottom: 8px;
-    border-bottom: 1px dashed var(--border, var(--grayscale-a5));
-}
-
-.dark .dynref-rsm-cuda-header { border-bottom-color: #333; }
-
-.dynref-rsm-cuda-driver {
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-}
-
-.dynref-rsm-backend-list {
-    display: grid;
-    gap: 8px;
-}
-
-.dynref-rsm-backend-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.85fr) minmax(0, 0.75fr) minmax(0, 0.85fr) minmax(0, 0.75fr);
-    align-items: baseline;
-    gap: 4px 12px;
-    padding: 6px 0;
-    border-top: 1px solid rgba(147, 51, 234, 0.08);
-}
-
-.dark .dynref-rsm-backend-row { border-top-color: rgba(168, 85, 247, 0.14); }
-
-.dynref-rsm-backend-row:first-child { border-top: 0; padding-top: 2px; }
-
-.dynref-rsm-backend-name {
-    color: var(--pst-color-text-base);
-    font-weight: 600;
-    font-size: 13.5px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.dynref-rsm-backend-cell {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 4px;
-    color: var(--pst-color-text-base);
-    font-size: 13px;
-    min-width: 0;
-}
-
-.dynref-rsm-cell-label {
-    color: var(--pst-color-text-muted);
-    font-size: 11.5px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    font-weight: 700;
-}
-
-.dynref-rsm-cell-value {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.dynref-rsm-backend-note {
-    grid-column: 1 / -1;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 2px;
-}
-
-.dynref-rsm-notes {
-    margin: 12px 14px 0;
-    padding: 0;
-    list-style: none;
-    color: var(--pst-color-text-muted);
-    font-size: 12px;
-}
-
-.dynref-rsm-notes li {
-    margin: 4px 0;
-    padding-left: 12px;
-    position: relative;
-}
-
-.dynref-rsm-notes li::before {
-    content: "·";
-    position: absolute;
-    left: 0;
-    top: -2px;
-    font-size: 16px;
-}
-
-@media (max-width: 640px) {
-    .dynref-rsm-backend-row {
-        grid-template-columns: 1fr 1fr;
-    }
-    .dynref-rsm-line-cudas { margin-left: 0; }
-    .dynref-rsm-release-ucx { margin-left: 0; }
-}
-`;
 
 // Only stable and patch releases carry CUDA_HISTORY rows and belong in the
 // support matrix. Platform previews and model-specific builds are excluded;
@@ -309,6 +57,17 @@ const BACKEND_PIN_KEYS: Record<CudaRow["backend"], BackendCells> = {
   vLLM: { engineKey: "vllm", nixlKey: "nixlVllm" },
 };
 
+// Order backends take on a release that predates CUDA_HISTORY; matches the
+// order CUDA_HISTORY itself lists them in.
+const BACKEND_ORDER: readonly CudaRow["backend"][] = [
+  "SGLang",
+  "TensorRT-LLM",
+  "vLLM",
+];
+
+// Printed where a release records no CUDA toolkit or driver floor at all.
+const UNRECORDED = "Not recorded";
+
 function cudaMajor(toolkit: string): CudaMajor {
   const major = toolkit.split(".", 1)[0];
   if (major === "12" || major === "13") return major;
@@ -330,7 +89,6 @@ interface BackendLine {
 interface MajorBlock {
   major: CudaMajor;
   lines: BackendLine[];
-  drivers: string[]; // unique, order-preserving
 }
 
 interface ReleaseBlock {
@@ -362,7 +120,8 @@ function minorLine(version: string): string {
 /* '0.7.0.post1' -> '0.7.0'; anything else unchanged. Post trains republish
  * images or wheels off an existing release and carry no CUDA_HISTORY row --
  * CUDA_NOTES states they have the same CUDA support as their base. They are
- * therefore listed on their base's card rather than given one of their own. */
+ * therefore named in their base's release cell rather than given rows of
+ * their own. */
 function postTrainBase(version: string): string {
   const cut = version.indexOf(".post");
   return cut === -1 ? version : version.slice(0, cut);
@@ -374,25 +133,13 @@ function supportedReleases(): string[] {
   );
 }
 
-function releaseIndex(): Map<string, Release> {
-  const idx = new Map<string, Release>();
-  for (const rel of RELEASES) {
-    if (SUPPORT_KINDS.has(rel.kind)) idx.set(bareVersion(rel.version), rel);
-  }
-  return idx;
-}
-
-function pushDriver(bucket: MajorBlock, driver: string): void {
-  if (!bucket.drivers.includes(driver)) bucket.drivers.push(driver);
-}
-
 function buildMajorBlock(
   release: Release,
   rows: CudaRow[],
   major: CudaMajor,
 ): MajorBlock {
   const pins = release.pins ?? {};
-  const block: MajorBlock = { major, lines: [], drivers: [] };
+  const block: MajorBlock = { major, lines: [] };
   for (const row of rows) {
     if (cudaMajor(row.toolkit) !== major) continue;
     const keys = BACKEND_PIN_KEYS[row.backend];
@@ -404,9 +151,31 @@ function buildMajorBlock(
       nixl: keys ? pins[keys.nixlKey] : undefined,
       note: row.note,
     });
-    pushDriver(block, row.minDriver);
   }
   return block;
+}
+
+/* A stable release or patch with no CUDA_HISTORY row still belongs on this
+ * page -- v0.6.x shipped before the CUDA matrix was recorded. Falling back to
+ * the engine and NIXL pins it does carry keeps the section's claim to list
+ * every stable release and patch true; dropping the release would quietly
+ * contradict it. */
+function unrecordedLines(release: Release): BackendLine[] {
+  const pins = release.pins ?? {};
+  const lines: BackendLine[] = [];
+  for (const backend of BACKEND_ORDER) {
+    const keys = BACKEND_PIN_KEYS[backend];
+    const engine = pins[keys.engineKey];
+    if (!engine) continue;
+    lines.push({
+      backend,
+      engine,
+      toolkit: UNRECORDED,
+      minDriver: UNRECORDED,
+      nixl: pins[keys.nixlKey],
+    });
+  }
+  return lines;
 }
 
 function buildReleaseBlock(
@@ -423,16 +192,17 @@ function buildReleaseBlock(
   return { release, version, blocks, postTrains };
 }
 
+/* Driven by RELEASES, not CUDA_HISTORY: iterating the CUDA rows silently
+ * dropped every stable/patch release with no row of its own (v0.6.0, v0.6.1,
+ * v0.6.1.post1), which is precisely the set this page must not lose. */
 function groupByMinorLine(): MinorGroup[] {
-  const releases = releaseIndex();
   const supported = supportedReleases();
   const groups = new Map<string, MinorGroup>();
-  const seenVersions = new Set<string>();
-  for (const row of CUDA_HISTORY) {
-    const version = row.version;
-    const release = releases.get(version);
-    if (!release || seenVersions.has(version)) continue;
-    seenVersions.add(version);
+  for (const release of RELEASES) {
+    if (!SUPPORT_KINDS.has(release.kind)) continue;
+    const version = bareVersion(release.version);
+    // Post trains ride on their base's rows rather than getting their own.
+    if (postTrainBase(version) !== version) continue;
     const line = minorLine(version);
     const versionRows = CUDA_HISTORY.filter((r) => r.version === version);
     const postTrains = supported.filter(
@@ -443,9 +213,9 @@ function groupByMinorLine(): MinorGroup[] {
       minor: line,
       releases: [],
       majors: [],
-      // Counted from RELEASES, not from the cards: a post train shares its
-      // base's card, so counting cards would report 0.8.x as two releases
-      // when the line actually shipped five.
+      // Counted from RELEASES, not from the rows: a post train shares its
+      // base's rows, so counting rendered releases would report 0.8.x as two
+      // releases when the line actually shipped five.
       releaseCount: supported.filter((v) => minorLine(v) === line).length,
     };
     group.releases.push(block);
@@ -457,127 +227,83 @@ function groupByMinorLine(): MinorGroup[] {
   return Array.from(groups.values());
 }
 
-function driverSummary(block: MajorBlock): string {
-  return block.drivers.join(" or ");
-}
-
-function kindBadge(kind: Release["kind"]): { className: string; label: string } {
-  if (kind === "stable") return { className: "dynref-badge--green", label: "stable" };
-  if (kind === "patch") return { className: "dynref-badge--gray", label: "patch" };
+function kindLabel(kind: Release["kind"]): string {
   // The support matrix only lists stable/patch (SUPPORT_KINDS gate), so any
-  // other kind reaching this function is a data bug; render it neutrally
-  // rather than throwing so the page still loads.
-  return { className: "dynref-badge--gray", label: kind };
+  // other kind reaching here is a data bug; print it rather than throwing so
+  // the page still loads.
+  return kind;
 }
 
-function CudaChip({ major }: { major: CudaMajor }) {
-  return <span className="dynref-chip dynref-chip--cuda">CUDA {major}</span>;
+/* Flattened in CUDA_MAJORS order, so a release's rows read 12 before 13 and
+ * the toolkit column stays monotonic down the block. */
+function releaseLines(block: ReleaseBlock): BackendLine[] {
+  const lines = block.blocks.flatMap((major) => major.lines);
+  return lines.length > 0 ? lines : unrecordedLines(block.release);
 }
 
-function BackendRow({ line }: { line: BackendLine }) {
+function ReleaseMeta({ block }: { block: ReleaseBlock }) {
+  const { release, postTrains } = block;
   return (
-    <div className="dynref-rsm-backend-row">
-      <span className="dynref-rsm-backend-name">{line.backend}</span>
-      <span className="dynref-rsm-backend-cell">
-        <span className="dynref-rsm-cell-label">Engine</span>
-        <span className="dynref-rsm-cell-value dynref-mono">{line.engine ?? "—"}</span>
-      </span>
-      <span className="dynref-rsm-backend-cell">
-        <span className="dynref-rsm-cell-label">Toolkit</span>
-        <span className="dynref-rsm-cell-value dynref-mono">{line.toolkit}</span>
-      </span>
-      {/* Per-backend, not per-block: within one CUDA major the backends can
-          sit on different toolkits and therefore different driver floors
-          (v0.7.1 pairs SGLang/12.8 with 570.xx+ and vLLM/12.9 with 575.xx+).
-          The block header summarises both, so the floor that applies to a
-          reader's backend has to be readable on its own row. */}
-      <span className="dynref-rsm-backend-cell">
-        <span className="dynref-rsm-cell-label">Driver</span>
-        <span className="dynref-rsm-cell-value dynref-mono">{line.minDriver}</span>
-      </span>
-      <span className="dynref-rsm-backend-cell">
-        <span className="dynref-rsm-cell-label">NIXL</span>
-        <span className="dynref-rsm-cell-value dynref-mono">{line.nixl ?? "—"}</span>
-      </span>
-      {line.note && (
-        <span className="dynref-rsm-backend-note">
-          <span className="dynref-badge dynref-badge--wip">{line.note}</span>
-        </span>
-      )}
-    </div>
-  );
-}
-
-function CudaMajorBlock({ block }: { block: MajorBlock }) {
-  return (
-    <div className="dynref-rsm-cuda-block">
-      <div className="dynref-rsm-cuda-header">
-        <CudaChip major={block.major} />
-        <span className="dynref-rsm-cuda-driver">
-          Driver <span className="dynref-mono">{driverSummary(block)}</span>
-        </span>
-      </div>
-      <div className="dynref-rsm-backend-list">
-        {block.lines.map((line) => (
-          <BackendRow key={`${line.backend}-${line.toolkit}`} line={line} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReleaseCard({ block }: { block: ReleaseBlock }) {
-  const badge = kindBadge(block.release.kind);
-  const ucx = block.release.ucx;
-  return (
-    <article className="dynref-rsm-release">
-      <header className="dynref-rsm-release-header">
-        <span className="dynref-rsm-release-version">
-          v{block.version}
-          <span className={`dynref-badge ${badge.className}`}>{badge.label}</span>
-        </span>
-        {block.release.date && (
-          <span className="dynref-rsm-release-meta">{block.release.date}</span>
+    <>
+      v{block.version}
+      <br />
+      <small>
+        {kindLabel(release.kind)}
+        {release.date && ` · ${release.date}`}
+        <br />
+        UCX {release.ucx ?? "not specified"}
+        {postTrains.length > 0 && (
+          <>
+            <br />
+            Post train{postTrains.length === 1 ? "" : "s"} v
+            {postTrains.join(", v")} share
+            {postTrains.length === 1 ? "s" : ""} this CUDA support
+          </>
         )}
-        {block.postTrains.length > 0 && (
-          <span className="dynref-rsm-release-meta">
-            Post trains{" "}
-            <span className="dynref-mono">v{block.postTrains.join(", v")}</span>{" "}
-            share this CUDA support
-          </span>
-        )}
-        <span className="dynref-rsm-release-ucx">
-          <span className="dynref-rsm-cell-label">UCX</span>
-          {ucx ? (
-            <span className="dynref-mono">{ucx}</span>
-          ) : (
-            <span className="dynref-rsm-cuda-driver">not specified</span>
-          )}
-        </span>
-      </header>
-      <div className="dynref-rsm-cuda-grid">
-        {block.blocks.map((b) => (
-          <CudaMajorBlock key={b.major} block={b} />
-        ))}
-      </div>
-    </article>
+      </small>
+    </>
   );
 }
 
-function MinorLineSummary({ group }: { group: MinorGroup }) {
-  const releaseCount = group.releaseCount;
+function MinorLineTable({ group }: { group: MinorGroup }) {
   return (
-    <summary className="dynref-rsm-line-summary">
-      <span className="dynref-rsm-line-title">{group.minor}</span>
-      <span className="dynref-rsm-line-meta">
-        {releaseCount} release{releaseCount === 1 ? "" : "s"}
-      </span>
-      <span className="dynref-rsm-line-cudas">
-        {group.majors.map((major) => (
-          <CudaChip key={major} major={major} />
-        ))}
-      </span>
-    </summary>
+    <table>
+      <thead>
+        <tr>
+          <th>Release</th>
+          <th>Backend</th>
+          <th>Engine</th>
+          <th>CUDA toolkit</th>
+          {/* Per-backend, not per-release: within one CUDA major the backends
+              can sit on different toolkits and therefore different driver
+              floors (v0.7.1 pairs SGLang/12.8 with 570.xx+ and vLLM/12.9 with
+              575.xx+), so the floor has to be readable on its own row. */}
+          <th>Min driver</th>
+          <th>NIXL</th>
+          <th>Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {group.releases.map((block) => {
+          const lines = releaseLines(block);
+          return lines.map((line, index) => (
+            <tr key={`${block.version}-${line.backend}-${line.toolkit}`}>
+              {index === 0 && (
+                <th rowSpan={lines.length} scope="rowgroup">
+                  <ReleaseMeta block={block} />
+                </th>
+              )}
+              <td>{line.backend}</td>
+              <td>{line.engine ?? "—"}</td>
+              <td>{line.toolkit}</td>
+              <td>{line.minDriver}</td>
+              <td>{line.nixl ?? "—"}</td>
+              <td>{line.note ?? "—"}</td>
+            </tr>
+          ));
+        })}
+      </tbody>
+    </table>
   );
 }
 
@@ -585,36 +311,31 @@ export function ReleaseSupportMatrix() {
   const groups = groupByMinorLine();
   if (groups.length === 0) {
     throw new Error(
-      "ReleaseSupportMatrix: no CUDA_HISTORY row matched a stable/patch " +
-        "release entry -- the matrix would render empty",
+      "ReleaseSupportMatrix: RELEASES carries no stable or patch entry -- " +
+        "the matrix would render empty",
     );
   }
-  const isNewest = (index: number) => index === 0;
   return (
-    <div className="dynref-panel">
-      <style dangerouslySetInnerHTML={{ __html: RSM_CSS }} />
-      <div className="dynref-panel-header">
-        <span className="dynref-h">Release support log</span>
-        <div className="dynref-rsm-legend">
-          <span className="dynref-rsm-legend-caption">Legend</span>
-          <CudaChip major="12" />
-          <CudaChip major="13" />
-          <span className="dynref-badge dynref-badge--wip">Experimental</span>
-        </div>
-      </div>
-      {groups.map((group, i) => (
-        <details className="dynref-rsm-line" key={group.minor} open={isNewest(i)}>
-          <MinorLineSummary group={group} />
-          {group.releases.map((block) => (
-            <ReleaseCard key={block.version} block={block} />
-          ))}
+    <>
+      {groups.map((group, index) => (
+        <details key={group.minor} open={index === 0}>
+          <summary>
+            <strong>{group.minor}</strong> — {group.releaseCount} release
+            {group.releaseCount === 1 ? "" : "s"} ·{" "}
+            {group.majors.length > 0
+              ? `CUDA ${group.majors.join(", ")}`
+              : "CUDA not recorded"}
+          </summary>
+          <MinorLineTable group={group} />
         </details>
       ))}
-      <ul className="dynref-rsm-notes">
+      <ul>
         {CUDA_NOTES.map((note) => (
-          <li key={note}>{note}</li>
+          <li key={note}>
+            <small>{note}</small>
+          </li>
         ))}
       </ul>
-    </div>
+    </>
   );
 }

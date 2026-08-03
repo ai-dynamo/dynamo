@@ -1668,14 +1668,16 @@
         "version": "24.04",
         "arch": "x86_64, ARM64",
         "scope": "Containers and wheels",
-        "chip": "ubuntu"
+        "chip": "ubuntu",
+        "status": "Supported"
       },
       {
         "name": "Ubuntu",
         "version": "22.04",
         "arch": "x86_64",
         "scope": "Wheels only",
-        "chip": "ubuntu"
+        "chip": "ubuntu",
+        "status": "Supported"
       }
     ],
     "csp": [
@@ -1683,7 +1685,8 @@
         "provider": "AWS",
         "os": "Amazon Linux 2023",
         "arch": "x86_64",
-        "scope": "Containers and wheels"
+        "scope": "Containers and wheels",
+        "status": "Supported"
       }
     ],
     "arch": [

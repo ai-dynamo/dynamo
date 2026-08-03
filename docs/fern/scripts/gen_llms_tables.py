@@ -107,6 +107,7 @@ REQUIRED_EXPORTS = [
     "CURRENT_WHEEL",
     "CUDA_HISTORY",
     "FEATURES",
+    "FEATURE_INTERACTIONS",
     "ARTIFACTS",
     "MODEL_EA_BUILDS",
     "PLATFORM",
@@ -440,6 +441,52 @@ def feature_table(data: dict) -> str:
     return md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], rows)
 
 
+INTERACTION_GLYPH = {"yes": "Yes", "wip": "Experimental", "no": "No", "na": "n/a"}
+
+
+def interaction_tables(data: dict) -> str:
+    """Pairwise feature-interaction matrices, one table per backend.
+
+    The human view renders through <FeatureInteractions />, whose cell states
+    live in the DOM as tinted divs with no text; Fern's agent-facing export
+    would carry no status at all. This twin restates every cell as words from
+    the same FEATURE_INTERACTIONS data, so the two cannot disagree.
+
+    Only the lower triangle is stored, so the upper triangle is filled in here
+    by mirroring -- an agent reading a row should not have to know the
+    convention to answer "does A work with B".
+    """
+    parts: list[str] = []
+    for matrix in data["FEATURE_INTERACTIONS"]:
+        features = matrix["features"]
+        rows_in = matrix["rows"]
+        grid: list[list] = [[None] * len(features) for _ in features]
+        for r, cells in enumerate(rows_in):
+            for c, cell in enumerate(cells):
+                grid[r][c] = cell
+                if r != c:
+                    grid[c][r] = cell  # mirror, so both directions read alike
+        body: list[list] = []
+        for r, feature in enumerate(features):
+            row = [feature]
+            for c in range(len(features)):
+                cell = grid[r][c]
+                if cell is None:
+                    row.append(None)
+                    continue
+                text = INTERACTION_GLYPH[cell["status"]]
+                note = cell.get("note")
+                if note:
+                    source = cell.get("source")
+                    suffix = f" ({PROD_HOST}{source})" if source else ""
+                    text = f"{text} — {note}{suffix}"
+                row.append(text)
+            body.append(row)
+        parts.append(f"*{matrix['backend']}*")
+        parts.append(md_table(["Feature", *features], body))
+    return "\n\n".join(parts)
+
+
 def artifact_table(data: dict) -> str:
     """Artifact-inventory table."""
     rows: list[list] = []
@@ -592,6 +639,14 @@ def render_compatibility(data: dict) -> str:
 
     parts.append(f"**Feature support by backend ({data['CURRENT_VERSION']})**")
     parts.append(feature_table(data))
+
+    parts.append("**Feature interactions by backend**")
+    parts.append(
+        "Each cell states whether the row feature works together with the "
+        "column feature. The matrix is symmetric: a cell reads the same in "
+        "either direction."
+    )
+    parts.append(interaction_tables(data))
 
     # Platform support (GPUs / OS / arch) — rendered by CompatibilityHero.
     parts.append("**Platform support**")
@@ -914,6 +969,25 @@ def render_releases_data(data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def platform_payload(data: dict) -> dict:
+    """PLATFORM with the retired ``status`` key restored for consumers.
+
+    releases.data.ts renamed ``status`` to ``scope`` because "Supported" read
+    the same on a shipped container base and on a wheels-only host. That rename
+    is right for the page, but releases.json is a published asset with a stable
+    schema: dropping a key breaks anything already reading
+    ``platform.os[].status``. So the JSON carries both — ``scope`` as the
+    precise field, ``status`` re-emitted with the value those rows always
+    carried. ``status`` is deprecated; read ``scope``.
+    """
+    plat = {k: copy.deepcopy(v) for k, v in data["PLATFORM"].items()}
+    for key in ("os", "csp"):
+        for row in plat.get(key, []):
+            if "scope" in row and "status" not in row:
+                row["status"] = "Supported"
+    return plat
+
+
 def build_json(data: dict) -> str:
     """Stable-schema JSON serialization of the parsed releases.data.ts."""
     releases = []
@@ -954,7 +1028,7 @@ def build_json(data: dict) -> str:
         "artifacts": data["ARTIFACTS"],
         "modelEaBuilds": ea_builds,
         "platformPreviewCoverage": data["PLATFORM_PREVIEW_COVERAGE"],
-        "platform": data["PLATFORM"],
+        "platform": platform_payload(data),
         "knownArtifactIssues": data["KNOWN_ARTIFACT_ISSUES"],
         "cratesFirstPublished": data["CRATES_FIRST_PUBLISHED"],
         "releaseStats": data["RELEASE_STATS"],

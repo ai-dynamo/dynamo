@@ -947,6 +947,123 @@ export const MODEL_EA_BUILDS: ModelEaBuild[] = [
   },
 ];
 
+/* Pairwise feature-by-feature compatibility, one matrix per backend. Only the
+ * lower triangle is stored: rows[i] carries i+1 cells, ending on the diagonal.
+ * The upper triangle is the mirror and is never authored twice.
+ *
+ * FeatureInteractions renders this for readers and gen_llms_tables.py emits the
+ * same cells as markdown into the <llms-only> twin, so a pairwise status can
+ * never be visible on the page but missing from an agent export -- the failure
+ * the tables hit while they were hand-authored JSX. */
+export const INTERACTION_FEATURES = [
+  "Disaggregated Serving",
+  "KV-Aware Routing",
+  "SLA-Based Planner",
+  "KV Block Manager",
+  "Multimodal",
+  "Request Migration",
+  "Request Cancellation",
+  "LoRA",
+  "Tool Calling",
+  "Speculative Decoding",
+];
+
+export type InteractionState = "yes" | "wip" | "no" | "na";
+
+export interface InteractionCell {
+  status: InteractionState;
+  label?: string; // short screen-reader / summary phrase for a noted cell
+  note?: string;
+  source?: string; // site-absolute docs path
+}
+
+export interface BackendInteractions {
+  backend: "SGLang" | "TensorRT-LLM" | "vLLM";
+  features: string[];
+  rows: InteractionCell[][];
+}
+
+export const FEATURE_INTERACTIONS: BackendInteractions[] = [
+  {
+    backend: "vLLM",
+    features: INTERACTION_FEATURES,
+    rows: [
+      // Disaggregated Serving
+      [{ status: "na" }],
+      // KV-Aware Routing
+      [{ status: "yes" }, { status: "na" }],
+      // SLA-Based Planner
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
+      // KV Block Manager
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // Multimodal
+      [{ status: "yes", label: "Audio and video support", note: "Supports Qwen2-Audio experimentally and video input with frame sampling.", source: "/dynamo/dev/knowledge-base/modular-components/backends/v-llm/vllm-multimodal" }, { status: "yes", label: "Image-aware KV routing", note: "The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "yes" }, { status: "na" }],
+      // Request Migration
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // Request Cancellation
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // LoRA
+      [{ status: "yes" }, { status: "yes", label: "Adapter-aware routing", note: "vLLM routes requests based on LoRA adapter affinity." }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // Tool Calling
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // Speculative Decoding
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes", label: "Eagle3 support", note: "Eagle3 support is documented.", source: "/dynamo/dev/additional-resources/speculative-decoding/speculative-decoding-with-v-llm" }, { status: "na" }],
+    ],
+  },
+  {
+    backend: "SGLang",
+    features: INTERACTION_FEATURES,
+    rows: [
+      // Disaggregated Serving
+      [{ status: "na" }],
+      // KV-Aware Routing
+      [{ status: "yes" }, { status: "na" }],
+      // SLA-Based Planner
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
+      // KV Block Manager
+      [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
+      // Multimodal
+      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "no", label: "Not supported with KV-aware routing", note: "This feature combination is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/router/overview" }, { status: "na" }, { status: "wip" }, { status: "na" }],
+      // Request Migration
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
+      // Request Cancellation
+      [{ status: "wip", label: "Remote-prefill limitation", note: "Cancellation during remote prefill is not supported in disaggregated mode.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
+      // LoRA
+      [{ status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
+      // Tool Calling
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
+      // Speculative Decoding
+      [{ status: "wip", label: "Limited integration", note: "Code hooks exist, but examples and documentation are not yet available." }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "no", label: "LoRA not supported", note: "SGLang does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip" }, { status: "na" }],
+    ],
+  },
+  {
+    backend: "TensorRT-LLM",
+    features: INTERACTION_FEATURES,
+    rows: [
+      // Disaggregated Serving
+      [{ status: "na" }],
+      // KV-Aware Routing
+      [{ status: "yes" }, { status: "na" }],
+      // SLA-Based Planner
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
+      // KV Block Manager
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
+      // Multimodal
+      [{ status: "yes", label: "Disaggregated image flows", note: "Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal" }, { status: "yes", label: "Image-aware KV routing", note: "Workers must publish KV events with block reuse enabled.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "yes" }, { status: "na" }],
+      // Request Migration
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "na" }],
+      // Request Cancellation
+      [{ status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "na" }],
+      // LoRA
+      [{ status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "na" }],
+      // Tool Calling
+      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "na" }],
+      // Speculative Decoding
+      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "yes" }, { status: "na" }],
+    ],
+  },
+];
+
 export const PLATFORM_PREVIEW_COVERAGE: Record<string, Coverage> = {
   "v1.3.0-dev.1": { images: true, wheels: true, helm: true, crates: true },
   "v1.1.0-dev.3": { images: true, wheels: true, helm: false, crates: false },
