@@ -356,6 +356,15 @@ jobs:
           ref: docs-website
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Second, into a subdirectory: the checkout above owns the workspace
+      # root. This provides the tagged docs and nav, so the snapshot reflects
+      # what shipped in the release rather than whatever main holds today.
+      - name: Checkout source at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          path: source-checkout
+
       - name: Check if version already exists
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -381,10 +390,34 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Creating fern/pages-$TAG/ from fern/pages-dev/..."
+          echo "Creating fern/pages-$TAG/ from source @ $TAG docs/..."
 
-          # Copy current pages-dev/ to pages-vX.Y.Z/
-          cp -r fern/pages-dev "fern/pages-$TAG"
+          # pages-dev tracks main and can differ from a tag cut off a release
+          # branch, so copy the tag's authored pages instead. Same excludes as
+          # the dev sync above: digest is synced separately and index.yml
+          # becomes the version config, not a page.
+          rm -rf "fern/pages-$TAG"
+          mkdir -p "fern/pages-$TAG"
+          rsync -a \
+            --exclude='digest' \
+            --exclude='index.yml' \
+            source-checkout/docs/ "fern/pages-$TAG/"
+
+          # Faithfulness guard: every file in the snapshot must trace back to
+          # the tagged source, so a stale or foreign tree cannot ship under a
+          # release label.
+          missing=0
+          while IFS= read -r f; do
+            rel="${f#fern/pages-$TAG/}"
+            if [ ! -e "source-checkout/docs/$rel" ]; then
+              echo "::error::Snapshot file has no counterpart in the tagged source: $rel"
+              missing=1
+            fi
+          done < <(find "fern/pages-$TAG" -type f)
+          if [ "$missing" != "0" ]; then
+            echo "::error::Release snapshot for $TAG contains files absent from the tag; aborting."
+            exit 1
+          fi
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
@@ -429,15 +462,19 @@ jobs:
 
           echo "Creating version config: $VERSION_FILE"
 
-          # Copy dev.yml as template
-          cp fern/versions/dev.yml "$VERSION_FILE"
+          # From the tag's own index.yml, for the same reason the pages come
+          # from the tag: dev.yml tracks main's navigation.
+          cp source-checkout/docs/index.yml "$VERSION_FILE"
+
+          # Same two transforms the dev sync applies to dev.yml, and in the
+          # same order: digest is a sibling of the pages tree, not inside it,
+          # so it must be rewritten first or the second sub() re-matches it.
+          yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' "$VERSION_FILE"
+          yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-'"$TAG"'/${1}")' "$VERSION_FILE"
 
           # Update the comment at the top
           sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
           sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
-
-          # Update all page paths from ../pages-dev/ to ../pages-vX.Y.Z/
-          sed -i "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
 
           echo "Created $VERSION_FILE"
           echo "First 30 lines:"
