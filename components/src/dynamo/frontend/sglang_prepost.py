@@ -818,16 +818,15 @@ def preprocess_chat_request(
             content_format_override="openai" if is_kimi_k3 else None,
         )
         if is_kimi_k3:
-            image_count = sum(
-                1
-                for message in template_messages
-                for part in (
-                    message.get("content")
-                    if isinstance(message.get("content"), list)
-                    else []
-                )
-                if isinstance(part, dict) and part.get("type") == "image"
-            )
+            image_count = 0
+            for message in template_messages:
+                content = message.get("content")
+                if isinstance(content, list):
+                    image_count += sum(
+                        1
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "image"
+                    )
             if image_count:
                 # K3's tokenizer otherwise emits its checkpoint-native
                 # <|kimi_image_placeholder|> sequence. SGLang's processor
