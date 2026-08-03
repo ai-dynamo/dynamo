@@ -12,9 +12,8 @@ use anyhow::Context as _;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
-use xxhash_rust::xxh3::xxh3_64;
 
-use dynamo_runtime::utils::GracefulTaskGuard;
+use dynamo_runtime::{logging::should_sample_trace_key, utils::GracefulTaskGuard};
 
 use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
@@ -292,20 +291,12 @@ fn should_sample(key: &FpmKey, counter_id: i64, sample_ratio: Option<f64>) -> bo
     let Some(ratio) = sample_ratio else {
         return true;
     };
-    if ratio <= 0.0 {
-        return false;
-    }
-    if ratio >= 1.0 {
-        return true;
-    }
-
     let (source, worker_id, dp_rank) = key;
     let key = format!(
         "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{counter_id}",
         source.namespace, source.component, source.producer_id, worker_id, dp_rank,
     );
-    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
-    xxh3_64(key.as_bytes()) < threshold
+    should_sample_trace_key(key.as_bytes(), ratio)
 }
 
 async fn send_decoded(
