@@ -27,6 +27,7 @@ from aiconfigurator.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
@@ -50,7 +51,10 @@ def _build_k8s_overrides(
         if dgdr.modelCache.pvcMountPath:
             overrides["k8s_pvc_mount_path"] = dgdr.modelCache.pvcMountPath
         if dgdr.modelCache.pvcModelPath:
-            overrides["k8s_model_path_in_pvc"] = dgdr.modelCache.pvcModelPath
+            overrides["k8s_model_path_in_pvc"] = model_cache_path_in_pvc(
+                dgdr.modelCache.pvcMountPath,
+                dgdr.modelCache.pvcModelPath,
+            )
     return overrides
 
 
