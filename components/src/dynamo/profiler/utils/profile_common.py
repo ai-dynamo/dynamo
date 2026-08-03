@@ -30,6 +30,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
 )
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +159,10 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
         and dgdr.modelCache.pvcMountPath
         and dgdr.modelCache.pvcModelPath
     ):
-        mount = dgdr.modelCache.pvcMountPath.rstrip("/")
-        sub = dgdr.modelCache.pvcModelPath.strip("/")
-        local_path = f"{mount}/{sub}"
+        local_path = normalize_model_cache_path(
+            dgdr.modelCache.pvcMountPath,
+            dgdr.modelCache.pvcModelPath,
+        )
         if os.path.isfile(os.path.join(local_path, "config.json")):
             return local_path
     return dgdr.model
@@ -301,18 +303,21 @@ def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> lis
 
 
 def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
-    """Add tolerations to every service's extraPodSpec in a DGD config dict.
+    """Add tolerations to every component pod template in a DGD config.
 
-    Tolerations already present in a service are preserved; only new entries
+    Tolerations already present in a component are preserved; only new entries
     (by identity) are appended.  Returns a deep copy with tolerations applied.
     """
     result = copy.deepcopy(dgd_config)
-    for _svc_name, svc in result.get("spec", {}).get("services", {}).items():
-        if not isinstance(svc, dict):
+    components = result.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return result
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        eps = svc.setdefault("extraPodSpec", {})
-        existing = eps.get("tolerations", [])
+        pod_spec = component.setdefault("podTemplate", {}).setdefault("spec", {})
+        existing = pod_spec.get("tolerations") or []
         new_entries = [t for t in tolerations if t not in existing]
         if new_entries:
-            eps["tolerations"] = list(existing) + new_entries
+            pod_spec["tolerations"] = list(existing) + new_entries
     return result

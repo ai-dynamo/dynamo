@@ -716,7 +716,7 @@ impl RoutingOverheadMetrics {
                     routing_overhead::SHARED_CACHE_ERRORS_TOTAL
                 );
                 prometheus::IntCounter::with_opts(
-                    Opts::new(name, "Total shared cache query errors")
+                    Opts::new(name, "Total shared cache failures")
                         .const_label(labels::ROUTER_ID, &router_id),
                 )
                 .expect("shared_cache_errors_total")
