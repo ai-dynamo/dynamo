@@ -87,8 +87,6 @@ pub struct RequestTracePolicy {
     pub enabled: bool,
     pub records: Vec<RequestTraceRecordKind>,
     pub sinks: Vec<RequestTraceSinkKind>,
-    pub sample_ratio: Option<f64>,
-    pub legacy_audit_force_logging: bool,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
     pub capacity: usize,
@@ -129,12 +127,21 @@ impl RequestTracePolicy {
     pub fn emit_tool_records(&self) -> bool {
         self.records.contains(&RequestTraceRecordKind::Tool)
     }
+}
 
+#[derive(Clone, Debug)]
+struct RequestTraceRuntimePolicy {
+    policy: RequestTracePolicy,
+    sample_ratio: Option<f64>,
+    legacy_audit_force_logging: bool,
+}
+
+impl RequestTraceRuntimePolicy {
     /// Applies the configured ratio before request-trace records fan out to sinks.
     ///
     /// The agent session ID keeps agent request and tool records together. Other
     /// request-end and request-payload records use the request ID as their stable key.
-    pub fn should_sample(&self, record: &RequestTraceRecord) -> bool {
+    fn should_sample(&self, record: &RequestTraceRecord) -> bool {
         if self.legacy_audit_force_logging
             && record.event_type == super::RequestTraceEventType::RequestPayload
         {
@@ -176,10 +183,10 @@ fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
     should_sample_trace_key(key.as_bytes(), ratio)
 }
 
-static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
+static POLICY: OnceLock<RequestTraceRuntimePolicy> = OnceLock::new();
 static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 
-fn load_from_env() -> RequestTracePolicy {
+fn load_runtime_policy_from_env() -> RequestTraceRuntimePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let request_trace_enabled = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE);
     let audit_force_logging = env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING);
@@ -284,29 +291,31 @@ fn load_from_env() -> RequestTracePolicy {
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
 
-    RequestTracePolicy {
-        enabled,
-        records,
-        sinks,
+    RequestTraceRuntimePolicy {
+        policy: RequestTracePolicy {
+            enabled,
+            records,
+            sinks,
+            file_path,
+            file_format,
+            capacity,
+            file_buffer_bytes,
+            file_flush_interval_ms,
+            file_roll_bytes,
+            file_roll_lines,
+            nats_subject,
+            otel_max_payload_bytes,
+            http_header_capture_list,
+            tool_events_zmq_endpoint,
+            tool_events_zmq_topic,
+            s3_bucket,
+            s3_region,
+            s3_prefix,
+            s3_roll_uncompressed_bytes,
+            s3_flush_interval_ms,
+        },
         sample_ratio,
         legacy_audit_force_logging: audit_force_logging,
-        file_path,
-        file_format,
-        capacity,
-        file_buffer_bytes,
-        file_flush_interval_ms,
-        file_roll_bytes,
-        file_roll_lines,
-        nats_subject,
-        otel_max_payload_bytes,
-        http_header_capture_list,
-        tool_events_zmq_endpoint,
-        tool_events_zmq_topic,
-        s3_bucket,
-        s3_region,
-        s3_prefix,
-        s3_roll_uncompressed_bytes,
-        s3_flush_interval_ms,
     }
 }
 
@@ -457,8 +466,19 @@ fn parse_file_format(value: &str) -> RequestTraceFileFormat {
     }
 }
 
+#[cfg(test)]
+fn load_from_env() -> RequestTracePolicy {
+    load_runtime_policy_from_env().policy
+}
+
 pub fn policy() -> &'static RequestTracePolicy {
-    POLICY.get_or_init(load_from_env)
+    &POLICY.get_or_init(load_runtime_policy_from_env).policy
+}
+
+pub(super) fn should_sample(record: &RequestTraceRecord) -> bool {
+    POLICY
+        .get_or_init(load_runtime_policy_from_env)
+        .should_sample(record)
 }
 
 pub fn is_enabled() -> bool {
@@ -684,7 +704,7 @@ mod tests {
                 (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0.25"),
             ],
             || {
-                assert_eq!(load_from_env().sample_ratio, Some(0.25));
+                assert_eq!(load_runtime_policy_from_env().sample_ratio, Some(0.25));
             },
         );
     }
@@ -698,10 +718,10 @@ mod tests {
                 (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0"),
             ],
             || {
-                let policy = load_from_env();
-                assert_eq!(policy.sample_ratio, Some(0.0));
-                assert!(policy.should_sample(&payload_record("request-123")));
-                assert!(!policy.should_sample(&request_record("request-123")));
+                let runtime_policy = load_runtime_policy_from_env();
+                assert_eq!(runtime_policy.sample_ratio, Some(0.0));
+                assert!(runtime_policy.should_sample(&payload_record("request-123")));
+                assert!(!runtime_policy.should_sample(&request_record("request-123")));
             },
         );
     }

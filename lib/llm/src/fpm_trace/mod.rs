@@ -216,24 +216,49 @@ pub(crate) async fn init_from_env_with_shutdown(
         return Ok(None);
     }
 
-    init_with_policy(
+    init_with_policy_and_sample_ratio(
         runtime_id,
         namespace,
         component,
         producer_id,
         policy.clone(),
+        config::sample_ratio(),
         shutdown,
         graceful_guard,
     )
     .await
 }
 
+#[cfg(test)]
 async fn init_with_policy(
     runtime_id: &str,
     namespace: &str,
     component: &str,
     producer_id: &str,
     policy: FpmTracePolicy,
+    shutdown: CancellationToken,
+    graceful_guard: Option<GracefulTaskGuard>,
+) -> anyhow::Result<Option<FpmTrace>> {
+    init_with_policy_and_sample_ratio(
+        runtime_id,
+        namespace,
+        component,
+        producer_id,
+        policy,
+        None,
+        shutdown,
+        graceful_guard,
+    )
+    .await
+}
+
+async fn init_with_policy_and_sample_ratio(
+    runtime_id: &str,
+    namespace: &str,
+    component: &str,
+    producer_id: &str,
+    policy: FpmTracePolicy,
+    sample_ratio: Option<f64>,
     shutdown: CancellationToken,
     graceful_guard: Option<GracefulTaskGuard>,
 ) -> anyhow::Result<Option<FpmTrace>> {
@@ -293,8 +318,14 @@ async fn init_with_policy(
         closed_notify: Notify::new(),
     });
 
-    if let Err(error) =
-        sink::spawn_worker(policy.clone(), receiver, inner.clone(), graceful_guard).await
+    if let Err(error) = sink::spawn_worker(
+        policy.clone(),
+        sample_ratio,
+        receiver,
+        inner.clone(),
+        graceful_guard,
+    )
+    .await
     {
         *entry = TraceRegistryEntry::Failed;
         return Err(error);
@@ -330,7 +361,6 @@ mod tests {
             enabled: true,
             output_path: path.display().to_string(),
             mode: FpmTraceMode::Full,
-            sample_ratio: None,
             sample_interval_ms: 100,
             jsonl_gz_roll_bytes: 1024 * 1024,
             max_segments: 4,
