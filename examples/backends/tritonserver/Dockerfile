@@ -12,9 +12,9 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
 COPY --from=triton_source /opt/tritonserver /opt/tritonserver
 COPY --from=triton_source /usr/local/dcgm /usr/local/dcgm
-# libdcgm may not be present in all Triton releases; copy only when found
-RUN --mount=type=bind,from=triton_source,source=/lib/x86_64-linux-gnu,target=/triton_lib \
-    find /triton_lib -name "libdcgm*.so*" -exec cp -a {} /lib/x86_64-linux-gnu/ \; 2>/dev/null || true
+USER root
+RUN --mount=type=bind,from=triton_source,source=/usr/lib/x86_64-linux-gnu,target=/triton_usr_lib \
+    find /triton_usr_lib -name "libdcgm*.so*" -exec cp -a {} /lib/x86_64-linux-gnu/ \;
 ENV BACKEND_DIR=/opt/tritonserver/backends
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/opt/tritonserver/lib:/opt/tritonserver/backends:/usr/local/dcgm/lib64
 ENV PATH=/opt/tritonserver/bin:$PATH
