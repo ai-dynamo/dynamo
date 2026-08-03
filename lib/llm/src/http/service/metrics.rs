@@ -1382,7 +1382,7 @@ impl InflightGuard {
 
         tracing::Span::current().record("model", model.as_str());
 
-        tracing::info!(
+        tracing::debug!(
             request_id = %request_id,
             model = %model,
             endpoint = %endpoint,
@@ -1478,7 +1478,7 @@ impl Drop for InflightGuard {
                 );
             }
             Status::Success => {
-                tracing::info!(
+                tracing::debug!(
                     request_id = %self.request_id,
                     model = %self.model,
                     endpoint = %self.endpoint,
