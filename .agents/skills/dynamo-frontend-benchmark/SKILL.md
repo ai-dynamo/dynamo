@@ -81,6 +81,11 @@ median of 3+. For profiling: `profile_oncpu.sh` (non-root) and
 
 ## Running a throughput benchmark — methodology
 
+This is the frontend-specific instantiation of the general run protocol. The
+substrate-independent invariants, preconditions, and reporting contract live in
+`dynamo-benchmark` (`references/measurement-protocol.md`); the concrete counts and
+commands below belong here and are not restated there.
+
 The harness encodes hard-won protocol. Follow it or results drift:
 
 1. **Full teardown + fresh restart between every run** (`stop.sh` then `start.sh`).

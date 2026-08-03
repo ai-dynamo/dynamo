@@ -228,6 +228,13 @@ occurred.
 
 ## Stage 7: Measure performance
 
+The paired design below — randomized arm order within each pair, a distribution-free
+interval on the median ratio, and an inconclusive result blocking the claim rather than
+passing it — is the reference A/B design for performance work across this repository, and
+`dynamo-benchmark` cites it rather than reimplementing it. The specific counts and
+thresholds are not portable: they assume a fast, deterministic, single-process workload
+yielding one elapsed value per run, which is what makes this sample size affordable.
+
 Measure every supported row from Stage 4 with its frozen configuration. The authoritative
 gate reuses the `replay-bench` artifacts from byte parity, so routing selection is seeded
 and matched between revisions. Require timing metadata to report `replay_bench: true`.
