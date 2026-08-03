@@ -70,7 +70,9 @@ FPM_SET_WORKER_ID_METHOD_NAME = "set_fpm_worker_id"
 
 async def _sync_fpm_worker_id(engine_client: AsyncLLM, new_worker_id: str) -> None:
     try:
-        await engine_client.engine_core.call_utility_async(FPM_SET_WORKER_ID_METHOD_NAME, new_worker_id)
+        await engine_client.engine_core.call_utility_async(
+            FPM_SET_WORKER_ID_METHOD_NAME, new_worker_id
+        )
     except Exception:
         logger.warning("Failed to set FPM worker_id on restored engine", exc_info=True)
 

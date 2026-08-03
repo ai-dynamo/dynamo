@@ -3669,12 +3669,16 @@ def _install_fpm_worker_id_utility() -> None:
     if hasattr(EngineCore, "set_fpm_worker_id"):
         return
 
-    def set_fpm_worker_id (self, new_worker_id: str) -> None:
+    def set_fpm_worker_id(self, new_worker_id: str) -> None:
         scheduler = getattr(self, "scheduler", None)
         if not isinstance(scheduler, InstrumentedScheduler):
-            raise RuntimeError(f"scheduler is {type(scheduler).__name__}, not InstrumentedScheduler")
+            raise RuntimeError(
+                f"scheduler is {type(scheduler).__name__}, not InstrumentedScheduler"
+            )
         scheduler._fpm_worker_id = new_worker_id
         scheduler._publisher._worker_id = new_worker_id
+
     EngineCore.set_fpm_worker_id = set_fpm_worker_id
+
 
 _install_fpm_worker_id_utility()
