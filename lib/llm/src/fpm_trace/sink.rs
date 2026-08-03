@@ -227,6 +227,7 @@ fn preflight_writable_parent(output_path: &str) -> anyhow::Result<()> {
 
 pub(super) async fn spawn_worker(
     policy: FpmTracePolicy,
+    sample_ratio: Option<f64>,
     receiver: broadcast::Receiver<FpmTraceEvent>,
     owner: Arc<FpmTraceInner>,
     graceful_guard: Option<GracefulTaskGuard>,
@@ -260,15 +261,13 @@ pub(super) async fn spawn_worker(
         // Keeping the owner alive keeps this producer discoverable in the
         // registry until its writer has finished closing.
         match policy.mode {
-            FpmTraceMode::Full => {
-                run_full(receiver, writer, owner.clone(), policy.sample_ratio).await
-            }
+            FpmTraceMode::Full => run_full(receiver, writer, owner.clone(), sample_ratio).await,
             FpmTraceMode::Sampled => {
                 run_sampled(
                     receiver,
                     writer,
                     owner.clone(),
-                    policy.sample_ratio,
+                    sample_ratio,
                     policy.sample_interval_ms,
                 )
                 .await

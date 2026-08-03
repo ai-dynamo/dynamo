@@ -28,13 +28,18 @@ pub struct FpmTracePolicy {
     pub enabled: bool,
     pub output_path: String,
     pub mode: FpmTraceMode,
-    pub sample_ratio: Option<f64>,
     pub sample_interval_ms: u64,
     pub jsonl_gz_roll_bytes: u64,
     pub max_segments: usize,
 }
 
-static POLICY: OnceLock<FpmTracePolicy> = OnceLock::new();
+#[derive(Clone, Debug)]
+struct FpmTraceRuntimePolicy {
+    policy: FpmTracePolicy,
+    sample_ratio: Option<f64>,
+}
+
+static POLICY: OnceLock<FpmTraceRuntimePolicy> = OnceLock::new();
 
 impl Default for FpmTracePolicy {
     fn default() -> Self {
@@ -42,7 +47,6 @@ impl Default for FpmTracePolicy {
             enabled: false,
             output_path: DEFAULT_OUTPUT_PATH.to_string(),
             mode: FpmTraceMode::Sampled,
-            sample_ratio: None,
             sample_interval_ms: DEFAULT_SAMPLE_INTERVAL_MS,
             jsonl_gz_roll_bytes: DEFAULT_JSONL_GZ_ROLL_BYTES,
             max_segments: DEFAULT_MAX_SEGMENTS,
@@ -67,7 +71,7 @@ where
     Ok(parsed)
 }
 
-fn load_enabled_policy() -> anyhow::Result<FpmTracePolicy> {
+fn load_enabled_runtime_policy() -> anyhow::Result<FpmTraceRuntimePolicy> {
     let output_path = match std::env::var(env_fpm_trace::DYN_FPM_OUTPUT_PATH) {
         Ok(value) if value.trim().is_empty() => {
             anyhow::bail!("{} must not be empty", env_fpm_trace::DYN_FPM_OUTPUT_PATH)
@@ -83,49 +87,69 @@ fn load_enabled_policy() -> anyhow::Result<FpmTracePolicy> {
         Err(_) => FpmTraceMode::Sampled,
     };
 
-    Ok(FpmTracePolicy {
-        enabled: true,
-        output_path,
-        mode,
+    Ok(FpmTraceRuntimePolicy {
+        policy: FpmTracePolicy {
+            enabled: true,
+            output_path,
+            mode,
+            sample_interval_ms: positive_integer_from_env(
+                env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS,
+                DEFAULT_SAMPLE_INTERVAL_MS,
+            )?,
+            jsonl_gz_roll_bytes: positive_integer_from_env(
+                env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES,
+                DEFAULT_JSONL_GZ_ROLL_BYTES,
+            )?,
+            max_segments: positive_integer_from_env(
+                env_fpm_trace::DYN_FPM_MAX_SEGMENTS,
+                DEFAULT_MAX_SEGMENTS,
+            )?,
+        },
         sample_ratio: trace_sample_ratio_from_env(),
-        sample_interval_ms: positive_integer_from_env(
-            env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS,
-            DEFAULT_SAMPLE_INTERVAL_MS,
-        )?,
-        jsonl_gz_roll_bytes: positive_integer_from_env(
-            env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES,
-            DEFAULT_JSONL_GZ_ROLL_BYTES,
-        )?,
-        max_segments: positive_integer_from_env(
-            env_fpm_trace::DYN_FPM_MAX_SEGMENTS,
-            DEFAULT_MAX_SEGMENTS,
-        )?,
     })
 }
 
-fn load_from_env() -> FpmTracePolicy {
+fn disabled_runtime_policy() -> FpmTraceRuntimePolicy {
+    FpmTraceRuntimePolicy {
+        policy: FpmTracePolicy::default(),
+        sample_ratio: None,
+    }
+}
+
+fn load_runtime_policy_from_env() -> FpmTraceRuntimePolicy {
     let enabled = match std::env::var(env_fpm_trace::DYN_FPM_TRACE) {
-        Err(_) => return FpmTracePolicy::default(),
+        Err(_) => return disabled_runtime_policy(),
         Ok(value) => match parse_bool(&value) {
             Ok(enabled) => enabled,
             Err(error) => {
                 tracing::warn!(%error, "invalid FPM trace configuration; tracing disabled");
-                return FpmTracePolicy::default();
+                return disabled_runtime_policy();
             }
         },
     };
     if !enabled {
-        return FpmTracePolicy::default();
+        return disabled_runtime_policy();
     }
 
-    load_enabled_policy().unwrap_or_else(|error| {
+    load_enabled_runtime_policy().unwrap_or_else(|error| {
         tracing::warn!(%error, "invalid FPM trace configuration; tracing disabled");
-        FpmTracePolicy::default()
+        disabled_runtime_policy()
     })
 }
 
+#[cfg(test)]
+fn load_from_env() -> FpmTracePolicy {
+    load_runtime_policy_from_env().policy
+}
+
 pub fn policy() -> &'static FpmTracePolicy {
-    POLICY.get_or_init(load_from_env)
+    &POLICY.get_or_init(load_runtime_policy_from_env).policy
+}
+
+pub(super) fn sample_ratio() -> Option<f64> {
+    POLICY
+        .get_or_init(load_runtime_policy_from_env)
+        .sample_ratio
 }
 
 pub fn is_enabled() -> bool {
@@ -152,11 +176,12 @@ mod tests {
                 (env_otlp::OTEL_TRACES_SAMPLE_RATIO, None),
             ],
             || {
-                let policy = load_from_env();
+                let runtime_policy = load_runtime_policy_from_env();
+                assert_eq!(runtime_policy.sample_ratio, None);
+                let policy = runtime_policy.policy;
                 assert!(!policy.enabled);
                 assert_eq!(policy.output_path, DEFAULT_OUTPUT_PATH);
                 assert_eq!(policy.mode, FpmTraceMode::Sampled);
-                assert_eq!(policy.sample_ratio, None);
                 assert_eq!(policy.sample_interval_ms, DEFAULT_SAMPLE_INTERVAL_MS);
                 assert_eq!(policy.jsonl_gz_roll_bytes, DEFAULT_JSONL_GZ_ROLL_BYTES);
                 assert_eq!(policy.max_segments, DEFAULT_MAX_SEGMENTS);
@@ -178,11 +203,12 @@ mod tests {
                 (env_otlp::OTEL_TRACES_SAMPLE_RATIO, Some("0.25")),
             ],
             || {
-                let policy = load_from_env();
+                let runtime_policy = load_runtime_policy_from_env();
+                assert_eq!(runtime_policy.sample_ratio, Some(0.25));
+                let policy = runtime_policy.policy;
                 assert!(policy.enabled);
                 assert_eq!(policy.output_path, "/var/log/fpm");
                 assert_eq!(policy.mode, FpmTraceMode::Full);
-                assert_eq!(policy.sample_ratio, Some(0.25));
                 assert_eq!(policy.sample_interval_ms, 250);
                 assert_eq!(policy.jsonl_gz_roll_bytes, 4096);
                 assert_eq!(policy.max_segments, 7);

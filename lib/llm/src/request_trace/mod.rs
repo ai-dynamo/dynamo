@@ -103,7 +103,7 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
 
 pub fn publish(record: RequestTraceRecord) {
     // Sample before the broadcast so every configured sink writes the same records.
-    if policy().should_sample(&record) {
+    if config::should_sample(&record) {
         BUS.publish(record);
     }
 }
