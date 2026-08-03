@@ -27,9 +27,14 @@ source .venv/bin/activate
 uv pip install -e ./aisimulate
 ```
 
-For Dynamo features, install the matching `ai-dynamo[simulation]` extra. It installs the Planner
-simulation dependencies and publishes the `dynamo.planner` and `dynamo.router` adapter entry
-points plus a transitional replay runner over the current Dynamo Replay API.
+The `dynamo-planner` image builds and installs AI Simulate from the same source revision as Dynamo.
+The AI Simulate wheel is an image-local artifact, not a standalone release artifact. For Dynamo
+feature development from a source checkout, also install `ai-dynamo` and the Planner requirements:
+
+```bash
+uv pip install --no-deps -e .
+uv pip install -r container/deps/requirements.planner.txt
+```
 
 Run a sweep from Python with an explicit runner:
 

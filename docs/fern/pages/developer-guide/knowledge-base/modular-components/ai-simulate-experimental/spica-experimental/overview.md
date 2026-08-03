@@ -16,10 +16,11 @@ candidate as a versioned `ReplaySpec`, sends that specification to an injected r
 `RunnerFactory`, and returns ranked candidates or a Pareto front.
 
 Spica does not import Dynamo. Dynamo-specific Planner and Router behavior lives in optional
-adapters published by the `ai-dynamo` wheel.
+adapters registered by the `ai-dynamo` wheel.
 
-Install `ai-dynamo[simulation]` when a sweep uses those adapters or the transitional Dynamo
-runner.
+Use the `dynamo-planner` image when a sweep needs those adapters or the transitional Dynamo runner.
+The image builds and installs AI Simulate and Dynamo from the same source revision; it does not
+publish AI Simulate as a standalone wheel.
 
 ## Documentation
 

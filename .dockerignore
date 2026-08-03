@@ -33,16 +33,6 @@ container/Dockerfile*
 container/**/*.Dockerfile
 container/render.py
 container/context.yaml
-
-# Planner CPU tests inspect these two source contracts. Keep the narrow files in
-# the build context without admitting the rest of .github or Dockerfile templates.
-!.github
-.github/**
-!.github/workflows
-.github/workflows/**
-!.github/workflows/release.yml
-!container/templates/wheel_builder.Dockerfile
-
 # container/compliance/ is now COPY'd into each image's `licenses` Dockerfile
 # stage (NOTICES generation + license-policy validation), so it must remain
 # in the build context. Old comment from prior compliance design left for

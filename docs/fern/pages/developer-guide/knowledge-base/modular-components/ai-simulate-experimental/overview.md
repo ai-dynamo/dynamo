@@ -20,19 +20,23 @@ Its core owns backend search, candidate orchestration, scoring, and the versione
 contract.
 
 Optional adapters extend the search without adding a Dynamo dependency to AI Simulate. The
-`ai-dynamo[simulation]` extra installs Planner simulation dependencies and publishes
-`dynamo.planner` and `dynamo.router` adapters. Selecting either adapter imports its Dynamo
-implementation and adds a versioned runtime hook to the replay specification.
+`ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` adapters. Selecting either
+adapter imports its Dynamo implementation and adds a versioned runtime hook to the replay
+specification.
 
 KVBM search settings are deprecated and have no adapter migration. Native G2 replaces that path.
 
 ## Install
 
-Install the AI Simulate distribution from the repository root:
+The `dynamo-planner` image builds and installs AI Simulate and Dynamo from the same source revision.
+The AI Simulate wheel remains inside the image and is not published as a standalone release
+artifact.
+
+For source development, install AI Simulate, Dynamo, and the Planner dependencies from the
+repository root:
 
 ```bash
 uv pip install -e ./aisimulate
+uv pip install --no-deps -e .
+uv pip install -r container/deps/requirements.planner.txt
 ```
-
-To use the Dynamo adapters and the transitional Dynamo replay runner, also install the matching
-`ai-dynamo` wheel.
