@@ -103,8 +103,26 @@ exceptions:
       libraries on their own breaks `import nvidia.dali` outright. The vendored
       set is all-or-nothing with the package.
 
-      Re-measure when the vendored version moves. Drop this entry once the image
-      carries 2.1.1 or newer.
+      The entry stays even so. trtllm_runtime.Dockerfile now pins
+      nvidia-dali-cuda130>=2.1.1, so the vendored libraries no longer register
+      those decoders -- but they are still on disk and still match the deny globs
+      above, which gate on presence rather than content. What changed is the
+      reason for the waiver: it now covers a vendored ffmpeg that carries no
+      software h264/hevc/aac, rather than one that does.
+
+      Enforcement lives at build time, not here. Two guards in
+      trtllm_runtime.Dockerfile enumerate every bundled libavcodec -- one after
+      the upgrade, and one after the overlay COPY, which is the only stage where
+      a missed whiteout can leave the base image's older copy sitting beside the
+      upgraded one -- and tests/dependencies/test_no_software_video_codecs.py
+      repeats the check against the shipped image.
+
+      Deliberately NOT expressed as a deny_components version floor:
+      nvidia-dali-cuda130 appears in the base-image SBOM and is therefore
+      subtracted from the generated delta, so such an entry would never match
+      anything and would read as a check while doing nothing.
+
+      Re-measure when the vendored version moves.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
