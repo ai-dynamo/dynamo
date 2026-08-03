@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { TerminalDemo } from "./TerminalDemo";
+import { UPCOMING_EVENTS } from "./events.generated";
 
 const STATEMENTS = [
   "works with vLLM, SGLang, and TensorRT-LLM.",
@@ -90,6 +91,69 @@ function RotatingStatement() {
   );
 }
 
+function SlackIcon() {
+  return (
+    <svg viewBox="0 0 448 512" aria-hidden="true">
+      <path d="M94.1 315.1c0 25.9-21.2 47.1-47.1 47.1S0 341 0 315.1 21.2 268 47.1 268h47.1v47.1Zm23.7 0c0-25.9 21.2-47.1 47.1-47.1s47.1 21.2 47.1 47.1v117.8c0 25.9-21.2 47.1-47.1 47.1s-47.1-21.2-47.1-47.1V315.1Zm47.1-189c-25.9 0-47.1-21.2-47.1-47.1S139 32 164.9 32 212 53.2 212 79.1v47.1h-47.1Zm0 23.7c25.9 0 47.1 21.2 47.1 47.1S190.8 244 164.9 244H47.1C21.2 244 0 222.8 0 196.9s21.2-47.1 47.1-47.1h117.8Zm189 47.1c0-25.9 21.2-47.1 47.1-47.1s47.1 21.2 47.1 47.1-21.2 47.1-47.1 47.1h-47.1v-47.1Zm-23.7 0c0 25.9-21.2 47.1-47.1 47.1S236 222.8 236 196.9V79.1C236 53.2 257.2 32 283.1 32s47.1 21.2 47.1 47.1v117.8Zm-47.1 189c25.9 0 47.1 21.2 47.1 47.1S309 480 283.1 480 236 458.8 236 432.9v-47.1h47.1Zm0-23.7c-25.9 0-47.1-21.2-47.1-47.1s21.2-47.1 47.1-47.1h117.8c25.9 0 47.1 21.2 47.1 47.1s-21.2 47.1-47.1 47.1H283.1Z" />
+    </svg>
+  );
+}
+
+function CalendarAppIcon() {
+  const day = UPCOMING_EVENTS[0]?.day ?? "•";
+  return (
+    <span className="dynamo-welcome__calendar-app" aria-hidden="true">
+      <span>CAL</span>
+      <strong>{day}</strong>
+    </span>
+  );
+}
+
+function CommunityRail() {
+  const notifications = [
+    {
+      app: "AI Dynamo Slack",
+      message: "Join the Dynamo community",
+      href: SLACK_URL,
+      icon: <SlackIcon />,
+      tone: "slack",
+    },
+    {
+      app: "Calendar",
+      message: "See upcoming community events",
+      href: CALENDAR_URL,
+      icon: <CalendarAppIcon />,
+      tone: "calendar",
+    },
+  ];
+
+  return (
+    <nav
+      className="dynamo-welcome__community"
+      aria-label="Dynamo community links"
+    >
+      {notifications.map(({ app, message, href, icon, tone }) => (
+        <a
+          key={app}
+          className={`dynamo-welcome__notification dynamo-welcome__notification--${tone}`}
+          href={href}
+          target={href.startsWith("http") ? "_blank" : undefined}
+          rel={href.startsWith("http") ? "noopener noreferrer" : undefined}
+        >
+          <span className="dynamo-welcome__notification-icon">{icon}</span>
+          <span className="dynamo-welcome__notification-copy">
+            <span className="dynamo-welcome__notification-app">
+              {app}
+              <small>now</small>
+            </span>
+            <span>{message}</span>
+          </span>
+        </a>
+      ))}
+    </nav>
+  );
+}
+
 export interface WelcomeHeroProps {
   /** Fern-rewritten path to the asciinema recording. */
   src: string;
@@ -139,12 +203,6 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
               <path d="m9 18 6-6-6-6" />
             </svg>
           </a>
-          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={SLACK_URL} target="_blank" rel="noopener noreferrer">
-            Join Slack
-          </a>
-          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={CALENDAR_URL} target="_blank" rel="noopener noreferrer">
-            View calendar
-          </a>
         </div>
       </section>
 
@@ -168,6 +226,8 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
           />
         </div>
       </section>
+
+      <CommunityRail />
     </div>
   );
 }
