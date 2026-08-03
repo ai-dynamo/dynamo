@@ -543,6 +543,23 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
     }
 }
 
+/// Mint an Anthropic-native `tool_use` id.
+///
+/// Backends speak OpenAI, so their tool-call ids carry the `call_...` shape.
+/// Anthropic clients expect `toolu_...`, so the id is minted fresh at the
+/// conversion boundary rather than forwarded. This mirrors
+/// `protocols::openai::responses`, which likewise mints a protocol-native id,
+/// and the `msg_` message ids already minted in this module.
+///
+/// Correlation back to the backend id is deliberately not maintained: it is
+/// only ever needed within a single request, and it holds without a map
+/// because an Anthropic client echoes the minted id back on both the
+/// `tool_use` block and its matching `tool_result`, so the two still agree
+/// when they reach the backend.
+pub(super) fn new_tool_use_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().simple())
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -572,7 +589,7 @@ pub fn chat_completion_to_anthropic_response(
                 let input: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
                 content.push(AnthropicResponseContentBlock::ToolUse {
-                    id: tc.id,
+                    id: new_tool_use_id(),
                     name: tc.function.name,
                     input,
                 });

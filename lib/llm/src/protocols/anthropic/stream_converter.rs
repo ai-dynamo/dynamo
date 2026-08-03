@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    completion_usage_to_anthropic,
+    completion_usage_to_anthropic, new_tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -160,7 +160,9 @@ impl AnthropicStreamConverter {
                 AnthropicStreamEvent::ContentBlockStart {
                     index: block_index,
                     content_block: AnthropicResponseContentBlock::ToolUse {
-                        id: tool_call.id.clone(),
+                        // Minted at emission, not in `ToolCallState`: the dedup
+                        // above keys on the backend id, which must stay intact.
+                        id: new_tool_use_id(),
                         name: tool_call.name.clone(),
                         input: serde_json::json!({}),
                     },
@@ -1059,12 +1061,17 @@ mod tests {
             event_types(&finish),
             vec!["content_block_start", "content_block_stop"]
         );
+        // The backend id `call-1` must not reach the client: the emitted block
+        // carries a minted Anthropic-native id instead.
         assert!(matches!(
             &finish[0].data,
             AnthropicStreamEvent::ContentBlockStart {
                 content_block: AnthropicResponseContentBlock::ToolUse { id, name, input },
                 ..
-            } if id == "call-1" && name == "Read" && input == &serde_json::json!({})
+            } if id.starts_with("toolu_")
+                && id.len() > "toolu_".len()
+                && name == "Read"
+                && input == &serde_json::json!({})
         ));
         assert_eq!(
             event_types(&conv.emit_end_events_tagged()),
