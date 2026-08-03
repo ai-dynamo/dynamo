@@ -21,12 +21,11 @@ spec:
   backendFramework: vllm
   components:
     - name: Frontend
-      runtimeVersionOverride: &runtimeVersion "1.4.0"
       podTemplate:
         spec:
           containers:
             - name: main
-              image: dynamo-riva:latest
+              image: ${DYNAMO_IMAGE}
               command: [python3, -m, dynamo.frontend]
               args: [--http-port, "8000"]
           imagePullSecrets: &imagePullSecrets
@@ -35,12 +34,11 @@ spec:
       replicas: 1
       type: frontend
     - name: RivaAsrWorker
-      runtimeVersionOverride: *runtimeVersion
       podTemplate:
         spec:
           containers:
             - name: main
-              image: dynamo-riva:latest
+              image: ${DYNAMO_IMAGE}
               command: [python3, -m, riva_nim.asr_worker]
               args:
                 - --riva-server
@@ -94,12 +92,11 @@ spec:
       sharedMemorySize: 16Gi
       type: worker
     - name: VllmWorker
-      runtimeVersionOverride: *runtimeVersion
       podTemplate:
         spec:
           containers:
             - name: main
-              image: dynamo-riva:latest
+              image: ${DYNAMO_IMAGE}
               command: [python3, -m, dynamo.vllm]
               args:
                 - --model
@@ -144,12 +141,11 @@ spec:
       sharedMemorySize: 16Gi
       type: worker
     - name: RivaTtsWorker
-      runtimeVersionOverride: *runtimeVersion
       podTemplate:
         spec:
           containers:
             - name: main
-              image: dynamo-riva:latest
+              image: ${DYNAMO_IMAGE}
               command: [python3, -m, riva_nim.tts_worker]
               args:
                 - --riva-server
