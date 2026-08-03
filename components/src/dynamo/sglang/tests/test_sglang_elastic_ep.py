@@ -31,9 +31,9 @@ pytestmark = [
 def _stub_sglang_io_struct(monkeypatch):
     """Provide ScaleElasticEPReqInput without the CUDA-only sglang import.
 
-    The pinned SGLang 0.5.14 has no ``ScaleElasticEPReqInput``; the handler
-    imports it lazily so the worker still starts there. The stub lets the
-    success-path test run regardless of the installed SGLang version.
+    The handler imports ``ScaleElasticEPReqInput`` lazily (it only exists on
+    SGLang >= 0.5.16), so stubbing it lets the success-path test run without a
+    real sglang install and regardless of the installed version.
     """
 
     io_struct = types.ModuleType("sglang.srt.managers.io_struct")

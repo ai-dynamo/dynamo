@@ -21,9 +21,9 @@
 #
 # REQUIREMENTS
 # ------------
-#   * SGLang >= 0.5.16 in the runtime image (the pinned 0.5.14 has no
+#   * SGLang >= 0.5.16 in the runtime image (older builds have no
 #     tokenizer_manager.scale_elastic_ep; the Dynamo worker capability-gates the
-#     route and simply will not expose it on 0.5.14).
+#     route and simply will not expose it there).
 #   * A MoE model with DP-attention (here: deepseek-ai/DeepSeek-V2-Lite).
 #   * 8 GPUs on ONE node: 4 for the primary group (--elastic-ep-initial-size 4),
 #     4 idle warm-standby GPUs for the joining group (scale 4 -> 8).

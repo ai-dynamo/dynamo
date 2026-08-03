@@ -929,20 +929,20 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 logger.error("[ElasticEP] Scaling failed: %s", e)
                 return err(str(e))
 
-        if not result.success:
-            return {
-                "status": "error",
-                "message": result.message or "scale_elastic_ep failed",
-                "old_ep_size": result.old_ep_size,
-                "new_ep_size": result.new_ep_size,
-                "pending_ep_size": result.pending_ep_size,
-            }
-        return {
-            "status": "ok",
-            "message": result.message or f"Scaled to ep_size={new_ep_size}",
+        response = {
+            "status": "ok" if result.success else "error",
+            "message": result.message
+            or (
+                f"Scaled to ep_size={new_ep_size}"
+                if result.success
+                else "scale_elastic_ep failed"
+            ),
             "old_ep_size": result.old_ep_size,
             "new_ep_size": result.new_ep_size,
         }
+        if not result.success:
+            response["pending_ep_size"] = result.pending_ep_size
+        return response
 
     async def is_scaling_elastic_ep(self, body: dict) -> dict:
         """Return the engine's current elastic-EP scale state.
