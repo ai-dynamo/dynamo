@@ -230,12 +230,37 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = raw_prefill_blocks - overlap_credit_blocks;
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
         let active_request_cost_blocks =
             self.kv_router_config.decode_active_request_weight * worker_load.active_requests as f64;
+
+        // Decode routers normally force `overlap_score_credit=0` through the
+        // per-request override, which preserves load-only disagg routing. When
+        // conditional disagg leaves a positive overlap credit in place, prefer
+        // cache-hot decode workers while still charging decode backlog.
+        if self.worker_type == "decode"
+            && !request.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0
+        {
+            // Clamp at zero because downstream taint multipliers assume non-negative scores.
+            // This loses ordering between workers whose overlap fully offsets decode load, but
+            // avoids inverting taint preference among negative-score workers.
+            let overlap_adjusted_decode_blocks =
+                (decode_cost_blocks - overlap_credit_blocks).max(0.0);
+            let logit = overlap_adjusted_decode_blocks + active_request_cost_blocks;
+            tracing::debug!(
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
+                 = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
+                 = max(0, {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}) + {active_request_cost_blocks:.3}",
+                worker.worker_id,
+                worker.dp_rank,
+            );
+            return logit;
+        }
+
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
         // These rows are emitted from the `SchedulerQueueActor` task, which `scheduling::queue`
@@ -370,6 +395,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request
+                    .potential_decode_blocks_after_admission(worker, block_size),
             });
         }
 
@@ -531,6 +558,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request
+                    .potential_decode_blocks_after_admission(best_worker, block_size),
             });
         }
 
@@ -560,6 +589,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            potential_decode_blocks: request
+                .potential_decode_blocks_after_admission(best_worker, block_size),
         })
     }
 }
@@ -1404,7 +1435,7 @@ mod tests {
             (cold_worker.worker_id, SimpleWorkerConfig::default()),
         ]);
 
-        let mut request = base_request(64);
+        let mut request = base_request(128);
         request
             .overlap
             .tier_overlap_blocks
@@ -1454,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_logit_does_not_clamp_negative_prefill_cost() {
+    fn test_worker_logit_clamps_non_decode_overlap_credit() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
         request.overlap.effective_cached_tokens.insert(worker, 96);
@@ -1484,7 +1515,7 @@ mod tests {
         request.track_prefill_tokens = false;
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            -7.0
+            5.0
         );
     }
 
@@ -1522,6 +1553,33 @@ mod tests {
         assert_eq!(
             weighted.worker_logit(&request, worker, 16, 0, weights, "test"),
             228.0
+        );
+    }
+
+    #[test]
+    fn test_decode_worker_logit_credits_overlap_without_prefill_tracking() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            7.0
         );
     }
 

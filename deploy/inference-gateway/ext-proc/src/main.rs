@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router};
+use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -150,6 +150,19 @@ async fn main() -> Result<()> {
             .serve(health_addr),
     );
 
+    // Start before router init so scrapes during a slow discovery bootstrap
+    // return an empty exposition rather than a connection refusal.
+    let metrics_port = parse_env(metrics::METRICS_PORT_ENV, metrics::DEFAULT_METRICS_PORT);
+    if metrics_port == 0 {
+        tracing::info!("Metrics server disabled");
+    } else {
+        tokio::spawn(async move {
+            if let Err(e) = metrics::serve(metrics_port).await {
+                tracing::error!(error = %e, port = metrics_port, "Metrics server exited");
+            }
+        });
+    }
+
     if standalone {
         let selector_cfg = EppStandaloneConfig::from_env()?;
         tracing::info!(
@@ -158,12 +171,14 @@ async fn main() -> Result<()> {
             block_size = selector_cfg.block_size,
             "Initializing standalone selector mode (no Dynamo runtime)..."
         );
+        metrics::set_served_model(&selector_cfg.model_name);
         let router = Arc::new(dynamo_ext_proc::EppRouter::from_selector(selector_cfg).await?);
         let ready_router = router.clone();
         serve(router, move || ready_router.is_ready(), health_reporter).await
     } else {
         tracing::info!("Initializing KV-aware router from discovery...");
         let router = Router::from_discovery(&config.namespace, &config.component).await?;
+        metrics::set_served_model(router.served_model());
         let ready = router.pod_store_ready();
         serve(
             Arc::new(router),
