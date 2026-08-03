@@ -38,7 +38,7 @@ set -uo pipefail
 NS="${1:-default}"
 DEPLOYMENT_NAME="${2:-sglang-elastic-ep}"
 MODEL="deepseek-ai/DeepSeek-V2-Lite"
-MODEL_PATH="/model-cache"  # mount path in the pod
+MODEL_PATH="$MODEL"  # joiner must serve the same model as the primary
 
 # Joiner launch knobs (match sglang_elastic_ep.yaml).
 DIST_INIT_ADDR="127.0.0.1:24555"
@@ -52,7 +52,7 @@ echo ""
 # ── Pod lookup helpers ────────────────────────────────────────────────────────
 worker_pod() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=SGLangDecodeWorker" \
+    -l "nvidia.com/dynamo-component=SGLangDecodeWorker,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
     --field-selector=status.phase=Running \
     --sort-by='.metadata.name' \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
@@ -60,7 +60,7 @@ worker_pod() {
 
 frontend_pod() {
   kubectl get pods -n "$NS" \
-    -l "nvidia.com/dynamo-component=Frontend" \
+    -l "nvidia.com/dynamo-component=Frontend,nvidia.com/dynamo-graph-deployment-name=$DEPLOYMENT_NAME" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
@@ -91,6 +91,9 @@ PF_ENGINE=$!
 kubectl port-forward pod/"$(frontend_pod)" 8002:8000 -n "$NS" &
 PF_FRONTEND=$!
 echo "Port-forwards: engine=$PF_ENGINE frontend=$PF_FRONTEND"
+# Reap the port-forwards on ANY exit (including the exit 1 error paths below).
+cleanup_port_forwards() { kill "$PF_ENGINE" "$PF_FRONTEND" 2>/dev/null || true; }
+trap cleanup_port_forwards EXIT
 sleep 5
 
 # ── Wait for inference endpoint ───────────────────────────────────────────────
@@ -123,12 +126,20 @@ snapshot() {
 
 infer() {
   local label="$1"
+  local tmp code
   echo ""
   echo "--- inference ($label) ---"
-  RESP=$(curl -s -m 30 http://localhost:8002/v1/completions \
+  tmp=$(mktemp)
+  code=$(curl -s -m 30 -o "$tmp" -w "%{http_code}" http://localhost:8002/v1/completions \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$MODEL\",\"prompt\":\"2+2=\",\"max_tokens\":5,\"temperature\":0}")
-  echo "response: $RESP"
+  echo "response ($code): $(cat "$tmp")"
+  if [ "$code" != "200" ] || ! python3 -c "import json,sys; d=json.load(open('$tmp')); assert isinstance(d['choices'][0]['text'], str)" 2>/dev/null; then
+    echo "ERROR: inference ($label) failed (HTTP $code or invalid completion JSON)" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  rm -f "$tmp"
 }
 
 # launch_joiner starts a SGLang joining group inside the worker pod on the idle
@@ -230,4 +241,4 @@ scale_up 6 8   # attach a 2-GPU joiner: ep=6 -> ep=8 (full node)
 
 echo ""
 echo "=== ALL SCALE-UP STEPS COMPLETE at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-kill $PF_ENGINE $PF_FRONTEND 2>/dev/null || true
+# Port-forwards are reaped by the EXIT trap.
