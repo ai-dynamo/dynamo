@@ -12,6 +12,7 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -78,6 +79,38 @@ const testCases = [
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  {
+    file: 'lib/sidecar/common/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'common sidecar source avoids unrelated build and E2E filters'
+  },
+  {
+    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+  },
+  {
+    file: 'lib/sidecar/sglang/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sglang sidecar source avoids backend E2E'
+  },
+  {
+    file: 'lib/sidecar/trtllm/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+  },
+  {
+    file: 'lib/sidecar/vllm/deploy/agg.yaml',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar deployment config avoids Rust and E2E checks'
+  },
+  {
+    file: 'lib/sidecar/README.md',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README avoids Rust, Fern, and E2E checks'
   },
 
   // Doc files should be excluded from core (negation patterns)

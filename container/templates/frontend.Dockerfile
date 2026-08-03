@@ -117,7 +117,8 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Install runtime dependencies (common + frontend).
-# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving.
+# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
+# plus AIC core for the experimental router-side prefill-load model.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \

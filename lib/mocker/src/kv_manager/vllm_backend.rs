@@ -3,22 +3,21 @@
 
 //! vLLM G1 manager over a minimal physical block-pool model.
 //!
-//! The manager owns request block tables and KV-event metadata. The pool owns
-//! physical occupancy, duplicate copies, prefix pins, and LRU eviction.
+//! Each request lease owns its physical-copy IDs and visibility state. The
+//! manager owns KV-event metadata, while the pool owns occupancy, duplicate
+//! copies, prefix pins, and LRU eviction.
 
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::cache::vllm_block_pool::{BlockCopyId, BlockReservation, ReserveOutcome, VllmBlockPool};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::{KvEventPublishers, PrefillCost};
-use crate::common::sequence::ActiveSequence;
+use crate::common::sequence::{NativeBlockIdentity, RequestSequence};
 
 struct PendingStore {
     parent_hash: Option<SequenceHash>,
@@ -26,18 +25,75 @@ struct PendingStore {
     token_ids: Option<Vec<u32>>,
 }
 
-struct FullBlock {
-    copy: BlockCopyId,
-    hash: SequenceHash,
+#[derive(Debug)]
+struct BlockLeaseEntry {
+    identity: NativeBlockIdentity,
+    copy: Option<BlockCopyId>,
     /// Whether a freshly allocated full block still needs to become cache-visible.
     pending_cache: bool,
-    /// Event metadata retained until `pending_cache` is finalized.
-    pending_store: Option<PendingStore>,
 }
 
-enum OwnedBlock {
-    Partial { copy: BlockCopyId, uuid: Uuid },
-    Full(FullBlock),
+/// Move-only native-G1 ownership token attached to one scheduler request.
+#[derive(Debug)]
+#[must_use = "a native block lease must be finished, aborted, retracted, or moved into a hold"]
+pub(crate) struct BlockRequestLease {
+    owner: Uuid,
+    entries: Vec<BlockLeaseEntry>,
+    allocated_tokens: usize,
+}
+
+impl BlockRequestLease {
+    pub(crate) fn new(owner: Uuid, identities: Vec<NativeBlockIdentity>) -> Self {
+        let mut entries = Vec::with_capacity(identities.capacity());
+        entries.extend(identities.into_iter().map(|identity| BlockLeaseEntry {
+            identity,
+            copy: None,
+            pending_cache: false,
+        }));
+        Self {
+            owner,
+            entries,
+            allocated_tokens: 0,
+        }
+    }
+
+    pub(crate) fn owner(&self) -> Uuid {
+        self.owner
+    }
+
+    pub(crate) fn allocated_tokens(&self) -> usize {
+        self.allocated_tokens
+    }
+
+    pub(crate) fn resident_block_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.copy.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
+    pub(crate) fn append_partial(&mut self) {
+        assert!(
+            self.entries
+                .last()
+                .is_none_or(|entry| entry.identity.sequence_hash.is_some()),
+            "native lease already has a partial tail"
+        );
+        self.entries.push(BlockLeaseEntry {
+            identity: NativeBlockIdentity::partial(),
+            copy: None,
+            pending_cache: false,
+        });
+    }
+
+    fn debug_assert_owner(&self, owner: Uuid) {
+        debug_assert_eq!(self.owner, owner, "native lease owner mismatch");
+    }
 }
 
 struct StoredBlock {
@@ -87,16 +143,9 @@ pub(crate) struct NativeDecodeBlockReservation {
     pool: BlockReservation,
 }
 
-impl NativeDecodeBlockReservation {
-    pub(crate) fn len(&self) -> usize {
-        self.pool.fresh_len()
-    }
-}
-
 pub(crate) struct NativeDestinationReservation {
     request_id: Uuid,
     pool: BlockReservation,
-    layout: Option<VllmBlockLayout>,
 }
 
 impl NativeDestinationReservation {
@@ -115,33 +164,8 @@ pub(super) enum VllmAcquire<T> {
     CapacityExhausted,
 }
 
-pub(super) struct VllmBlockLayout {
-    blocks: Vec<UniqueBlock>,
-    local_hashes: Vec<BlockHash>,
-    token_ids: Option<Vec<Vec<u32>>>,
-    parent: Option<UniqueBlock>,
-}
-
-impl VllmBlockLayout {
-    pub(super) fn new(
-        blocks: Vec<UniqueBlock>,
-        local_hashes: Vec<BlockHash>,
-        token_ids: Option<Vec<Vec<u32>>>,
-        parent: Option<UniqueBlock>,
-    ) -> Self {
-        Self {
-            blocks,
-            local_hashes,
-            token_ids,
-            parent,
-        }
-    }
-}
-
 pub(crate) struct VllmKvManager {
     pool: VllmBlockPool,
-    request_blocks: FxHashMap<Uuid, Vec<OwnedBlock>>,
-    partial_uuids: FxHashSet<Uuid>,
     block_size: usize,
     enable_prefix_caching: bool,
     kv_event_publishers: KvEventPublishers,
@@ -163,8 +187,6 @@ impl VllmKvManager {
         }
         Self {
             pool: VllmBlockPool::new(max_capacity),
-            request_blocks: FxHashMap::default(),
-            partial_uuids: FxHashSet::default(),
             block_size,
             enable_prefix_caching,
             kv_event_publishers,
@@ -173,110 +195,384 @@ impl VllmKvManager {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn use_for_request(
+    /// Atomically allocate the native lease through `cumulative_tokens`.
+    ///
+    /// Capacity is reserved before either physical residency or the allocation
+    /// watermark changes, so exhaustion leaves the lease unchanged.
+    pub(crate) fn allocate_lease(
         &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
+        owner: Uuid,
+        lease: &mut BlockRequestLease,
+        cumulative_tokens: usize,
         reusable_prefix_blocks: usize,
     ) -> VllmAcquire<usize> {
-        self.process_use(
-            request_id,
-            blocks,
-            local_hashes,
-            token_ids,
-            parent,
+        lease.debug_assert_owner(owner);
+        let previous_blocks = lease
+            .allocated_tokens
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        let target_blocks = cumulative_tokens
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        if target_blocks <= previous_blocks {
+            lease.allocated_tokens = cumulative_tokens;
+            return VllmAcquire::Ready(0);
+        }
+        assert!(
+            reusable_prefix_blocks == 0 || previous_blocks == 0,
+            "only a request's first allocation may reuse a prefix"
+        );
+        assert!(
+            reusable_prefix_blocks <= target_blocks - previous_blocks,
+            "reusable prefix exceeds the newly allocated block range"
+        );
+        assert!(self.enable_prefix_caching || reusable_prefix_blocks == 0);
+
+        let count = target_blocks - previous_blocks;
+        let prefix = lease.entries[previous_blocks..previous_blocks + reusable_prefix_blocks]
+            .iter()
+            .map(|entry| {
+                entry
+                    .identity
+                    .sequence_hash
+                    .expect("reusable prefix must contain only complete blocks")
+            });
+        let Some(ReserveOutcome {
+            mut reservation,
+            removed,
+        }) = self.pool.reserve_exact_prefix(prefix, count)
+        else {
+            return VllmAcquire::CapacityExhausted;
+        };
+        assert_eq!(
+            reservation.len() - reservation.fresh_len(),
             reusable_prefix_blocks,
+            "exact native prefix reservation returned the wrong hit count"
+        );
+        self.publish_removed(removed);
+        self.commit_lease_range(
+            lease,
+            previous_blocks,
+            target_blocks,
+            &mut reservation,
+            false,
             None,
-        )
+        );
+        assert_eq!(reservation.len(), 0, "native reservation was not consumed");
+        self.pool.cancel(reservation);
+        lease.allocated_tokens = cumulative_tokens;
+        VllmAcquire::Ready(count)
     }
 
-    pub(super) fn deref_for_request(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        self.process_deref(request_id, blocks);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn promote_for_request(
+    pub(crate) fn allocate_lease_from_decode_reservation(
         &mut self,
-        request_id: Uuid,
-        uuid: Uuid,
-        hash: SequenceHash,
-        parent_hash: Option<SequenceHash>,
-        local_hash: Option<BlockHash>,
-        token_ids: Option<Vec<u32>>,
+        owner: Uuid,
+        lease: &mut BlockRequestLease,
+        cumulative_tokens: usize,
+        reservation: &mut NativeDecodeBlockReservation,
     ) {
-        self.process_promote(request_id, uuid, hash, parent_hash, local_hash, token_ids);
+        lease.debug_assert_owner(owner);
+        let previous_blocks = lease
+            .allocated_tokens
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        let target_blocks = cumulative_tokens
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        if target_blocks <= previous_blocks {
+            lease.allocated_tokens = cumulative_tokens;
+            return;
+        }
+        let count = target_blocks - previous_blocks;
+        assert!(
+            reservation.pool.fresh_len() >= count,
+            "decode reservation does not cover the native lease growth"
+        );
+        self.commit_lease_range(
+            lease,
+            previous_blocks,
+            target_blocks,
+            &mut reservation.pool,
+            false,
+            None,
+        );
+        lease.allocated_tokens = cumulative_tokens;
     }
 
-    /// Publish full blocks completed by this scheduling decision.
-    ///
-    /// `computed_before` is a finalization watermark: every earlier complete
-    /// block was either finalized by a prior decision or arrived as an already
-    /// cache-visible prefix/destination block. Restricting the scan to this
-    /// delta avoids revisiting the full request block table on every decode
-    /// step.
-    pub(crate) fn finalize_computed_prefix(
+    pub(crate) fn finalize_lease_computed_prefix(
         &mut self,
-        request_id: Uuid,
+        owner: Uuid,
+        sequence: &mut RequestSequence,
+        lease: &mut BlockRequestLease,
         computed_before: usize,
         computed_after: usize,
     ) {
-        if !self.enable_prefix_caching {
-            return;
-        }
+        lease.debug_assert_owner(owner);
         assert!(
             computed_before <= computed_after,
             "computed token count cannot move backwards during one scheduling decision"
         );
         let first_new_block = computed_before / self.block_size;
-        let completed_blocks = computed_after / self.block_size;
-        if first_new_block == completed_blocks {
-            return;
-        }
-
-        let materialize_store_events = self.materialize_store_events();
-        let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
-            panic!("request {request_id} owns no block table")
-        };
-        let completed_blocks = completed_blocks.min(blocks.len());
+        let completed_blocks = (computed_after / self.block_size).min(lease.entries.len());
         if first_new_block >= completed_blocks {
             return;
         }
+
+        let materialize_store_events =
+            self.enable_prefix_caching && self.materialize_store_events();
         let mut stores = materialize_store_events
             .then(|| Vec::with_capacity(completed_blocks - first_new_block));
-        for block in &mut blocks[first_new_block..completed_blocks] {
-            match block {
-                OwnedBlock::Full(full) => {
-                    if !full.pending_cache {
-                        if let Some(stores) = &mut stores {
-                            stores.push(None);
-                        }
-                        continue;
-                    }
-                    full.pending_cache = false;
-                    let metadata = full.pending_store.take();
-                    let became_visible = self.pool.cache_private(full.copy, full.hash);
-                    if let Some(stores) = &mut stores {
-                        stores.push(became_visible.then(|| {
-                            StoredBlock {
-                                hash: full.hash,
-                                metadata: metadata.expect(
-                                    "materialized pending store must retain event metadata",
-                                ),
-                            }
-                        }));
-                    } else {
-                        debug_assert!(metadata.is_none());
-                    }
-                }
-                OwnedBlock::Partial { .. } => break,
+        for position in first_new_block..completed_blocks {
+            let parent_hash = position
+                .checked_sub(1)
+                .and_then(|parent| lease.entries[parent].identity.sequence_hash);
+            if lease.entries[position].identity.sequence_hash.is_none() {
+                lease.entries[position].identity =
+                    sequence.complete_block_identity(position, parent_hash);
+                lease.entries[position].pending_cache = self.enable_prefix_caching;
             }
+
+            let entry = &mut lease.entries[position];
+            if !entry.pending_cache {
+                if let Some(stores) = &mut stores {
+                    stores.push(None);
+                }
+                sequence.discard_completed_block(position);
+                continue;
+            }
+            entry.pending_cache = false;
+            let copy = entry
+                .copy
+                .expect("computed native block must retain physical residency");
+            let hash = entry
+                .identity
+                .sequence_hash
+                .expect("computed native block must have a sequence hash");
+            let became_visible = self.pool.cache_private(copy, hash);
+            if let Some(stores) = &mut stores {
+                stores.push(became_visible.then(|| StoredBlock {
+                    hash,
+                    metadata: PendingStore {
+                        parent_hash,
+                        local_hash: entry.identity.local_hash,
+                        token_ids: sequence.block_token_ids(position),
+                    },
+                }));
+            }
+            sequence.discard_completed_block(position);
         }
         if let Some(stores) = stores {
             self.publish_store_sequence(stores);
+        }
+        #[cfg(debug_assertions)]
+        sequence.debug_assert_finalized_range(
+            lease.entries.len(),
+            lease.entries[first_new_block..completed_blocks]
+                .iter()
+                .map(|entry| entry.identity),
+            lease.entries.last().map(|entry| entry.identity),
+        );
+    }
+
+    pub(crate) fn reserve_destination_lease(
+        &mut self,
+        owner: Uuid,
+        sequence: &RequestSequence,
+        lease: &BlockRequestLease,
+        _eviction_now_ms: Option<f64>,
+    ) -> VllmAcquire<NativeDestinationReservation> {
+        lease.debug_assert_owner(owner);
+        assert_eq!(
+            lease.resident_block_count(),
+            0,
+            "destination request already owns physical blocks"
+        );
+        let prompt_blocks = sequence
+            .num_input_tokens()
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        let prefix_candidates = lease.entries[..prompt_blocks]
+            .iter()
+            .map_while(|entry| entry.identity.sequence_hash);
+        let Some(outcome) = self
+            .pool
+            .reserve_resident_prefix(prefix_candidates, prompt_blocks)
+        else {
+            return VllmAcquire::CapacityExhausted;
+        };
+        self.publish_removed(outcome.removed);
+        VllmAcquire::Ready(NativeDestinationReservation {
+            request_id: owner,
+            pool: outcome.reservation,
+        })
+    }
+
+    pub(crate) fn activate_destination_lease(
+        &mut self,
+        owner: Uuid,
+        sequence: &RequestSequence,
+        lease: &mut BlockRequestLease,
+        mut reservation: NativeDestinationReservation,
+    ) {
+        lease.debug_assert_owner(owner);
+        debug_assert_eq!(
+            lease.resident_block_count(),
+            0,
+            "destination request already owns physical blocks"
+        );
+        assert_eq!(reservation.request_id, owner, "destination owner mismatch");
+        let prompt_blocks = sequence
+            .num_input_tokens()
+            .div_ceil(self.block_size)
+            .min(lease.entries.len());
+        self.commit_lease_range(
+            lease,
+            0,
+            prompt_blocks,
+            &mut reservation.pool,
+            self.enable_prefix_caching,
+            Some(sequence),
+        );
+        lease.allocated_tokens = sequence.num_input_tokens();
+        assert_eq!(
+            reservation.pool.len(),
+            0,
+            "destination reservation was not consumed"
+        );
+        self.pool.cancel(reservation.pool);
+    }
+
+    pub(crate) fn preempt_lease(&mut self, owner: Uuid, lease: &mut BlockRequestLease) {
+        lease.debug_assert_owner(owner);
+        self.release_lease_entries(lease);
+        lease.allocated_tokens = 0;
+    }
+
+    pub(crate) fn finish_lease(&mut self, owner: Uuid, mut lease: BlockRequestLease) {
+        lease.debug_assert_owner(owner);
+        self.release_lease_entries(&mut lease);
+        lease.allocated_tokens = 0;
+    }
+
+    fn release_lease_entries(&mut self, lease: &mut BlockRequestLease) {
+        for entry in lease.entries.iter_mut().rev() {
+            if let Some(copy) = entry.copy.take() {
+                self.pool.release(copy);
+            }
+            entry.pending_cache = false;
+        }
+    }
+
+    fn commit_lease_range(
+        &mut self,
+        lease: &mut BlockRequestLease,
+        start: usize,
+        end: usize,
+        reservation: &mut BlockReservation,
+        cache_fresh: bool,
+        sequence: Option<&RequestSequence>,
+    ) {
+        assert!(start <= end && end <= lease.entries.len());
+        let prefix_len = reservation.len() - reservation.fresh_len();
+        let mut prefix_copies = self.pool.activate_prefix(reservation);
+        assert_eq!(prefix_copies.len(), prefix_len);
+        let materialize_store_events = self.materialize_store_events();
+        let mut stores =
+            (cache_fresh && materialize_store_events).then(|| Vec::with_capacity(end - start));
+
+        for (offset, position) in (start..end).enumerate() {
+            let parent_hash = position
+                .checked_sub(1)
+                .and_then(|parent| lease.entries[parent].identity.sequence_hash);
+            let entry = &mut lease.entries[position];
+            assert!(
+                entry.copy.is_none(),
+                "native lease entry is already resident"
+            );
+            if offset < prefix_len {
+                let (hash, copy) = prefix_copies
+                    .next()
+                    .expect("prefix reservation returned too few copies");
+                assert_eq!(
+                    entry.identity.sequence_hash,
+                    Some(hash),
+                    "reserved prefix hash changed before activation"
+                );
+                entry.copy = Some(copy);
+                entry.pending_cache = false;
+                if let Some(stores) = &mut stores {
+                    stores.push(None);
+                }
+                continue;
+            }
+
+            let Some(hash) = entry.identity.sequence_hash else {
+                entry.copy = Some(self.pool.allocate_private(reservation));
+                entry.pending_cache = false;
+                if let Some(stores) = &mut stores {
+                    stores.push(None);
+                }
+                continue;
+            };
+            if cache_fresh && self.enable_prefix_caching {
+                let (copy, became_visible) = self.pool.allocate_cached(reservation, hash);
+                entry.copy = Some(copy);
+                entry.pending_cache = false;
+                if let Some(stores) = &mut stores {
+                    stores.push(became_visible.then(|| StoredBlock {
+                        hash,
+                        metadata: PendingStore {
+                            parent_hash,
+                            local_hash: entry.identity.local_hash,
+                            token_ids: sequence.and_then(|seq| seq.block_token_ids(position)),
+                        },
+                    }));
+                }
+            } else {
+                entry.copy = Some(self.pool.allocate_private(reservation));
+                entry.pending_cache = self.enable_prefix_caching;
+                if let Some(stores) = &mut stores {
+                    stores.push(None);
+                }
+            }
+        }
+        assert!(prefix_copies.next().is_none());
+        if let Some(stores) = stores {
+            self.publish_store_sequence(stores);
+        }
+    }
+
+    pub(crate) fn get_lease_prefill_cost(
+        &self,
+        sequence: &RequestSequence,
+        lease: &BlockRequestLease,
+    ) -> PrefillCost {
+        let (overlap_blocks, active_overlap_blocks) =
+            if self.enable_prefix_caching && sequence.enable_prefix_caching() {
+                let mut overlap = 0;
+                let mut active = 0;
+                for entry in &lease.entries {
+                    let Some(hash) = entry.identity.sequence_hash else {
+                        break;
+                    };
+                    let Some(hit) = self.pool.prefix_hit(hash) else {
+                        break;
+                    };
+                    overlap += 1;
+                    active += usize::from(hit.is_active);
+                }
+                (overlap, active)
+            } else {
+                (0, 0)
+            };
+        let new_blocks = lease.entries.len() - overlap_blocks;
+        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.len());
+        let active_cached_tokens = (active_overlap_blocks * self.block_size).min(sequence.len());
+        PrefillCost {
+            new_blocks,
+            new_tokens: sequence.len() - cached_tokens,
+            cached_tokens,
+            active_cached_tokens,
         }
     }
 
@@ -297,445 +593,8 @@ impl VllmKvManager {
         self.pool.cancel(reservation.pool);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn use_decode_reservation_for_request(
-        &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-        reservation: &mut NativeDecodeBlockReservation,
-    ) {
-        let outcome = self.process_use(
-            request_id,
-            blocks,
-            local_hashes,
-            token_ids,
-            parent,
-            0,
-            Some(&mut reservation.pool),
-        );
-        assert!(
-            matches!(outcome, VllmAcquire::Ready(allocated) if allocated == blocks.len()),
-            "reserved decode allocation must be infallible"
-        );
-    }
-
-    pub(crate) fn reserve_destination_at(
-        &mut self,
-        request_id: Uuid,
-        layout: Option<VllmBlockLayout>,
-        _eviction_now_ms: Option<f64>,
-    ) -> VllmAcquire<NativeDestinationReservation> {
-        assert!(
-            !self.request_blocks.contains_key(&request_id),
-            "destination request already owns a block table"
-        );
-        let (prefix, fresh) = match layout.as_ref() {
-            Some(VllmBlockLayout {
-                blocks,
-                local_hashes,
-                token_ids,
-                parent,
-            }) => {
-                Self::validate_use_metadata(
-                    blocks,
-                    local_hashes,
-                    token_ids.as_deref(),
-                    parent.as_ref(),
-                );
-                self.validate_fresh_partials(blocks);
-                let prefix = self.resident_prefix(blocks);
-                let fresh = blocks.len() - prefix.len();
-                (prefix, fresh)
-            }
-            None => (Vec::new(), 0),
-        };
-        let Some(outcome) = self.pool.reserve(&prefix, fresh) else {
-            return VllmAcquire::CapacityExhausted;
-        };
-        self.publish_removed(outcome.removed);
-        VllmAcquire::Ready(NativeDestinationReservation {
-            request_id,
-            pool: outcome.reservation,
-            layout,
-        })
-    }
-
-    pub(crate) fn activate_destination(&mut self, reservation: NativeDestinationReservation) {
-        let NativeDestinationReservation {
-            request_id,
-            mut pool,
-            layout,
-        } = reservation;
-        assert!(
-            !self.request_blocks.contains_key(&request_id),
-            "destination request already owns a block table"
-        );
-        let Some(VllmBlockLayout {
-            blocks,
-            local_hashes,
-            token_ids,
-            parent,
-        }) = layout
-        else {
-            self.pool.cancel(pool);
-            return;
-        };
-        Self::validate_use_metadata(
-            &blocks,
-            &local_hashes,
-            token_ids.as_deref(),
-            parent.as_ref(),
-        );
-        self.validate_fresh_partials(&blocks);
-        self.commit_layout(
-            request_id,
-            &blocks,
-            &local_hashes,
-            token_ids.as_deref(),
-            parent.as_ref(),
-            &mut pool,
-            self.enable_prefix_caching,
-        );
-        assert_eq!(pool.len(), 0, "destination reservation was not consumed");
-        self.pool.cancel(pool);
-    }
-
     pub(crate) fn cancel_destination(&mut self, reservation: NativeDestinationReservation) {
         self.pool.cancel(reservation.pool);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn process_use(
-        &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-        reusable_prefix_blocks: usize,
-        reservation: Option<&mut BlockReservation>,
-    ) -> VllmAcquire<usize> {
-        Self::validate_use_metadata(blocks, local_hashes, token_ids, parent);
-        self.validate_fresh_partials(blocks);
-        assert!(reusable_prefix_blocks <= blocks.len());
-        assert!(self.enable_prefix_caching || reusable_prefix_blocks == 0);
-        assert!(
-            reusable_prefix_blocks == 0
-                || self
-                    .request_blocks
-                    .get(&request_id)
-                    .is_none_or(Vec::is_empty),
-            "only a request's first allocation may reuse a prefix"
-        );
-
-        let prefix = if reusable_prefix_blocks == 0 {
-            Vec::new()
-        } else {
-            blocks[..reusable_prefix_blocks]
-                .iter()
-                .map(|block| match block {
-                    UniqueBlock::FullBlock(hash) => *hash,
-                    UniqueBlock::PartialBlock(_) => {
-                        panic!("a reusable prefix can contain only full blocks")
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let fresh = blocks.len() - reusable_prefix_blocks;
-
-        match reservation {
-            Some(reservation) => {
-                assert!(prefix.is_empty(), "decode cannot reuse a new prefix");
-                if reservation.fresh_len() < fresh {
-                    return VllmAcquire::CapacityExhausted;
-                }
-                self.commit_layout(
-                    request_id,
-                    blocks,
-                    local_hashes,
-                    token_ids,
-                    parent,
-                    reservation,
-                    false,
-                );
-            }
-            None => {
-                let Some(ReserveOutcome {
-                    mut reservation,
-                    removed,
-                }) = self.pool.reserve(&prefix, fresh)
-                else {
-                    return VllmAcquire::CapacityExhausted;
-                };
-                self.publish_removed(removed);
-                self.commit_layout(
-                    request_id,
-                    blocks,
-                    local_hashes,
-                    token_ids,
-                    parent,
-                    &mut reservation,
-                    false,
-                );
-                assert_eq!(reservation.len(), 0, "Use reservation was not consumed");
-                self.pool.cancel(reservation);
-            }
-        }
-        VllmAcquire::Ready(blocks.len())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn commit_layout(
-        &mut self,
-        request_id: Uuid,
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-        reservation: &mut BlockReservation,
-        cache_fresh: bool,
-    ) {
-        let prefix_len = reservation.len() - reservation.fresh_len();
-        let prefix_copies = self.pool.activate_prefix(reservation);
-        assert_eq!(prefix_copies.len(), prefix_len);
-        let mut prefix_copies = prefix_copies.into_iter();
-        let mut cursor = match parent {
-            None => None,
-            Some(UniqueBlock::FullBlock(hash)) => Some(*hash),
-            Some(UniqueBlock::PartialBlock(_)) => unreachable!("validated above"),
-        };
-        let mut full_idx = 0;
-        let materialize_store_events = self.materialize_store_events();
-        let owned = self.request_blocks.entry(request_id).or_default();
-        owned.reserve(blocks.len());
-        let mut stores =
-            (cache_fresh && materialize_store_events).then(|| Vec::with_capacity(blocks.len()));
-
-        for (block_idx, block) in blocks.iter().enumerate() {
-            match block {
-                UniqueBlock::FullBlock(hash) => {
-                    let local_hash = local_hashes.get(full_idx).copied();
-                    full_idx += 1;
-
-                    if block_idx < prefix_len {
-                        let Some(copy) = prefix_copies.next() else {
-                            panic!("prefix reservation returned too few copies")
-                        };
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache: false,
-                            pending_store: None,
-                        }));
-                        cursor = Some(*hash);
-                        continue;
-                    }
-
-                    if cache_fresh {
-                        let (copy, became_visible) = self.pool.allocate_cached(reservation, *hash);
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache: false,
-                            pending_store: None,
-                        }));
-                        if let Some(stores) = &mut stores {
-                            let metadata = PendingStore {
-                                parent_hash: cursor,
-                                local_hash,
-                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                            };
-                            stores.push(became_visible.then_some(StoredBlock {
-                                hash: *hash,
-                                metadata,
-                            }));
-                        }
-                    } else {
-                        let copy = self.pool.allocate_private(reservation);
-                        let pending_cache = self.enable_prefix_caching;
-                        let pending_store =
-                            (pending_cache && materialize_store_events).then(|| PendingStore {
-                                parent_hash: cursor,
-                                local_hash,
-                                token_ids: token_ids.and_then(|ids| ids.get(full_idx - 1).cloned()),
-                            });
-                        owned.push(OwnedBlock::Full(FullBlock {
-                            copy,
-                            hash: *hash,
-                            pending_cache,
-                            pending_store,
-                        }));
-                    }
-                    cursor = Some(*hash);
-                }
-                UniqueBlock::PartialBlock(uuid) => {
-                    let copy = self.pool.allocate_private(reservation);
-                    assert!(
-                        self.partial_uuids.insert(*uuid),
-                        "partial block {uuid} is already allocated"
-                    );
-                    owned.push(OwnedBlock::Partial { copy, uuid: *uuid });
-                    if let Some(stores) = &mut stores {
-                        stores.push(None);
-                    }
-                }
-            }
-        }
-        assert!(prefix_copies.next().is_none());
-        if let Some(stores) = stores {
-            self.publish_store_sequence(stores);
-        }
-    }
-
-    fn validate_use_metadata(
-        blocks: &[UniqueBlock],
-        local_hashes: &[BlockHash],
-        token_ids: Option<&[Vec<u32>]>,
-        parent: Option<&UniqueBlock>,
-    ) {
-        let full_blocks = blocks
-            .iter()
-            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
-            .count();
-        assert!(
-            local_hashes.is_empty() || local_hashes.len() == full_blocks,
-            "local hashes must be empty or align with full blocks"
-        );
-        assert!(
-            token_ids.is_none_or(|ids| ids.len() == full_blocks),
-            "token IDs must align with full blocks"
-        );
-        assert!(!matches!(parent, Some(UniqueBlock::PartialBlock(_))));
-    }
-
-    fn validate_fresh_partials(&self, blocks: &[UniqueBlock]) {
-        let mut first_partial = None;
-        for (index, uuid) in blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, block)| match block {
-                UniqueBlock::PartialBlock(uuid) => Some((index, uuid)),
-                UniqueBlock::FullBlock(_) => None,
-            })
-        {
-            let repeated_in_layout = first_partial.is_some_and(|first| {
-                first == *uuid
-                    || blocks[..index].iter().any(
-                        |block| matches!(block, UniqueBlock::PartialBlock(seen) if seen == uuid),
-                    )
-            });
-            assert!(
-                !self.partial_uuids.contains(uuid) && !repeated_in_layout,
-                "partial block {uuid} is already allocated"
-            );
-            first_partial.get_or_insert(*uuid);
-        }
-    }
-
-    fn resident_prefix(&self, blocks: &[UniqueBlock]) -> Vec<SequenceHash> {
-        if !self.enable_prefix_caching {
-            return Vec::new();
-        }
-        blocks
-            .iter()
-            .map_while(|block| match block {
-                UniqueBlock::FullBlock(hash) if self.pool.prefix_hit(*hash).is_some() => {
-                    Some(*hash)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Release request blocks in caller-provided eviction-priority order.
-    ///
-    /// Like vLLM's `BlockPool::free_blocks`, the physical pool is lineage-agnostic:
-    /// reversing the request-owned table here makes suffix/leaf blocks older LRU
-    /// candidates than their parents, so capacity pressure evicts the leaf first.
-    fn process_deref(&mut self, request_id: Uuid, blocks: &[UniqueBlock]) {
-        let released = {
-            let Some(owned) = self.request_blocks.get_mut(&request_id) else {
-                panic!("request {request_id} owns no block table")
-            };
-            assert!(
-                blocks.len() <= owned.len(),
-                "request releases too many blocks"
-            );
-            let start = owned.len() - blocks.len();
-            for (expected, actual) in blocks.iter().zip(owned[start..].iter().rev()) {
-                match (expected, actual) {
-                    (UniqueBlock::FullBlock(expected), OwnedBlock::Full(full)) => {
-                        assert_eq!(*expected, full.hash, "full-block Deref mismatch");
-                    }
-                    (UniqueBlock::PartialBlock(expected), OwnedBlock::Partial { uuid, .. }) => {
-                        assert_eq!(expected, uuid, "partial Deref mismatch")
-                    }
-                    _ => panic!("Deref block kind disagrees with request table"),
-                }
-            }
-            owned.split_off(start)
-        };
-        if self.request_blocks[&request_id].is_empty() {
-            self.request_blocks.remove(&request_id);
-        }
-
-        for block in released.into_iter().rev() {
-            match block {
-                OwnedBlock::Partial { copy, uuid } => {
-                    assert!(self.partial_uuids.remove(&uuid));
-                    self.pool.release(copy);
-                }
-                OwnedBlock::Full(full) => self.pool.release(full.copy),
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn process_promote(
-        &mut self,
-        request_id: Uuid,
-        uuid: Uuid,
-        hash: SequenceHash,
-        parent_hash: Option<SequenceHash>,
-        local_hash: Option<BlockHash>,
-        token_ids: Option<Vec<u32>>,
-    ) {
-        let materialize_store_events = self.materialize_store_events();
-        let Some(blocks) = self.request_blocks.get_mut(&request_id) else {
-            panic!("request {request_id} owns no block table")
-        };
-        let Some(last) = blocks.last_mut() else {
-            panic!("Promote requires a request-owned partial tail")
-        };
-        let copy = match last {
-            OwnedBlock::Partial { copy, uuid: actual } => {
-                assert_eq!(*actual, uuid, "Promote partial UUID mismatch");
-                *copy
-            }
-            OwnedBlock::Full(_) => panic!("Promote requires a partial tail"),
-        };
-        assert!(self.partial_uuids.remove(&uuid));
-
-        let became_visible = self.enable_prefix_caching && self.pool.cache_private(copy, hash);
-        *last = OwnedBlock::Full(FullBlock {
-            copy,
-            hash,
-            pending_cache: false,
-            pending_store: None,
-        });
-        if became_visible && materialize_store_events {
-            self.publish_store_sequence(vec![Some(StoredBlock {
-                hash,
-                metadata: PendingStore {
-                    parent_hash,
-                    local_hash,
-                    token_ids,
-                },
-            })]);
-        }
     }
 
     fn materialize_store_events(&self) -> bool {
@@ -881,41 +740,6 @@ impl VllmKvManager {
     pub(crate) fn dp_rank(&self) -> u32 {
         self.dp_rank
     }
-
-    #[cfg(test)]
-    pub(crate) fn request_block_count(&self, request_id: Uuid) -> usize {
-        self.request_blocks.get(&request_id).map_or(0, Vec::len)
-    }
-
-    pub(crate) fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
-        let (overlap_blocks, active_overlap_blocks) =
-            if self.enable_prefix_caching && sequence.enable_prefix_caching() {
-                let mut overlap = 0;
-                let mut active = 0;
-                for block in sequence.unique_blocks() {
-                    let UniqueBlock::FullBlock(hash) = block else {
-                        break;
-                    };
-                    let Some(hit) = self.pool.prefix_hit(*hash) else {
-                        break;
-                    };
-                    overlap += 1;
-                    active += usize::from(hit.is_active);
-                }
-                (overlap, active)
-            } else {
-                (0, 0)
-            };
-        let new_blocks = sequence.unique_blocks().len() - overlap_blocks;
-        let cached_tokens = (overlap_blocks * self.block_size).min(sequence.len());
-        let active_cached_tokens = (active_overlap_blocks * self.block_size).min(sequence.len());
-        PrefillCost {
-            new_blocks,
-            new_tokens: sequence.len() - cached_tokens,
-            cached_tokens,
-            active_cached_tokens,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -943,26 +767,22 @@ mod tests {
         }
     }
 
-    fn use_full(
-        manager: &mut VllmKvManager,
+    fn request(
         owner: Uuid,
         hashes: &[u64],
-        reusable_prefix_blocks: usize,
-    ) -> VllmAcquire<usize> {
-        let blocks = hashes
+        emit_token_ids: bool,
+    ) -> (RequestSequence, BlockRequestLease) {
+        let tokens = (0..hashes.len() * 4).map(|token| token as u32).collect();
+        let (sequence, _) = RequestSequence::new(tokens, 0, 0, 4, true, true, emit_token_ids, None);
+        let identities = hashes
             .iter()
             .copied()
-            .map(UniqueBlock::FullBlock)
-            .collect::<Vec<_>>();
-        let local_hashes = hashes.iter().map(|hash| hash + 100).collect::<Vec<_>>();
-        manager.use_for_request(
-            owner,
-            &blocks,
-            &local_hashes,
-            None,
-            None,
-            reusable_prefix_blocks,
-        )
+            .map(|hash| NativeBlockIdentity {
+                sequence_hash: Some(hash),
+                local_hash: Some(hash + 100),
+            })
+            .collect();
+        (sequence, BlockRequestLease::new(owner, identities))
     }
 
     fn ready<T>(outcome: VllmAcquire<T>) -> T {
@@ -976,15 +796,22 @@ mod tests {
     fn duplicate_full_hashes_consume_physical_capacity() {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let mut leases = Vec::new();
         for owner in [Uuid::from_u128(1), Uuid::from_u128(2)] {
-            ready(use_full(&mut manager, owner, &[7], 0));
-            manager.finalize_computed_prefix(owner, 0, 4);
+            let (mut sequence, mut lease) = request(owner, &[7], false);
+            ready(manager.allocate_lease(owner, &mut lease, 4, 0));
+            manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, 4);
+            leases.push(lease);
         }
         assert_eq!(manager.num_active_blocks(), 2);
+        let third = Uuid::from_u128(3);
+        let (_, mut third_lease) = request(third, &[8], false);
         assert!(matches!(
-            use_full(&mut manager, Uuid::from_u128(3), &[8], 0),
+            manager.allocate_lease(third, &mut third_lease, 4, 0),
             VllmAcquire::CapacityExhausted
         ));
+        assert_eq!(third_lease.allocated_tokens(), 0);
+        assert_eq!(third_lease.resident_block_count(), 0);
     }
 
     #[test]
@@ -992,13 +819,39 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
         let first = Uuid::from_u128(1);
-        ready(use_full(&mut manager, first, &[7], 0));
-        manager.finalize_computed_prefix(first, 0, 4);
-        manager.deref_for_request(first, &[UniqueBlock::FullBlock(7)]);
+        let (mut first_sequence, mut first_lease) = request(first, &[7], false);
+        ready(manager.allocate_lease(first, &mut first_lease, 4, 0));
+        manager.finalize_lease_computed_prefix(first, &mut first_sequence, &mut first_lease, 0, 4);
+        manager.finish_lease(first, first_lease);
 
-        ready(use_full(&mut manager, Uuid::from_u128(2), &[7], 1));
+        let second = Uuid::from_u128(2);
+        let (_, mut second_lease) = request(second, &[7], false);
+        ready(manager.allocate_lease(second, &mut second_lease, 4, 1));
         assert_eq!(manager.num_active_blocks(), 1);
         assert_eq!(manager.num_inactive_blocks(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "only a request's first allocation may reuse a prefix")]
+    fn later_native_allocation_rejects_prefix_reuse() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(3);
+        let (_, mut lease) = request(owner, &[7, 8], false);
+        ready(manager.allocate_lease(owner, &mut lease, 4, 0));
+
+        let _ = manager.allocate_lease(owner, &mut lease, 8, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "reusable prefix exceeds the newly allocated block range")]
+    fn native_allocation_rejects_excessive_reusable_prefix() {
+        let mut manager =
+            VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
+        let owner = Uuid::from_u128(4);
+        let (_, mut lease) = request(owner, &[7, 8], false);
+
+        let _ = manager.allocate_lease(owner, &mut lease, 4, 2);
     }
 
     #[test]
@@ -1006,9 +859,10 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
         let owner = Uuid::from_u128(1);
-        ready(use_full(&mut manager, owner, &[7], 0));
+        let (mut sequence, mut lease) = request(owner, &[7], false);
+        ready(manager.allocate_lease(owner, &mut lease, 4, 0));
         assert!(manager.pool.prefix_hit(7).is_none());
-        manager.finalize_computed_prefix(owner, 0, 4);
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, 4);
         assert!(manager.pool.prefix_hit(7).is_some());
     }
 
@@ -1017,13 +871,14 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
         let owner = Uuid::from_u128(1);
-        ready(use_full(&mut manager, owner, &[7, 8], 0));
+        let (mut sequence, mut lease) = request(owner, &[7, 8], false);
+        ready(manager.allocate_lease(owner, &mut lease, 8, 0));
 
-        manager.finalize_computed_prefix(owner, 0, 4);
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, 4);
         assert!(manager.pool.prefix_hit(7).is_some());
         assert!(manager.pool.prefix_hit(8).is_none());
 
-        manager.finalize_computed_prefix(owner, 4, 8);
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 4, 8);
         assert!(manager.pool.prefix_hit(8).is_some());
     }
 
@@ -1032,9 +887,10 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(3, 4, true, KvEventPublishers::default(), 0);
         let owner = Uuid::from_u128(1);
-        ready(use_full(&mut manager, owner, &[7, 8, 9], 0));
+        let (mut sequence, mut lease) = request(owner, &[7, 8, 9], false);
+        ready(manager.allocate_lease(owner, &mut lease, 12, 0));
 
-        manager.finalize_computed_prefix(owner, 3, 9);
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 3, 9);
         assert!(manager.pool.prefix_hit(7).is_some());
         assert!(manager.pool.prefix_hit(8).is_some());
         assert!(manager.pool.prefix_hit(9).is_none());
@@ -1045,13 +901,15 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
         let seed = Uuid::from_u128(1);
-        ready(use_full(&mut manager, seed, &[7], 0));
-        manager.finalize_computed_prefix(seed, 0, 4);
-        manager.deref_for_request(seed, &[UniqueBlock::FullBlock(7)]);
+        let (mut seed_sequence, mut seed_lease) = request(seed, &[7], false);
+        ready(manager.allocate_lease(seed, &mut seed_lease, 4, 0));
+        manager.finalize_lease_computed_prefix(seed, &mut seed_sequence, &mut seed_lease, 0, 4);
+        manager.finish_lease(seed, seed_lease);
 
         let owner = Uuid::from_u128(2);
-        ready(use_full(&mut manager, owner, &[7, 8], 1));
-        manager.finalize_computed_prefix(owner, 4, 8);
+        let (mut sequence, mut lease) = request(owner, &[7, 8], false);
+        ready(manager.allocate_lease(owner, &mut lease, 8, 1));
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 4, 8);
         assert!(manager.pool.prefix_hit(7).is_some());
         assert!(manager.pool.prefix_hit(8).is_some());
     }
@@ -1061,15 +919,14 @@ mod tests {
         let mut manager =
             VllmKvManager::new_with_event_sink(2, 4, true, KvEventPublishers::default(), 0);
         let owner = Uuid::from_u128(1);
-        ready(use_full(&mut manager, owner, &[7, 8], 0));
-        manager.finalize_computed_prefix(owner, 0, 8);
+        let (mut sequence, mut lease) = request(owner, &[7, 8], false);
+        ready(manager.allocate_lease(owner, &mut lease, 8, 0));
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 0, 8);
+        manager.finish_lease(owner, lease);
 
-        // Deref signals describe the request tail first.
-        manager.deref_for_request(
-            owner,
-            &[UniqueBlock::FullBlock(8), UniqueBlock::FullBlock(7)],
-        );
-        ready(use_full(&mut manager, Uuid::from_u128(2), &[9], 0));
+        let next = Uuid::from_u128(2);
+        let (_, mut next_lease) = request(next, &[9], false);
+        ready(manager.allocate_lease(next, &mut next_lease, 4, 0));
 
         assert!(
             manager.pool.prefix_hit(7).is_some(),
@@ -1087,18 +944,10 @@ mod tests {
         let publishers = KvEventPublishers::new(None, Some(sink.clone()));
         let mut manager = VllmKvManager::new_with_event_sink(2, 4, true, publishers, 3);
         let owner = Uuid::from_u128(1);
-        let token_ids = vec![vec![1, 2, 3, 4]];
-        let parent = UniqueBlock::FullBlock(6);
-
-        ready(manager.use_for_request(
-            owner,
-            &[UniqueBlock::FullBlock(7)],
-            &[107],
-            Some(&token_ids),
-            Some(&parent),
-            0,
-        ));
-        manager.finalize_computed_prefix(owner, 0, 4);
+        let token_ids = vec![vec![4, 5, 6, 7]];
+        let (mut sequence, mut lease) = request(owner, &[6, 7], true);
+        ready(manager.allocate_lease(owner, &mut lease, 8, 0));
+        manager.finalize_lease_computed_prefix(owner, &mut sequence, &mut lease, 4, 8);
 
         let mut events = sink.take();
         assert_eq!(events.len(), 1);
