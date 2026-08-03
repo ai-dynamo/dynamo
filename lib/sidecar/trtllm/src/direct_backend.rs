@@ -84,6 +84,11 @@ impl DirectBackend for TrtllmDirectBackend {
             context_length,
             tool_call_parser: None,
             reasoning_parser: None,
+            // TensorRT-LLM direct is aggregated-only (its convert layer has no
+            // disagg mode), so it never publishes a bootstrap endpoint or DP size.
+            bootstrap_host: None,
+            bootstrap_port: None,
+            data_parallel_size: None,
         })
     }
 
@@ -157,6 +162,8 @@ fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig)
         tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
         reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
         advertise_grpc_endpoint: args.advertise_grpc_endpoint,
+        // Validated to Aggregated above; TensorRT-LLM direct disagg is unsupported.
+        disaggregation_mode: DisaggregationMode::Aggregated,
     };
     Ok((backend, config))
 }

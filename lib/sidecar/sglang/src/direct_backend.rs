@@ -23,21 +23,37 @@ use tokio::time::Instant;
 use crate::args::{Args, TransportConfig, normalize_endpoint};
 use crate::client::{self, Client, Pool};
 use crate::direct::SGLANG_BACKEND;
-use crate::engine::{SglangSidecarEngine, discovery_mode, discovery_string};
+use crate::engine::{
+    SglangSidecarEngine, bootstrap_discover, component_for_mode, discovery_bootstrap_port,
+    discovery_data_parallel_size, discovery_mode, discovery_string, resolve_bootstrap_host,
+};
 
 /// A [`DirectBackend`] over SGLang's native `SglangService` gRPC.
 pub struct SglangDirectBackend {
     /// Normalized (`http://…`) SGLang gRPC endpoint the sidecar connects to.
     endpoint: String,
     transport: TransportConfig,
+    /// Disaggregation role resolved from SGLang discovery at arg-parse time.
+    /// `connect` re-verifies it against the live server.
+    mode: DisaggregationMode,
+    /// `--bootstrap-host` override (env `SGLANG_DISAGGREGATION_BOOTSTRAP_HOST`),
+    /// used only for a prefill worker whose discovery exposes a non-routable host.
+    bootstrap_host_arg: Option<String>,
     pool: OnceCell<Pool>,
 }
 
 impl SglangDirectBackend {
-    pub(crate) fn new(endpoint: String, transport: TransportConfig) -> Self {
+    pub(crate) fn new(
+        endpoint: String,
+        transport: TransportConfig,
+        mode: DisaggregationMode,
+        bootstrap_host_arg: Option<String>,
+    ) -> Self {
         Self {
             endpoint,
             transport,
+            mode,
+            bootstrap_host_arg,
             pool: OnceCell::new(),
         }
     }
@@ -61,13 +77,32 @@ impl DirectBackend for SglangDirectBackend {
         await_ready(&mut control, &self.transport, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
 
-        let mode = discovery_mode(&discovery)?;
-        if mode != DisaggregationMode::Aggregated {
+        // Re-verify the role resolved at arg-parse time against the live server;
+        // a mismatch means the component/topology the shim already registered
+        // under would be wrong.
+        let observed_mode = discovery_mode(&discovery)?;
+        if observed_mode != self.mode {
             anyhow::bail!(
-                "--direct supports aggregated serving only; SGLang reports {mode:?}. \
-                 The direct Generate response contract carries no disaggregation handoff"
+                "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
+                self.mode,
+                observed_mode
             );
         }
+
+        // Prefill workers publish the disaggregation bootstrap endpoint the decode
+        // hop dials; decode / aggregated workers leave it unset.
+        let (bootstrap_host, bootstrap_port) = if self.mode.is_prefill() {
+            (
+                resolve_bootstrap_host(
+                    self.bootstrap_host_arg.as_deref(),
+                    &self.endpoint,
+                    &discovery,
+                )?,
+                discovery_bootstrap_port(&discovery)?,
+            )
+        } else {
+            (None, None)
+        };
 
         self.pool
             .set(pool)
@@ -75,6 +110,7 @@ impl DirectBackend for SglangDirectBackend {
         tracing::info!(
             endpoint = %self.endpoint,
             model = %discovery.model_path,
+            mode = ?self.mode,
             "sglang gRPC is ready (direct)"
         );
 
@@ -91,6 +127,9 @@ impl DirectBackend for SglangDirectBackend {
             context_length: discovery.max_model_len,
             tool_call_parser: discovery_string(&discovery.server_info, "tool_call_parser"),
             reasoning_parser: discovery_string(&discovery.server_info, "reasoning_parser"),
+            bootstrap_host,
+            bootstrap_port,
+            data_parallel_size: Some(discovery_data_parallel_size(&discovery)),
         })
     }
 
@@ -160,7 +199,10 @@ pub fn launch_from_env() -> Result<Launch, DynamoError> {
 }
 
 /// Build the direct backend + shim config from parsed args. Model identity,
-/// context, and parsers are resolved from SGLang discovery at connect time.
+/// context, and parsers are resolved from SGLang discovery at connect time; the
+/// disaggregation role is resolved here (a throwaway bootstrap discovery, as the
+/// request-plane path does) because it decides the discovery component the shim
+/// registers under before the engine is connected.
 fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig), DynamoError> {
     let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
     let transport = args.transport();
@@ -171,18 +213,27 @@ fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig)
         None => None,
     };
 
-    let backend = Arc::new(SglangDirectBackend::new(endpoint, transport));
+    // Resolve the disaggregation role up front: it selects the component
+    // (`prefill` vs `backend`) the shim resolves before `connect`.
+    let discovery = bootstrap_discover(&endpoint, &transport)?;
+    let mode = discovery_mode(&discovery)?;
+
+    let backend = Arc::new(SglangDirectBackend::new(
+        endpoint,
+        transport,
+        mode,
+        args.bootstrap_host,
+    ));
     let config = DirectConfig {
         namespace: args.namespace,
-        // Direct is aggregated-only (enforced at connect); agg registers as
-        // the "backend" component.
-        component: "backend".to_string(),
+        component: component_for_mode(mode).to_string(),
         endpoint: args.endpoint,
         custom_jinja_template: args.custom_jinja_template,
         // Resolved from SGLang discovery on the DirectRegistration instead.
         tool_call_parser: None,
         reasoning_parser: None,
         advertise_grpc_endpoint,
+        disaggregation_mode: mode,
     };
     Ok((backend, config))
 }

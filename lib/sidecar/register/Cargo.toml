@@ -12,6 +12,7 @@ repository.workspace = true
 description = "Engine-agnostic direct-backend discoverability shim: registers a stock engine's gRPC endpoint + model card in Dynamo discovery and health-gates its liveness, without the backend-common LLMEngine/Worker lifecycle."
 
 [dependencies]
+dynamo-backend-common = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 

@@ -70,6 +70,12 @@ impl DirectBackend for VllmDirectBackend {
             context_length: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            // vLLM transfers KV via NixlConnector keyed by `prefill_result`, not a
+            // bootstrap endpoint, so a prefill worker publishes no bootstrap
+            // host/port and the frontend never synthesizes a bootstrap handoff.
+            bootstrap_host: None,
+            bootstrap_port: None,
+            data_parallel_size: None,
         })
     }
 
@@ -113,14 +119,27 @@ pub fn launch_from_env() -> Result<Launch, DynamoError> {
     }
 }
 
+/// The discovery component a vLLM worker registers under for its disaggregation
+/// role: prefill workers register as `prefill` (so the frontend's prefill router
+/// targets them); decode / aggregated workers register as `backend`. Mirrors the
+/// SGLang sidecar's `component_for_mode`.
+fn component_for_mode(mode: DisaggregationMode) -> &'static str {
+    if mode.is_prefill() {
+        "prefill"
+    } else {
+        "backend"
+    }
+}
+
 /// Build the direct backend + shim config from parsed args.
 fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig), DynamoError> {
     if args.model_path.trim().is_empty() {
         return Err(client::invalid_argument("model-path must not be empty"));
     }
-    if args.sidecar.common.disaggregation_mode != DisaggregationMode::Aggregated {
+    let mode = args.sidecar.common.disaggregation_mode;
+    if mode.is_encode() {
         return Err(client::invalid_argument(
-            "--direct supports aggregated serving only for the vLLM sidecar",
+            "encode mode is not supported by the vLLM sidecar",
         ));
     }
 
@@ -130,14 +149,25 @@ fn direct_from_args(args: Args) -> Result<(Arc<dyn DirectBackend>, DirectConfig)
         args.sidecar.grpc.config(),
         args.model_path.clone(),
     ));
+    // Prefill workers expose no OpenAI surface and hand off KV; parsers are
+    // meaningless for them (mirrors the request-plane path).
+    let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
+        (None, None)
+    } else {
+        (
+            args.sidecar.common.dyn_tool_call_parser,
+            args.sidecar.common.dyn_reasoning_parser,
+        )
+    };
     let config = DirectConfig {
         namespace: args.sidecar.common.namespace,
-        component: args.sidecar.common.component,
+        component: component_for_mode(mode).to_string(),
         endpoint: args.sidecar.common.endpoint,
         custom_jinja_template: args.sidecar.common.custom_jinja_template,
-        tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
-        reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+        tool_call_parser,
+        reasoning_parser,
         advertise_grpc_endpoint: args.advertise_grpc_endpoint,
+        disaggregation_mode: mode,
     };
     Ok((backend, config))
 }

@@ -409,7 +409,7 @@ impl LLMEngine for SglangSidecarEngine {
     }
 }
 
-fn bootstrap_discover(
+pub(crate) fn bootstrap_discover(
     endpoint: &str,
     transport: &TransportConfig,
 ) -> Result<Discovery, DynamoError> {
@@ -440,11 +440,32 @@ pub(crate) fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode
     }
 }
 
-fn component_for_mode(mode: DisaggregationMode) -> &'static str {
+pub(crate) fn component_for_mode(mode: DisaggregationMode) -> &'static str {
     if mode.is_prefill() {
         "prefill"
     } else {
         "backend"
+    }
+}
+
+/// Data-parallel size the SGLang server reports. Only the multi-node
+/// DP-attention frontend (rank-zero, `enable_dp_attention` with `dp_size > 1`)
+/// exposes every DP rank through one gRPC endpoint; otherwise a single rank is
+/// registered. Used by the direct path to publish the DP size the frontend needs
+/// to partition the disaggregation bootstrap room.
+pub(crate) fn discovery_data_parallel_size(discovery: &Discovery) -> u32 {
+    let dp_size = client::json_u32(&discovery.server_info, "dp_size")
+        .unwrap_or(1)
+        .max(1);
+    let enable_dp_attention = discovery
+        .server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if enable_dp_attention && dp_size > 1 {
+        dp_size
+    } else {
+        1
     }
 }
 
@@ -456,7 +477,7 @@ pub(crate) fn discovery_string(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, DynamoError> {
+pub(crate) fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, DynamoError> {
     client::json_u64(&discovery.server_info, "disaggregation_bootstrap_port")
         .map(|port| {
             u16::try_from(port).map_err(|_| {
@@ -478,7 +499,7 @@ fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, Dynamo
         })
 }
 
-fn resolve_bootstrap_host(
+pub(crate) fn resolve_bootstrap_host(
     explicit: Option<&str>,
     endpoint: &str,
     discovery: &Discovery,
@@ -579,18 +600,10 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        // Native gRPC is exposed by the rank-zero frontend for the complete
-        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
-        (Some(0), Some(dp_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    // Native gRPC is exposed by the rank-zero frontend for the complete
+    // multi-node SGLang endpoint, so one sidecar registers every DP rank.
+    let data_parallel_start_rank = Some(0);
+    let data_parallel_size = Some(discovery_data_parallel_size(discovery));
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(

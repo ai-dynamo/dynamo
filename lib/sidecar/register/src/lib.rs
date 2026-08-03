@@ -32,8 +32,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_backend_common::DisaggregationMode;
 use dynamo_llm::discovery::DIRECT_BACKEND_KEY;
-use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::worker_type::WorkerType;
@@ -73,6 +74,17 @@ pub struct DirectRegistration {
     /// Reasoning parser resolved from the engine. Takes precedence over
     /// [`DirectConfig::reasoning_parser`]; `None` falls back to it.
     pub reasoning_parser: Option<String>,
+    /// Prefill disaggregation bootstrap host, when this is a prefill worker whose
+    /// engine exposes a bootstrap endpoint (e.g. SGLang). Published on the model
+    /// card's `disaggregated_endpoint` so the frontend's `PrefillRouter` can
+    /// synthesize the decode-side handoff. `None` for decode / aggregated workers
+    /// and for engines (e.g. vLLM) that transfer KV via `prefill_result` instead.
+    pub bootstrap_host: Option<String>,
+    /// Prefill disaggregation bootstrap port; see [`Self::bootstrap_host`].
+    pub bootstrap_port: Option<u16>,
+    /// Data-parallel size the engine reports, used by the frontend to partition
+    /// the bootstrap room across ranks. `None` defaults to a single rank.
+    pub data_parallel_size: Option<u32>,
 }
 
 /// Deployment facts the host supplies from CLI args — everything the shim needs
@@ -97,6 +109,11 @@ pub struct DirectConfig {
     /// Address the frontend dials, when it differs from the engine's local gRPC
     /// endpoint (multi-node). `None` advertises the engine's own endpoint.
     pub advertise_grpc_endpoint: Option<String>,
+    /// Disaggregation role this worker plays. Drives the `ModelType` /
+    /// `WorkerType` / topology-`needs` the shim registers with, mirroring
+    /// `backend-common`'s `Worker`. `Aggregated` (the default) keeps the ordinary
+    /// single-worker registration.
+    pub disaggregation_mode: dynamo_backend_common::DisaggregationMode,
 }
 
 /// An external engine reachable over gRPC that the shim makes discoverable.
@@ -214,14 +231,19 @@ async fn run_direct_lifecycle(
     let mut local_model = build_local_model(&config, &reg, &grpc_endpoint)
         .await
         .context("build direct model card")?;
+    // Register with the model_type / worker_type / topology-needs implied by the
+    // disaggregation role, mirroring `backend-common`'s `Worker`, so the
+    // frontend's prefill router targets prefill workers via `worker_type` and the
+    // decode/prefill topology resolves.
+    let (model_type, worker_type, needs) = resolve_topology(config.disaggregation_mode);
     local_model
         .attach(
             &endpoint,
-            ModelType::Chat | ModelType::Completions,
+            model_type,
             ModelInput::Tokens,
             None,
-            Some(WorkerType::Aggregated),
-            Vec::new(),
+            Some(worker_type),
+            needs,
         )
         .await
         .context("attach direct model card")?;
@@ -233,7 +255,10 @@ async fn run_direct_lifecycle(
         .await
         .context("register direct endpoint")?;
 
-    let served = reg.model_name.clone().unwrap_or_else(|| reg.model_path.clone());
+    let served = reg
+        .model_name
+        .clone()
+        .unwrap_or_else(|| reg.model_path.clone());
     tracing::info!(
         "Serving {} on {}.{}.{} via direct gRPC → {}",
         served,
@@ -247,13 +272,7 @@ async fn run_direct_lifecycle(
     // unregister + cleanup (mirrors `serve_with_orchestrator`).
     let _graceful = endpoint.drt().register_graceful_task();
 
-    let registered = run_health_loop(
-        backend.as_ref(),
-        &endpoint,
-        &grpc_endpoint,
-        shutdown,
-    )
-    .await;
+    let registered = run_health_loop(backend.as_ref(), &endpoint, &grpc_endpoint, shutdown).await;
 
     tracing::info!("Received shutdown signal; tearing down direct endpoint");
     if registered {
@@ -270,6 +289,39 @@ async fn run_direct_lifecycle(
         tracing::warn!(%error, "direct backend cleanup failed");
     }
     Ok(())
+}
+
+/// Derive the discovery-registration topology (`ModelType`, `WorkerType`, and
+/// DNF `needs`) for a disaggregation role. Mirrors `backend-common`'s
+/// `resolve_model_type` + `resolve_worker_type_and_needs`: prefill workers expose
+/// no OpenAI surface (the legacy `ModelType::Prefill` marker keeps cross-version
+/// routing) and need a Decode peer; decode workers expose the ordinary
+/// chat/completions surface and need a Prefill peer; aggregated workers stand
+/// alone. Encode is included for exhaustiveness but is rejected upstream by the
+/// engine adapters — the direct path is prefill/decode only.
+fn resolve_topology(mode: DisaggregationMode) -> (ModelType, WorkerType, Vec<Vec<WorkerType>>) {
+    // The direct shim has no `endpoint_types`; the ordinary serving surface is
+    // chat + completions, matching the previous hardcoded aggregated registration.
+    let surface = ModelType::Chat | ModelType::Completions;
+    match mode {
+        DisaggregationMode::Prefill => (
+            ModelType::Prefill,
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+        ),
+        DisaggregationMode::Decode => {
+            (surface, WorkerType::Decode, vec![vec![WorkerType::Prefill]])
+        }
+        DisaggregationMode::Aggregated => (surface, WorkerType::Aggregated, Vec::new()),
+        DisaggregationMode::Encode => (
+            ModelType::empty(),
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        ),
+    }
 }
 
 /// Build the model card for the direct path. Replicates the essential subset of
@@ -295,6 +347,19 @@ async fn build_local_model(
         serde_json::Value::String(grpc_endpoint.to_string()),
     );
 
+    // Publish the disaggregated bootstrap endpoint when the engine reported one
+    // (only prefill workers on a bootstrap engine such as SGLang do). The
+    // frontend's `PrefillRouter` reads it via `get_disaggregated_endpoint` to
+    // synthesize the decode-side handoff. Decode / aggregated workers, and
+    // engines that hand off via `prefill_result` (vLLM), leave it `None`.
+    let disaggregated_endpoint = match (&reg.bootstrap_host, reg.bootstrap_port) {
+        (Some(host), Some(port)) => Some(DisaggregatedEndpoint {
+            bootstrap_host: Some(host.clone()),
+            bootstrap_port: Some(port),
+        }),
+        _ => None,
+    };
+
     let rt_cfg = ModelRuntimeConfig {
         context_length: reg.context_length,
         tool_call_parser: reg
@@ -305,6 +370,8 @@ async fn build_local_model(
             .reasoning_parser
             .clone()
             .or_else(|| config.reasoning_parser.clone()),
+        data_parallel_size: reg.data_parallel_size.unwrap_or(1),
+        disaggregated_endpoint,
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
