@@ -53,7 +53,12 @@ SELF = Path(__file__).resolve()  # skipped: the docstring must show the bad shap
 # those are the two shapes Fern does rewrite. The backtick is an opening
 # delimiter too: these files hold CSS in template literals, so a bare
 # `/dynamo/assets/x.svg` assignment is as reachable as a quoted one.
-ABSOLUTE_ASSET = re.compile(r"""["'`(]\s*(/(?:[\w.-]+/)*assets/[^"'`)\s]+)""")
+# Openers: a quote, a backtick, a `url(`, or a bare YAML scalar (`favicon: /...`,
+# `- path: /...`). docs.yml writes its logo, favicon and font paths unquoted, so
+# a delimiter-only pattern reads that file and finds nothing.
+ABSOLUTE_ASSET = re.compile(
+    r"""(?:["'`(]|:\s|^\s*-\s)\s*(/(?:[\w.-]+/)*assets/[^"'`)\s]+)"""
+)
 
 # translations/ carries the zh-CN pages, which publish through the locale
 # configured in docs.yml and 404 the same way.
