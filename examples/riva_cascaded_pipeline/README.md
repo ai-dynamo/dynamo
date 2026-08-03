@@ -22,11 +22,74 @@ OpenAI-compatible APIs. A voice application such as Pipecat remains responsible
 for the ASR -> LLM -> TTS cascade, conversation state, turn taking, tools, and
 barge-in.
 
-```text
-browser -> Pipecat -> Dynamo frontend -> /v1/realtime        -> ASR adapter -> ASR NIM
-                                    |-> /v1/chat/completions -> vLLM worker
-                                    `-> /v1/audio/speech     -> TTS adapter -> TTS NIM
+```mermaid
+flowchart LR
+    Browser["Browser UI"]
+
+    subgraph PipecatContainer["Container: Generic Assistant"]
+        direction TB
+        Pipecat["Same Pipecat pipeline"]
+        STTClient["OpenAI Realtime STT<br/>WebSocket"]
+        LLMClient["NvidiaLLMService<br/>OpenAI HTTP"]
+        TTSClient["OpenAI-compatible TTS<br/>Streaming HTTP"]
+    end
+
+    subgraph DGD["DynamoGraphDeployment: riva-cascaded"]
+        direction LR
+
+        subgraph FrontendPod["Kubernetes Pod: Frontend"]
+            Frontend["Container: main<br/>Dynamo Frontend<br/>OpenAI APIs and routing"]
+        end
+
+        subgraph ASRPod["Kubernetes Pod: RivaAsrWorker"]
+            ASRWorker["Container: main<br/>Dynamo ASR adapter"]
+            ASR["Container: riva-asr<br/>Same Nemotron ASR NIM<br/>1 GPU"]
+        end
+
+        subgraph LLMPod["Kubernetes Pod: VllmWorker"]
+            LLMWorker["Container: main<br/>Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
+        end
+
+        subgraph TTSPod["Kubernetes Pod: RivaTtsWorker"]
+            TTSWorker["Container: main<br/>Dynamo TTS adapter"]
+            TTS["Container: riva-tts<br/>Same Magpie TTS NIM<br/>1 GPU"]
+        end
+    end
+
+    Browser <--> Pipecat
+
+    Pipecat --> STTClient
+    STTClient -->|"/v1/realtime"| Frontend
+    Frontend --> ASRWorker
+    ASRWorker <-->|"Riva streaming gRPC"| ASR
+
+    Pipecat --> LLMClient
+    LLMClient -->|"/v1/chat/completions"| Frontend
+    Frontend --> LLMWorker
+
+    Pipecat --> TTSClient
+    TTSClient -->|"/v1/audio/speech"| Frontend
+    Frontend --> TTSWorker
+    TTSWorker <-->|"Riva online gRPC"| TTS
+
+    classDef client fill:#eef6ff,stroke:#2563eb,color:#111827
+    classDef dynamo fill:#fff7e6,stroke:#b45309,color:#111827
+    classDef nim fill:#edf9f0,stroke:#15803d,color:#111827
+    class Browser,Pipecat,STTClient,LLMClient,TTSClient client
+    class Frontend,ASRWorker,LLMWorker,TTSWorker dynamo
+    class ASR,TTS nim
+
+    style PipecatContainer fill:#f8fafc,stroke:#2563eb,stroke-width:2px
+    style DGD fill:#f8fafc,stroke:#1d4ed8,stroke-width:4px
+    style FrontendPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
+    style ASRPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
+    style LLMPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
+    style TTSPod fill:#ffffff,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 5
 ```
+
+The thick blue border is the DGD, dashed borders are Kubernetes pods, and each
+labeled inner box is a container. The Generic Assistant container runs outside
+the DGD.
 
 The deployment matches the Generic Assistant recipe in the Nemotron Voice
 Agent Blueprint so the same UI and workload can compare direct NIM access with
