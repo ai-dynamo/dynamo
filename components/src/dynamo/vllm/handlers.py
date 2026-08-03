@@ -65,7 +65,10 @@ from dynamo.common.rl import (
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
-from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.input_params import (
+    InputParamManager,
+    resolve_thinking_token_budget,
+)
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
@@ -962,11 +965,11 @@ def build_sampling_params_openai(
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
 
-    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
-    if nvext_max_thinking_tokens is not None and hasattr(
+    thinking_token_budget = resolve_thinking_token_budget(request)
+    if thinking_token_budget is not None and hasattr(
         sampling_params, "thinking_token_budget"
     ):
-        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
+        sampling_params.thinking_token_budget = thinking_token_budget
 
     return sampling_params
 
