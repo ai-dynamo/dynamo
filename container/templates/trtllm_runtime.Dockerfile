@@ -194,6 +194,50 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
+# Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
+# vendored ffmpeg build to drop the software h264/hevc/aac decoders
+# (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1; the base
+# image here carries 2.1.0, which predates it.
+#
+# Upgrade rather than remove. The vendored libav*/libsw* set cannot be trimmed
+# on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
+# deleting the codec libraries breaks `import nvidia.dali` outright -- and while
+# nothing in this image imports DALI today, it belongs to TensorRT-LLM rather
+# than to us. A version bump removes the codec surface without taking a package
+# out of someone else's image.
+#
+# Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
+# hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
+# five absent and vp8/vp9/mjpeg/av1 retained.
+#
+# A floor rather than a pin, matching how PyNvVideoCodec is constrained. 2.1.1 is
+# where the fix landed, but pip resolves this to the newest available (2.2.0 at
+# the time of writing), and a pin would DOWNGRADE the package if TensorRT-LLM
+# later ships a base image newer than the pin -- reintroducing nothing, but
+# diverging from their choice for no reason. The guard below is what makes the
+# floating upper end safe for the codec question specifically; functional
+# regressions are the TRT-LLM CI lane's job.
+#
+# System interpreter for the same reason as the opencv removal above: with
+# VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
+# place. The guard enumerates what the library actually registers rather than
+# trusting the version string, so a wheel that reintroduces a decoder fails the
+# build. Mirrored by the pre_runtime whiteout below, which matters more here than
+# for a deletion: DALI's libraries are hash-named, so an upgrade RENAMES them and
+# the squash COPY would otherwise leave the old codec-carrying copy in place
+# beside the new one.
+RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+    set -eu; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130>=2.1.1'; \
+    v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
+    echo "DALI version: $v"; \
+    lib=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' | head -1); \
+    if [ -n "$lib" ]; then \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    fi; \
+    /usr/bin/python3 -c 'import nvidia.dali'
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -225,9 +269,18 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # /usr/local/bin/etcd, and preinstalled opencv (cv2/ + vendored
 # opencv_python_headless.libs/ + dist-info) would leak alongside our content.
 # Keep this list in sync with any deletion RUNs in the stages above.
+#
+# DALI is here for a different reason: runtime_full UPGRADES it rather than
+# removing it, and its vendored libraries are hash-named
+# (libavcodec-847b0373.so.62 -> libavcodec-7e11e4e3.so.62). An overlay COPY only
+# replaces paths that match, so without dropping the old tree first, the base
+# image's 2.1.0 libraries — the ones carrying h264/hevc/aac — would ship
+# alongside the upgraded ones and the upgrade would buy nothing.
 RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
     /usr/local/lib/python3.12/dist-packages/cv2 \
-    /usr/local/lib/python3.12/dist-packages/opencv_python_headless* && \
+    /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
+    /usr/local/lib/python3.12/dist-packages/nvidia/dali \
+    /usr/local/lib/python3.12/dist-packages/nvidia_dali_* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null
 COPY --from=runtime_full / /
 

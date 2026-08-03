@@ -22,10 +22,12 @@ pass while proving nothing.
 
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import os
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -128,11 +130,100 @@ def _assert_python_carriers_absent() -> None:
         )
 
 
+def _bundled_libavcodecs() -> list[str]:
+    """Every third-party libavcodec on disk, excluding our own in-tree copy.
+
+    A wheel may vendor a complete ffmpeg under its package directory, where the
+    ``ffmpeg`` CLI checks above cannot see it. DALI does exactly that.
+    """
+    found: list[str] = []
+    for root in {p for p in sys.path if p and os.path.isdir(p)}:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            if dirpath.startswith("/usr/local/lib") and "/dist-packages" not in dirpath:
+                continue  # our in-tree ffmpeg, covered by the surface checks
+            for name in filenames:
+                if name.startswith("libavcodec") and ".so" in name:
+                    found.append(os.path.join(dirpath, name))
+    return found
+
+
+def _registered_decoders(lib_path: str) -> set[str]:
+    """What a libavcodec actually registers, via av_codec_iterate.
+
+    These libraries are stripped, so ``nm`` sees nothing; ``strings`` gives false
+    positives because a decoder's long name survives when only its parser or
+    bitstream filter is kept. Asking the library at runtime is the only
+    authoritative answer. Mirrors container/compliance/enumerate_bundled_decoders.py.
+    """
+
+    class AVCodec(ctypes.Structure):
+        _fields_ = [
+            ("name", ctypes.c_char_p),
+            ("long_name", ctypes.c_char_p),
+            ("type", ctypes.c_int),
+            ("id", ctypes.c_int),
+        ]
+
+    lib = ctypes.CDLL(lib_path)
+    lib.av_codec_iterate.restype = ctypes.c_void_p
+    lib.av_codec_iterate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    lib.av_codec_is_decoder.restype = ctypes.c_int
+    lib.av_codec_is_decoder.argtypes = [ctypes.c_void_p]
+
+    opaque = ctypes.c_void_p(None)
+    decoders: set[str] = set()
+    while True:
+        c = lib.av_codec_iterate(ctypes.byref(opaque))
+        if not c:
+            break
+        entry = ctypes.cast(c, ctypes.POINTER(AVCodec)).contents
+        if lib.av_codec_is_decoder(c):
+            decoders.add(entry.name.decode())
+    return decoders
+
+
+# Formats no bundled libavcodec may register. Narrower than _DISALLOWED_RE: that
+# pattern matches listing lines, this matches exact codec names.
+_EXCLUDED_DECODERS = ("h264", "hevc", "aac", "aac_fixed", "aac_latm")
+
+
+def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
+    """A vendored libavcodec must not register the formats we exclude.
+
+    The TensorRT-LLM base image ships DALI, which vendors its own ffmpeg for its
+    video reader. DALI 2.1.0 registered h264, hevc and the aac family; upstream
+    restricted that build (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352) from 2.1.1,
+    and the image pins past it. This keeps that pin honest: a base-image bump
+    that reverted to an older DALI, or a new dependency vendoring its own ffmpeg,
+    fails here rather than shipping.
+
+    The libraries cannot simply be deleted — they are DT_NEEDED by libdali.so, so
+    removing them breaks the package outright, which is why this asserts on
+    content rather than absence.
+    """
+    for lib_path in _bundled_libavcodecs():
+        try:
+            decoders = _registered_decoders(lib_path)
+        except OSError as exc:
+            pytest.fail(f"could not load bundled libavcodec {lib_path}: {exc}")
+        assert decoders, (
+            f"{lib_path} registered no decoders at all; the probe is broken and "
+            "the exclusion check below would pass vacuously"
+        )
+        present = sorted(d for d in _EXCLUDED_DECODERS if d in decoders)
+        assert not present, (
+            f"bundled libavcodec {lib_path} registers excluded decoder(s): "
+            f"{', '.join(present)}. It ships {len(decoders)} decoders in total; "
+            "if this is DALI, the image needs 2.1.1 or newer."
+        )
+
+
 def _check_image() -> None:
     surfaces = _surfaces()
     _assert_required_codecs_present(surfaces)
     _assert_no_software_codecs(surfaces)
     _assert_python_carriers_absent()
+    _assert_bundled_libavcodecs_carry_no_software_codecs()
 
 
 # One entry point per image. Each carries a single framework marker so it runs in
