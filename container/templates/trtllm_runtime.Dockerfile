@@ -232,10 +232,9 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130>=2.1.1'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
-    lib=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' | head -1); \
-    if [ -n "$lib" ]; then \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
-    fi; \
+    done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
@@ -283,6 +282,23 @@ RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Post-overlay guard for the DALI whiteout above. This is the only stage where
+# the failure can appear: runtime_full holds exactly one DALI, and the whiteout
+# is what keeps the overlay from re-adding the base image's copy beside it.
+# Because those libraries are hash-named, a missed whiteout leaves TWO -- the
+# upgraded one and the 2.1.0 one that registers h264/hevc/aac -- and the image
+# then reports version 2.1.0 while carrying both. Verified by building this
+# stage with and without the rm -rf: without it, two copies and the codecs are
+# back; with it, one copy and clean.
+#
+# Every match is checked, not just the first: the whole point is catching the
+# case where more than one exists.
+RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
+    set -eu; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
