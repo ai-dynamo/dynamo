@@ -71,6 +71,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -341,6 +342,7 @@ fn test_serialization_preserves_structure() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 
@@ -395,6 +397,7 @@ fn test_sampling_parameters_extraction() {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     };
 

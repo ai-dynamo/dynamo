@@ -223,6 +223,13 @@ pub fn validate_response_format(
     }
 }
 
+/// Validates the `thinking_token_budget` parameter.
+///
+/// It must be a non-negative integer when present.
+pub fn validate_thinking_token_budget(_value: Option<u32>) -> Result<(), anyhow::Error> {
+    Ok(())
+}
+
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(temp) = temperature
