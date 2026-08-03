@@ -49,7 +49,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1035,7 +1035,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 	limit.SetMilli(ptr.To(resource.MustParse("1Gi")).MilliValue() / 2)
 	type fields struct {
 		Client                client.Client
-		Recorder              record.EventRecorder
+		Recorder              events.EventRecorder
 		Config                *configv1alpha1.OperatorConfiguration
 		RuntimeConfig         *controller_common.RuntimeConfig
 		DockerSecretRetriever *mockDockerSecretRetriever
@@ -1058,7 +1058,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "generateLeaderWorkerSet - nominal case",
 			fields: fields{
-				Recorder:      record.NewFakeRecorder(100),
+				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -1434,7 +1434,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		{
 			name: "error from generateLeaderPodTemplateSpec", // This case involves an error from generatePodTemplateSpec
 			fields: fields{
-				Recorder:      record.NewFakeRecorder(100),
+				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -1584,7 +1584,7 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 		Build()
 
 	// Set up reconciler
-	recorder := record.NewFakeRecorder(100)
+	recorder := events.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
@@ -2313,7 +2313,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 		WithObjects(dcd).
 		Build()
 
-	recorder := record.NewFakeRecorder(100)
+	recorder := events.NewFakeRecorder(100)
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
@@ -2567,7 +2567,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -2663,7 +2663,7 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 				WithObjects(objs...).
 				WithStatusSubresource(objs...).
 				Build(),
-			Recorder:      record.NewFakeRecorder(100),
+			Recorder:      events.NewFakeRecorder(100),
 			Config:        &configv1alpha1.OperatorConfiguration{},
 			RuntimeConfig: &controller_common.RuntimeConfig{},
 			DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -2877,7 +2877,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -2966,7 +2966,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 
 	reconciler := &DynamoComponentDeploymentReconciler{
 		Client:        fakeKubeClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
@@ -3187,7 +3187,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 				Build()
 
 			// Set up reconciler
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
@@ -3386,7 +3386,7 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				WithObjects(dcd).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoComponentDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,

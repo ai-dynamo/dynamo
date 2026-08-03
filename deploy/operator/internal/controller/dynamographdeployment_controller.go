@@ -43,7 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -90,7 +90,7 @@ type DynamoGraphDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
-	Recorder              record.EventRecorder
+	Recorder              events.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
 	SSHKeyManager         *secret.SSHKeyManager
@@ -264,7 +264,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Info("Worker spec change detected but rolling update not supported for this pathway",
 				"isGrove", r.isGrovePathway(dynamoDeployment),
 				"hasMultinode", dynamoDeployment.HasAnyMultinodeComponent())
-			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "RollingUpdateNotSupported",
+			r.Recorder.Eventf(dynamoDeployment, nil, corev1.EventTypeWarning, "RollingUpdateNotSupported", "Update",
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
 			// Update the hash to prevent repeated warnings. If the unsupported
@@ -588,7 +588,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
 			logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
-			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+			r.Recorder.Eventf(dgd, nil, corev1.EventTypeWarning, reason, "Update", "Topology constraints no longer enforced: %s", groveTopoCond.Message)
 		}
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
@@ -1175,7 +1175,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					err = r.Update(ctx, syncedMainComponentService)
 					if err != nil {
 						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
-						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
+						r.GetRecorder().Eventf(dynamoDeployment, syncedMainComponentService, corev1.EventTypeWarning, "UpdateService", "Update", "Failed to update Service %s: %s", componentName, err)
 						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 					}
 				}
@@ -1484,7 +1484,7 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 	// Supersede restart if a rolling update is in progress
 	if r.isRollingUpdateInProgress(dgd) {
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "RestartSuperseded",
+		r.Recorder.Eventf(dgd, nil, corev1.EventTypeWarning, "RestartSuperseded", "Update",
 			"Restart %s superseded by rolling update", dgd.Spec.Restart.ID)
 		return &nvidiacomv1beta1.RestartStatus{
 			ObservedID: dgd.Spec.Restart.ID,
@@ -2592,7 +2592,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 				return err
 			}
 			logger.Info("Deleted DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
-			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+			r.Recorder.Eventf(dynamoDeployment, adapter, corev1.EventTypeNormal, "AdapterDeleted", "Delete",
 				"Deleted scaling adapter %s for component %s", adapterName, componentName)
 			continue
 		}
@@ -2626,11 +2626,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		switch operation {
 		case controllerutil.OperationResultCreated:
 			logger.Info("Created DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
-			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterCreated",
+			r.Recorder.Eventf(dynamoDeployment, adapter, corev1.EventTypeNormal, "AdapterCreated", "Create",
 				"Created scaling adapter %s for component %s", adapterName, componentName)
 		case controllerutil.OperationResultUpdated:
 			logger.Info("Updated DynamoGraphDeploymentScalingAdapter", "adapter", adapterName, "component", componentName)
-			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterUpdated",
+			r.Recorder.Eventf(dynamoDeployment, adapter, corev1.EventTypeNormal, "AdapterUpdated", "Update",
 				"Updated scaling adapter %s for component %s", adapterName, componentName)
 		}
 	}
@@ -2656,7 +2656,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 				logger.Error(err, "Failed to delete orphaned adapter", "adapter", adapter.Name)
 				return err
 			}
-			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeNormal, "AdapterDeleted",
+			r.Recorder.Eventf(dynamoDeployment, adapter, corev1.EventTypeNormal, "AdapterDeleted", "Delete",
 				"Deleted orphaned scaling adapter %s for removed component %s", adapter.Name, componentName)
 		}
 	}
@@ -2886,7 +2886,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	return ctrlBuilder.Complete(observedReconciler)
 }
 
-func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
+func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 

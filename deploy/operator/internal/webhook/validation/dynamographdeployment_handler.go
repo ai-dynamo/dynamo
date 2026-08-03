@@ -25,7 +25,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,7 +68,7 @@ func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal stri
 }
 
 // ValidateCreate validates a DynamoGraphDeployment create request.
-func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj *nvidiacomv1beta1.DynamoGraphDeployment) (admission.Warnings, error) {
 	return h.validateCreate(ctx, obj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 }
 
@@ -97,7 +96,10 @@ func (h *DynamoGraphDeploymentHandler) validateCreate(
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
-func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj *nvidiacomv1beta1.DynamoGraphDeployment,
+) (admission.Warnings, error) {
 	return h.validateUpdate(ctx, oldObj, newObj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 }
 
@@ -172,7 +174,7 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 }
 
 // ValidateDelete validates a DynamoGraphDeployment delete request.
-func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj *nvidiacomv1beta1.DynamoGraphDeployment) (admission.Warnings, error) {
 	return h.validateDelete(ctx, obj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
 }
 
@@ -202,55 +204,45 @@ func (h *DynamoGraphDeploymentHandler) validateDelete(
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
 // and ObservedValidator to add metrics collection.
 func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
-	h.registerWithManager(
+	registerValidationWebhook(
 		mgr,
-		&nvidiacomv1beta1.DynamoGraphDeployment{},
 		dynamoGraphDeploymentV1Beta1WebhookPath,
 		h,
+		consts.ResourceTypeDynamoGraphDeployment,
 		gate,
 	)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
 	// a supported upgrade or rollback target.
 	alphaHandler := &dynamoGraphDeploymentV1Alpha1Handler{handler: h}
-	h.registerWithManager(
+	registerValidationWebhook(
 		mgr,
-		&nvidiacomv1alpha1.DynamoGraphDeployment{},
 		dynamoGraphDeploymentV1Alpha1WebhookPath,
 		alphaHandler,
+		consts.ResourceTypeDynamoGraphDeployment,
 		gate,
 	)
 	return nil
 }
 
-func (h *DynamoGraphDeploymentHandler) registerWithManager(
-	mgr manager.Manager,
-	object runtime.Object,
-	path string,
-	validator admission.CustomValidator,
-	gate features.Gate,
-) {
-	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
-
-	// Wrap with metrics collection
-	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
-
-	webhook := internalwebhook.WithGate(admission.
-		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
-		WithRecoverPanic(true), gate)
-	mgr.GetWebhookServer().Register(path, webhook)
-}
-
-func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateCreate(
+	ctx context.Context,
+	obj *nvidiacomv1alpha1.DynamoGraphDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateCreate(ctx, obj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
 }
 
-func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj *nvidiacomv1alpha1.DynamoGraphDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateUpdate(ctx, oldObj, newObj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
 }
 
-func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateDelete(
+	ctx context.Context,
+	obj *nvidiacomv1alpha1.DynamoGraphDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateDelete(ctx, obj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
 }
 
