@@ -112,7 +112,8 @@ uses three GPUs in total, one for each model.
 - A Kubernetes cluster with at least three NVIDIA GPUs and the
   [Dynamo Kubernetes Platform](../../docs/fern/kubernetes/quickstart.mdx)
   installed.
-- Docker access to a registry that the cluster can pull from.
+- Docker and `envsubst`, plus access to a registry that the cluster can pull
+  from.
 - An NGC API key with access to the ASR and TTS NIM images.
 - A Hugging Face token with access to the Nemotron LLM.
 - A ReadWriteMany storage class for the shared model cache.
@@ -122,7 +123,10 @@ once:
 
 ```bash
 export NAMESPACE=voice-agent
-export DYNAMO_IMAGE=<registry-host>/<project>/dynamo-riva:<tag>
+export DYNAMO_RUNTIME_VERSION="$(
+  python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+)"
+export DYNAMO_IMAGE="<registry-host>/<project>/dynamo-riva:${DYNAMO_RUNTIME_VERSION}-riva"
 export DYNAMO_REGISTRY=<registry-host>
 export DYNAMO_REGISTRY_USER=<username>
 export DYNAMO_REGISTRY_PASSWORD=<password>
@@ -130,6 +134,9 @@ export NGC_API_KEY=<ngc-api-key>
 export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
+
+The semantic image tag lets the Dynamo operator derive the runtime
+compatibility version directly from each component's main image.
 
 ### 1. Build and push the image
 
@@ -203,11 +210,11 @@ EOF
 
 ### 4. Deploy the graph
 
-Replace the example image name while applying the tracked manifest:
+Render the image environment variable while applying the tracked manifest:
 
 ```bash
-sed "s|dynamo-riva:latest|${DYNAMO_IMAGE}|g" \
-  examples/riva_cascaded_pipeline/deploy/agg.yaml \
+envsubst '${DYNAMO_IMAGE}' \
+  < examples/riva_cascaded_pipeline/deploy/agg.yaml \
   | kubectl apply --namespace "${NAMESPACE}" -f -
 ```
 
