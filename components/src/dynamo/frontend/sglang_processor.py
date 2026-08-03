@@ -137,6 +137,15 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     return routing or None
 
 
+def _request_stop_strings(request: dict[str, Any]) -> set[str]:
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        return {stop}
+    if isinstance(stop, list):
+        return {item for item in stop if isinstance(item, str)}
+    return set()
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -599,6 +608,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
         )
 
         async for item in self._generate_and_stream(
@@ -657,6 +667,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
         )
 
         async for item in self._generate_and_stream(
