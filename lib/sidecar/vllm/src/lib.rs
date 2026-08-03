@@ -7,6 +7,7 @@ mod args;
 mod client;
 mod convert;
 mod direct;
+mod direct_backend;
 mod engine;
 mod json;
 mod model;
@@ -17,6 +18,7 @@ mod model;
 pub mod proto;
 
 pub use direct::{GrpcDispatch, VllmDirectDispatchProvider};
+pub use direct_backend::{Launch, launch_from_env};
 pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]

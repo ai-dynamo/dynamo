@@ -3127,6 +3127,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-direct-register",
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
