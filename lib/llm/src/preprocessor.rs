@@ -3340,29 +3340,28 @@ impl OpenAIPreprocessor {
                     .flat_map(|data| data.inner.choices.iter())
                     .filter_map(|choice| {
                         let state = cr.entry(choice.index).or_default();
-                        if !state.recovered {
-                            if let Some(ChatCompletionMessageContent::Text(t)) =
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
                                 &choice.delta.content
+                        {
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from =
+                                match state.emitted_text.rfind(glm47_start.as_str()) {
+                                    Some(pos) => pos,
+                                    None => state
+                                        .emitted_text
+                                        .len()
+                                        .saturating_sub(glm47_start.len() - 1),
+                                };
+                            while keep_from > 0
+                                && !state.emitted_text.is_char_boundary(keep_from)
                             {
-                                state.emitted_text.push_str(t);
-                                // Bound like input_text: retain only the suffix from
-                                // the last marker onward — all the contains(&tail)
-                                // check needs.
-                                let mut keep_from =
-                                    match state.emitted_text.rfind(glm47_start.as_str()) {
-                                        Some(pos) => pos,
-                                        None => state
-                                            .emitted_text
-                                            .len()
-                                            .saturating_sub(glm47_start.len() - 1),
-                                    };
-                                while keep_from > 0
-                                    && !state.emitted_text.is_char_boundary(keep_from)
-                                {
-                                    keep_from -= 1;
-                                }
-                                state.emitted_text.drain(..keep_from);
+                                keep_from -= 1;
                             }
+                            state.emitted_text.drain(..keep_from);
                         }
                         if state.recovered
                             || !matches!(
