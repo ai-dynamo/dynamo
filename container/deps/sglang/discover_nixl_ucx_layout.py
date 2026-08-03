@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import re
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
@@ -24,13 +25,56 @@ def cuda_distributions(
     return matches
 
 
+def distribution_description(name: str, distribution: Distribution) -> str:
+    """Return an installed distribution name and its import root."""
+    install_root = Path(distribution.locate_file("")).resolve()
+    return f"{name} ({install_root})"
+
+
+def read_ucx_version(libucp_path: Path) -> str:
+    """Read the UCX release from a specific libucp implementation."""
+    try:
+        libucp = ctypes.CDLL(str(libucp_path), mode=ctypes.RTLD_LOCAL)
+    except OSError as error:
+        raise SystemExit(
+            f"nixl-ucx-compat: failed to load {libucp_path}: {error}"
+        ) from error
+
+    try:
+        get_version = libucp.ucp_get_version
+    except AttributeError as error:
+        raise SystemExit(
+            f"nixl-ucx-compat: {libucp_path} does not export ucp_get_version"
+        ) from error
+
+    major = ctypes.c_uint()
+    minor = ctypes.c_uint()
+    release = ctypes.c_uint()
+    get_version.argtypes = [
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    get_version.restype = None
+    get_version(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(release))
+    return f"{major.value}.{minor.value}.{release.value}"
+
+
 def main() -> None:
     """Print the discovered layout as tab-separated records."""
     nixl_matches = cuda_distributions("nixl")
-    if len(nixl_matches) != 1:
-        names = sorted(name for name, _, _ in nixl_matches)
+    if not nixl_matches:
         raise SystemExit(
-            f"nixl-ucx-compat: expected one nixl-cu* distribution, found {names}"
+            "nixl-ucx-compat: no nixl-cu* distribution found; "
+            "the upstream NIXL wheel layout may have changed"
+        )
+    if len(nixl_matches) > 1:
+        found = sorted(
+            distribution_description(name, distribution)
+            for name, _, distribution in nixl_matches
+        )
+        raise SystemExit(
+            f"nixl-ucx-compat: expected one nixl-cu* distribution, found {found}"
         )
 
     nixl_name, nixl_cuda_major, nixl = nixl_matches[0]
@@ -70,8 +114,13 @@ def main() -> None:
             f"{sorted(map(str, lib_dirs))}"
         )
     nixl_lib_dir = next(iter(lib_dirs))
+    libucp_target = next(
+        target for alias, target in aliases if alias.startswith("libucp.so.")
+    )
+    ucx_version = read_ucx_version(libucp_target)
 
     print(f"nixl\t{nixl_name}\t{nixl_cuda_major}")
+    print(f"ucx\t{ucx_version}")
     print(f"libdir\t{nixl_lib_dir}")
     for plugin in sorted(plugins):
         print(f"plugin\t{plugin}")

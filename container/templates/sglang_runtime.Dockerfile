@@ -165,7 +165,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 {% if device != "xpu" and target not in ("dev", "local-dev") %}
 # Add generic UCX aliases beside NIXL's private libraries so native consumers
 # use the same implementation without breaking UCX's $ORIGIN-based core and
-# module lookup. No existing wheel file or ELF metadata is modified.
+# module lookup. The wheel's auditwheel dependency directory is deliberately
+# placed first for every process; it contains only hash-mangled dependencies
+# plus the two generic UCX aliases. No existing wheel file or ELF metadata is
+# modified.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
     bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
