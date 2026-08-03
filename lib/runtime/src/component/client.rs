@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex as StdMutex},
@@ -359,6 +359,7 @@ impl RoutingInstances {
 struct RoutingInstancesState {
     snapshot: ArcSwap<RoutingInstances>,
     update_lock: StdMutex<()>,
+    overload_reconciliation_needed: AtomicBool,
     instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
     instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
 }
@@ -371,6 +372,7 @@ impl RoutingInstancesState {
         Self {
             snapshot: ArcSwap::from_pointee(snapshot),
             update_lock: StdMutex::new(()),
+            overload_reconciliation_needed: AtomicBool::new(false),
             instance_avail_tx,
             instance_avail_rx,
         }
@@ -431,6 +433,8 @@ impl RoutingInstancesState {
             .copied()
             .collect::<HashSet<_>>();
         let _guard = self.update_lock.lock().unwrap();
+        self.overload_reconciliation_needed
+            .store(false, Ordering::Release);
         let current = self.snapshot.load();
         if current.overloaded_ids == overloaded_ids {
             return false;
@@ -442,12 +446,16 @@ impl RoutingInstancesState {
     }
 
     fn mark_overloaded_immediate(&self, instance_id: u64) {
-        self.update(
-            move |current| current.mark_overloaded(instance_id),
-            // Routable set is unchanged — only the derived free set shrinks —
-            // so there's no need to republish routable_ids.
-            false,
-        );
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        let next = Arc::new(current.mark_overloaded(instance_id));
+        self.snapshot.store(next);
+        self.overload_reconciliation_needed
+            .store(true, Ordering::Release);
+    }
+
+    fn overload_reconciliation_needed(&self) -> bool {
+        self.overload_reconciliation_needed.load(Ordering::Acquire)
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -618,6 +626,12 @@ impl Client {
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
+    }
+
+    /// Whether request-path backpressure changed overload state after the monitor's
+    /// most recent metric publication.
+    pub fn overload_reconciliation_needed(&self) -> bool {
+        self.routing_instances.overload_reconciliation_needed()
     }
 
     /// Mark an instance overloaded immediately. A worker returning

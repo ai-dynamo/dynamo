@@ -6,8 +6,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -320,6 +320,14 @@ where
             }
         }
         self.update_queue_metrics();
+    }
+
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        self.inner.select_without_admission(request).await
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {

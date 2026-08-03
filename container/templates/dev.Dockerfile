@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         # Debugging / tracing
         gdb \
         valgrind \

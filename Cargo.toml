@@ -27,6 +27,7 @@ members = [
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",
+    "lib/mocker/servers/sglang",
     "lib/sidecar/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
@@ -59,7 +60,7 @@ dynamo-memory = { path = "lib/memory", version = "1.4.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.4.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.4.0" }
 dynamo-protocols = { version = "=5.0.1" }
-dynamo-parsers = { version = "7.0.0" }
+dynamo-parsers = { version = "7.0.1" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
@@ -83,7 +84,6 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.4.0" }
 velo = { version = "0.1.0" }
 
 # External dependencies
-aiconfigurator-core = { version = "=0.11.0-dev20260728" }
 anyhow = { version = "1" }
 lru = { version = "0.16" }
 async-nats = { version = "0.49.1", features = ["service"] }

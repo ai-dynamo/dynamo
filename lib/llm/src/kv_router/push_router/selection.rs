@@ -12,7 +12,10 @@ use dynamo_kv_router::{
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
+    kv_router::{
+        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
+        push_router::KvPushRouter,
+    },
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -90,15 +93,24 @@ impl KvPushRouter {
                 args.pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
-                true,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: true,
+                },
             )
             .await?;
+        let outcome = match outcome {
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => outcome,
+            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+                unreachable!("with-admission routing returned advisory outcome")
+            }
+        };
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: _,
                 routing_hashes,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
