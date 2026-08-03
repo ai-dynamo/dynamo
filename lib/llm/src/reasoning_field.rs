@@ -5,44 +5,87 @@
 //! chat-completions HTTP API. Dynamo keeps `reasoning_content` as its internal
 //! canonical field; this module changes only the serialized response boundary.
 
-use std::sync::OnceLock;
+use std::{fmt, str::FromStr};
 
 use serde::{Serialize, Serializer, ser::Error as _};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReasoningField {
+pub enum ReasoningField {
     Reasoning,
     ReasoningContent,
 }
 
-fn reasoning_field_selection() -> ReasoningField {
-    static FIELD: OnceLock<ReasoningField> = OnceLock::new();
-    *FIELD.get_or_init(|| match std::env::var("DYN_REASONING_FIELD_NAME").as_deref() {
-        Ok("reasoning") => ReasoningField::Reasoning,
-        Ok("reasoning_content") | Err(_) => ReasoningField::ReasoningContent,
-        Ok(other) => {
-            tracing::warn!(
-                "DYN_REASONING_FIELD_NAME={other:?} is not \"reasoning\" or \"reasoning_content\"; defaulting to reasoning_content"
-            );
-            ReasoningField::ReasoningContent
+impl ReasoningField {
+    pub const DEFAULT: Self = Self::ReasoningContent;
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::ReasoningContent => "reasoning_content",
         }
-    })
+    }
+}
+
+impl Default for ReasoningField {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl fmt::Display for ReasoningField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningFieldParseError {
+    value: String,
+}
+
+impl fmt::Display for ReasoningFieldParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "reasoning field name {:?} is not \"reasoning\" or \"reasoning_content\"",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for ReasoningFieldParseError {}
+
+impl FromStr for ReasoningField {
+    type Err = ReasoningFieldParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "reasoning" => Ok(Self::Reasoning),
+            "reasoning_content" => Ok(Self::ReasoningContent),
+            other => Err(ReasoningFieldParseError {
+                value: other.to_string(),
+            }),
+        }
+    }
 }
 
 /// Serialization wrapper that routes chat-completion reasoning to the field
-/// selected by `DYN_REASONING_FIELD_NAME`.
+/// selected by frontend startup config.
 ///
 /// Keeping routing at the HTTP boundary is intentional: reasoning parsers,
 /// tool-call parsers, aggregators, request tracing, and gRPC continue to use
 /// Dynamo's canonical `reasoning_content` representation. That avoids
 /// teaching every internal producer about a wire-format compatibility option.
 #[derive(Debug, Clone)]
-pub struct RoutedReasoning<T>(T);
+pub struct RoutedReasoning<T> {
+    inner: T,
+    field: ReasoningField,
+}
 
 impl<T> RoutedReasoning<T> {
-    pub fn new(inner: T) -> Self {
-        Self(inner)
+    pub fn new(inner: T, field: ReasoningField) -> Self {
+        Self { inner, field }
     }
 }
 
@@ -51,8 +94,12 @@ impl<T: Serialize> Serialize for RoutedReasoning<T> {
     where
         S: Serializer,
     {
-        let mut value = serde_json::to_value(&self.0).map_err(S::Error::custom)?;
-        route_serialized_reasoning(&mut value, reasoning_field_selection());
+        if self.field == ReasoningField::ReasoningContent {
+            return self.inner.serialize(serializer);
+        }
+
+        let mut value = serde_json::to_value(&self.inner).map_err(S::Error::custom)?;
+        route_serialized_reasoning(&mut value, self.field);
         value.serialize(serializer)
     }
 }

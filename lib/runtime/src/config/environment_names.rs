@@ -360,6 +360,10 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// OpenAI-compatible response field used for emitted reasoning content.
+    /// Accepted values: "reasoning_content" (default) or "reasoning".
+    pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
+
     /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
     /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
     /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
@@ -865,6 +869,7 @@ mod tests {
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
