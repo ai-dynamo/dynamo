@@ -23,7 +23,7 @@
 #    - Triggers on trusted pushes to main or pull-request/N when docs-site files change
 #    - On main: commits and pushes to docs-website, then publishes via `fern generate --docs`
 #    - On gated PR branches: generates a preview URL via `fern generate --docs --preview` and comments on PR
-#    - Preserves versioned documentation (products[0]) from docs-website's docs.yml
+#    - Preserves the release-managed version list from docs-website's docs.yml
 #
 # 2. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
@@ -188,11 +188,21 @@ jobs:
         run: |
           cd docs-checkout/fern
 
-          # Save the full products[0] block from docs-website (versions, path, etc.)
-          yq '.products[0]' docs.yml > /tmp/preserved_product.yml
+          # Save the release-managed version list from docs-website. Production
+          # moved from the product-switcher wrapper to top-level versioning, so
+          # read either shape: a bare .products[0] read returns null against the
+          # current site and writes that null straight back, which Fern then
+          # rejects as "expected object but received null".
+          yq '. as $doc | ([$doc.products[]? | select(.display-name == "Docs" or .display-name == "Dynamo")][0].versions // $doc.versions)' \
+            docs.yml > /tmp/preserved_versions.yml
 
-          echo "Preserved products[0] block:"
-          cat /tmp/preserved_product.yml
+          if [ "$(head -c4 /tmp/preserved_versions.yml)" = "null" ]; then
+            echo "::error::No release-managed versions found in docs.yml"
+            exit 1
+          fi
+
+          echo "Preserved release state:"
+          cat /tmp/preserved_versions.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
           cp ../../source-checkout/fern/docs.yml docs.yml
@@ -201,8 +211,10 @@ jobs:
           # but on docs-website assets live at fern/assets/ so we need ./assets/
           sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
-          # Restore the preserved products[0] block
-          yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+          # This branch's source docs.yml still uses the product switcher, so
+          # restore the history there rather than at top level; writing both
+          # shapes would leave the composed file with two version lists.
+          yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
 
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
@@ -488,33 +500,37 @@ jobs:
 
           echo "Updating $DOCS_FILE to include $TAG..."
 
-          # Check if version already in docs.yml
-          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
+          # docs.yml here is docs-website's own file, which uses top-level
+          # versioning rather than the product switcher this branch's source
+          # still carries. Addressing .products[0] would read null and then
+          # fabricate a product wrapper, corrupting the published config.
+          if yq ".versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
           # Find the index of the "dev" entry and insert new version right after it
-          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          DEV_IDX=$(yq '.versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          if [ -z "$DEV_IDX" ] || [ "$DEV_IDX" = "null" ]; then
+            echo "::error::No dev entry found in $DOCS_FILE versions list"
+            exit 1
+          fi
           INSERT_IDX=$((DEV_IDX + 1))
 
           yq -i "
-            .products[0].versions |= (
+            .versions |= (
               .[:$INSERT_IDX] +
               [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
               .[$INSERT_IDX:]
             )
           " "$DOCS_FILE"
 
-          # Update the top-level entry to point to the new version
-          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
-
           # Update the "Latest" entry to point to the new version
-          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
-          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
+          yq -i ".versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
 
-          echo "Updated docs.yml products/versions section:"
-          yq '.products[0].versions' "$DOCS_FILE"
+          echo "Updated docs.yml versions section:"
+          yq '.versions' "$DOCS_FILE"
 
       - name: Commit and push changes
         run: |
