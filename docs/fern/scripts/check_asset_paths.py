@@ -48,16 +48,22 @@ ROOT = Path(__file__).resolve().parents[1]  # docs/fern
 REPO = ROOT.parents[1]  # repo root, for readable paths
 SELF = Path(__file__).resolve()  # skipped: the docstring must show the bad shape
 
-# A site-absolute reference into the asset tree. Anchored on the leading slash
-# so relative forms (../../assets/...) and docs.yml's ./assets/... are ignored;
-# those are the two shapes Fern does rewrite. The backtick is an opening
-# delimiter too: these files hold CSS in template literals, so a bare
-# `/dynamo/assets/x.svg` assignment is as reachable as a quoted one.
-# Openers: a quote, a backtick, a `url(`, or a bare YAML scalar (`favicon: /...`,
-# `- path: /...`). docs.yml writes its logo, favicon and font paths unquoted, so
-# a delimiter-only pattern reads that file and finds nothing.
+# A site-absolute reference into the asset tree, anchored on the leading slash so
+# the two forms Fern does rewrite stay clean: `../../assets/...` in MDX and
+# docs.yml's `./assets/...`.
+#
+# Openers, each one a shape that showed up in review:
+#   "..." '...'   quoted attributes and config values
+#   `...`         template literals, which is where these files keep their CSS
+#   url(...)      the CSS form the Home hero regressed on
+#   key: /...     bare YAML scalars; docs.yml writes logo/favicon/fonts unquoted
+#   - /...        YAML sequence entries
+#
+# MULTILINE so `^` still anchors per line if this is ever handed whole-file text
+# rather than the line-at-a-time feed check() uses today.
 ABSOLUTE_ASSET = re.compile(
-    r"""(?:["'`(]|:\s|^\s*-\s)\s*(/(?:[\w.-]+/)*assets/[^"'`)\s]+)"""
+    r"""(?:["'`(]|:\s|^\s*-\s)\s*(/(?:[\w.-]+/)*assets/[^"'`)\s]+)""",
+    re.MULTILINE,
 )
 
 # translations/ carries the zh-CN pages, which publish through the locale
@@ -99,7 +105,40 @@ def check(path: Path) -> list[str]:
     return problems
 
 
+# Every case here is one a reviewer caught the pattern missing, or one an earlier
+# revision wrongly flagged. Run with --test.
+CASES: tuple[tuple[str, bool, str], ...] = (
+    ('background: url("/dynamo/assets/img/x.svg")', True, "quoted url()"),
+    ("background: url(/dynamo/assets/img/x.svg)", True, "bare url()"),
+    ("const s = `/dynamo/assets/demo.cast`;", True, "template literal"),
+    ('<img src="/dynamo/assets/img/y.png" />', True, "quoted attribute"),
+    ("favicon: /dynamo/assets/NVIDIA_symbol.svg", True, "bare YAML scalar"),
+    ("  dark: /dynamo/assets/NVIDIA_dark.svg", True, "indented YAML scalar"),
+    ("  - path: /dynamo/assets/fonts/NVIDIASans.woff2", True, "YAML sequence"),
+    ('src="../../assets/img/x.svg"', False, "relative, Fern rewrites it"),
+    ("  dark: ./assets/NVIDIA_dark.svg", False, "docs.yml relative form"),
+    ("x: https://cdn.example.com/assets/a.svg", False, "external URL"),
+    ('url("https://cdn.example.com/assets/a.svg")', False, "quoted external URL"),
+    ("/dynamo/assets/img/x.svg", False, "bare prose, no opener"),
+)
+
+
+def selftest() -> int:
+    failures = 0
+    for line, should_match, why in CASES:
+        hit = bool(ABSOLUTE_ASSET.search(line))
+        ok = hit == should_match
+        failures += not ok
+        print(f"  {'PASS' if ok else 'FAIL'}: {why}")
+    total = len(CASES)
+    print(f"\n{total - failures}/{total} passed")
+    return 1 if failures else 0
+
+
 def main() -> int:
+    if "--test" in sys.argv[1:]:
+        return selftest()
+
     args = [Path(a) for a in sys.argv[1:]]
     if args:
         targets = [a for a in args if a.exists()]
