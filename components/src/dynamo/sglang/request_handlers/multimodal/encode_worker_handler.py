@@ -27,11 +27,8 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES, ImageLoader
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
-from dynamo.common.multimodal.image_loader import (
-    DECODED_VARIANT_KEY,
-    URL_VARIANT_KEY,
-    decoded_content_hash_key,
-)
+from dynamo.common.multimodal.image_loader import DECODED_VARIANT_KEY, URL_VARIANT_KEY
+from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
