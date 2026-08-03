@@ -756,10 +756,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         top_logprobs = top_logprobs[:-removed_count]
                 elif not finish_reason:
-                    output_ids, pending_stop_tokens = (
-                        _split_trailing_suppressed_stop_tokens(
-                            output_ids, suppressed_stop_token_ids
-                        )
+                    (
+                        output_ids,
+                        pending_stop_tokens,
+                    ) = _split_trailing_suppressed_stop_tokens(
+                        output_ids, suppressed_stop_token_ids
                     )
                     if pending_stop_tokens:
                         pending_stop_tokens_per_choice[output_idx] = pending_stop_tokens
@@ -896,9 +897,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     visible_text_len = len(text) - len(matched)
                 elif not finish_reason:
-                    visible_text_len -= _trailing_stop_prefix_len(
-                        text, stop_strings
-                    )
+                    visible_text_len -= _trailing_stop_prefix_len(text, stop_strings)
 
                 delta = text[count:visible_text_len] if visible_text_len > count else ""
 
