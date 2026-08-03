@@ -886,38 +886,26 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         Only scale-up is supported today: SGLang rejects a target smaller than
         the current EP size. ``new_ep_size`` is the target number of EP ranks.
         """
+
+        def err(message: str) -> dict:
+            return {"status": "error", "message": message}
+
         body = body or {}
         if not isinstance(body, dict):
-            return {
-                "status": "error",
-                "message": "request body must be a JSON object",
-            }
+            return err("request body must be a JSON object")
 
         new_ep_size = body.get("new_ep_size")
         if new_ep_size is None:
-            return {
-                "status": "error",
-                "message": "Missing required field: new_ep_size",
-            }
-        # bool is an int subclass — reject it explicitly so True/False can't
-        # masquerade as a size.
+            return err("Missing required field: new_ep_size")
+        # bool is an int subclass — reject it so True/False can't pose as a size.
         if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
-            return {
-                "status": "error",
-                "message": f"new_ep_size must be an integer, got: {new_ep_size!r}",
-            }
+            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
         if new_ep_size <= 0:
-            return {
-                "status": "error",
-                "message": "new_ep_size must be a positive integer",
-            }
+            return err("new_ep_size must be a positive integer")
 
         tokenizer_manager = self.engine.tokenizer_manager
         if getattr(tokenizer_manager.server_args, "elastic_ep_backend", None) is None:
-            return {
-                "status": "error",
-                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
-            }
+            return err("elastic EP is not enabled (set --elastic-ep-backend)")
 
         from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
 
@@ -928,7 +916,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 )
             except Exception as e:
                 logger.error("[ElasticEP] Scaling failed: %s", e)
-                return {"status": "error", "message": str(e)}
+                return err(str(e))
 
         if not getattr(result, "success", False):
             return {
