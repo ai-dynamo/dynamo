@@ -247,7 +247,7 @@ pub(super) fn simulate_decode_step_with_sampler(
         .map(SglangRequest::current_sequence_len)
         .sum();
     let avg_context = total_context / running.len();
-    let active_kv_tokens = total_context.min(config.total_kv_tokens);
+    let active_kv_tokens = total_context;
     let decode_time = config.perf_model.predict_decode_time(
         running.len(),
         active_kv_tokens,

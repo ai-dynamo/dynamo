@@ -623,7 +623,7 @@ Request handling:
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
-| `--enable-rl` | RL support via `call_tokenizer_manager` route |
+| Configurable SGLang method routes | Legacy workers can expose startup-allowlisted Engine or tokenizer-manager methods through `DYN_SGLANG_ENGINE_ROUTES`; the unified path does not register these routes |
 
 ### TRT-LLM-specific gaps
 

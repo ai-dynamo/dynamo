@@ -69,7 +69,7 @@ func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string 
 
 func ResolveCheckpointForService(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 	gate features.Gate,
