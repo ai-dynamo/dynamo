@@ -89,7 +89,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.14", trtllm: "1.3.0rc19", vllm: "0.23.0", nixlSglang: "1.3.0", nixlTrtllm: "1.0.1", nixlVllm: "1.1.0" },
     ucx: "1.20.x",
     delta:
-      "CUDA 12 container images discontinued; EFA variants go multi-arch as -efa; GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
+      "CUDA 12 container images discontinued; EFA variants retagged from -efa-amd64 to -efa (the images were already multi-arch — the old suffix was misleading); GA wheels published as 1.3.0.post1 (containers stay :1.3.0); UCX 1.20.x.",
     notesSummary:
       "Tool-calling and reasoning overhaul, RL rollout serving, the largest Router buildout to date, SLA-driven Planner autoscaling, and production GPU Memory Service on Kubernetes.",
   },
@@ -223,7 +223,7 @@ export const RELEASES: Release[] = [
     docs: "https://docs.nvidia.com/dynamo",
     pins: { sglang: "0.5.9", trtllm: "1.3.0rc5.post1", vllm: "0.16.0", nixlSglang: "0.10.1", nixlTrtllm: "0.10.1", nixlVllm: "0.10.1" },
     delta:
-      "snapshot-agent image and EFA variants for vLLM and TRT-LLM (AMD64 only). First publish of dynamo-mocker and dynamo-kv-router crates. snapshot Helm chart added (preview); deprecated dynamo-crds dropped from the publish stream.",
+      "snapshot-agent image and EFA variants for vLLM and TensorRT-LLM. First publish of dynamo-mocker and dynamo-kv-router crates. snapshot Helm chart added (preview); deprecated dynamo-crds dropped from the publish stream.",
     notesSummary:
       "First GA release: unified configuration, Kubernetes production readiness, multimodal serving, and the agents surface.",
   },
