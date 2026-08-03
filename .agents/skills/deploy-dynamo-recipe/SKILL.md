@@ -1,6 +1,6 @@
 ---
 name: deploy-dynamo-recipe
-description: Deploy one already-selected Dynamo Kubernetes recipe or DGD manifest and prove it with an OpenAI-compatible smoke test. Use when recipe-explorer or hypothesis-challenger has already selected the deploy.yaml/DGD.
+description: Deploys one assigned DynamoGraphDeployment and proves it with an OpenAI-compatible smoke test. Use when user-interviewer has captured the user-provided baseline DGD or hypothesis-challenger has approved a later DGD.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -15,23 +15,25 @@ metadata:
 
 ## Purpose
 
-Deploy exactly one selected Dynamo Kubernetes manifest and return a small smoke-test artifact. This skill does not
-search the recipe catalog, choose between variants, tune knobs, benchmark performance, or create new recipes.
+Deploy exactly one assigned Dynamo Kubernetes DGD and return a small smoke-test artifact. This skill does not search
+the recipe catalog, choose or substitute a DGD, tune knobs, benchmark performance, or create new recipes.
 
 Input ownership:
 
-- First Optimization Iteration: `recipe-explorer` provides the selected `deploy.yaml` or DGD.
+- First Optimization Iteration: `user-interviewer` provides the canonical user-provided DGD path and SHA256.
 - Subsequent Optimization Iterations: `hypothesis-challenger` provides the candidate `deploy.yaml` or DGD.
-- The user-provided `target_workload.yaml` supplies the Kubernetes context, namespace, and optional storage class.
+- The synthesized `user_workload.yaml` supplies the Kubernetes context, namespace, optional storage class, and
+  baseline DGD path-and-hash record.
 
 ## Inputs
 
 Required:
 
-- selected `deploy.yaml`, DGD manifest, or recipe variant directory
-- user-provided `target_workload.yaml`
-- target namespace and `kubectl` context from `target_workload.yaml`
-- experiment root created by `recipe-explorer`
+- assigned DGD manifest path and SHA256
+- handoff provenance: `user-interviewer` for iteration 0 or `hypothesis-challenger` for iteration > 0
+- exact `<EXP_ROOT>/user_workload.yaml` path and SHA256
+- target namespace and `kubectl` context from `user_workload.yaml`
+- experiment root created by `user-interviewer`
 - zero-based optimization iteration
 - previous deployment root for iteration > 0
 
@@ -49,6 +51,11 @@ Secrets:
 
 ## Workflow
 
+Recompute the supplied `user_workload.yaml` SHA256 before using its Kubernetes and workload context. Recompute the
+assigned DGD SHA256 and require it to match the handoff before creating run-scoped copies. At iteration 0, also
+require the assigned path and SHA256 to equal `deployment.dgd_path` and `deployment.dgd_sha256` in
+`user_workload.yaml`.
+
 ### 1. Create The Deployment Directory
 
 Create exactly one directory for the assigned candidate:
@@ -57,9 +64,9 @@ Create exactly one directory for the assigned candidate:
 <EXP_ROOT>/artifacts/deploy-iter-<NNN>/
 ```
 
-Create `applied_manifests/` beneath it. Copy the assigned DGD and every support manifest used by the deployment into
-that directory with stable names such as `deploy.yaml`, `model-cache.yaml`, `model-download.yaml`, and
-`model-validate.yaml`. Never modify the tracked recipe source.
+Create `applied_manifests/` beneath it. Copy the assigned DGD and every explicitly handed-off support manifest used by
+the deployment into that directory with stable names such as `deploy.yaml`, `model-cache.yaml`,
+`model-download.yaml`, and `model-validate.yaml`. Never modify the handed-off source files.
 
 Update these run-scoped copies in place when a compatibility fix is required, then reapply them. Record every change
 and reason in `deployment_ledger.json`; do not retain numbered intermediate copies. After a successful smoke test,
@@ -67,7 +74,7 @@ and reason in `deployment_ledger.json`; do not retain numbered intermediate copi
 that produced the successful deployment. If the deployment is blocked, retain only the latest attempted copies and mark
 the ledger blocked. Create `logs/` only when a targeted failure log must be retained.
 
-### 2. Validate The Selected Manifest
+### 2. Validate The Assigned DGD
 
 Run read-only checks first:
 
@@ -83,10 +90,10 @@ Validate the selected path without mutating the cluster:
 
 ```bash
 kubectl --context "${KUBE_CONTEXT}" apply --dry-run=client -n "${NAMESPACE}" \
-  -f <deploy-yaml-or-recipe-dir>
+  -f <assigned-dgd-yaml>
 ```
 
-Review the selected manifest and any sibling support manifests it requires. Check:
+Review the assigned DGD and any support manifests explicitly included in the handoff. Check:
 
 - DGD name and frontend service name
 - model-cache PVCs and storage class needs
@@ -98,7 +105,7 @@ Stop before mutation if required namespace, CRDs, PVC prerequisites, secret name
 capacity are missing.
 
 If a manifest must change only to work with the target cluster, such as resolving a storage class placeholder or adding
-a required node-taint toleration, update only the copy under `applied_manifests/`. Preserve the tracked recipe source
+a required node-taint toleration, update only the copy under `applied_manifests/`. Preserve the handed-off source
 and record the exact change and reason in `deployment_ledger.json`. Do not change performance knobs.
 
 ### 3. Retire The Previous Iteration
@@ -117,7 +124,7 @@ new iteration directory. Preserve shared PVCs, model-cache jobs, namespaces, and
 
 ### 4. Apply Support Manifests
 
-Follow the selected recipe README when it gives a specific sequence. Otherwise:
+Follow user-provided deployment instructions when they give a specific sequence. Otherwise:
 
 Read each support manifest's `kind` and `metadata.name`; never infer a Kubernetes resource name from its filename. Set
 `DOWNLOAD_JOB` and `VALIDATE_JOB` from the corresponding Job manifests.
@@ -135,7 +142,7 @@ kubectl apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NA
 kubectl wait --for=condition=Complete "job/${VALIDATE_JOB}" -n "${NAMESPACE}" --timeout=3600s
 ```
 
-### 5. Apply The Selected DGD
+### 5. Apply The Assigned DGD
 
 Apply only the run-scoped copy of the assigned manifest:
 
@@ -163,7 +170,7 @@ Healthy signals:
 On failure, inspect the DGD status, events, and logs for the affected component before making a minimal run-scoped
 compatibility patch. Record the readiness state, diagnosis, relevant error excerpt, and patch in `deployment_ledger.json`.
 Do not generate broad Kubernetes snapshots, endpoint-response copies, successful pod logs, or other evidence files.
-Persist one targeted file under `logs/` only when failure output is needed beyond the ledger excerpt. If no
+Persist additional logs under `logs/` only when failure output is needed beyond the ledger excerpt. If no
 diagnosis-backed patch remains, stop or hand off to troubleshooting; do not loop blindly.
 
 ### 7. Smoke Test
@@ -215,13 +222,13 @@ Write `${DEPLOY_ROOT}/smoke_test_artifact.json`:
 - `api_response`: full parsed response body, or error body if the smoke test fails.
 - `success`: `1` when the smoke test passes, otherwise `0`.
 
-Also write `deployment_ledger.json`, including the DGD name, Kubernetes context and namespace, source recipe path,
-final applied-manifest paths, compatibility patches and their reasons, readiness state, concise diagnostics, blockers,
-and cleanup commands.
+Also write `deployment_ledger.json`, including the DGD name, Kubernetes context and namespace, assigned source DGD
+path and SHA256, final applied-manifest paths, compatibility patches and their reasons, readiness state, concise
+diagnostics, blockers, and cleanup commands.
 
 ## Out Of Scope
 
-- recipe discovery or variant selection
+- catalog search, DGD selection, or DGD substitution
 - benchmark execution or AIPerf result parsing
 - optimization hypotheses or challenger reviews
 - authoring new recipes from scratch
@@ -231,4 +238,4 @@ and cleanup commands.
 ## References
 
 - `../../../docs/kubernetes/kubernetes-recipe-workflow.md`
-- `../../../docs/reference/run-artifacts.md`
+- `../../../agent-docs/rules/execution/run-artifacts.md`
