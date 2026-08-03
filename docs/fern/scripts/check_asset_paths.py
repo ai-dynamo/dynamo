@@ -123,59 +123,13 @@ CASES: tuple[tuple[str, bool, str], ...] = (
 )
 
 
-HOOK_CONFIG = REPO / ".pre-commit-config.yaml"
-
-
-def hook_files_pattern() -> str | None:
-    """The `files:` regex the check-asset-paths hook triggers on."""
-    try:
-        after_id = HOOK_CONFIG.read_text().split("id: check-asset-paths\n", 1)[1]
-    except (OSError, IndexError):
-        return None
-    for line in after_id.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("files:"):
-            return stripped.removeprefix("files:").strip()
-        if stripped.startswith("- id:"):  # next hook, no files: of our own
-            break
-    return None
-
-
-def samples(glob: str) -> list[str]:
-    """Representative paths a glob covers, flat and nested."""
-    if "*" not in glob:
-        return [glob]
-    return [glob.replace("**/", depth).replace("*", "a") for depth in ("", "sub/")]
-
-
 def selftest() -> int:
     failures = 0
     for line, should_match, why in CASES:
         ok = bool(ABSOLUTE_ASSET.search(line)) == should_match
         failures += not ok
         print(f"  {'PASS' if ok else 'FAIL'}: {why}")
-
-    # Scope lives in two places -- DEFAULT_GLOBS for a bare run, the hook's
-    # files: for the commit path. Both had to be widened for translations/ and
-    # docs.yml, and a files: narrower than the globs means changed files skip
-    # the hook and only a full manual run catches them. Pin them together.
-    checks = 0
-    pattern = hook_files_pattern()
-    if pattern is None:
-        print("  FAIL: could not read the hook's files: pattern")
-        failures += 1
-        checks += 1
-    else:
-        hook_re = re.compile(pattern)
-        for glob in DEFAULT_GLOBS:
-            for sample in samples(glob):
-                path = f"{ROOT.name}/{sample}"
-                ok = bool(hook_re.match(f"docs/{path}"))
-                failures += not ok
-                checks += 1
-                print(f"  {'PASS' if ok else 'FAIL'}: hook covers docs/{path}")
-
-    total = len(CASES) + checks
+    total = len(CASES)
     print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 

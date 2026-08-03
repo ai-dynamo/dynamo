@@ -90,7 +90,11 @@ repos:
       name: Check docs asset paths are ones Fern rewrites
       entry: python3 docs/fern/scripts/check_asset_paths.py
       language: system
-      files: ^docs/fern/(components/.*\.tsx?|(pages|translations)/.*\.mdx?|main\.css|custom\.js|docs\.yml)$
+      # Coarse trigger on purpose. DEFAULT_GLOBS in the script is the single
+      # definition of what gets scanned; enumerating the same file types here
+      # would be a second copy to keep in sync. Full scan is ~0.8s.
+      files: ^docs/fern/
+      pass_filenames: false
     - id: check-asset-paths-selftest
       name: Self-test the asset-path opener cases
       entry: python3 docs/fern/scripts/check_asset_paths.py --test
