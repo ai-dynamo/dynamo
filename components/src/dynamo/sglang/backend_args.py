@@ -142,7 +142,21 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--enable-rl",
             env_var="DYN_SGL_ENABLE_RL",
             default=False,
-            help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
+            help="Enable RL metadata upload support.",
+        )
+        add_argument(
+            g,
+            flag_name="--engine-route",
+            env_var="DYN_SGLANG_ENGINE_ROUTES",
+            default=[],
+            dest="engine_routes",
+            action="append",
+            help=(
+                "Expose a trusted SGLang method under /engine/<path>. Use "
+                "'<path>[=<method>][:engine|tm]'; the target defaults to Engine. "
+                "May be repeated. DYN_SGLANG_ENGINE_ROUTES accepts "
+                "whitespace-separated descriptors."
+            ),
         )
 
         # Topology constraint: rejecting --frontend-decoding combined with an
@@ -179,6 +193,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    engine_routes: list[str]
     frontend_decoding: bool = False
     sglang_trace_level: int
 

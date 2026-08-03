@@ -17,7 +17,7 @@
  *   2. New page reference/release-notes/vX-Y-Z.mdx (ingest the GitHub body;
  *      ReleaseHeader and the UpgradePanel readingList read their counts
  *      from RELEASE_STATS — no per-page count props).
- *   3. reference/known-issues.mdx + reference/deprecations.mdx: new vXYZ
+ *   3. reference/general/releases/known-issues.mdx + reference/general/releases/deprecations.mdx: new vXYZ
  *      section + accordion retitles (titles read RELEASE_STATS).
  *   4. Nav: docs/fern/index.yml Release Notes section (+ explicit slug).
  *   5. Regenerate agent twins: python3 scripts/gen_llms_tables.py
@@ -68,7 +68,7 @@ export const CURRENT_TAG = "1.3.0";
 export const CURRENT_WHEEL = "1.3.0.post1";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.15",
+  sglang: "0.5.16",
   trtllm: "1.3.0rc22",
   vllm: "0.26.0",
   nixlSglang: "1.3.0",
@@ -652,7 +652,7 @@ export const ARTIFACTS: Artifact[] = [
       {
         label: "helm install · dynamo-platform 1.3.0",
         clipboard:
-          "helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.3.0",
+          "helm install dynamo-platform https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.3.0.tgz",
       },
     ],
   },
@@ -664,7 +664,7 @@ export const ARTIFACTS: Artifact[] = [
     tags: [
       {
         label: "helm install · snapshot 1.3.0",
-        clipboard: "helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.3.0",
+        clipboard: "helm install snapshot https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.3.0.tgz",
       },
     ],
   },
@@ -871,9 +871,9 @@ export const MODEL_EA_BUILDS: ModelEaBuild[] = [
     releaseLine: "v1.3.0",
     runtimes: ["vllm-runtime"],
     shipped: "Jun 4, 2026",
-    gaPath: "promoted",
-    gaLabel: "Promoted → :1.3.0",
-    statusLine: "Both container patches are in the vLLM v0.23.0 that v1.3.0 ships; the recipe runs on the stock vllm-runtime:1.3.0.",
+    gaPath: "dev-only",
+    gaLabel: "Dev-only",
+    statusLine: "Requires the dedicated `vllm-runtime:1.3.0-nemotron-super-dev.1` image; the model-specific vLLM patches are not in the v1.3.0 release container.",
     recipeLabel: "Nemotron-3-Super recipe",
     recipeHref: "/dynamo/dev/recipes/nemotron-3-super",
     github: `${GH}v1.3.0-nemotron-super-dev.1`,
@@ -1020,11 +1020,42 @@ export interface ReleaseStats {
   knownIssues: number;
 }
 
+/* COUNTING RULES — apply these when ingesting a new release so rows stay
+   comparable across the two release-note eras:
+   - prs / contributors / firstTimers: use the figure the body states outright
+     ("merged 930 PRs from 125 contributors", "welcome 14 new contributors").
+     Where the body only lists first-timers without a total, count the list.
+     Omit rather than derive: v1.0.0 states commits, not PRs, so prs is absent,
+     and v1.2.0 names no first-timers at all.
+   - breaking: top-level entries under Breaking Changes, including its
+     Deprecated/Removed subsections, but excluding subsections that only
+     restate a prior release's announced deprecations ("vX.Y.Z
+     Future-Deprecation Reminders"). Pre-v1.0.0 bodies have no Breaking Changes
+     section; v0.9.0's lone Deprecation Notices entry is the same entry class
+     and counts, and a release with no such section at all is a true 0.
+   - knownIssues: one per named issue — the per-issue heading where the body
+     gives each issue its own, otherwise the top-level bullets.
+   Known exception: v1.0.0 breaking is published as 41, but its body holds 40
+   top-level entries and no rule reproduces 41. Left as published.
+
+   The absent prs and contributors cells are absent for cause, not for want of
+   looking. Neither the release bodies, the TPM release archive, nor the git
+   history yields a figure comparable to the stated ones: the archive's own
+   numbers disagree with each other (v0.9.0 is written up as both 217 and 935
+   PRs for the identical window, and v1.0.0's 708 is quoted as commits in one
+   place and as merged PRs in another), and no tag-to-tag count reproduces the
+   three published anchors — the closest method returns 910/572/899 against a
+   published 930/603/896, missing in both directions, so it cannot be trusted
+   to fill the rest. Leave them absent unless a method reproduces all three. */
 export const RELEASE_STATS: Record<string, ReleaseStats> = {
   "v1.3.0": { prs: 930, contributors: 125, firstTimers: 23, breaking: 24, knownIssues: 10 },
   "v1.2.0": { prs: 603, contributors: 82, breaking: 5, knownIssues: 11 },
   "v1.1.0": { prs: 896, contributors: 113, firstTimers: 12, breaking: 8, knownIssues: 20 },
   "v1.0.0": { contributors: 90, firstTimers: 34, breaking: 41, knownIssues: 14 },
+  "v0.9.0": { firstTimers: 14, breaking: 1, knownIssues: 13 },
+  "v0.8.0": { firstTimers: 20, breaking: 0, knownIssues: 14 },
+  "v0.7.0": { firstTimers: 2, breaking: 0, knownIssues: 7 },
+  "v0.6.0": { firstTimers: 4, breaking: 0, knownIssues: 3 },
 };
 
 export const NIGHTLIES_NOTE =

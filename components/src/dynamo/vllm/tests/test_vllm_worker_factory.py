@@ -42,9 +42,11 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
-        # Keep shadow mode default-on for non-XPU lanes, but disable it on XPU
-        # where the shadow-mode GMS path is not exercised in this test matrix.
-        "gms_shadow_mode": detect_target_device() != "xpu",
+        # Pin to the real Config default: an auto-created Mock attribute is
+        # truthy, which enables the GMS shadow-mode path and imports the
+        # optional gpu_memory_service package (absent in some test images).
+        "gms_shadow_mode": False,
+        "realtime": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -472,6 +474,7 @@ class TestCreate:
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -526,13 +529,40 @@ class TestCreate:
     async def test_embedding_worker_takes_priority(
         self, factory: WorkerFactory
     ) -> None:
-        """--embedding-worker is checked first; disaggregation_mode is ignored."""
         config = _make_config(embedding_worker=True)
         shutdown_event = asyncio.Event()
 
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_embedding_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_realtime_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_realtime_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(realtime=True)
+        runtime = Mock()
+        shutdown_event = asyncio.Event()
+        shutdown_endpoints = []
+        snapshot_engine = Mock()
+
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+
+        factory._create_realtime_worker.assert_awaited_once_with(  # type: ignore[union-attr]
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+        factory._create_embedding_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]

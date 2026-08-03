@@ -2,7 +2,7 @@
 
 Supported manifests for the GKE deployment guide.
 
-**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/fern/kubernetes/cloud-providers/gke/gke.mdx)
+**Full guide:** [docs/kubernetes/cloud-providers/gke/gke.md](../../../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx)
 
 ## Contents
 
