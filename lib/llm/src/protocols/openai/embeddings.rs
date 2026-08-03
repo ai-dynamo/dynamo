@@ -27,6 +27,8 @@ pub struct NvCreateEmbeddingRequest {
 
     /// vLLM tokenizer option for raw-text embedding requests. vLLM accepts
     /// -1 as the sentinel for truncating to the model's maximum length.
+    /// This integration currently follows vLLM's right-truncation mode and
+    /// keeps the first N tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncate_prompt_tokens: Option<i64>,
 

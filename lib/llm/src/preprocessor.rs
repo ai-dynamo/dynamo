@@ -2181,6 +2181,8 @@ impl OpenAIPreprocessor {
         };
         if let Some(limit) = truncation_limit {
             for token_ids in &mut all_token_ids {
+                // This embedding integration intentionally follows vLLM's
+                // right-truncation mode: keep the first N tokens.
                 token_ids.truncate(limit);
             }
         }

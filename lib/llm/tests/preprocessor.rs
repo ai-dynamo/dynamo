@@ -755,13 +755,50 @@ mod embedding_without_chat_template {
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
     use dynamo_renderer::PromptFormatter;
+    use serde::Deserialize;
     use serde_json::json;
     use serial_test::serial;
     use std::sync::Arc;
     use tempfile::TempDir;
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    const PARITY_MODEL_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
     const ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+    #[derive(Debug, Deserialize)]
+    struct TokenizationParityFixture {
+        text: String,
+        bos_token_id: u32,
+        cases: Vec<TokenizationParityCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TokenizationParityCase {
+        name: String,
+        add_special_tokens: bool,
+        truncate_prompt_tokens: Option<i64>,
+        max_model_len: u32,
+        expected_token_ids: Vec<u32>,
+    }
+
+    fn tokenization_parity_fixture() -> TokenizationParityFixture {
+        serde_json::from_str(include_str!(
+            "data/sample-models/TinyLlama_v1.1/embedding_right_truncation_parity.json"
+        ))
+        .unwrap()
+    }
+
+    fn model_bos_token_id(model_path: &str) -> u32 {
+        let model_config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::path::Path::new(model_path).join("config.json")).unwrap(),
+        )
+        .unwrap();
+        model_config["bos_token_id"].as_u64().unwrap() as u32
+    }
+
+    fn mock_tokenizer_bos_token_id() -> u32 {
+        model_bos_token_id(MODEL_PATH)
+    }
 
     fn model_copy_with_chat_template(chat_template: Option<&str>) -> TempDir {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -951,8 +988,9 @@ mod embedding_without_chat_template {
 
             assert_eq!(omitted, explicit_true);
             assert_ne!(omitted, explicit_false);
-            assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
-            assert_ne!(explicit_false[0].first(), Some(&128000));
+            let bos_token_id = mock_tokenizer_bos_token_id();
+            assert_eq!(explicit_true[0][0], bos_token_id, "explicit true adds BOS");
+            assert_ne!(explicit_false[0].first(), Some(&bos_token_id));
         })
         .await;
     }
@@ -986,10 +1024,11 @@ mod embedding_without_chat_template {
     async fn env_add_special_tokens_is_default_and_request_wins() {
         temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("true"))], async {
             let preprocessor = embedding_preprocessor_without_template();
-            assert_eq!(token_ids(&preprocessor, None).await[0][0], 128000);
+            let bos_token_id = mock_tokenizer_bos_token_id();
+            assert_eq!(token_ids(&preprocessor, None).await[0][0], bos_token_id);
             assert_ne!(
                 token_ids(&preprocessor, Some(false)).await[0].first(),
-                Some(&128000)
+                Some(&bos_token_id)
             );
         })
         .await;
@@ -999,7 +1038,10 @@ mod embedding_without_chat_template {
             let env_false = token_ids(&preprocessor, None).await;
             let request_false = token_ids(&preprocessor, Some(false)).await;
             assert_eq!(env_false, request_false);
-            assert_eq!(token_ids(&preprocessor, Some(true)).await[0][0], 128000);
+            assert_eq!(
+                token_ids(&preprocessor, Some(true)).await[0][0],
+                mock_tokenizer_bos_token_id()
+            );
         })
         .await;
     }
@@ -1022,7 +1064,43 @@ mod embedding_without_chat_template {
 
     #[tokio::test]
     #[serial]
-    async fn frontend_truncation_keeps_the_token_prefix() {
+    async fn frontend_tokenization_matches_vllm_right_truncation_fixture() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let fixture = tokenization_parity_fixture();
+            assert_eq!(fixture.bos_token_id, model_bos_token_id(PARITY_MODEL_PATH));
+
+            for case in fixture.cases {
+                let mut mdc = embedding_mdc(PARITY_MODEL_PATH);
+                mdc.prompt_formatter = None;
+                mdc.chat_template_file = None;
+                mdc.runtime_config.context_length = Some(case.max_model_len);
+                let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+                let request = embedding_request_with_options(
+                    json!(fixture.text),
+                    Some(case.add_special_tokens),
+                    case.truncate_prompt_tokens,
+                );
+                let actual = preprocessor
+                    .preprocess_embedding_request(&request)
+                    .await
+                    .unwrap()
+                    .0
+                    .token_ids;
+
+                assert_eq!(
+                    actual,
+                    vec![case.expected_token_ids],
+                    "vLLM right-truncation parity case {:?}",
+                    case.name
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_right_truncation_keeps_the_token_prefix() {
         temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
             let preprocessor = embedding_preprocessor_without_template();
             let input = json!("<|eot_id|><|eot_id|><|eot_id|>");
@@ -1038,7 +1116,11 @@ mod embedding_without_chat_template {
                     .token_ids;
                 assert_eq!(truncated[0], full[0][..limit as usize]);
             }
-            assert_eq!(full[0][0], 128000, "BOS is added before truncation");
+            assert_eq!(
+                full[0][0],
+                mock_tokenizer_bos_token_id(),
+                "BOS is added before truncation"
+            );
         })
         .await;
     }
