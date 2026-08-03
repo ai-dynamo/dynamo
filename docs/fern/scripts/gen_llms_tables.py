@@ -412,11 +412,16 @@ def feature_cell(fc: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def cuda_table(data: dict) -> str:
-    """CUDA toolkit and minimum-driver history table."""
+def cuda_table(data: dict, versions: set[str] | None = None) -> str:
+    """CUDA toolkit and minimum-driver history table.
+
+    ``versions`` optionally restricts the rows to a set of bare release
+    versions (e.g. ``{"1.3.0", "1.2.0"}``); ``None`` emits the full history.
+    """
     rows = [
         [r["version"], r["backend"], r["toolkit"], r["minDriver"], r.get("note")]
         for r in data["CUDA_HISTORY"]
+        if versions is None or r["version"] in versions
     ]
     return md_table(["Dynamo", "Backend", "CUDA Toolkit", "Min Driver", "Note"], rows)
 
@@ -592,6 +597,90 @@ def render_compatibility(data: dict) -> str:
     parts.append("**Platform support**")
     parts.append(platform_lines(data))
 
+    return "\n\n".join(parts)
+
+
+# Release kinds the human-facing support matrix covers: the lines a reader
+# can actually pull and run. Platform previews (-dev.N) and model-specific
+# builds are deliberately excluded -- CUDA_NOTES documents the toolkit support
+# of those that have it, which is not all of them: v1.3.0-dev.1 and
+# v1.2.0-deepseek-v4-dev.2 have no note and no CUDA_HISTORY row, and no CUDA
+# version is recorded for them anywhere in the repo. The accordion caption is
+# therefore worded to promise coverage only for the builds a note names,
+# rather than to send readers of the others after information that is not
+# there. CUDA_HISTORY happens to carry no preview or model-build rows
+# today, so this filter is currently a no-op; it is expressed on kind anyway
+# so a future preview entry cannot leak into the matrix unnoticed.
+SUPPORT_MATRIX_KINDS = ("stable", "patch")
+
+
+def released_versions(data: dict) -> set[str]:
+    """Bare versions of the released lines -- stable releases and patches."""
+    return {
+        rel["version"].removeprefix("v")
+        for rel in data["RELEASES"]
+        if rel.get("kind") in SUPPORT_MATRIX_KINDS
+    }
+
+
+def minor_line(version: str) -> str:
+    """'1.2.1' -> '1.2.x' -- the caption a matrix table is grouped under."""
+    parts = version.split(".")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        raise TSParseError(
+            f"CUDA_HISTORY version {version!r} is not MAJOR.MINOR... -- the "
+            "support matrix cannot group it by minor line"
+        )
+    return f"{parts[0]}.{parts[1]}.x"
+
+
+def group_by_minor_line(data: dict, versions: set[str]) -> dict[str, set[str]]:
+    """Minor line -> its versions, keyed in CUDA_HISTORY order (newest first).
+
+    Insertion order carries the sort: CUDA_HISTORY is maintained newest-first,
+    so the first time a minor line is seen fixes its position, and dicts
+    preserve that. No separate version sort to drift out of step with it.
+    """
+    groups: dict[str, set[str]] = {}
+    for row in data["CUDA_HISTORY"]:
+        if row["version"] in versions:
+            groups.setdefault(minor_line(row["version"]), set()).add(row["version"])
+    return groups
+
+
+def render_support_matrix(data: dict) -> str:
+    """Human-facing collapsed CUDA/driver matrix for the released lines.
+
+    One captioned table per minor line, all inside a single <Accordion>. A
+    flat 60-row run pushes its header off screen inside a collapsed panel;
+    per-line tables repeat the header every few rows. Separate tables rather
+    than a version column blanked after its first row -- blank leading cells
+    are ambiguous once the page is flattened into the agent markdown export.
+    """
+    versions = released_versions(data)
+    groups = group_by_minor_line(data, versions)
+    if not groups:
+        raise TSParseError(
+            "no CUDA_HISTORY row matches a released RELEASES version -- the "
+            "support-matrix accordion would render an empty table"
+        )
+
+    parts = [
+        '<Accordion title="CUDA toolkit and minimum driver by release">',
+        "Every released line — stable releases and their patches, grouped by "
+        "minor line, newest first. Platform previews and model-specific "
+        "builds are not listed individually; those with a documented toolkit "
+        "requirement appear in the notes below, and "
+        "[Releases (machine-readable)](releases-machine-readable.mdx) "
+        "has the full release inventory.",
+    ]
+    for line, line_versions in groups.items():
+        parts.append(f"**{line}**")
+        parts.append(cuda_table(data, line_versions))
+    cuda_notes = data.get("CUDA_NOTES") or []
+    if cuda_notes:
+        parts.append("\n".join(f"- {note}" for note in cuda_notes))
+    parts.append("</Accordion>")
     return "\n\n".join(parts)
 
 

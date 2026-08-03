@@ -153,9 +153,11 @@ targets. The perf model is bootstrapped from the first available source:
 3. `profile_results_dir` NPZ/JSON fallback data
 4. live FPM regression warmup when no pre-deployment data is available
 
-The Rust perf shim can use native AIC estimates and online FPM tuning. Runtime
-metadata such as KV hit rate and speculative accept length are applied as input
-features, not as persistent correction-factor flags.
+The Planner calls `aiconfigurator_core.sdk.RustForwardPassPerfModel` directly
+for native AIC estimates, online correction, and regression fallback. A
+Planner-owned engine-query layer derives queue drain, TTFT, ITL, and capacity.
+Runtime metadata such as KV hit rate and speculative accept length are applied
+as input features, not as persistent correction-factor flags.
 
 ### Step 4: Proposal and Lower Bound
 

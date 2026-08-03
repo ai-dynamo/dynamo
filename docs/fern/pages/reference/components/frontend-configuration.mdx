@@ -56,6 +56,11 @@ The Rust HTTP server also reads these environment variables, which are not expos
   cached when the HTTP service initializes.
 </ParamField>
 
+<ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
+  Interval in milliseconds between SSE comment frames while a streaming response has no data.
+  Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
+</ParamField>
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
