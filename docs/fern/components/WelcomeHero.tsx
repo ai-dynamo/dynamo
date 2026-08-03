@@ -203,12 +203,6 @@ export function WelcomeHero({ src }: WelcomeHeroProps) {
               <path d="m9 18 6-6-6-6" />
             </svg>
           </a>
-          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={SLACK_URL} target="_blank" rel="noopener noreferrer">
-            Join Slack
-          </a>
-          <a className="dynamo-welcome__cta dynamo-welcome__cta--secondary" href={CALENDAR_URL} target="_blank" rel="noopener noreferrer">
-            View calendar
-          </a>
         </div>
       </section>
 

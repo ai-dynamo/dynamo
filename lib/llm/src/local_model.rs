@@ -37,7 +37,8 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+/// Default for `LocalModelBuilder::self_host_metadata`. On by default;
+/// set to an explicitly falsy value (`0`/`false`/`no`/`off`) to opt out.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
@@ -46,7 +47,10 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(dynamo_runtime::config::is_truthy)
+    // Unset, empty, and unrecognized values keep the default-on behavior.
+    value
+        .and_then(dynamo_runtime::config::parse_bool_opt)
+        .unwrap_or(true)
 }
 
 pub struct LocalModelBuilder {
@@ -207,8 +211,7 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
-    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    /// Opt in or out of self-hosting MDC artifacts. Default `true`.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -675,12 +678,15 @@ impl LocalModel {
         let component = endpoint.component().name().to_string();
         let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
-            tracing::warn!(
-                model_slug = %self.card.slug(),
-                "self_host_metadata enabled but system_status_server is not \
-                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
-                 set DYN_SYSTEM_PORT to enable",
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "self_host_metadata is ON but DYN_SYSTEM_PORT is unset; \
+                     falling back to shared-storage MDC. Set DYN_SYSTEM_PORT \
+                     (e.g. 9090) to enable self-hosting, or set \
+                     DYN_SELF_HOST_METADATA=0 to silence this warning.",
+                );
+            });
             return Ok(());
         };
         let model_slug = self.card.slug().to_string();
@@ -876,24 +882,18 @@ fn harvest_extra_files(
 }
 
 #[cfg(test)]
-mod env_self_host_metadata_tests {
+mod self_host_metadata_default_tests {
     use super::*;
 
+    // parse_bool_opt owns the falsy/truthy vocabulary (tested in the `truthy`
+    // crate); here we only lock the default-on inversion this flag introduced:
+    // anything that isn't an explicit falsy token stays ON.
     #[test]
-    fn env_default_parsing() {
-        assert!(!self_host_metadata_default(None), "unset → default OFF");
-
-        for v in [
-            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
-        ] {
-            assert!(
-                !self_host_metadata_default(Some(v)),
-                "expected OFF for {v:?}"
-            );
-        }
-        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
-        }
+    fn defaults_on_unless_explicitly_falsy() {
+        assert!(self_host_metadata_default(None)); // unset
+        assert!(self_host_metadata_default(Some(""))); // empty
+        assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
+        assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
     }
 }
 
