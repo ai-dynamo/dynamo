@@ -38,106 +38,172 @@ Dynamo routing:
 | LLM | NVIDIA Nemotron 3 Nano 30B A3B FP8 |
 | TTS | Magpie TTS Multilingual 1.8.0 |
 
-## Build
+## Deploy on Kubernetes
 
-The Riva Python client is not included in the vLLM runtime. Build one image for
-the frontend, vLLM worker, and lightweight speech adapters:
+The manifest creates a Dynamo frontend, a vLLM worker, and separate ASR and TTS
+worker pods. Each speech worker runs its Riva NIM as a sidecar. The deployment
+uses three GPUs in total, one for each model.
 
-```bash
-cd examples/riva_cascaded_pipeline
-BASE_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag> \
-  TAG=<registry>/dynamo-riva:<tag> ./container/build.sh
-```
+### Prerequisites
 
-Use an immutable base image digest for measured runs.
+- A Kubernetes cluster with at least three NVIDIA GPUs and the
+  [Dynamo Kubernetes Platform](../../docs/fern/kubernetes/quickstart.mdx)
+  installed.
+- Docker access to a registry that the cluster can pull from.
+- An NGC API key with access to the ASR and TTS NIM images.
+- A Hugging Face token with access to the Nemotron LLM.
+- A ReadWriteMany storage class for the shared model cache.
 
-## Run locally
-
-Start the ASR and TTS NIMs before launching Dynamo. The host ports below avoid
-collisions between their gRPC and health endpoints:
-
-```bash
-docker run -d --name nemotron-asr --gpus '"device=0"' --shm-size=16g \
-  -e NGC_API_KEY -e NIM_GRPC_API_PORT=50152 -e NIM_HTTP_API_PORT=9012 \
-  -e NIM_TAGS_SELECTOR='type=en-US,mode=str' \
-  -p 50152:50152 -p 9012:9012 -v ~/.cache/nim/asr:/opt/nim/.cache \
-  nvcr.io/nim/nvidia/nemotron-asr-streaming:1.2.0
-
-docker run -d --name magpie-tts --gpus '"device=1"' --shm-size=16g \
-  -e NGC_API_KEY -e NIM_GRPC_API_PORT=50151 -e NIM_HTTP_API_PORT=9011 \
-  -e NIM_TAGS_SELECTOR='name=magpie-tts-multilingual,batch_size=8' \
-  -p 50151:50151 -p 9011:9011 -v ~/.cache/nim/tts:/opt/nim/.cache \
-  nvcr.io/nim/nvidia/magpie-tts-multilingual:1.8.0
-```
-
-Inside the built Dynamo image, start the normal local discovery dependencies,
-then launch all public endpoints:
+Run all commands from the Dynamo repository root. Set the deployment values
+once:
 
 ```bash
-ASR_RIVA_SERVER=localhost:50152 \
-TTS_RIVA_SERVER=localhost:50151 \
-LLM_GPU_DEVICES=2 \
-LLM_TP_SIZE=1 \
-  ./launch_workers.sh
+export NAMESPACE=voice-agent
+export DYNAMO_IMAGE=<registry-host>/<project>/dynamo-riva:<tag>
+export DYNAMO_REGISTRY=<registry-host>
+export DYNAMO_REGISTRY_USER=<username>
+export DYNAMO_REGISTRY_PASSWORD=<password>
+export NGC_API_KEY=<ngc-api-key>
+export HF_TOKEN=<hugging-face-token>
+export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
 
-This layout uses GPUs 0 and 1 for the NIM containers and GPU 2 for vLLM. Each
-speech worker waits for its Riva gRPC channel before registering the model, so
-the frontend cannot route traffic to an unready NIM.
+### 1. Build and push the image
 
-The resulting contracts are:
+To ensure the runtime contains the Dynamo changes used by this example, first
+build the vLLM runtime from the same checkout. Then add the Riva client and
+adapters:
 
-- `ws://localhost:8000/v1/realtime`, transcription sessions using 24 kHz PCM
+```bash
+container/render.py --framework vllm --target runtime --output-short-filename
+docker build -t dynamo-riva-base:dev -f container/rendered.Dockerfile .
+
+BASE_IMAGE=dynamo-riva-base:dev TAG="${DYNAMO_IMAGE}" \
+  ./examples/riva_cascaded_pipeline/container/build.sh
+docker push "${DYNAMO_IMAGE}"
+```
+
+When the same revision is available in a published runtime image, that image
+can be passed directly as `BASE_IMAGE`.
+
+### 2. Create the namespace and credentials
+
+```bash
+kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
+  | kubectl apply -f -
+
+kubectl create secret docker-registry dynamo-image-pull-secret \
+  --namespace "${NAMESPACE}" \
+  --docker-server "${DYNAMO_REGISTRY}" \
+  --docker-username "${DYNAMO_REGISTRY_USER}" \
+  --docker-password "${DYNAMO_REGISTRY_PASSWORD}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret docker-registry ngc-secret \
+  --namespace "${NAMESPACE}" \
+  --docker-server nvcr.io \
+  --docker-username '$oauthtoken' \
+  --docker-password "${NGC_API_KEY}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic ngc-api \
+  --namespace "${NAMESPACE}" \
+  --from-literal=NGC_API_KEY="${NGC_API_KEY}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic hf-token-secret \
+  --namespace "${NAMESPACE}" \
+  --from-literal=HF_TOKEN="${HF_TOKEN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### 3. Create the shared model cache
+
+The three model pods may run on different nodes, so the cache must support
+`ReadWriteMany`:
+
+```bash
+kubectl apply --namespace "${NAMESPACE}" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${RWX_STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 200Gi
+EOF
+```
+
+### 4. Deploy the graph
+
+Replace the example image name while applying the tracked manifest:
+
+```bash
+sed "s|dynamo-riva:latest|${DYNAMO_IMAGE}|g" \
+  examples/riva_cascaded_pipeline/deploy/agg.yaml \
+  | kubectl apply --namespace "${NAMESPACE}" -f -
+```
+
+Watch the model pods start. Initial NIM and LLM downloads can take several
+minutes:
+
+```bash
+kubectl get dgd riva-cascaded --namespace "${NAMESPACE}"
+kubectl get pods --namespace "${NAMESPACE}" \
+  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded --watch
+```
+
+After the pods appear, wait for every container to become ready:
+
+```bash
+kubectl wait --namespace "${NAMESPACE}" --for=condition=Ready pod \
+  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded \
+  --timeout=45m
+```
+
+If a pod does not become ready, inspect its events and container logs:
+
+```bash
+kubectl describe pod --namespace "${NAMESPACE}" \
+  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded
+kubectl logs --namespace "${NAMESPACE}" \
+  --selector nvidia.com/dynamo-component=RivaAsrWorker \
+  --container riva-asr --tail=100
+```
+
+### 5. Connect and validate
+
+Forward the generated frontend service:
+
+```bash
+kubectl port-forward --namespace "${NAMESPACE}" \
+  service/riva-cascaded-frontend 8000:8000
+```
+
+The deployment exposes:
+
+- `ws://localhost:8000/v1/realtime`, transcription using 24 kHz PCM
 - `http://localhost:8000/v1/chat/completions`
 - `http://localhost:8000/v1/audio/speech`, streaming 24 kHz PCM
 
-The TTS adapter requires Dynamo's streaming `/v1/audio/speech` support from
-[PR #12100](https://github.com/ai-dynamo/dynamo/pull/12100). Until that change
-lands on `main`, build this example from a revision containing the PR; the
-non-streaming frontend returns only the first upstream audio chunk.
-
-The realtime ASR adapter intentionally disables server VAD. Pipecat's local VAD
-and Smart Turn processors commit input audio, preserving identical conversation
-behavior across both backend profiles.
-
-Run a compact speech-path check after all three models are warm:
+In another terminal, install the small client dependency and exercise TTS and
+ASR together:
 
 ```bash
-python3 smoke_speech_loop.py
+python3 -m pip install aiohttp
+python3 examples/riva_cascaded_pipeline/smoke_speech_loop.py
 ```
 
-The check streams TTS output into the realtime ASR session and reports TTS TTFB,
-ASR first-transcript latency, PCM RMS, and the final transcript. It fails on HTTP
-or WebSocket error, silent audio, or an empty transcript.
+The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
+transcript. It fails on an API error, silent audio, or an empty transcript.
 
-## Deploy with DGD
-
-The deployment uses the same adapter image for the frontend, vLLM, and speech
-workers. ASR and TTS NIMs run as sidecars in their respective worker pods.
-
-Before applying it:
-
-1. Push the built Dynamo image to a registry available to the cluster.
-2. Set the image pull secret names for the Dynamo image and NGC NIM images.
-3. Create `ngc-api` with an `NGC_API_KEY` key and `hf-token-secret` with the
-   Hugging Face token expected by the vLLM runtime.
-4. Provide an RWX PVC named `model-cache`, or change the claim name.
-
-Render the image reference without editing the tracked manifest:
-
-```bash
-export DYNAMO_IMAGE=<registry>/dynamo-riva:<tag>
-sed "s|dynamo-riva:latest|${DYNAMO_IMAGE}|g" deploy/agg.yaml \
-  | kubectl apply -f -
-kubectl get dgd,pods
-```
-
-Forward the generated frontend service after all model containers are ready:
-
-```bash
-kubectl get services
-kubectl port-forward service/<frontend-service> 8000:8000
-```
+The TTS adapter requires a Dynamo runtime with streaming
+`/v1/audio/speech` support. The realtime ASR adapter disables server VAD
+because Pipecat's local VAD and Smart Turn processors commit the input audio.
 
 ## Use the Blueprint UI
 
@@ -152,12 +218,6 @@ docker compose --profile generic-assistant/dynamo up -d
 Open `http://localhost:7860`. This is the same application, browser UI,
 Pipecat pipeline, prompt, VAD, and turn processor used by the direct NIM
 profile; only the service endpoints differ.
-
-The recorded NIM image digests are:
-
-- LLM: `sha256:ef711febf0e5b9884f9c37b4868b48d65e1899dc13055541bb746fcb09bac7e0`
-- ASR: `sha256:0f01867023d93402fefab2859bdc363cf6f002e37083e5c0ca5d632df30e1850`
-- TTS: `sha256:f71667404b3b72a80e24e9a39bf7fc36ac85b11289143cfced9702786ae31f6e`
 
 ## Tests
 
