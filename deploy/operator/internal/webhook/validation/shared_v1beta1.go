@@ -434,6 +434,36 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		}
 	}
 
+	if newComponent.Experimental != nil {
+		gmsSpec := newComponent.Experimental.GPUMemoryService
+		if gmsSpec != nil && effectiveGMSMode(gmsSpec.Mode) == nvidiacomv1beta1.GMSModeIntraPod {
+			// Read the declared pod containers from the sibling pod template.
+			var containers []corev1.Container
+			if newComponent.PodTemplate != nil {
+				containers = newComponent.PodTemplate.Spec.Containers
+			}
+
+			// Validate every updated GMS client reference at its indexed field path.
+			seen := make(map[string]struct{}, len(gmsSpec.ExtraClientContainers))
+			extraClientContainersPath := fldPath.Child("experimental", "gpuMemoryService", "extraClientContainers")
+			for i, name := range gmsSpec.ExtraClientContainers {
+				clientPath := extraClientContainersPath.Index(i)
+				if _, exists := seen[name]; exists {
+					allErrs = append(allErrs, field.Duplicate(clientPath, name))
+					continue
+				}
+				seen[name] = struct{}{}
+				if !hasContainerNamed(containers, name) {
+					allErrs = append(allErrs, field.Invalid(
+						clientPath,
+						name,
+						"does not name a container in podTemplate.spec.containers",
+					))
+				}
+			}
+		}
+	}
+
 	// Ratchet legacy image absence or an unchanged legacy tuple, but reject a newly invalid tuple.
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)

@@ -1562,6 +1562,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// GMS and failover updates.
 		{
+			name: "GMS extra client container update must resolve",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaIntraPodGMS(worker)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+		},
+		{
 			name:          "inter-pod GMS layout is immutable",
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
