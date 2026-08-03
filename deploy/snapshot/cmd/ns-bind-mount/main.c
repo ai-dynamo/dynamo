@@ -4,8 +4,9 @@
  *
  * ns-bind-mount: bind-mount or unmount a directory in another process's mount namespace.
  *
- * Mount:   ns-bind-mount <pid> <src> <dst> [ro]
- * Unmount: ns-bind-mount umount <pid> <dst>
+ * Mount:      ns-bind-mount <pid> <src> <dst> [ro]
+ * Unmount:    ns-bind-mount umount <pid> <dst>
+ * Unmount-fd: ns-bind-mount umount-fd <ns_fd> <dst>
  *
  * Mount uses open_tree(OPEN_TREE_CLONE) to capture the source before entering
  * the target namespace, then move_mount to attach it there.  Unmount enters
@@ -101,12 +102,12 @@ do_umount(int argc, char* argv[])
 
   /* MNT_DETACH: lazy unmount — succeeds even if the path is busy. */
   if (umount2(dst, MNT_DETACH) < 0) {
-    if (errno == ENOENT || errno == EINVAL) {
-      /* Already gone (CRIU removed it during namespace restore). */
-      return 0;
+    if (errno != ENOENT && errno != EINVAL) {
+      fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
+      return 1;
     }
-    fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
-    return 1;
+    /* Already gone (CRIU removed it during namespace restore).
+     * Fall through to rmdir so we don't leave the directory behind. */
   }
 
   /* Remove the directory we created at mount time. Ignore errors — the
@@ -115,9 +116,46 @@ do_umount(int argc, char* argv[])
   return 0;
 }
 
+/* Unmount via an open namespace fd rather than a pid.  The caller (Go) passes
+ * an already-open /proc/<pid>/ns/mnt fd inherited through ExtraFiles; using
+ * the fd avoids the PID-reuse window between mount time and cleanup. */
+static int
+do_umount_fd(int argc, char* argv[])
+{
+  if (argc < 4) {
+    fprintf(stderr, "usage: ns-bind-mount umount-fd <ns_fd> <dst>\n");
+    return 1;
+  }
+  char* end;
+  long fd_val = strtol(argv[2], &end, 10);
+  if (*end != '\0' || fd_val < 0 || fd_val > INT_MAX) {
+    fprintf(stderr, "invalid fd: %s\n", argv[2]);
+    return 1;
+  }
+  int ns_fd = (int)fd_val;
+  const char* dst = argv[3];
+
+  if (setns(ns_fd, CLONE_NEWNS) < 0) {
+    fprintf(stderr, "setns fd %d: %s\n", ns_fd, strerror(errno));
+    return 1;
+  }
+
+  if (umount2(dst, MNT_DETACH) < 0) {
+    if (errno != ENOENT && errno != EINVAL) {
+      fprintf(stderr, "umount2 %s: %s\n", dst, strerror(errno));
+      return 1;
+    }
+  }
+
+  rmdir(dst);
+  return 0;
+}
+
 int
 main(int argc, char* argv[])
 {
+  if (argc >= 2 && strcmp(argv[1], "umount-fd") == 0)
+    return do_umount_fd(argc, argv);
   if (argc >= 2 && strcmp(argv[1], "umount") == 0)
     return do_umount(argc, argv);
 
@@ -125,7 +163,8 @@ main(int argc, char* argv[])
     fprintf(
         stderr,
         "usage: ns-bind-mount <pid> <src> <dst> [ro]\n"
-        "       ns-bind-mount umount <pid> <dst>\n");
+        "       ns-bind-mount umount <pid> <dst>\n"
+        "       ns-bind-mount umount-fd <ns_fd> <dst>\n");
     return 1;
   }
 

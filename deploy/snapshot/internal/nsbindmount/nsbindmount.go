@@ -11,6 +11,7 @@ package nsbindmount
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -65,17 +66,12 @@ func NewWithBinary(path string, log logr.Logger) *ExecMounter {
 }
 
 // mountHandle is the concrete MountHandle returned by ExecMounter.Mount.
-//
-// PID-lifetime constraint: Unmount re-enters the target namespace by PID. The
-// caller must invoke Unmount while the target process is still alive; if the
-// process has exited and its PID been recycled, the helper would enter an
-// unrelated namespace. In the current CRIU-restore flow this is guaranteed —
-// Cleanup is deferred inside the same scope that holds the placeholder
-// container alive. If this handle ever outlives the target process, replace
-// pidStr with an open /proc/<pid>/ns/mnt file descriptor held since Mount time.
+// It holds an open /proc/<pid>/ns/mnt fd captured at mount time so that
+// Unmount can re-enter the correct namespace even after the target process
+// has exited and its PID been recycled by the kernel.
 type mountHandle struct {
 	binaryPath string
-	pidStr     string
+	nsFd       *os.File // /proc/<pid>/ns/mnt opened at Mount time
 	dst        string
 	log        logr.Logger
 	once       sync.Once
@@ -86,15 +82,20 @@ func (h *mountHandle) TargetPath() string { return h.dst }
 
 func (h *mountHandle) Unmount(_ context.Context) error {
 	h.once.Do(func() {
+		defer h.nsFd.Close()
 		// Use a fresh context with a hard timeout so a hung umount does not block
 		// indefinitely. Parent context is intentionally not forwarded: cleanup must
 		// complete even if the caller's context is already cancelled.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, h.binaryPath, "umount", h.pidStr, h.dst).CombinedOutput()
+		// Pass the ns fd as fd 3 in the child via ExtraFiles; Go maps
+		// ExtraFiles[0] → fd 3 (after stdin/stdout/stderr).
+		cmd := exec.CommandContext(ctx, h.binaryPath, "umount-fd", "3", h.dst)
+		cmd.ExtraFiles = []*os.File{h.nsFd}
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			h.log.Error(err, "failed to unmount from namespace", "dst", h.dst, "output", strings.TrimSpace(string(out)))
-			h.unmountErr = fmt.Errorf("ns-bind-mount umount %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
+			h.unmountErr = fmt.Errorf("ns-bind-mount umount-fd %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
 			return
 		}
 		h.log.Info("unmounted from namespace", "dst", h.dst)
@@ -105,6 +106,9 @@ func (h *mountHandle) Unmount(_ context.Context) error {
 // Mount bind-mounts src (in the current namespace) to dst inside the mount
 // namespace of pid. It uses open_tree(OPEN_TREE_CLONE) to capture the source
 // before the namespace switch so the mount is independent of the source tree.
+// After a successful mount it opens /proc/<pid>/ns/mnt and holds the fd in
+// the returned handle so Unmount can re-enter the namespace without relying
+// on the PID still being alive.
 func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
 	pidStr := strconv.Itoa(pid)
 	args := []string{pidStr, src, dst}
@@ -117,9 +121,19 @@ func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 	}
 	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "pid", pid)
 
+	nsFd, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	if err != nil {
+		// Mount succeeded but we cannot hold the namespace reference — unmount
+		// synchronously so the caller never receives an un-unmountable handle.
+		if out, umErr := exec.Command(m.binaryPath, "umount", pidStr, dst).CombinedOutput(); umErr != nil {
+			m.log.Error(umErr, "cleanup unmount failed after ns fd open error", "dst", dst, "output", strings.TrimSpace(string(out)))
+		}
+		return nil, fmt.Errorf("open /proc/%d/ns/mnt: %w", pid, err)
+	}
+
 	return &mountHandle{
 		binaryPath: m.binaryPath,
-		pidStr:     pidStr,
+		nsFd:       nsFd,
 		dst:        dst,
 		log:        m.log,
 	}, nil
