@@ -85,18 +85,26 @@ exceptions:
       than gated here. The glob covers the whole vendored dir so the libsw*
       companions are waived too, not just libavcodec.
 
-      Expected to narrow. DALI has since restricted its own ffmpeg build to drop
-      the software h264/hevc/aac decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352,
-      May 2026), keeping the mp4toannexb bitstream filters so hardware decode
-      still works -- the same split Dynamo's in-tree ffmpeg uses. The DALI build
-      vendored in the image we consume predates that change: enumerating
-      av_codec_iterate on its libavcodec still registers h264, hevc, aac,
-      aac_fixed and aac_latm (446 decoders total). Re-check with
-      container/compliance/enumerate_bundled_decoders.py when the vendored
-      version moves;
-      once a build carrying the trim is in place this waiver can be narrowed to
-      the non-codec companions, or dropped. Treat it as time-limited rather than
-      settled.
+      Resolved by a version bump, not by narrowing. Measured with
+      container/compliance/enumerate_bundled_decoders.py against the shipped
+      image: DALI 2.1.0 registers 446 decoders including h264, hevc, aac,
+      aac_fixed and aac_latm. DALI restricted its own ffmpeg build to drop those
+      (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352, May 2026), first released in
+      2.1.1 -- as a cherry-pick, so checking whether the merge commit is an
+      ancestor of the tag gives the wrong answer; the release notes are the
+      reliable source. Upgrading the wheel in place to 2.1.1 or 2.2.0 leaves 440
+      decoders with all five absent, vp8/vp9/mjpeg/av1 still present, and the
+      image importing and passing its unit suite.
+
+      This waiver cannot be narrowed to the non-codec companions, which an
+      earlier revision of this note claimed. libavcodec, libavfilter, libavformat,
+      libavutil and libswscale are all DT_NEEDED by libdali.so, libdali_kernels.so,
+      libdali_operators.so and every python_function_plugin, so removing the codec
+      libraries on their own breaks `import nvidia.dali` outright. The vendored
+      set is all-or-nothing with the package.
+
+      Re-measure when the vendored version moves. Drop this entry once the image
+      carries 2.1.1 or newer.
     owner: DALI
   # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
   # libavformat under its package dir to demux input containers before handing the
