@@ -25,6 +25,7 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/go-logr/logr"
 	"github.com/imdario/mergo"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -53,6 +54,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -107,6 +109,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=disaggregatedset.x-k8s.io,resources=disaggregatedsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -337,42 +340,13 @@ type ReconcileResult struct {
 	RestartStatus   *nvidiacomv1beta1.RestartStatus
 }
 
+const resourceNotFoundReason = "resource not found"
+
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	// Ensure planner RBAC exists in cluster-wide mode
-	if r.Config.Namespace.Restricted == "" {
-		if r.RBACManager == nil {
-			return ReconcileResult{}, fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
-		}
-		if r.Config.RBAC.PlannerClusterRoleName == "" {
-			return ReconcileResult{}, fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
-		}
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-			ctx,
-			dynamoDeployment.Namespace,
-			consts.PlannerServiceAccountName,
-			r.Config.RBAC.PlannerClusterRoleName,
-		); err != nil {
-			logger.Error(err, "Failed to ensure planner RBAC")
-			return ReconcileResult{}, fmt.Errorf("failed to ensure planner RBAC: %w", err)
-		}
-
-		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
-		if dynamoDeployment.HasEPPComponent() {
-			if r.Config.RBAC.EPPClusterRoleName == "" {
-				return ReconcileResult{}, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
-			}
-			if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-				ctx,
-				dynamoDeployment.Namespace,
-				consts.EPPServiceAccountName,
-				r.Config.RBAC.EPPClusterRoleName,
-			); err != nil {
-				logger.Error(err, "Failed to ensure EPP RBAC")
-				return ReconcileResult{}, fmt.Errorf("failed to ensure EPP RBAC: %w", err)
-			}
-		}
+	if err := r.ensureClusterScopedRBAC(ctx, dynamoDeployment, logger); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	// Reconcile top-level PVCs first
@@ -427,27 +401,31 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 	}
 
-	// return error early if Grove and LWS is not available for multinode
-	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.Gate.Enabled(features.LWS) {
+	useDisaggregatedSet, disaggregatedSetFallbackReason := r.shouldUseDisaggregatedSet(dynamoDeployment)
+
+	// return error early if Grove, DS, and LWS are all unavailable for multinode
+	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.RuntimeConfig.Gate.Enabled(features.LWS) && !useDisaggregatedSet {
 		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS), "disaggregatedSetEnabled", r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet))
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
+	restartState = r.coalesceDisaggregatedSetRestartStateForPath(dynamoDeployment, useDisaggregatedSet, restartState)
 
-	var result ReconcileResult
-	if r.isGrovePathway(dynamoDeployment) {
-		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-	} else {
-		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
-		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
-	}
+	result, err := r.reconcileWorkloadResources(
+		ctx,
+		dynamoDeployment,
+		hasMultinode,
+		useDisaggregatedSet,
+		disaggregatedSetFallbackReason,
+		restartState,
+		checkpointInfos,
+	)
 	if err != nil {
-		logger.Error(err, "Failed to reconcile Dynamo components deployments")
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+		logger.Error(err, "Failed to reconcile workload resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile workload resources: %w", err)
 	}
 	result.RestartStatus = restartStatus
 	result = applyCheckpointStartupReadiness(result, checkpointInfos)
@@ -467,6 +445,132 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	return result, nil
 }
 
+func (r *DynamoGraphDeploymentReconciler) ensureClusterScopedRBAC(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	logger logr.Logger,
+) error {
+	if r.Config.Namespace.Restricted != "" {
+		return nil
+	}
+	if r.RBACManager == nil {
+		return fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+	}
+	if r.Config.RBAC.PlannerClusterRoleName == "" {
+		return fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+	}
+	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		ctx,
+		dynamoDeployment.Namespace,
+		consts.PlannerServiceAccountName,
+		r.Config.RBAC.PlannerClusterRoleName,
+	); err != nil {
+		logger.Error(err, "Failed to ensure planner RBAC")
+		return fmt.Errorf("failed to ensure planner RBAC: %w", err)
+	}
+
+	if !dynamoDeployment.HasEPPComponent() {
+		return nil
+	}
+	if r.Config.RBAC.EPPClusterRoleName == "" {
+		return fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
+	}
+	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		ctx,
+		dynamoDeployment.Namespace,
+		consts.EPPServiceAccountName,
+		r.Config.RBAC.EPPClusterRoleName,
+	); err != nil {
+		logger.Error(err, "Failed to ensure EPP RBAC")
+		return fmt.Errorf("failed to ensure EPP RBAC: %w", err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	hasMultinode bool,
+	useDisaggregatedSet bool,
+	disaggregatedSetFallbackReason string,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (ReconcileResult, error) {
+	logger := log.FromContext(ctx)
+
+	if r.isGrovePathway(dynamoDeployment) {
+		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
+		return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, false, func() (ReconcileResult, error) {
+			return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+		})
+	}
+
+	if useDisaggregatedSet {
+		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "disaggregatedSetEnabled", r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet))
+		return r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+	}
+
+	if r.wantsDisaggregatedSet(dynamoDeployment) && disaggregatedSetFallbackReason != "" {
+		logger.Info("DisaggregatedSet requested but falling back to DynamoComponentDeployments", "reason", disaggregatedSetFallbackReason)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "DisaggregatedSetFallback", "DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s", disaggregatedSetFallbackReason)
+		}
+	}
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.Gate.Enabled(features.LWS))
+	return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, true, func() (ReconcileResult, error) {
+		return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
+	})
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileReplacementBeforeDisaggregatedSetCleanup(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	restoreDCDServiceOwnership bool,
+	reconcileReplacement func() (ReconcileResult, error),
+) (ReconcileResult, error) {
+	result, err := reconcileReplacement()
+	if err != nil || result.State != nvidiacomv1beta1.DGDStateSuccessful {
+		return result, err
+	}
+	if restoreDCDServiceOwnership {
+		if err := r.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, dgd); err != nil {
+			return ReconcileResult{}, err
+		}
+	}
+	if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dgd); err != nil {
+		return ReconcileResult{}, err
+	}
+	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetOnLegacyPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	if !r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		return nil
+	}
+	return r.deleteDisaggregatedSetIfExists(ctx, dgd)
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteGrovePodCliqueSetOnDisaggregatedSetPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	if !r.RuntimeConfig.Gate.Enabled(features.Grove) {
+		return nil
+	}
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	key := types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}
+	if err := r.Client.Get(ctx, key, pcs); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get stale PodCliqueSet %s: %w", key, err)
+	}
+	if !isControlledByBetaDGD(pcs, dgd) {
+		return fmt.Errorf("refusing to delete PodCliqueSet %s because it is not controlled by DynamoGraphDeployment %s/%s", key, dgd.Namespace, dgd.Name)
+	}
+	if err := r.Client.Delete(ctx, pcs); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete stale PodCliqueSet %s: %w", key, err)
+	}
+	return nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return r.RuntimeConfig.Gate.Enabled(features.Grove) && (dgd.Annotations == nil ||
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
@@ -475,6 +579,9 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.D
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 	if r.isGrovePathway(dgd) {
 		return r.getUpdatedInProgressForGrove(ctx, dgd, inProgress)
+	}
+	if useDisaggregatedSet, _ := r.shouldUseDisaggregatedSet(dgd); useDisaggregatedSet {
+		return r.getUpdatedInProgressForDisaggregatedSet(ctx, dgd, inProgress)
 	}
 	return r.getUpdatedInProgressForComponent(ctx, dgd, inProgress)
 }
@@ -1424,7 +1531,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	logger.Info("Component restart completed", "component", currentComponent)
 
 	// Find the next component.
-	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	nextComponent, currentFound := r.getNextSequentialRestartComponent(dgd, order, currentComponent)
 	if !currentFound {
 		logger.Info("Current restart component is no longer in order, restarting sequence from first component", "component", currentComponent, "firstComponent", order[0])
 		return &nvidiacomv1beta1.RestartStatus{
@@ -1450,6 +1557,40 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
 		InProgress: []string{nextComponent},
 	}
+}
+
+// getNextSequentialRestartComponent skips selected DisaggregatedSet roles after
+// one of them completes. Those roles share one DisaggregatedSet revision and
+// are restarted together, even when the DGD restart strategy is sequential.
+func (r *DynamoGraphDeploymentReconciler) getNextSequentialRestartComponent(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	order []string,
+	currentComponent string,
+) (string, bool) {
+	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	if !currentFound || nextComponent == "" {
+		return nextComponent, currentFound
+	}
+
+	useDisaggregatedSet, _ := r.shouldUseDisaggregatedSet(dgd)
+	if !useDisaggregatedSet || r.isGrovePathway(dgd) {
+		return nextComponent, currentFound
+	}
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	if reason != "" {
+		return nextComponent, currentFound
+	}
+	if _, selected := selection.componentToRole[currentComponent]; !selected {
+		return nextComponent, currentFound
+	}
+
+	for nextComponent != "" {
+		if _, selected := selection.componentToRole[nextComponent]; !selected {
+			return nextComponent, true
+		}
+		nextComponent, _ = getNextComponentInOrder(order, nextComponent)
+	}
+	return "", true
 }
 
 // getNextComponentInOrder returns the component after the current component.
@@ -1517,7 +1658,7 @@ func (r *DynamoGraphDeploymentReconciler) checkComponentFullyUpdated(ctx context
 	for _, hash := range r.activeWorkerHashCandidates(dgd, hashes) {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
 		ready, reason := checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
-		if ready || reason != "resource not found" {
+		if ready || reason != resourceNotFoundReason {
 			return ready, reason
 		}
 		lastReason = reason
@@ -1536,7 +1677,7 @@ func checkDCDReady(ctx context.Context, client client.Client, resourceName, name
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("DynamoComponentDeployment not found", "resourceName", resourceName)
-			return false, "resource not found"
+			return false, resourceNotFoundReason
 		}
 		logger.V(1).Info("Failed to get DynamoComponentDeployment", "error", err, "resourceName", resourceName)
 		return false, fmt.Sprintf("get error: %v", err)
@@ -2769,6 +2910,30 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 	return r.deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
+func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
+	oldDGD, oldOK := update.ObjectOld.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	newDGD, newOK := update.ObjectNew.(*nvidiacomv1beta1.DynamoGraphDeployment)
+	if !oldOK || !newOK {
+		return false
+	}
+	annotationValue := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, key string) string {
+		return strings.ToLower(dgd.GetAnnotations()[key])
+	}
+	return annotationValue(oldDGD, consts.KubeAnnotationEnableDisaggregatedSet) != annotationValue(newDGD, consts.KubeAnnotationEnableDisaggregatedSet) ||
+		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
+}
+
+func dgdOwnedServiceEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		// DS-path Services are controlled directly by the DGD. Ignore creation
+		// because the current reconcile just created the desired object.
+		CreateFunc:  func(ce event.CreateEvent) bool { return false },
+		DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+		UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+		GenericFunc: func(ge event.GenericEvent) bool { return true },
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -2782,7 +2947,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			predicate.GenerationChangedPredicate{},
+			predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.Funcs{UpdateFunc: workloadRoutingAnnotationsChanged},
+			),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Watches(
@@ -2807,6 +2975,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Owns(&corev1.Service{}, builder.WithPredicates(dgdOwnedServiceEventPredicate())).
 		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the adapter
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -2829,6 +2998,23 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		}))
+	}
+	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
+		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(ue event.UpdateEvent) bool { return disaggregatedSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		})).Watches(
+			&leaderworkersetv1.LeaderWorkerSet{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDisaggregatedSetChildLWSToDGD),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return true },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return leaderWorkerSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		)
 	}
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{

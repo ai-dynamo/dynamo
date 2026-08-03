@@ -387,6 +387,58 @@ endif
 		-dgdr-image=$(DGDR_IMAGE) \
 		$(DGDR_TEST_FLAGS)
 
+# DisaggregatedSet e2e test configuration.
+DISAGGREGATEDSET_TEST_TIMEOUT ?= 20m
+DISAGGREGATEDSET_NAMESPACE ?= dynamo-test
+DISAGGREGATEDSET_LWS_VERSION ?= v0.9.0
+DISAGGREGATEDSET_VOLCANO_VERSION ?= v1.14.0
+DISAGGREGATEDSET_WORKLOAD_IMAGE ?= busybox:1.36
+DISAGGREGATEDSET_LWS_MANIFEST ?= https://github.com/kubernetes-sigs/lws/releases/download/$(DISAGGREGATEDSET_LWS_VERSION)/manifests.yaml
+DISAGGREGATEDSET_VOLCANO_MANIFEST ?= https://raw.githubusercontent.com/volcano-sh/volcano/$(DISAGGREGATEDSET_VOLCANO_VERSION)/installer/volcano-development.yaml
+
+.PHONY: ensure-e2e-disaggregatedset-lws  # Install the pinned LWS release when the API is absent.
+ensure-e2e-disaggregatedset-lws: kubectl
+	@images="$$($(KUBECTL) get deployments -A -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')"; \
+	if echo "$$images" | grep -Fqx "registry.k8s.io/lws/lws:$(DISAGGREGATEDSET_LWS_VERSION)"; then \
+		echo "LWS $(DISAGGREGATEDSET_LWS_VERSION) is already running"; \
+	elif $(KUBECTL) get crd disaggregatedsets.disaggregatedset.x-k8s.io >/dev/null 2>&1 || \
+	     $(KUBECTL) get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1; then \
+		echo "An LWS installation exists but is not running registry.k8s.io/lws/lws:$(DISAGGREGATEDSET_LWS_VERSION)"; \
+		echo "Refusing to modify an existing cluster-wide LWS installation"; \
+		exit 1; \
+	else \
+		$(KUBECTL) apply --server-side -f "$(DISAGGREGATEDSET_LWS_MANIFEST)"; \
+		$(KUBECTL) rollout status deployment/lws-controller-manager -n lws-system --timeout=3m; \
+	fi
+
+.PHONY: ensure-e2e-disaggregatedset-volcano  # Install pinned Volcano for the multinode DCD fallback.
+ensure-e2e-disaggregatedset-volcano: kubectl
+	@images="$$($(KUBECTL) get deployments -A -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')"; \
+	if echo "$$images" | grep -Fqx "docker.io/volcanosh/vc-scheduler:$(DISAGGREGATEDSET_VOLCANO_VERSION)"; then \
+		echo "Volcano $(DISAGGREGATEDSET_VOLCANO_VERSION) is already running"; \
+	elif $(KUBECTL) get crd podgroups.scheduling.volcano.sh >/dev/null 2>&1; then \
+		echo "A Volcano installation exists but is not running docker.io/volcanosh/vc-scheduler:$(DISAGGREGATEDSET_VOLCANO_VERSION)"; \
+		echo "Refusing to modify an existing cluster-wide Volcano installation"; \
+		exit 1; \
+	else \
+		$(KUBECTL) apply --server-side -f "$(DISAGGREGATEDSET_VOLCANO_MANIFEST)"; \
+		$(KUBECTL) rollout status deployment/volcano-admission -n volcano-system --timeout=3m; \
+		$(KUBECTL) rollout status deployment/volcano-controllers -n volcano-system --timeout=3m; \
+		$(KUBECTL) rollout status deployment/volcano-scheduler -n volcano-system --timeout=3m; \
+	fi
+
+.PHONY: prepare-e2e-disaggregatedset  # Install live-cluster dependencies before starting the Dynamo operator.
+prepare-e2e-disaggregatedset: ensure-e2e-disaggregatedset-lws ensure-e2e-disaggregatedset-volcano
+
+.PHONY: test-e2e-disaggregatedset  # Run DisaggregatedSet e2e tests against a live cluster.
+test-e2e-disaggregatedset: kubectl
+	go test ./test/e2e/disaggregatedset/ -v -ginkgo.v -timeout=$(DISAGGREGATEDSET_TEST_TIMEOUT) \
+		-disaggregatedset-namespace=$(DISAGGREGATEDSET_NAMESPACE) \
+		-disaggregatedset-lws-version=$(DISAGGREGATEDSET_LWS_VERSION) \
+		-disaggregatedset-volcano-version=$(DISAGGREGATEDSET_VOLCANO_VERSION) \
+		-disaggregatedset-workload-image=$(DISAGGREGATEDSET_WORKLOAD_IMAGE) \
+		$(DISAGGREGATEDSET_TEST_FLAGS)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run
