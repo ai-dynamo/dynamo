@@ -68,6 +68,11 @@ CHECKS: list[tuple[str, str, str]] = [
     ("community", ".dynamo-community-page", "LandingStyles"),
     ("digest", ".dynamo-blog-art__grid", "BlogStyles"),
     ("reference/compatibility", ".dynref-panel", "ReferenceStyles"),
+    (
+        "recipes/feature-benchmarks/llama-3-3-70b-topology",
+        ".dynamo-benchmark-grid",
+        "RecipeStyles",
+    ),
 ]
 
 # Minified CSS keeps only mandatory whitespace, so match `.foo{` and `.foo,`

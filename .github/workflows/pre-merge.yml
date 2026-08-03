@@ -108,8 +108,12 @@ jobs:
       run: npm install -g fern-api
     - name: Install yq
       run: |
-        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
-        sudo chmod +x /usr/local/bin/yq
+        # Runner-owned bin dir: no sudo, and $GITHUB_PATH puts it ahead of
+        # any preinstalled yq for the steps that follow.
+        mkdir -p "$RUNNER_TEMP/bin"
+        wget -qO "$RUNNER_TEMP/bin/yq" https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+        chmod +x "$RUNNER_TEMP/bin/yq"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
     - name: Replay the docs-website composition
       env:
         DOCS_WEBSITE_REF: origin/docs-website
