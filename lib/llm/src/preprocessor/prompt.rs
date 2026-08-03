@@ -91,8 +91,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
-        normalize_tool_call_arguments(&mut messages_json);
+        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
         Value::from_serialize(&messages_json)
     }
 
