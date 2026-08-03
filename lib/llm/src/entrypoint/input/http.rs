@@ -28,8 +28,6 @@ use dynamo_kv_router::{
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
-type WorkerSelectionPolicyFactory = WorkerSelectorFactory<WorkerSelectionPolicy>;
-
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
 /// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
@@ -37,7 +35,7 @@ type WorkerSelectionPolicyFactory = WorkerSelectorFactory<WorkerSelectionPolicy>
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
 }
 
 impl HttpFrontend {
