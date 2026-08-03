@@ -37,6 +37,12 @@ struct FpmTraceKey {
     producer_id: String,
 }
 
+#[derive(Clone, Debug)]
+struct FpmTraceInitPolicy {
+    policy: FpmTracePolicy,
+    sample_ratio: Option<f64>,
+}
+
 struct FpmTraceInner {
     producer_id: String,
     sender: broadcast::Sender<FpmTraceEvent>,
@@ -216,13 +222,15 @@ pub(crate) async fn init_from_env_with_shutdown(
         return Ok(None);
     }
 
-    init_with_policy_and_sample_ratio(
+    init_with_trace_policy(
         runtime_id,
         namespace,
         component,
         producer_id,
-        policy.clone(),
-        config::sample_ratio(),
+        FpmTraceInitPolicy {
+            policy: policy.clone(),
+            sample_ratio: config::sample_ratio(),
+        },
         shutdown,
         graceful_guard,
     )
@@ -239,29 +247,34 @@ async fn init_with_policy(
     shutdown: CancellationToken,
     graceful_guard: Option<GracefulTaskGuard>,
 ) -> anyhow::Result<Option<FpmTrace>> {
-    init_with_policy_and_sample_ratio(
+    init_with_trace_policy(
         runtime_id,
         namespace,
         component,
         producer_id,
-        policy,
-        None,
+        FpmTraceInitPolicy {
+            policy,
+            sample_ratio: None,
+        },
         shutdown,
         graceful_guard,
     )
     .await
 }
 
-async fn init_with_policy_and_sample_ratio(
+async fn init_with_trace_policy(
     runtime_id: &str,
     namespace: &str,
     component: &str,
     producer_id: &str,
-    policy: FpmTracePolicy,
-    sample_ratio: Option<f64>,
+    trace_policy: FpmTraceInitPolicy,
     shutdown: CancellationToken,
     graceful_guard: Option<GracefulTaskGuard>,
 ) -> anyhow::Result<Option<FpmTrace>> {
+    let FpmTraceInitPolicy {
+        policy,
+        sample_ratio,
+    } = trace_policy;
     let source = sink::FpmTraceSource {
         namespace: namespace.to_string(),
         component: component.to_string(),
