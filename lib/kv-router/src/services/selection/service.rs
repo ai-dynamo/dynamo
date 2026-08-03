@@ -218,6 +218,19 @@ impl SelectionService {
         self.core.upsert_worker(req).await
     }
 
+    /// Whether the configured scheduling policy enables queueing for `model_name`.
+    pub fn queueing_enabled(
+        &self,
+        model_name: &str,
+    ) -> Result<bool, crate::scheduling::RouterPolicyConfigError> {
+        self.core.queueing_enabled(model_name)
+    }
+
+    /// Whether this service was built with replica synchronization enabled.
+    pub fn replica_sync_enabled(&self) -> bool {
+        self.peer_manager.is_some()
+    }
+
     pub async fn patch_worker(
         &self,
         worker_id: WorkerId,
