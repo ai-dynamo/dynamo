@@ -147,8 +147,11 @@ def _symbol_body(symbol: Symbol) -> list[str]:
     return lines
 
 
-def _split_lead(symbol: Symbol | Method) -> tuple[str, tuple[DocSection, ...]]:
-    """The accordion's opening line, and the sections that follow it.
+def _split_lead(documented: Symbol | Method) -> tuple[str, tuple[DocSection, ...]]:
+    """The opening line of a documented entry, and the sections after it.
+
+    Takes a symbol or a method because both carry the same ``summary`` and
+    ``docs`` pair, and both need the first paragraph split off the rest.
 
     :attr:`Symbol.summary` stops at the docstring's first newline because the
     index cards and page subtitles need one short line. Leading with that
@@ -156,9 +159,9 @@ def _split_lead(symbol: Symbol | Method) -> tuple[str, tuple[DocSection, ...]]:
     leads with the whole first paragraph and the remaining prose moves below
     the signature.
     """
-    sections = symbol.docs
+    sections = documented.docs
     if not sections or sections[0].kind != "text":
-        return escape_mdx_prose(symbol.summary) or "No summary available.", sections
+        return escape_mdx_prose(documented.summary) or "No summary available.", sections
     head, _, tail = sections[0].text.partition("\n\n")
     lead = escape_mdx_prose(" ".join(head.split()))
     rest = list(sections[1:])
@@ -361,7 +364,7 @@ def _method_block(symbol: Symbol, method: Method) -> list[str]:
     lead, detail = _split_lead(method)
     anchor = method_anchor(symbol, method)
     return [
-        f'<h4 id="{anchor}">{mdx_attribute(method.name)}</h4>',
+        f'<h4 id="{anchor}">{escape_mdx_prose(method.name)}</h4>',
         "",
         "```python",
         method.signature,
