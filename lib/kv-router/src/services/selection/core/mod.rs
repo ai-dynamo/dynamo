@@ -47,8 +47,9 @@ use super::types::{
     WorkerPatchRequest, WorkerRequest,
 };
 
-pub(crate) type SelectionWorkerPolicyFactory =
-    Box<dyn Fn() -> WorkerSelectionPolicy + Send + Sync + 'static>;
+pub(crate) type SelectionWorkerPolicyFactory = Box<
+    dyn Fn(&crate::config::KvRouterConfig, &'static str) -> WorkerSelectionPolicy + Send + Sync,
+>;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -498,15 +499,8 @@ impl SelectionCore {
                     block_size,
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
-                    || {
-                        WorkerSelectionPolicy::default(
-                            self.kv_router_config.clone(),
-                            WORKER_TYPE,
-                            #[cfg(any(test, feature = "bench"))]
-                            None,
-                        )
-                    },
-                    |factory| factory(),
+                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
+                    |factory| factory(&self.kv_router_config, WORKER_TYPE),
                 );
                 let profile = self
                     .kv_router_config
