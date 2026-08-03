@@ -425,7 +425,9 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = self._vmm.import_shareable_handle_close_fd(fd)
+        handle = self._vmm.import_shareable_handle_close_fd(
+            fd, import_size=aligned_size
+        )
         self._vmm.map(va, aligned_size, handle)
         self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
         self._track_mapping(
@@ -626,7 +628,9 @@ class GMSClientMemoryManager:
                 )
 
             fd = self.export_handle(alloc_info.allocation_id)
-            handle = self._vmm.import_shareable_handle_close_fd(fd)
+            handle = self._vmm.import_shareable_handle_close_fd(
+                fd, import_size=mapping.aligned_size
+            )
             self._vmm.map(va, mapping.aligned_size, handle)
             self._vmm.set_access(
                 va, mapping.aligned_size, self.device, self._granted_lock_type

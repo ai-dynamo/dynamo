@@ -13,10 +13,16 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <atomic>
+
+// torch C++ API for tensor_from_device_ptr (at::from_blob with XPU device)
+#include <torch/csrc/autograd/python_variable.h>
+#include <torch/torch.h>
+
 #include <sycl/sycl.hpp>
 
 // --- VMM / physical_mem headers ---
-// oneAPI 2025.3.x: sycl/ext/oneapi/virtual_mem/
+// Older oneAPI:    sycl/ext/oneapi/virtual_mem/
 // oneAPI nightly:   sycl/ext/oneapi/experimental/virtual_mem/
 // The namespace is sycl::ext::oneapi::experimental in BOTH versions.
 #if __has_include(<sycl/ext/oneapi/experimental/virtual_mem/virtual_mem.hpp>)
@@ -26,16 +32,18 @@
 #include <sycl/ext/oneapi/virtual_mem/physical_mem.hpp>
 #include <sycl/ext/oneapi/virtual_mem/virtual_mem.hpp>
 #else
-#error "SYCL VMM headers not found. Requires oneAPI 2025.3+ or DPC++ nightly."
+#error "SYCL VMM headers not found. Requires oneAPI 2026.0+ (IPC needs ipc_memory.hpp)."
 #endif
 
-// --- IPC physical memory (compile-time guarded) ---
-#if __has_include(<sycl/ext/oneapi/experimental/ipc_physical_memory.hpp>)
-#include <sycl/ext/oneapi/experimental/ipc_physical_memory.hpp>
-#define SYCL_HAS_IPC_PHYSICAL_MEM 1
-#else
-#define SYCL_HAS_IPC_PHYSICAL_MEM 0
-#endif
+// --- IPC: L0 interop path ---
+// Uses Level-Zero APIs directly for IPC export/import of physical memory.
+// zePhysicalMemGetProperties (export) and zePhysicalMemCreate (import)
+// with external memory FD extension.
+#include <level_zero/ze_api.h>
+
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
+#define SYCL_HAS_IPC 1
+
 
 // --- Host register (compile-time guarded) ---
 #if __has_include(<sycl/ext/oneapi/experimental/register_host_memory.hpp>)
@@ -59,6 +67,10 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+
+// POSIX headers for memfd-based IPC handle transport
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace py = pybind11;
 namespace syclex = sycl::ext::oneapi::experimental;
@@ -92,6 +104,36 @@ static std::unordered_map<int64_t, syclex::physical_mem> g_phys_handles;
 static int64_t g_next_stream_id = 1;
 static std::unordered_map<int64_t, sycl::queue> g_stream_handles;
 
+// Workaround: Intel NEO driver does not reflect zePhysicalMemCreate allocations
+// in any free-memory query (zesMemoryGetState, sycl::ext::intel::free_memory,
+// torch.xpu.mem_get_info). Track committed bytes internally until the driver
+// accounting is fixed.
+static std::atomic<size_t> g_total_allocated_bytes{0};
+
+// For L0 interop IPC:
+// - g_l0_phys_handles: tracks L0 physical_mem handles (both local and imported)
+// - g_next_imported_id: ID generator for imported IPC handles (negative to distinguish)
+struct L0ImportedMem {
+  ze_context_handle_t context;
+  ze_physical_mem_handle_t phys;
+  void* va;
+  size_t size;
+};
+static std::unordered_map<int64_t, L0ImportedMem> g_imported_l0;
+static int64_t g_next_imported_id = -1;  // negative IDs for imported handles
+
+// L0 native physical_mem handles — for IPC-capable allocations created via L0
+// directly (because SYCL physical_mem constructor cannot pass export flags).
+struct L0PhysMem {
+  ze_context_handle_t context;
+  ze_device_handle_t device;
+  ze_physical_mem_handle_t phys;
+  size_t size;
+  bool is_imported;           // true = imported via IPC; skip zePhysicalMemDestroy on release
+  int cached_export_fd = -1;  // NEO driver returns stale fd on repeat export; cache+dup
+};
+static std::unordered_map<int64_t, L0PhysMem> g_l0_phys_handles;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -117,6 +159,27 @@ active_dev()
 // ============================================================================
 
 static void
+finalize()
+{
+  // Destroy all SYCL objects (queues, contexts, physical_mem) before process
+  // exit.  Python atexit runs before C++ global destructors, so calling this
+  // from atexit prevents the SYCL runtime from hitting already-finalized L0
+  // handles during its own static destruction (UR_RESULT_ERROR_UNINITIALIZED).
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_initialized)
+    return;
+  {
+    std::lock_guard<std::mutex> hlock(g_handle_mutex);
+    g_stream_handles.clear();
+    g_phys_handles.clear();
+    g_l0_phys_handles.clear();
+  }
+  g_devices.clear();
+  g_initialized = false;
+  g_total_allocated_bytes.store(0);
+}
+
+static void
 ensure_initialized()
 {
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -140,9 +203,7 @@ ensure_initialized()
     bool vmm = dev.has(sycl::aspect::ext_oneapi_virtual_mem);
     bool ipc = false;
     bool hreg = false;
-#if SYCL_HAS_IPC_PHYSICAL_MEM
-    ipc = dev.has(sycl::aspect::ext_oneapi_ipc_physical_memory);
-#endif
+    ipc = true;  // L0 interop IPC always available
 #if SYCL_HAS_HOST_REGISTER
     hreg = dev.has(sycl::aspect::ext_oneapi_register_host_memory);
 #endif
@@ -180,6 +241,24 @@ device_memory_info(int dev_idx)
   return py::make_tuple(free_bytes, total);
 }
 
+static std::string
+device_uuid(int dev_idx)
+{
+  auto& ds = dev_state(dev_idx);
+  if (!ds.device.has(sycl::aspect::ext_intel_device_info_uuid))
+    throw std::runtime_error(
+        "_sycl_vmm: device does not support UUID query "
+        "(aspect::ext_intel_device_info_uuid)");
+  auto raw = ds.device.get_info<sycl::ext::intel::info::device::uuid>();
+  // Format as "GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" matching pynvml style.
+  char buf[48];
+  std::snprintf(
+      buf, sizeof(buf), "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", raw[0], raw[1],
+      raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+      raw[15]);
+  return std::string(buf);
+}
+
 static void
 set_device(int dev_idx)
 {
@@ -191,7 +270,12 @@ static int
 get_mem_granularity(int dev_idx)
 {
   auto& ds = dev_state(dev_idx);
-  size_t gran = syclex::get_mem_granularity(ds.device, ds.context, syclex::granularity_mode::minimum);
+  // Level-Zero physical_mem requires 2MB page alignment for allocations > ~1MB.
+  // SYCL get_mem_granularity returns 64KB (VA granularity) which is insufficient.
+  // Return the effective physical page size that physical_mem_create uses.
+  constexpr size_t PHYS_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB
+  size_t sycl_gran = syclex::get_mem_granularity(ds.device, ds.context, syclex::granularity_mode::recommended);
+  size_t gran = std::max(PHYS_PAGE_SIZE, static_cast<size_t>(sycl_gran));
   return static_cast<int>(gran);
 }
 
@@ -240,31 +324,80 @@ unmap(uintptr_t ptr, size_t size)
   syclex::unmap(reinterpret_cast<void*>(ptr), size, ds.context);
 }
 
+
+// --- L0 interop helpers (forward declarations for physical_mem_create) --------
+static ze_context_handle_t
+_get_l0_context(const sycl::context& ctx)
+{
+  return sycl::get_native<sycl::backend::ext_oneapi_level_zero>(ctx);
+}
+
+static ze_device_handle_t
+_get_l0_device(const sycl::device& dev)
+{
+  return sycl::get_native<sycl::backend::ext_oneapi_level_zero>(dev);
+}
+
 // --- Physical memory -------------------------------------------------------
 
 static py::tuple
 physical_mem_create(int dev_idx, size_t size, bool want_ipc)
 {
   auto& ds = dev_state(dev_idx);
-  try {
-    // oneAPI 2025.3: physical_mem(device, context, size) — no properties param.
-    // oneAPI nightly: physical_mem(device, context, size, properties{enable_ipc}).
-    // The enable_ipc property only exists when IPC headers are present.
-    syclex::physical_mem pmem = [&]() {
-#if SYCL_HAS_IPC_PHYSICAL_MEM
-      if (want_ipc) {
-        return syclex::physical_mem(ds.device, ds.context, size, syclex::properties{syclex::enable_ipc});
-      }
-#else
-      (void)want_ipc;  // IPC not available on this oneAPI version
-#endif
-      return syclex::physical_mem(ds.device, ds.context, size);
-    }();
 
-    std::lock_guard<std::mutex> lock(g_handle_mutex);
-    int64_t id = g_next_phys_id++;
-    g_phys_handles.emplace(id, std::move(pmem));
-    return py::make_tuple(true, id);
+  // Round up size to physical memory page alignment.
+  // Level-Zero uses 2MB pages for physical_mem allocations above ~1MB.
+  // The SYCL get_mem_granularity API returns 64KB (the VA granularity) for both
+  // minimum and recommended modes — it does NOT expose the physical page size.
+  // zeVirtualMemQueryPageSize(ctx, dev, size) returns 2MB for larger allocations,
+  // but SYCL has no equivalent. Hard-code 2MB as the safe alignment.
+  constexpr size_t PHYS_PAGE_SIZE = 2 * 1024 * 1024;  // 2MB
+  size_t gran = std::max(
+      PHYS_PAGE_SIZE,
+      static_cast<size_t>(syclex::get_mem_granularity(ds.device, ds.context, syclex::granularity_mode::recommended)));
+  size = ((size + gran - 1) / gran) * gran;
+
+  try {
+    // physical_mem(device, context, size) â standard constructor.
+    if (want_ipc) {
+      // L0 interop: create physical_mem via L0 directly with export flag.
+      ze_context_handle_t l0_ctx = _get_l0_context(ds.context);
+      ze_device_handle_t l0_dev = _get_l0_device(ds.device);
+
+      ze_external_memory_export_desc_t export_desc = {};
+      export_desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_EXPORT_DESC;
+      export_desc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
+
+      ze_physical_mem_desc_t phys_desc = {};
+      phys_desc.stype = ZE_STRUCTURE_TYPE_PHYSICAL_MEM_DESC;
+      phys_desc.pNext = &export_desc;
+      phys_desc.flags = 0;
+      phys_desc.size = size;
+
+      ze_physical_mem_handle_t l0_phys = nullptr;
+      ze_result_t rc = zePhysicalMemCreate(l0_ctx, l0_dev, &phys_desc, &l0_phys);
+      if (rc != ZE_RESULT_SUCCESS) {
+        if (rc == ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY || rc == ZE_RESULT_ERROR_OUT_OF_HOST_MEMORY)
+          return py::make_tuple(false, static_cast<int64_t>(0));
+        throw std::runtime_error(
+            "_sycl_vmm: zePhysicalMemCreate failed: 0x" + std::to_string(static_cast<unsigned>(rc)));
+      }
+
+      std::lock_guard<std::mutex> lock(g_handle_mutex);
+      int64_t id = g_next_phys_id++;
+      g_l0_phys_handles[id] = {l0_ctx, l0_dev, l0_phys, size, /*is_imported=*/false};
+      g_total_allocated_bytes.fetch_add(size, std::memory_order_relaxed);
+      return py::make_tuple(true, id);
+    }
+    // Non-IPC allocation: use SYCL physical_mem
+    {
+      syclex::physical_mem pmem(ds.device, ds.context, size);
+      std::lock_guard<std::mutex> lock(g_handle_mutex);
+      int64_t id = g_next_phys_id++;
+      g_phys_handles.emplace(id, std::move(pmem));
+      g_total_allocated_bytes.fetch_add(size, std::memory_order_relaxed);
+      return py::make_tuple(true, id);
+    }
   }
   catch (const sycl::exception& e) {
     // OOM: return (false, 0) — let the Python layer handle it.
@@ -278,10 +411,24 @@ static void
 physical_mem_release(int64_t handle_id)
 {
   std::lock_guard<std::mutex> lock(g_handle_mutex);
+  auto l0_it = g_l0_phys_handles.find(handle_id);
+  if (l0_it != g_l0_phys_handles.end()) {
+    if (!l0_it->second.is_imported) {
+      g_total_allocated_bytes.fetch_sub(l0_it->second.size, std::memory_order_relaxed);
+      if (l0_it->second.cached_export_fd >= 0)
+        ::close(l0_it->second.cached_export_fd);
+      zePhysicalMemDestroy(l0_it->second.context, l0_it->second.phys);
+    }
+    // Imported handles: do NOT call zePhysicalMemDestroy (NEO driver DMA-BUF
+    // refcount bug — destroying an imported copy corrupts the shared backing).
+    g_l0_phys_handles.erase(l0_it);
+    return;
+  }
   auto it = g_phys_handles.find(handle_id);
   if (it == g_phys_handles.end())
     throw std::invalid_argument("_sycl_vmm: unknown physical_mem handle");
-  g_phys_handles.erase(it);  // destructor releases the physical memory
+  g_total_allocated_bytes.fetch_sub(it->second.size(), std::memory_order_relaxed);
+  g_phys_handles.erase(it);
 }
 
 static void
@@ -301,6 +448,19 @@ physical_mem_map(int64_t handle_id, uintptr_t ptr, size_t size, int mode)
   }
 
   std::lock_guard<std::mutex> lock(g_handle_mutex);
+  auto l0_it = g_l0_phys_handles.find(handle_id);
+  if (l0_it != g_l0_phys_handles.end()) {
+    ze_memory_access_attribute_t l0_access = ZE_MEMORY_ACCESS_ATTRIBUTE_READWRITE;
+    if (am == syclex::address_access_mode::read)
+      l0_access = ZE_MEMORY_ACCESS_ATTRIBUTE_READONLY;
+    else if (am == syclex::address_access_mode::none)
+      l0_access = ZE_MEMORY_ACCESS_ATTRIBUTE_NONE;
+    ze_result_t rc = zeVirtualMemMap(
+        l0_it->second.context, reinterpret_cast<const void*>(ptr), size, l0_it->second.phys, 0, l0_access);
+    if (rc != ZE_RESULT_SUCCESS)
+      throw std::runtime_error("_sycl_vmm: zeVirtualMemMap failed: 0x" + std::to_string(static_cast<unsigned>(rc)));
+    return;
+  }
   auto it = g_phys_handles.find(handle_id);
   if (it == g_phys_handles.end())
     throw std::invalid_argument("_sycl_vmm: unknown physical_mem handle");
@@ -311,113 +471,139 @@ static size_t
 physical_mem_size(int64_t handle_id)
 {
   std::lock_guard<std::mutex> lock(g_handle_mutex);
+  auto l0_it = g_l0_phys_handles.find(handle_id);
+  if (l0_it != g_l0_phys_handles.end())
+    return l0_it->second.size;
   auto it = g_phys_handles.find(handle_id);
   if (it == g_phys_handles.end())
     throw std::invalid_argument("_sycl_vmm: unknown physical_mem handle");
   return it->second.size();
 }
 
-// --- IPC -------------------------------------------------------------------
+// --- IPC -----------------------------------------------------------------
 
-#if SYCL_HAS_IPC_PHYSICAL_MEM
-namespace sycl_ipc = sycl::ext::oneapi::experimental::ipc;
+// ======== L0 interop path (Level-Zero APIs for IPC export/import) ========
+// Uses zePhysicalMemGetProperties (export) and zePhysicalMemCreate (import)
+// with external memory FD extension. Validated by ipc_spike_vmm.
 
 static void
-_check_ipc_aspect(int dev_idx)
+_check_ipc_aspect(int /*dev_idx*/)
 {
-  auto& ds = dev_state(dev_idx);
-  if (!ds.has_ipc)
-    throw std::runtime_error(
-        "_sycl_vmm: device does not support IPC physical memory "
-        "(aspect::ext_oneapi_ipc_physical_memory). "
-        "Ensure oneAPI 2026.1+ and Level-Zero v2 adapter are in use.");
+  // L0 interop IPC is always available on this path (compile-time selected).
 }
 
+// Export: extract POSIX FD from a L0 physical_mem via zePhysicalMemGetProperties.
+// The allocation must have been created with want_ipc=true (which uses L0 with export flag).
 static int
 ipc_export_fd(int64_t handle_id)
 {
-  _check_ipc_aspect(g_active_device);
+  std::lock_guard<std::mutex> lock(g_handle_mutex);
+  auto l0_it = g_l0_phys_handles.find(handle_id);
+  if (l0_it == g_l0_phys_handles.end())
+    throw std::invalid_argument("_sycl_vmm: ipc_export_fd requires a handle created with want_ipc=true");
 
-  syclex::physical_mem* pmem = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(g_handle_mutex);
-    auto it = g_phys_handles.find(handle_id);
-    if (it == g_phys_handles.end())
-      throw std::invalid_argument("_sycl_vmm: unknown physical_mem handle");
-    pmem = &it->second;
+  auto& lm = l0_it->second;
+
+  // NEO driver bug: zePhysicalMemGetProperties caches the export fd internally
+  // and returns the SAME (stale) number on repeat calls even after the fd was
+  // closed. Workaround: call GetProperties only once, cache the fd, and return
+  // dup() copies to callers.
+  if (lm.cached_export_fd < 0) {
+    ze_external_memory_export_fd_t export_fd_prop = {};
+    export_fd_prop.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_EXPORT_FD;
+    export_fd_prop.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
+    export_fd_prop.fd = -1;
+
+    ze_physical_mem_properties_t phys_props = {};
+    phys_props.stype = ZE_STRUCTURE_TYPE_PHYSICAL_MEM_PROPERTIES;
+    phys_props.pNext = &export_fd_prop;
+
+    ze_result_t rc = zePhysicalMemGetProperties(lm.context, lm.phys, &phys_props);
+    if (rc != ZE_RESULT_SUCCESS || export_fd_prop.fd < 0)
+      throw std::runtime_error(
+          "_sycl_vmm: zePhysicalMemGetProperties(export_fd) failed: rc=0x" + std::to_string(static_cast<unsigned>(rc)) +
+          ", fd=" + std::to_string(export_fd_prop.fd));
+
+    lm.cached_export_fd = export_fd_prop.fd;
   }
 
-  auto ipc_handle = sycl_ipc::physical_memory::get(*pmem);
-  auto handle_data = ipc_handle.data();  // std::vector<std::byte>
-
-  // Transport the handle data via memfd so Python receives a plain FD.
-  int fd = memfd_create("sycl_ipc_phys", MFD_CLOEXEC);
-  if (fd < 0)
-    throw std::runtime_error("_sycl_vmm: memfd_create failed");
-
-  ssize_t written = write(fd, handle_data.data(), handle_data.size());
-  if (written < 0 || static_cast<size_t>(written) != handle_data.size()) {
-    close(fd);
-    throw std::runtime_error("_sycl_vmm: failed to write IPC handle to memfd");
-  }
-  lseek(fd, 0, SEEK_SET);
-  return fd;
+  // Return a dup so the caller (and L0 import) can consume/close it without
+  // invalidating our cached copy.
+  int dup_fd = ::dup(lm.cached_export_fd);
+  if (dup_fd < 0)
+    throw std::runtime_error("_sycl_vmm: dup(cached_export_fd) failed");
+  return dup_fd;
 }
 
+// Import: create a L0 physical_mem from an imported FD.
+// Returns a positive handle_id (stored in g_l0_phys_handles).
+// Caller must use physical_mem_map() to bind it to a VA, then unmap/release.
 static int64_t
-ipc_import_fd(int fd, int dev_idx)
+ipc_import_fd(int fd, int dev_idx, size_t import_size = 0)
 {
-  _check_ipc_aspect(dev_idx);
   auto& ds = dev_state(dev_idx);
+  ze_context_handle_t l0_ctx = _get_l0_context(ds.context);
+  ze_device_handle_t l0_dev = _get_l0_device(ds.device);
 
-  // Read handle data from the memfd.
-  off_t sz = lseek(fd, 0, SEEK_END);
-  lseek(fd, 0, SEEK_SET);
-  std::vector<std::byte> handle_data(static_cast<size_t>(sz));
-  ssize_t rd = read(fd, handle_data.data(), handle_data.size());
-  close(fd);  // Always close — matches the CUDA contract.
+  // The size must be provided by the caller (GMS metadata has it).
+  size_t size = import_size;
+  if (size == 0)
+    throw std::runtime_error("_sycl_vmm: ipc_import_fd: import_size is required for L0 interop path.");
 
-  if (rd < 0 || static_cast<size_t>(rd) != handle_data.size())
-    throw std::runtime_error("_sycl_vmm: failed to read IPC handle from fd");
+  // Create L0 physical_mem from imported FD.
+  ze_external_memory_import_fd_t import_fd_desc = {};
+  import_fd_desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
+  import_fd_desc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_FD;
+  import_fd_desc.fd = fd;
 
-  syclex::physical_mem imported = sycl_ipc::physical_memory::open(handle_data, ds.context, ds.device);
+  ze_physical_mem_desc_t phys_desc = {};
+  phys_desc.stype = ZE_STRUCTURE_TYPE_PHYSICAL_MEM_DESC;
+  phys_desc.pNext = &import_fd_desc;
+  phys_desc.flags = 0;
+  phys_desc.size = size;
 
+  ze_physical_mem_handle_t imported_phys = nullptr;
+  ze_result_t rc = zePhysicalMemCreate(l0_ctx, l0_dev, &phys_desc, &imported_phys);
+  if (rc != ZE_RESULT_SUCCESS)
+    throw std::runtime_error(
+        "_sycl_vmm: zePhysicalMemCreate(import_fd) failed: 0x" + std::to_string(static_cast<unsigned>(rc)));
+
+  // Store in g_l0_phys_handles (same table as server-side L0 allocations).
+  // physical_mem_map/unmap/release work on these handles directly.
   std::lock_guard<std::mutex> lock(g_handle_mutex);
   int64_t id = g_next_phys_id++;
-  g_phys_handles.emplace(id, std::move(imported));
+  g_l0_phys_handles[id] = {l0_ctx, l0_dev, imported_phys, size, /*is_imported=*/true};
   return id;
 }
 
 static void
-ipc_put_handle(py::bytes handle_bytes_py)
-{
-  std::string raw = handle_bytes_py;
-  // Construct a handle from the raw bytes and release it.
-  std::vector<std::byte> hdata(raw.size());
-  std::memcpy(hdata.data(), raw.data(), raw.size());
-
-  sycl_ipc::handle h(std::move(hdata));
-  auto& ds = active_dev();
-  sycl_ipc::physical_memory::put(h, ds.context);
-}
-#else
-// Stubs when IPC headers are not available.
-static int
-ipc_export_fd(int64_t)
-{
-  throw std::runtime_error("_sycl_vmm: IPC physical memory not available (oneAPI too old)");
-}
-static int64_t
-ipc_import_fd(int, int)
-{
-  throw std::runtime_error("_sycl_vmm: IPC physical memory not available (oneAPI too old)");
-}
-static void
 ipc_put_handle(py::bytes)
-{
-  throw std::runtime_error("_sycl_vmm: IPC physical memory not available (oneAPI too old)");
+{ /* no-op */
 }
-#endif
+
+static uintptr_t
+ipc_get_mapped_ptr(int64_t /*handle_id*/)
+{
+  // With positive-ID import (stored in g_l0_phys_handles), the caller uses
+  // physical_mem_map() to bind to a VA. This function is kept for API compat.
+  throw std::runtime_error(
+      "_sycl_vmm: ipc_get_mapped_ptr not applicable with L0 interop path. "
+      "Use physical_mem_map() on the imported handle instead.");
+}
+
+static void
+ipc_close_imported(int64_t handle_id)
+{
+  // Imported handles are now in g_l0_phys_handles; use physical_mem_release.
+  physical_mem_release(handle_id);
+}
+
+static bool
+ipc_is_pointer_based()
+{
+  return false;
+}
+
 
 // --- Host register ---------------------------------------------------------
 
@@ -546,6 +732,31 @@ synchronize()
 // pybind11 module definition
 // ============================================================================
 
+// --- Allocation tracking -----------------------------------------------------
+
+// Create a torch.Tensor aliasing existing device memory (no copy, no ownership).
+// dtype_code is the integer value of c10::ScalarType (e.g. float16=5).
+static py::object
+tensor_from_device_ptr(
+    uintptr_t data_ptr, std::vector<int64_t> shape, std::vector<int64_t> stride, int64_t dtype_code, int device_index)
+{
+  auto options =
+      at::TensorOptions().device(c10::Device(c10::kXPU, device_index)).dtype(static_cast<c10::ScalarType>(dtype_code));
+
+  at::Tensor tensor = at::from_blob(
+      reinterpret_cast<void*>(data_ptr), shape, stride,
+      /*deleter=*/[](void*) {},  // no-op: GMS owns the memory
+      options);
+
+  return py::reinterpret_steal<py::object>(THPVariable_Wrap(std::move(tensor)));
+}
+
+static size_t
+total_allocated_bytes()
+{
+  return g_total_allocated_bytes.load(std::memory_order_relaxed);
+}
+
 PYBIND11_MODULE(_sycl_vmm, m)
 {
   m.doc() = "SYCL VMM/IPC/host-register native module for GMS XPU backend";
@@ -554,6 +765,7 @@ PYBIND11_MODULE(_sycl_vmm, m)
   m.def("ensure_initialized", &ensure_initialized, "Initialize SYCL runtime and cache GPU devices/contexts");
   m.def("device_count", &device_count, "Return number of GPU devices");
   m.def("device_memory_info", &device_memory_info, "Return (free_bytes, total_bytes) for a device", py::arg("dev_idx"));
+  m.def("device_uuid", &device_uuid, "Return GPU UUID string for a device (GPU-xxxx-... format)", py::arg("dev_idx"));
   m.def("set_device", &set_device, "Set the active device for subsequent operations", py::arg("dev_idx"));
   m.def("synchronize", &synchronize, "Wait for all work on the active device's default queue");
 
@@ -576,6 +788,10 @@ PYBIND11_MODULE(_sycl_vmm, m)
       py::arg("dev_idx"), py::arg("size"), py::arg("enable_ipc") = true);
   m.def("physical_mem_release", &physical_mem_release, "Release a physical memory handle", py::arg("handle_id"));
   m.def(
+      "total_allocated_bytes", &total_allocated_bytes,
+      "Return total bytes committed via physical_mem_create (internal tracking; "
+      "workaround for NEO driver not reflecting VMM in free-memory queries)");
+  m.def(
       "physical_mem_map", &physical_mem_map, "Map physical memory to a VA range", py::arg("handle_id"), py::arg("ptr"),
       py::arg("size"), py::arg("mode") = 2);
   m.def(
@@ -587,8 +803,18 @@ PYBIND11_MODULE(_sycl_vmm, m)
       py::arg("handle_id"));
   m.def(
       "ipc_import_fd", &ipc_import_fd, "Import a physical_mem handle from a memfd FD; closes the FD", py::arg("fd"),
-      py::arg("dev_idx"));
+      py::arg("dev_idx"), py::arg("import_size") = 0);
   m.def("ipc_put_handle", &ipc_put_handle, "Release an IPC handle's resources", py::arg("handle_bytes"));
+  m.def(
+      "ipc_get_mapped_ptr", &ipc_get_mapped_ptr,
+      "Get the device pointer for an imported IPC handle (2026.0 pointer-based API only)", py::arg("handle_id"));
+  m.def(
+      "ipc_close_imported", &ipc_close_imported,
+      "Close/release an imported IPC handle (pointer API: unmaps pointer; physical_mem API: releases handle)",
+      py::arg("handle_id"));
+  m.def(
+      "ipc_is_pointer_based", &ipc_is_pointer_based,
+      "Returns True if this build uses pointer-based IPC (2026.0), False for physical_mem-based (future)");
 
   // --- host register ---
   m.def("host_register", &host_register, "Pin host memory for DMA access", py::arg("ptr"), py::arg("size"));
@@ -623,7 +849,19 @@ PYBIND11_MODULE(_sycl_vmm, m)
       "Check if device supports virtual memory management (cached at init)", py::arg("dev_idx"));
 
   // --- compile-time capability flags ---
-  m.attr("HAS_SYCL_IPC") = py::bool_(SYCL_HAS_IPC_PHYSICAL_MEM != 0);
+  // --- tensor creation from raw pointer ---
+  m.def(
+      "tensor_from_device_ptr", &tensor_from_device_ptr,
+      "Create a torch.Tensor aliasing device memory (no copy). "
+      "dtype_code is int(torch_dtype) e.g. torch.float16 -> 5",
+      py::arg("data_ptr"), py::arg("shape"), py::arg("stride"), py::arg("dtype_code"), py::arg("device_index"));
+
+  m.def(
+      "finalize", &finalize,
+      "Destroy all SYCL/L0 resources.  Called via atexit to prevent "
+      "crash during C++ static destruction at process exit.");
+
+  m.attr("HAS_SYCL_IPC") = py::bool_(SYCL_HAS_IPC != 0);
   m.attr("HAS_SYCL_HOST_REGISTER") = py::bool_(SYCL_HAS_HOST_REGISTER != 0);
   m.attr("HAS_SYCL_FREE_MEMORY") = py::bool_(SYCL_HAS_FREE_MEMORY != 0);
 #ifdef __INTEL_LLVM_COMPILER
