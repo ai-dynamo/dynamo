@@ -369,6 +369,11 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            metric_payload_default(
+                min_num_requests=1,
+                backend="vllm",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "disaggregated_same_gpu": VLLMConfig(

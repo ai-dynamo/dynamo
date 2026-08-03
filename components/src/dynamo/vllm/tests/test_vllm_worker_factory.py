@@ -718,12 +718,15 @@ class TestPrefillRegistrationContract:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lora_enabled", [True, False])
-async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     lora_enabled: bool,
 ) -> None:
     engine_client = Mock()
-    vllm_config = Mock(additional_config={})
+    vllm_config = Mock(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=96),
+    )
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
@@ -731,8 +734,9 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         "/tmp/prom",
         Mock(),
     )
+    setup_vllm_engine = Mock(return_value=engine_tuple)
     factory = WorkerFactory(
-        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=Mock(return_value=None),
         register_vllm_model_fn=AsyncMock(),
         setup_fpm_relay_fn=Mock(return_value=None),
@@ -758,6 +762,14 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
 
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
+    )
+    stat_logger = Mock()
+    stat_logger_factory = Mock(return_value=stat_logger)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory
     )
 
     endpoints: dict[str, Mock] = {}
@@ -792,6 +804,13 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         asyncio.Event(),
         shutdown_endpoints,
     )
+
+    stat_logger_factory.assert_called_once_with(
+        endpoint=endpoints["dyn.prefill.generate"]
+    )
+    setup_vllm_engine.assert_called_once_with(config, stat_logger, fpm_worker_id="cid")
+    stat_logger.set_num_gpu_blocks_all.assert_called_once_with(48)
+    stat_logger.init_publish.assert_called_once_with()
 
     lifecycle_names = {
         "dyn.prefill.load_lora",
