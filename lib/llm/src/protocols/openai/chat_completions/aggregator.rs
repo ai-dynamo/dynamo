@@ -370,7 +370,63 @@ impl DeltaAggregator {
             }
         }
 
-        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+        // When the request's parser pair has a unified parser and it is switched on, ONE
+        // state machine owns reasoning + text + tool calls, so it replaces the split
+        // reasoning/tool-call finalize below rather than running alongside it. This is
+        // the safety net for output that reached the aggregator unparsed; a request the
+        // worker already streamed through `unified_parser::apply_stream` arrives with
+        // `tool_calls` populated and is skipped by the guard.
+        let unified_family = super::unified_parser::selected_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if let Some(family) = unified_family {
+            for choice in aggregator.choices.values_mut() {
+                if choice.text.is_empty()
+                    || choice
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    continue;
+                }
+                match super::unified_parser::parse_complete(family, &choice.text) {
+                    Ok(parsed) => {
+                        choice.text = parsed.text;
+                        if !parsed.reasoning.is_empty() {
+                            choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&parsed.reasoning);
+                        }
+                        if !parsed.tool_calls.is_empty() {
+                            choice.tool_calls = Some(parsed.tool_calls);
+                            // OpenAI contract: a message carrying tool calls finishes
+                            // with `ToolCalls`, not `Stop`.
+                            if choice.finish_reason
+                                == Some(dynamo_protocols::types::FinishReason::Stop)
+                            {
+                                choice.finish_reason =
+                                    Some(dynamo_protocols::types::FinishReason::ToolCalls);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Best-effort: the aggregated text is served as-is rather than
+                        // failing a request the model already answered.
+                        tracing::warn!(
+                            error = %error,
+                            family,
+                            "failed to parse aggregated unified output; serving it unparsed"
+                        );
+                    }
+                }
+            }
+        }
+
+        if unified_family.is_none()
+            && let Some(parser) = parsing_options.tool_call_parser.as_deref()
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls

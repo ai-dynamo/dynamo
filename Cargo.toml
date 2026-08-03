@@ -62,10 +62,17 @@ dynamo-kv-router = { path = "lib/kv-router", version = "1.4.0" }
 dynamo-protocols = { version = "=5.0.1" }
 dynamo-parsers = { version = "7.0.1" }
 
+# TEMPORARY TESTING PIN — MUST become a published version bump before this merges.
+# frontend-crates PR #163 adds `UnifiedParserPrefill`, `UnifiedToolOutputMode` and the
+# `unified_registry!` macro on top of the base unified API published in 0.1.25. Nothing
+# on crates.io carries them yet, so the unified wiring below builds against the branch.
+# Replace with `dynamo-parsers-v2 = { version = "0.1.26" }` (or whatever #163 releases as)
+# once it is published; a git pin cannot ship in a released Dynamo.
+#
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "0.1.23" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/keiven-qwen-unified-fix" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.4.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.4.0" }
 fastokens = { version = "0.2.0" }
