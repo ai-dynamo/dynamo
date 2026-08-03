@@ -72,6 +72,8 @@ spec:
                 - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
                 - --served-model-name=Qwen/Qwen3.5-122B-A10B
                 - --trust-remote-code
+                # Enables the vision path for Image/Video input.
+                - --enable-multimodal
                 - --dyn-tool-call-parser
                 - qwen3_coder
                 - --dyn-reasoning-parser
