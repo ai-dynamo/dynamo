@@ -4,6 +4,18 @@
 from typing import Any, Optional
 
 
+def resolve_thinking_token_budget(request: dict) -> Optional[Any]:
+    """Resolve the thinking-token budget from an OpenAI-compatible request.
+
+    Supports both the OpenAI-compatible root-level field
+    ``thinking_token_budget`` and the legacy Dynamo extension
+    ``nvext.max_thinking_tokens``. The root-level field takes precedence.
+    """
+    root = request.get("thinking_token_budget")
+    legacy = (request.get("nvext") or {}).get("max_thinking_tokens")
+    return root if root is not None else legacy
+
+
 def _inject_reasoning_content(messages: list) -> None:
     """Inject reasoning_content as <think> blocks into content.
 
