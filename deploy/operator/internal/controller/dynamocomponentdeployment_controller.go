@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -99,6 +100,7 @@ type DynamoComponentDeploymentReconciler struct {
 
 // +kubebuilder:rbac:groups=scheduling.volcano.sh,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaims;resourceclaimtemplates,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -928,14 +930,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
 	kubeName := dcd.Name
 
-	// Convert user-provided metrics annotation into controller-managed label
-	// By default (no annotation), metrics are enabled
-	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] == commonconsts.KubeLabelValueFalse {
-		// Explicitly disabled, don't add the label
-	} else {
-		// Any other value (including empty) enables metrics
-		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
-	}
+	applyMetricsLabel(podLabels, podAnnotations)
 
 	if parentName := dcd.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; parentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
@@ -974,6 +969,11 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
+	gpusPerNode, err := r.resolveGPUsPerNode(ctx, dcd, component)
+	if err != nil {
+		return nil, err
+	}
+
 	podSpec, err := dynamo.GenerateBasePodSpecForController(
 		dcd,
 		r.DockerSecretRetriever,
@@ -983,6 +983,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		checkpointInfo,
 		dynamo.GenerateBasePodSpecForControllerOptions{
 			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
+			GPUsPerNode:           gpusPerNode,
 		},
 	)
 	if err != nil {
@@ -1056,6 +1057,43 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+func applyMetricsLabel(podLabels, podAnnotations map[string]string) {
+	// Metrics are enabled unless the pod annotation explicitly disables them.
+	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] != commonconsts.KubeLabelValueFalse {
+		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+	}
+}
+
+func (r *DynamoComponentDeploymentReconciler) resolveGPUsPerNode(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (int64, error) {
+	backendFramework, err := dynamo.GetBackendFrameworkFromDynamoComponent(dcd)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to determine backend framework")
+	}
+	if backendFramework != dynamo.BackendFrameworkVLLM || component.GetNumberOfNodes() <= 1 {
+		return 0, nil
+	}
+
+	claimPodSpec := &corev1.PodSpec{}
+	if component.PodTemplate != nil {
+		claimPodSpec = &component.PodTemplate.Spec
+	}
+	gpuCount, err := dra.ResolveGPUCount(
+		ctx,
+		r.Client,
+		dcd.Namespace,
+		claimPodSpec,
+		dynamo.GetMainContainerResources(component),
+	)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to resolve GPUs per node")
+	}
+	return int64(gpuCount), nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {

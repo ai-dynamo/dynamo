@@ -43,6 +43,7 @@ import (
 	istioNetworking "istio.io/api/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -4387,6 +4388,102 @@ func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 		return sorted[i].Name < sorted[j].Name
 	})
 	return sorted
+}
+
+func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
+	t.Log("Create a one-GPU ResourceClaimTemplate")
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "one-gpu", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{
+			Spec: resourcev1.ResourceClaimSpec{
+				Devices: resourcev1.DeviceClaim{
+					Requests: []resourcev1.DeviceRequest{{
+						Name: "gpu",
+						Exactly: &resourcev1.ExactDeviceRequest{
+							DeviceClassName: "gpu.nvidia.com",
+							AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+							Count:           1,
+						},
+					}},
+				},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claimTemplate).Build()
+
+	t.Log("Render a two-node TP=2 vLLM component using only the DRA claim")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dra-test",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "mp",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "agg",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						ResourceClaims: []corev1.PodResourceClaim{{
+							Name:                      "gpu",
+							ResourceClaimTemplateName: ptr.To("one-gpu"),
+						}},
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "vllm-test",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "2"},
+							Resources: corev1.ResourceRequirements{
+								Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		kubeClient,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify the leader and worker receive role-specific MP launch flags")
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec, len(got.Spec.Template.Cliques))
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	require.Contains(t, cliques, "agg-ldr")
+	require.Contains(t, cliques, "agg-wkr")
+	leader := cliques["agg-ldr"].Spec.PodSpec.Containers[0]
+	worker := cliques["agg-wkr"].Spec.PodSpec.Containers[0]
+	assert.Contains(t, leader.Args, distributedExecutorFlag)
+	assert.Contains(t, leader.Args, "--nnodes")
+	assert.Contains(t, leader.Args, "--node-rank")
+	assert.Contains(t, leader.Args, "0")
+	require.Len(t, worker.Args, 1)
+	assert.Contains(t, worker.Args[0], "--node-rank $((GROVE_PCLQ_POD_INDEX + 1))")
+	assert.Contains(t, worker.Args[0], "--headless")
+
+	t.Log("Verify rendering preserves DRA without adding a scalar GPU allocation")
+	for _, container := range []corev1.Container{leader, worker} {
+		assert.Equal(t, []corev1.ResourceClaim{{Name: "gpu"}}, container.Resources.Claims)
+		assert.NotContains(t, container.Resources.Limits, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
+		assert.NotContains(t, container.Resources.Requests, corev1.ResourceName(commonconsts.KubeResourceGPUNvidia))
+	}
 }
 
 func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
