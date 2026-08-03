@@ -6293,7 +6293,7 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 				Enabled:               true,
 				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"gms-loader"},
+				ExtraClientContainers: []string{"gms-loader", "metrics-client"},
 			},
 			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 				MainContainer: &corev1.Container{
@@ -6304,10 +6304,10 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 					},
 				},
 				PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:  "gms-loader",
-						Image: "loader:latest",
-					}},
+					Containers: []corev1.Container{
+						{Name: "gms-loader", Image: "loader:latest"},
+						{Name: "metrics-client", Image: "metrics:latest"},
+					},
 				},
 			},
 		}),
@@ -6328,29 +6328,34 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
 	var main *corev1.Container
 	var loader *corev1.Container
+	var metricsClient *corev1.Container
 	for i := range podSpec.Containers {
 		switch podSpec.Containers[i].Name {
 		case commonconsts.MainContainerName:
 			main = &podSpec.Containers[i]
 		case "gms-loader":
 			loader = &podSpec.Containers[i]
+		case "metrics-client":
+			metricsClient = &podSpec.Containers[i]
 		}
 	}
 	require.NotNil(t, main)
 	require.NotNil(t, loader)
+	require.NotNil(t, metricsClient)
 
 	assertGMSClientContainer(t, main)
 	assertGMSClientContainer(t, loader)
+	assertGMSClientContainer(t, metricsClient)
 }
 
-func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(t *testing.T) {
+func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {
 	podSpec, err := GenerateBasePodSpec(
 		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType: commonconsts.ComponentTypeWorker,
 			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 				Enabled:               true,
 				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"missing"},
+				ExtraClientContainers: []string{"missing-b", "missing-a"},
 			},
 			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 				MainContainer: &corev1.Container{
@@ -6374,20 +6379,11 @@ func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(
 		nil,
 		nil,
 	)
-	require.NoError(t, err)
-	var main *corev1.Container
-	var missing *corev1.Container
-	for i := range podSpec.Containers {
-		switch podSpec.Containers[i].Name {
-		case commonconsts.MainContainerName:
-			main = &podSpec.Containers[i]
-		case "missing":
-			missing = &podSpec.Containers[i]
-		}
-	}
-	require.NotNil(t, main)
-	assertGMSClientContainer(t, main)
-	assert.Nil(t, missing)
+	require.Error(t, err)
+	assert.Nil(t, podSpec)
+	assert.Contains(t, err.Error(), "gpuMemoryService.extraClientContainers")
+	assert.Contains(t, err.Error(), "missing-a")
+	assert.Contains(t, err.Error(), "missing-b")
 }
 
 func assertGMSClientContainer(t *testing.T, container *corev1.Container) {

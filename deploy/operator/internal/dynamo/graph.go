@@ -1607,12 +1607,43 @@ func GenerateBasePodSpec(
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
 	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() {
+		gmsSpec := GetGPUMemoryService(component)
+		containerNames := make(map[string]struct{}, len(podSpec.Containers))
+		for i := range podSpec.Containers {
+			containerNames[podSpec.Containers[i].Name] = struct{}{}
+		}
+		seenClients := make(map[string]struct{}, len(gmsSpec.ExtraClientContainers))
+		missingClients := make([]string, 0)
+		duplicateClients := make([]string, 0)
+		for _, name := range gmsSpec.ExtraClientContainers {
+			if _, duplicate := seenClients[name]; duplicate {
+				duplicateClients = append(duplicateClients, name)
+				continue
+			}
+			seenClients[name] = struct{}{}
+			if _, exists := containerNames[name]; !exists {
+				missingClients = append(missingClients, name)
+			}
+		}
+		if len(missingClients) > 0 || len(duplicateClients) > 0 {
+			sort.Strings(missingClients)
+			sort.Strings(duplicateClients)
+			problems := make([]string, 0, 2)
+			if len(duplicateClients) > 0 {
+				problems = append(problems, fmt.Sprintf("contains duplicate names %q", duplicateClients))
+			}
+			if len(missingClients) > 0 {
+				problems = append(problems, fmt.Sprintf("references missing pod containers %q", missingClients))
+			}
+			return nil, fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
+		}
+
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
-		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
 				if podSpec.Containers[i].Name == name {
@@ -1621,7 +1652,7 @@ func GenerateBasePodSpec(
 				}
 			}
 			if container == nil {
-				continue
+				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
 		}

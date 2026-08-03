@@ -124,6 +124,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			spec.ComponentType,
 			dynamo.GetMainContainerResources(spec),
 		)...)
+		allErrs = append(allErrs, validateGMSExtraClientContainers(
+			spec.Experimental.GPUMemoryService,
+			spec.PodTemplate,
+			fldPath.Child("experimental", "gpuMemoryService"),
+		)...)
 	}
 
 	// Validate runtime compatibility against the source-version fields.
@@ -140,6 +145,44 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	return allErrs
+}
+
+// validateGMSExtraClientContainers verifies that every intra-pod GMS client
+// reference resolves to exactly one user-declared container. gms and
+// podTemplate may be nil when GMS or the component pod template is omitted.
+func validateGMSExtraClientContainers(
+	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
+	podTemplate *corev1.PodTemplateSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if gms == nil || effectiveGMSMode(gms.Mode) != nvidiacomv1beta1.GMSModeIntraPod {
+		return nil
+	}
+
+	containers := []corev1.Container(nil)
+	if podTemplate != nil {
+		containers = podTemplate.Spec.Containers
+	}
+
+	allErrs := field.ErrorList{}
+	seen := make(map[string]struct{}, len(gms.ExtraClientContainers))
+	extraClientContainersPath := fldPath.Child("extraClientContainers")
+	for i, name := range gms.ExtraClientContainers {
+		clientPath := extraClientContainersPath.Index(i)
+		if _, exists := seen[name]; exists {
+			allErrs = append(allErrs, field.Duplicate(clientPath, name))
+			continue
+		}
+		seen[name] = struct{}{}
+		if !hasContainerNamed(containers, name) {
+			allErrs = append(allErrs, field.Invalid(
+				clientPath,
+				name,
+				"does not name a container in podTemplate.spec.containers",
+			))
+		}
+	}
 	return allErrs
 }
 
