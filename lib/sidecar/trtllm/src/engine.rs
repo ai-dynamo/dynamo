@@ -38,13 +38,6 @@ pub struct TrtllmSidecarEngine {
     /// requests that omit one.
     context_length: OnceCell<u32>,
     cancel: CancellationToken,
-    /// When true, `start` surfaces this engine's gRPC endpoint + backend name in
-    /// `EngineConfig.runtime_data` so the `--direct` registrar advertises a
-    /// `TransportType::Grpc` instance for direct frontend→gRPC dispatch.
-    pub(crate) is_direct: bool,
-    /// Address the frontend dials, when it differs from the local `--trtllm-endpoint`
-    /// the sidecar connects to (multi-node). `None` advertises the local endpoint.
-    pub(crate) advertise_grpc_endpoint: Option<String>,
 }
 
 impl TrtllmSidecarEngine {
@@ -60,8 +53,6 @@ impl TrtllmSidecarEngine {
             client: OnceCell::new(),
             context_length: OnceCell::new(),
             cancel: CancellationToken::new(),
-            is_direct: false,
-            advertise_grpc_endpoint: None,
         }
     }
 
@@ -75,7 +66,7 @@ impl TrtllmSidecarEngine {
         Self::from_parsed(args)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
         }
@@ -102,7 +93,7 @@ impl TrtllmSidecarEngine {
             source: args.model_path,
             context_length: args.context_length,
         };
-        let mut engine = Self::new(endpoint, transport, model.clone());
+        let engine = Self::new(endpoint, transport, model.clone());
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
             component: args.sidecar.common.component,
@@ -120,13 +111,8 @@ impl TrtllmSidecarEngine {
             enable_kv_routing: false,
             disaggregation_mode: DisaggregationMode::Aggregated,
             route_to_encoder: false,
-            is_direct: args.sidecar.common.is_direct,
             ..Default::default()
         };
-        // Mirror the single config flag so `start()` can surface the direct-gRPC
-        // facts without threading WorkerConfig into the engine.
-        engine.is_direct = config.is_direct;
-        engine.advertise_grpc_endpoint = args.sidecar.common.advertise_grpc_endpoint;
         Ok((engine, config))
     }
 }
@@ -168,26 +154,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             model = %model.source,
             "TensorRT-LLM gRPC is ready"
         );
-        let mut engine_config = model.engine_config();
-        if self.is_direct {
-            // Advertise the backend name (frontend selects the trtllm gRPC
-            // dispatcher) and the address the frontend dials — the
-            // --advertise-grpc-endpoint override for multi-node, else the local
-            // endpoint the sidecar connects to.
-            let advertised = self
-                .advertise_grpc_endpoint
-                .clone()
-                .unwrap_or_else(|| self.endpoint.as_str().to_string());
-            engine_config.runtime_data.insert(
-                dynamo_llm::discovery::DIRECT_BACKEND_KEY.to_string(),
-                serde_json::Value::String(crate::direct::TRTLLM_BACKEND.to_string()),
-            );
-            engine_config.runtime_data.insert(
-                dynamo_backend_common::DIRECT_GRPC_ENDPOINT_KEY.to_string(),
-                serde_json::Value::String(advertised),
-            );
-        }
-        Ok(engine_config)
+        Ok(model.engine_config())
     }
 
     async fn generate(
@@ -268,14 +235,6 @@ impl LLMEngine for TrtllmSidecarEngine {
         if let Err(error) = client.abort(ctx.id().to_string()).await {
             tracing::debug!(request_id = ctx.id(), %error, "TensorRT-LLM Abort RPC failed");
         }
-    }
-
-    async fn health_check(&self) -> Result<(), DynamoError> {
-        let client = self
-            .client
-            .get()
-            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
-        client.model_info().await.map(|_| ())
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

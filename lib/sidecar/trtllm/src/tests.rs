@@ -633,28 +633,27 @@ async fn aggregated_generation_streams_delta_then_terminal() {
 }
 
 #[tokio::test]
-async fn direct_mode_advertises_backend_and_override_endpoint() {
-    let server = FakeServer::start(FakeTrtllm::default()).await;
-    let mut engine = engine(&server.endpoint, 1);
-    engine.is_direct = true;
-    engine.advertise_grpc_endpoint = Some("10.0.0.5:50051".to_string());
-    let config = engine.start(0).await.expect("start");
+async fn direct_backend_connect_reports_backend_and_context() {
+    use dynamo_direct_register::DirectBackend;
 
-    assert_eq!(
-        config
-            .runtime_data
-            .get("direct_backend")
-            .and_then(|v| v.as_str()),
-        Some("trtllm")
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let backend = crate::direct_backend::TrtllmDirectBackend::new(
+        GrpcEndpoint::parse(&server.endpoint, "--trtllm-endpoint").expect("valid endpoint"),
+        transport(1),
+        "model-source".to_string(),
+        None,
     );
-    // The frontend dials the advertised override, not the local endpoint.
-    assert_eq!(
-        config
-            .runtime_data
-            .get("direct_grpc_endpoint")
-            .and_then(|v| v.as_str()),
-        Some("10.0.0.5:50051")
-    );
+
+    let reg = backend.connect().await.expect("connect");
+    assert_eq!(reg.backend, "trtllm");
+    // The shim health-checks (and, absent an advertise override, advertises) the
+    // engine's own local gRPC endpoint.
+    assert_eq!(reg.grpc_endpoint, server.endpoint);
+    // GetModelInfo reports 4096; that wins over the `--context-length` fallback.
+    assert_eq!(reg.context_length, Some(4096));
+
+    // Health probe succeeds against a live engine after connect.
+    backend.health_check().await.expect("health check");
 }
 
 #[tokio::test]
