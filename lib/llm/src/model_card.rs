@@ -725,6 +725,21 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+fn local_model_path_overlay_uri(
+    cf: &CheckedFile,
+    filename: &str,
+    local_model_path: Option<&Path>,
+) -> anyhow::Result<Option<String>> {
+    let Some(prefix) = local_model_path else {
+        return Ok(None);
+    };
+    let local = prefix.join(filename);
+    if CheckedFile::from_disk(&local).is_ok_and(|local_cf| local_cf.checksum() == cf.checksum()) {
+        return file_uri_for(&local).map(Some);
+    }
+    Ok(None)
+}
+
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
@@ -750,7 +765,14 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" => Ok(url.to_string()),
+        "hf" => {
+            let (_, filename) = parse_hf_uri(url.as_str())?;
+            if let Some(uri) = local_model_path_overlay_uri(cf, &filename, local_model_path)? {
+                return Ok(uri);
+            }
+            Ok(url.to_string())
+        }
         "file" => {
             // worker location → --model-path → hf://. Basename + checksum preserved.
             // is_custom slots aren't published on HF, so rung 4 errors instead.
@@ -764,11 +786,8 @@ fn checked_file_uri(
             if path.exists() {
                 return Ok(url.to_string());
             }
-            if let Some(prefix) = local_model_path {
-                let local = prefix.join(filename);
-                if local.exists() {
-                    return file_uri_for(&local);
-                }
+            if let Some(uri) = local_model_path_overlay_uri(cf, filename, local_model_path)? {
+                return Ok(uri);
             }
             if is_custom {
                 anyhow::bail!(
@@ -2654,29 +2673,70 @@ mod tests {
     #[test]
     fn checked_file_uri_passes_through_remote_urls() {
         let tmp = tempfile::tempdir().unwrap();
-        for url in [
-            "http://worker:8080/v1/metadata/slug/base/config.json",
-            "hf://Qwen/Qwen3-0.6B/config.json",
-        ] {
-            let got =
-                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
-                    .unwrap();
-            assert_eq!(got, url);
-        }
+        let http = "http://worker:8080/v1/metadata/slug/base/config.json";
+        let got =
+            super::checked_file_uri(&cf_for(http), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
+                .unwrap();
+        assert_eq!(got, http);
+
+        // hf:// without a matching --model-path overlay still passes through.
+        let hf = "hf://Qwen/Qwen3-0.6B/config.json";
+        let got = super::checked_file_uri(&cf_for(hf), "Qwen/Qwen3-0.6B", None, false).unwrap();
+        assert_eq!(got, hf);
+    }
+
+    #[test]
+    fn checked_file_uri_hf_uri_uses_local_model_path_overlay() {
+        let local = tempfile::tempdir().unwrap();
+        let local_tok = local.path().join("tokenizer.json");
+        std::fs::write(&local_tok, b"{}").unwrap();
+        // Same bytes as the override, so the checksum check passes.
+        let mut cf = super::CheckedFile::from_disk(&local_tok).unwrap();
+        cf.move_to_url(url::Url::parse("hf://Qwen/Qwen3-0.6B/tokenizer.json").unwrap());
+
+        let got =
+            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
+        assert_eq!(
+            got,
+            url::Url::from_file_path(&local_tok).unwrap().to_string()
+        );
     }
 
     #[test]
     fn checked_file_uri_uses_local_model_path_when_worker_path_unreachable() {
-        let cf = cf_for("/nonexistent/worker/path/config.json");
         let local = tempfile::tempdir().unwrap();
         let local_cfg = local.path().join("config.json");
         std::fs::write(&local_cfg, b"").unwrap();
+        // Same bytes as the override, so the checksum check passes.
+        let mut cf = super::CheckedFile::from_disk(&local_cfg).unwrap();
+        cf.move_to_disk(PathBuf::from("/nonexistent/worker/path/config.json"));
+
         let got =
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
             url::Url::from_file_path(&local_cfg).unwrap().to_string()
         );
+    }
+
+    /// A stale file sharing a basename must fail the checksum check and
+    /// fall back to the original URI, not silently serve wrong bytes.
+    #[test]
+    fn checked_file_uri_rejects_local_model_path_overlay_on_checksum_mismatch() {
+        let local = tempfile::tempdir().unwrap();
+        let stale = local.path().join("tokenizer.json");
+        std::fs::write(&stale, b"stale, unrelated content").unwrap();
+
+        let hf = "hf://Qwen/Qwen3-0.6B/tokenizer.json";
+        let got =
+            super::checked_file_uri(&cf_for(hf), "Qwen/Qwen3-0.6B", Some(local.path()), false)
+                .unwrap();
+        assert_eq!(got, hf);
+
+        let cf = cf_for("/nonexistent/worker/path/tokenizer.json");
+        let got =
+            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
+        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/tokenizer.json");
     }
 
     #[test]
@@ -2711,6 +2771,50 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+    }
+
+    /// Regression: a custom --model-name must not leak into the hf://
+    /// fallback repo id (used to produce hf://my-custom-name/...).
+    #[tokio::test]
+    async fn checked_file_uri_rejects_custom_model_name_as_hf_source() {
+        let model_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+
+        let mut builder = crate::local_model::LocalModelBuilder::default();
+        builder.model_path(model_dir);
+        builder.model_name(Some("my-custom-name".to_string()));
+        let model = builder.build().await.unwrap();
+        let source = model.card().source_path().to_string();
+
+        // File unreachable, no --model-path overlay: forces the fallback.
+        let cf = cf_for("/nonexistent/worker/path/tokenizer.json");
+        let got = super::checked_file_uri(&cf, &source, None, false).unwrap();
+
+        assert_eq!(got, format!("hf://{source}/tokenizer.json"));
+        assert!(
+            !got.contains("my-custom-name"),
+            "custom model name leaked into published hf:// source: {got}"
+        );
+    }
+
+    /// Complement to the test above: HF-sourced models (source_path = repo
+    /// id) must still resolve to hf://<repo>/<filename> via the fallback.
+    #[tokio::test]
+    async fn checked_file_uri_reconstructs_hf_source_for_repo_id_source_path() {
+        let model_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+
+        let mut builder = crate::local_model::LocalModelBuilder::default();
+        builder.model_path(model_dir);
+        builder.source_path(PathBuf::from("Qwen/Qwen3-0.6B"));
+        let model = builder.build().await.unwrap();
+        let source = model.card().source_path().to_string();
+        assert_eq!(source, "Qwen/Qwen3-0.6B");
+
+        let cf = cf_for("/nonexistent/worker/hf-cache/tokenizer.json");
+        let got = super::checked_file_uri(&cf, &source, None, false).unwrap();
+
+        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/tokenizer.json");
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
