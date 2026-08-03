@@ -822,8 +822,6 @@ navigation:
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md
                   - page: Service Discovery
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md
-                  - page: TCP TLS
-                    path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/tls.md
                   - page: Webhooks
                     path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/webhooks.md
                   - page: Managing Models (DynamoModel)
@@ -995,6 +993,8 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: pages/reference/components/runtime-configuration.mdx
+          - page: TLS Configuration
+            path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
           - page: Planner Configuration
