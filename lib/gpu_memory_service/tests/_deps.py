@@ -46,3 +46,12 @@ if HAS_TORCH:
         HAS_XPU = False
 
 HAS_GPU = HAS_CUDA or HAS_XPU
+
+# _sycl_vmm native extension availability (XPU VMM backend)
+HAS_SYCL_VMM = False
+try:
+    from gpu_memory_service.common.vmm import _sycl_vmm  # noqa: F401
+
+    HAS_SYCL_VMM = True
+except Exception:
+    pass

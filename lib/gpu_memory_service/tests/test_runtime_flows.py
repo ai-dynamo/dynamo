@@ -21,7 +21,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
-from _deps import HAS_GMS, HAS_PYNVML
+from _deps import HAS_CUDA, HAS_GMS, HAS_PYNVML, HAS_XPU
 
 if not HAS_GMS:
     pytest.skip(
@@ -75,12 +75,27 @@ _SLOW_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _gpu_memory_free_bytes(device: int = 0) -> int:
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
-    finally:
-        pynvml.nvmlShutdown()
+    """Query free GPU memory — works on both CUDA (pynvml) and XPU (torch.xpu)."""
+    if HAS_XPU:
+        import torch
+
+        free_bytes, _total = torch.xpu.mem_get_info(device)
+        # Workaround: NEO driver does not reflect VMM allocations in
+        # free-memory queries. Subtract internally tracked VMM usage.
+        try:
+            from gpu_memory_service.common.vmm import _sycl_vmm
+
+            free_bytes = max(0, free_bytes - _sycl_vmm.total_allocated_bytes())
+        except Exception:
+            pass
+        return int(free_bytes)
+    else:
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
+        finally:
+            pynvml.nvmlShutdown()
 
 
 def _drop_connection(session: _GMSClientSession) -> None:
@@ -954,7 +969,11 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
-@pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
+@pytest.mark.skipif(
+    not (HAS_CUDA and HAS_PYNVML),
+    reason="CUDA+pynvml only. Caveat: Unsupported on XPU."
+    "Re-enable when VMM OOM + free-memory tracking ready for XPU.",
+)
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

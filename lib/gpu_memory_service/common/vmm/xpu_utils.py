@@ -47,6 +47,14 @@ _PTR_TYPE_VMM_MAPPED = 4
 class XpuVMM(VMMDevice):
     """``VMMDevice`` implementation backed by ``_sycl_vmm`` (SYCL native)."""
 
+    def __init__(self) -> None:
+        self._active_device: int = 0
+        # Eagerly initialize SYCL so that the runtime's global state is
+        # properly set up before process exit.  Without this, loading the
+        # _sycl_vmm .so alongside PyTorch XPU (torch.xpu.is_available)
+        # causes a SYCL teardown crash (UR_RESULT_ERROR_UNINITIALIZED).
+        _sycl_vmm.ensure_initialized()
+
     # ----- driver lifecycle -------------------------------------------------
 
     def ensure_initialized(self) -> None:
@@ -61,7 +69,13 @@ class XpuVMM(VMMDevice):
         return list(range(_sycl_vmm.device_count()))
 
     def device_memory_info(self, device: int) -> tuple[int, int]:
-        return _sycl_vmm.device_memory_info(device)
+        free_bytes, total_bytes = _sycl_vmm.device_memory_info(device)
+        # Workaround: NEO driver does not reflect VMM zePhysicalMemCreate
+        # allocations in free-memory queries. Subtract our internally tracked
+        # VMM usage so the allocator sees accurate free memory.
+        vmm_used = _sycl_vmm.total_allocated_bytes()
+        free_bytes = max(0, free_bytes - vmm_used)
+        return (free_bytes, total_bytes)
 
     def get_allocation_granularity(self, device: int) -> int:
         return _sycl_vmm.get_mem_granularity(device)
@@ -79,9 +93,12 @@ class XpuVMM(VMMDevice):
     def export_to_shareable_handle(self, handle: int) -> int:
         return _sycl_vmm.ipc_export_fd(handle)
 
-    def import_shareable_handle_close_fd(self, fd: int) -> int:
+    def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
         # import_fd closes the FD (matching CUDA contract).
-        return _sycl_vmm.ipc_import_fd(fd, dev_idx=0)
+        # L0 interop path requires import_size for zePhysicalMemCreate.
+        return _sycl_vmm.ipc_import_fd(
+            fd, dev_idx=self._active_device, import_size=import_size
+        )
 
     # ----- virtual address space + mapping ----------------------------------
 
@@ -108,7 +125,7 @@ class XpuVMM(VMMDevice):
     # ----- pointer validation -----------------------------------------------
 
     def validate_pointer(self, va: int) -> None:
-        ptype = _sycl_vmm.get_pointer_type(va, dev_idx=0)
+        ptype = _sycl_vmm.get_pointer_type(va, dev_idx=self._active_device)
         # Accept USM device (1) or VMM-mapped (4).
         if ptype not in (1, _PTR_TYPE_VMM_MAPPED):
             raise ValueError(
@@ -124,6 +141,7 @@ class XpuVMM(VMMDevice):
         pass
 
     def runtime_set_device(self, device: int) -> None:
+        self._active_device = device
         _sycl_vmm.set_device(device)
 
     def host_register(self, ptr: int, size: int) -> None:
@@ -133,7 +151,7 @@ class XpuVMM(VMMDevice):
         _sycl_vmm.host_unregister(ptr)
 
     def stream_create_nonblocking(self):
-        return _sycl_vmm.stream_create(dev_idx=0)
+        return _sycl_vmm.stream_create(dev_idx=self._active_device)
 
     def stream_destroy(self, stream) -> None:
         _sycl_vmm.stream_destroy(stream)
