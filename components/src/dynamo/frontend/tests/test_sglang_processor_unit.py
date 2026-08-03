@@ -46,6 +46,7 @@ from dynamo.frontend.sglang_processor import (
     _init_worker,
     _load_chat_template,
     _map_finish_reason,
+    _model_eos_token_ids,
     _normalize_eos_token_ids,
     _preprocess_worker,
     _runtime_config_parser_name,
@@ -308,6 +309,20 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     def test_tokenizer_eos_token_ids_falls_back_to_single_id(self):
         tokenizer = types.SimpleNamespace(eos_token_id=2)
         assert _tokenizer_eos_token_ids(tokenizer) == [2]
+
+    def test_model_eos_token_ids_merge_generation_config(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_ids=[2, 3], eos_token_id=2)
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps({"eos_token_id": [3, 4, 5]}),
+            encoding="utf-8",
+        )
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2, 3, 4, 5]
+
+    def test_model_eos_token_ids_fall_back_when_config_is_absent(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_id=2)
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2]
 
     def test_normalize_eos_token_ids_ignores_non_ints_and_bools(self):
         assert _normalize_eos_token_ids([2, True, "3", 4, 2]) == [2, 4]
@@ -697,6 +712,7 @@ def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
     assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+    assert _normalize_sglang_parser_name("kimi-k3") == "kimi_k3"
 
 
 def test_minimax_m3_force_reasoning_uses_thinking_mode():
@@ -2674,6 +2690,118 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    # Only the explicit case is covered: with no `thinking` key we deliberately
+    # do NOT materialize one, so the K3 chat template applies its own default
+    # (measured: an unset `thinking` renders byte-identically to `thinking=True`).
+    # The parser reaches the same conclusion independently via
+    # `_THINKING_BY_DEFAULT`, so template and parser agree without our help.
+    @pytest.mark.parametrize(
+        ("chat_template_kwargs", "expected"),
+        [
+            ({"thinking": False}, False),
+        ],
+    )
+    def test_kimi_k3_template_and_parser_share_thinking_state(
+        self,
+        monkeypatch,
+        chat_template_kwargs,
+        expected,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        def fake_create_parsers(*args, force_reasoning=False, **kwargs):
+            return None, types.SimpleNamespace(force_reasoning=force_reasoning)
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            fake_create_parsers,
+        )
+
+        result = preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": chat_template_kwargs,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="kimi_k3",
+        )
+
+        assert captured["kwargs"]["thinking"] is expected
+        assert result.request["chat_template_kwargs"]["thinking"] is expected
+        assert result.force_reasoning is expected
+        assert result.reasoning_parser.force_reasoning is expected
+
+    @pytest.mark.multimodal
+    def test_kimi_k3_normalizes_template_media_but_forwards_original_url(
+        self,
+        monkeypatch,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                return [1, 2, 3]
+
+        def normalize_for_template(message, *args, **kwargs):
+            normalized = copy.deepcopy(message)
+            for part in normalized.get("content", []):
+                if part.get("type") == "image_url":
+                    part["type"] = "image"
+            return normalized
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "process_content_for_template_format",
+            normalize_for_template,
+        )
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/k3.png"},
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        dynamo_preproc = _build_dynamo_preproc(
+            result.request,
+            result.prompt_token_ids,
+            request["model"],
+            None,
+        )
+
+        assert captured["messages"][0]["content"][1]["type"] == "image"
+        assert request["messages"][0]["content"][1]["type"] == "image_url"
+        assert dynamo_preproc["multi_modal_data"] == {
+            "image_url": [{"Url": "https://example.com/k3.png"}]
+        }
 
 
 # ---------------------------------------------------------------------------
