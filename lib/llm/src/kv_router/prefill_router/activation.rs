@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::oneshot;
 
 use dynamo_kv_router::{
@@ -157,28 +157,22 @@ impl PrefillRouter {
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
 
+        // Fetch the prefill model card once, then reuse it for both the EAGLE mode
+        // and — for a direct-gRPC prefill backend — the transport dispatch. When
+        // the card advertises a `direct_backend`, the prefill hop dials the
+        // engine's gRPC directly instead of the request plane, exactly as the
+        // decode hop does in the discovery watcher; `PushRouter` keeps all of its
+        // selection / fault-detection / migration behavior either way.
+        let prefill_card = fetch_prefill_card(&endpoint).await;
+        let direct_dispatch = match prefill_card.as_ref() {
+            Some(card) => build_direct_dispatch(card).await?,
+            None => None,
+        };
+
         let inner_router = if self.router_mode.is_kv_routing() {
-            let endpoint_id = endpoint.id();
-            let discovered_cards = endpoint
-                .component()
-                .drt()
-                .discovery()
-                .list(DiscoveryQuery::EndpointModels {
-                    namespace: endpoint_id.namespace,
-                    component: endpoint_id.component,
-                    endpoint: endpoint_id.name,
-                })
-                .await;
-            let is_eagle = match discovered_cards {
-                Ok(instances) => instances
-                    .into_iter()
-                    .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
-                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
-                Err(error) => {
-                    tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
-                    self.is_eagle
-                }
-            };
+            let is_eagle = prefill_card
+                .as_ref()
+                .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle);
 
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
@@ -200,13 +194,26 @@ impl PrefillRouter {
             let affinity =
                 create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
-            // Build the PushRouter for prefill with KV mode using the shared client
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
-                client,
-                RouterMode::KV,
-                None, // worker_monitor
-            )
-            .await?;
+            // Build the PushRouter for prefill with KV mode using the shared client.
+            // A direct-gRPC prefill card swaps only the final-hop transport.
+            let push_router = match direct_dispatch {
+                Some(dispatch) => {
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_dispatch(
+                        client,
+                        RouterMode::KV,
+                        dispatch,
+                    )
+                    .await?
+                }
+                None => {
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+                        client,
+                        RouterMode::KV,
+                        None, // worker_monitor
+                    )
+                    .await?
+                }
+            };
 
             // Wrap it in KvPushRouter
             InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
@@ -224,12 +231,25 @@ impl PrefillRouter {
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
-                client,
-                self.router_mode,
-                None, // worker_monitor
-            )
-            .await?;
+            // A direct-gRPC prefill card swaps only the final-hop transport.
+            let push_router = match direct_dispatch {
+                Some(dispatch) => {
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_dispatch(
+                        client,
+                        self.router_mode,
+                        dispatch,
+                    )
+                    .await?
+                }
+                None => {
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+                        client,
+                        self.router_mode,
+                        None, // worker_monitor
+                    )
+                    .await?
+                }
+            };
 
             InnerPrefillRouter::SimpleRouter(Arc::new(
                 crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
@@ -386,4 +406,60 @@ impl PrefillRouter {
         self.lifecycle
             .store(PrefillLifecycleState::Active as u8, Ordering::Release);
     }
+}
+
+/// Read one prefill model card from the endpoint's discovery records, if any.
+/// Used to resolve the EAGLE mode and the optional direct-gRPC backend for the
+/// prefill hop. A read failure is non-fatal — the caller falls back to the
+/// configured EAGLE mode and the request-plane transport.
+async fn fetch_prefill_card(endpoint: &Endpoint) -> Option<ModelDeploymentCard> {
+    let endpoint_id = endpoint.id();
+    match endpoint
+        .component()
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+        })
+        .await
+    {
+        Ok(instances) => instances
+            .into_iter()
+            .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok()),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to read prefill model card; using request-plane transport and configured EAGLE mode");
+            None
+        }
+    }
+}
+
+/// Build the direct-gRPC transport dispatch for a prefill card that advertises a
+/// `direct_backend`, from the composition-root-registered provider. Returns
+/// `None` for an ordinary request-plane prefill worker (the caller keeps the
+/// request-plane `PushRouter`). Mirrors the decode hop in the discovery watcher.
+async fn build_direct_dispatch(
+    card: &ModelDeploymentCard,
+) -> Result<Option<crate::discovery::LlmStreamingDispatch>> {
+    let Some(backend) = card
+        .runtime_config
+        .runtime_data
+        .get(crate::discovery::DIRECT_BACKEND_KEY)
+        .and_then(|value| value.as_str())
+    else {
+        return Ok(None);
+    };
+    let provider = crate::discovery::direct_dispatch_provider(backend).ok_or_else(|| {
+        anyhow::anyhow!(
+            "prefill model advertises direct_backend={backend:?} but no \
+             DirectDispatchProvider is registered; the frontend was not \
+             built/configured with that backend's provider"
+        )
+    })?;
+    let dispatch = provider
+        .build(card)
+        .await
+        .context("build direct-gRPC prefill dispatch")?;
+    Ok(Some(dispatch))
 }
