@@ -9,9 +9,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -25,29 +28,143 @@ pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
-/// Resolve the required aggregated replica-sync port from the peer Service's
-/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
-/// missing or inconsistent ports fail EPP startup before replica sync is built.
-pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
+/// How often startup retries while the Service controller is still publishing
+/// the EndpointSlice port list.
+const REPLICA_SYNC_PORT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Validate the static peer Service contract before resolving a pod IP port.
+///
+/// Replica sync dials Pod IPs directly, so the Service's `port` is not the
+/// replica-sync dial port when it differs from `targetPort`. The EndpointSlice
+/// is the authority for that concrete target port. This check deliberately
+/// permits either a named or numeric `targetPort` and validates only the
+/// Service-level contract shared by all replicas.
+fn validate_replica_sync_service(service: &Service) -> Result<()> {
+    let ports = service
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.ports.as_deref())
+        .context("peer Service has no ports")?;
+    let mut matches = ports
+        .iter()
+        .filter(|port| port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME));
+    let port = matches.next().with_context(|| {
+        format!("peer Service does not expose named port {REPLICA_AGG_PORT_NAME:?}")
+    })?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "peer Service exposes named port {REPLICA_AGG_PORT_NAME:?} more than once"
+    );
+    anyhow::ensure!(
+        port.protocol
+            .as_deref()
+            .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
+        "peer Service named port {REPLICA_AGG_PORT_NAME:?} must use TCP"
+    );
+    anyhow::ensure!(
+        port.port > 0,
+        "peer Service named port {REPLICA_AGG_PORT_NAME:?} must be greater than zero"
+    );
+    if let Some(target_port) = &port.target_port {
+        match target_port {
+            IntOrString::Int(port) => anyhow::ensure!(
+                *port > 0,
+                "peer Service named port {REPLICA_AGG_PORT_NAME:?} has invalid targetPort {port}"
+            ),
+            IntOrString::String(name) => anyhow::ensure!(
+                !name.trim().is_empty(),
+                "peer Service named port {REPLICA_AGG_PORT_NAME:?} has an empty targetPort name"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Wait for the required aggregated replica-sync port from the peer Service's
+/// EndpointSlices.
+///
+/// The Service is validated first, then EndpointSlices supply the concrete
+/// target port that EPP will dial at Pod IPs. Service controllers can create a
+/// slice before populating its ports, so an absent Service or incomplete slice
+/// is a transient startup state rather than a fatal EPP configuration error.
+/// Once a port resolves, [`spawn`] retains responsibility for asynchronous
+/// EndpointSlice membership discovery.
+pub async fn wait_for_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
     use kube::{Api, Client, api::ListParams};
 
     let client = Client::try_default()
         .await
         .context("building Kubernetes client for EPP peer port resolution")?;
+    let services: Api<Service> = Api::namespaced(client.clone(), namespace);
     let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
-    let list = slices
-        .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
-        .await
-        .with_context(|| {
+    let params = ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
+    let mut last_pending_reason = None;
+
+    loop {
+        let service = match services.get(service_name).await {
+            Ok(service) => service,
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                wait_for_replica_sync_port_retry(
+                    namespace,
+                    service_name,
+                    &mut last_pending_reason,
+                    "peer Service does not exist yet".to_string(),
+                )
+                .await;
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("getting EPP peer Service {namespace}/{service_name}")
+                });
+            }
+        };
+        validate_replica_sync_service(&service)
+            .with_context(|| format!("validating EPP peer Service {namespace}/{service_name}"))?;
+
+        let list = slices.list(&params).await.with_context(|| {
             format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
         })?;
+        match replica_sync_port(list.items.iter()) {
+            Ok(port) => {
+                tracing::info!(
+                    %namespace,
+                    service = %service_name,
+                    sync_port = port,
+                    "Resolved EPP replica-sync EndpointSlice port"
+                );
+                return Ok(port);
+            }
+            Err(error) => {
+                wait_for_replica_sync_port_retry(
+                    namespace,
+                    service_name,
+                    &mut last_pending_reason,
+                    format!("{error:#}"),
+                )
+                .await;
+            }
+        }
+    }
+}
 
-    replica_sync_port(list.items.iter()).with_context(|| {
-        format!(
-            "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
-             {namespace}/{service_name}"
-        )
-    })
+async fn wait_for_replica_sync_port_retry(
+    namespace: &str,
+    service_name: &str,
+    last_pending_reason: &mut Option<String>,
+    pending_reason: String,
+) {
+    if last_pending_reason.as_deref() != Some(pending_reason.as_str()) {
+        tracing::info!(
+            %namespace,
+            service = %service_name,
+            reason = %pending_reason,
+            retry_after_secs = REPLICA_SYNC_PORT_RETRY_INTERVAL.as_secs(),
+            "Waiting for EPP replica-sync EndpointSlice port"
+        );
+        *last_pending_reason = Some(pending_reason);
+    }
+    tokio::time::sleep(REPLICA_SYNC_PORT_RETRY_INTERVAL).await;
 }
 
 fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
@@ -318,6 +435,7 @@ fn peer_ips<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{ServicePort, ServiceSpec};
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
 
     fn slice_with(ips: &[&str], terminating: bool, address_type: &str) -> EndpointSlice {
@@ -347,6 +465,22 @@ mod tests {
             ..Default::default()
         }]);
         slice
+    }
+
+    fn service_with_replica_port(port: i32, target_port: Option<IntOrString>) -> Service {
+        Service {
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                    port,
+                    protocol: Some("TCP".to_string()),
+                    target_port,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -425,6 +559,40 @@ mod tests {
             slice_with_replica_port(Some(9092)),
         ];
         assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
+    }
+
+    #[test]
+    fn validates_service_and_uses_endpointslice_target_port() {
+        let service = service_with_replica_port(
+            9092,
+            Some(IntOrString::String(REPLICA_AGG_PORT_NAME.to_string())),
+        );
+        validate_replica_sync_service(&service).unwrap();
+
+        // EPP dials the Pod IP, not the Service ClusterIP. A named targetPort
+        // can resolve to a different concrete port in the EndpointSlice.
+        let slices = [slice_with_replica_port(Some(9192))];
+        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9192);
+    }
+
+    #[test]
+    fn rejects_service_without_replica_agg_named_port() {
+        let service = Service {
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    name: Some("grpc".to_string()),
+                    port: 9002,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let error = validate_replica_sync_service(&service)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(REPLICA_AGG_PORT_NAME));
     }
 
     #[test]

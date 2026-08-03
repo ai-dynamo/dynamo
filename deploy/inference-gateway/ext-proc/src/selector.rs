@@ -129,7 +129,7 @@ impl Selector {
         let replication: Option<(String, u16)> = match &cfg.peer_service {
             Some(name) => Some((
                 name.clone(),
-                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
+                crate::peer_discovery::wait_for_replica_sync_port(&cfg.namespace, name).await?,
             )),
             None => None,
         };
