@@ -175,11 +175,20 @@ def _strip_postprocess_workers(engine_args: dict) -> None:
     num_postprocess_workers is not effective in this context.
     """
     value = engine_args.pop("num_postprocess_workers", None)
-    if value is not None and value > 0:
+    if value is None:
+        return
+    try:
+        if int(value) > 0:
+            logging.warning(
+                "num_postprocess_workers=%r was set in engine config but will be ignored: "
+                "Dynamo manages its own post-processing pipeline and does not make "
+                "TRT-LLM's num_postprocess_workers effective. The setting has been removed.",
+                value,
+            )
+    except (TypeError, ValueError):
         logging.warning(
-            "num_postprocess_workers=%d was set in engine config but will be ignored: "
-            "Dynamo manages its own post-processing pipeline and does not make "
-            "TRT-LLM's num_postprocess_workers effective. The setting has been removed.",
+            "num_postprocess_workers=%r was set in engine config with an unrecognised value "
+            "and has been removed.",
             value,
         )
 
