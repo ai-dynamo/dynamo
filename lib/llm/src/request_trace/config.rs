@@ -8,8 +8,7 @@ use std::sync::atomic::Ordering;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
-use dynamo_runtime::logging::trace_sample_ratio_from_env;
-use xxhash_rust::xxh3::xxh3_64;
+use dynamo_runtime::logging::{should_sample_trace_key, trace_sample_ratio_from_env};
 
 use crate::telemetry::parse_sink_names;
 
@@ -89,6 +88,7 @@ pub struct RequestTracePolicy {
     pub records: Vec<RequestTraceRecordKind>,
     pub sinks: Vec<RequestTraceSinkKind>,
     pub sample_ratio: Option<f64>,
+    pub legacy_audit_force_logging: bool,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
     pub capacity: usize,
@@ -132,9 +132,14 @@ impl RequestTracePolicy {
 
     /// Applies the configured ratio before request-trace records fan out to sinks.
     ///
-    /// The request ID keeps request-end and request-payload records together. Harness
-    /// tool records have no request ID, so their session ID provides the stable key.
+    /// The agent session ID keeps agent request and tool records together. Other
+    /// request-end and request-payload records use the request ID as their stable key.
     pub fn should_sample(&self, record: &RequestTraceRecord) -> bool {
+        if self.legacy_audit_force_logging
+            && record.event_type == super::RequestTraceEventType::RequestPayload
+        {
+            return true;
+        }
         self.sample_ratio
             .is_none_or(|ratio| should_sample_record(record, ratio))
     }
@@ -149,27 +154,26 @@ fn should_sample_record(record: &RequestTraceRecord, ratio: f64) -> bool {
     }
 
     let key = record
-        .request
+        .agent_context
         .as_ref()
-        .map(|request| request.request_id.as_str())
+        .map(|context| context.session_id.as_str())
+        .or_else(|| {
+            record
+                .request
+                .as_ref()
+                .map(|request| request.request_id.as_str())
+        })
         .or_else(|| {
             record
                 .payload
                 .as_ref()
                 .map(|payload| payload.request_id.as_str())
-        })
-        .or_else(|| {
-            record
-                .agent_context
-                .as_ref()
-                .map(|context| context.session_id.as_str())
         });
     let Some(key) = key else {
         return false;
     };
 
-    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
-    xxh3_64(key.as_bytes()) < threshold
+    should_sample_trace_key(key.as_bytes(), ratio)
 }
 
 static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
@@ -285,6 +289,7 @@ fn load_from_env() -> RequestTracePolicy {
         records,
         sinks,
         sample_ratio,
+        legacy_audit_force_logging: audit_force_logging,
         file_path,
         file_format,
         capacity,
@@ -480,8 +485,10 @@ mod tests {
     use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 
     use super::*;
+    use crate::protocols::common::extensions::AgentContext;
     use crate::request_trace::{
-        RequestTraceEventType, RequestTraceMetrics, RequestTracePayload, RequestTraceSchema,
+        RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
+        RequestTraceSchema, RequestTraceToolEvent,
     };
 
     const ALL_ENV_NAMES: &[&str] = &[
@@ -591,6 +598,46 @@ mod tests {
         }
     }
 
+    fn agent_request_record(request_id: &str, session_id: &str) -> RequestTraceRecord {
+        let mut record = request_record(request_id);
+        record.agent_context = Some(AgentContext {
+            session_id: session_id.to_string(),
+            parent_session_id: None,
+            session_final: None,
+            kv_hints: None,
+        });
+        record
+    }
+
+    fn tool_record(session_id: &str) -> RequestTraceRecord {
+        RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::ToolEnd,
+            event_time_unix_ms: 1_000,
+            event_source: Some(RequestTraceEventSource::Harness),
+            agent_context: Some(AgentContext {
+                session_id: session_id.to_string(),
+                parent_session_id: None,
+                session_final: None,
+                kv_hints: None,
+            }),
+            request: None,
+            tool: Some(RequestTraceToolEvent {
+                tool_call_id: "tool-1".to_string(),
+                tool_class: "web_search".to_string(),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: None,
+                status: None,
+                duration_ms: None,
+                output_tokens: None,
+                output_bytes: None,
+                tool_name_hash: None,
+                error_type: None,
+            }),
+            payload: None,
+        }
+    }
+
     #[test]
     fn sample_ratio_uses_a_stable_request_key() {
         let request = request_record("request-123");
@@ -611,6 +658,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_request_and_tool_records_share_the_session_decision() {
+        let session_id = "session-123";
+        let request_id = (0..256)
+            .map(|index| format!("request-{index}"))
+            .find(|request_id| {
+                should_sample_trace_key(request_id.as_bytes(), 0.5)
+                    != should_sample_trace_key(session_id.as_bytes(), 0.5)
+            })
+            .expect("a request key with a different decision");
+        let request = agent_request_record(&request_id, session_id);
+        let tool = tool_record(session_id);
+        let expected = should_sample_trace_key(session_id.as_bytes(), 0.5);
+
+        assert_eq!(should_sample_record(&request, 0.5), expected);
+        assert_eq!(should_sample_record(&tool, 0.5), expected);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn request_trace_loads_the_otel_sample_ratio() {
         with_request_trace_env(
@@ -620,6 +685,23 @@ mod tests {
             ],
             || {
                 assert_eq!(load_from_env().sample_ratio, Some(0.25));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_audit_forced_payloads_ignore_the_otel_sample_ratio() {
+        with_request_trace_env(
+            &[
+                (env_audit::DYN_AUDIT_FORCE_LOGGING, "true"),
+                (env_otlp::OTEL_TRACES_SAMPLE_RATIO, "0"),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.sample_ratio, Some(0.0));
+                assert!(policy.should_sample(&payload_record("request-123")));
+                assert!(!policy.should_sample(&request_record("request-123")));
             },
         );
     }

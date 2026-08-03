@@ -96,6 +96,7 @@ use std::time::Duration;
 use tracing::{info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::config::environment_names::logging as env_logging;
 
@@ -276,6 +277,19 @@ fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
         .enable_all()
         .build()?;
     Ok(OTEL_RUNTIME.get_or_init(|| rt).handle().clone())
+}
+
+/// Deterministically applies a trace sample ratio to a stable key.
+pub fn should_sample_trace_key(key: &[u8], ratio: f64) -> bool {
+    if ratio <= 0.0 {
+        return false;
+    }
+    if ratio >= 1.0 {
+        return true;
+    }
+
+    let threshold = (ratio * ((u64::MAX as f64) + 1.0)) as u64;
+    xxh3_64(key) < threshold
 }
 
 fn build_span_exporter(
@@ -2297,6 +2311,16 @@ pub mod tests {
         assert_eq!(parse_trace_sample_ratio(Some("1.1")), None);
         assert_eq!(parse_trace_sample_ratio(Some("nan")), None);
         assert_eq!(parse_trace_sample_ratio(Some("bad")), None);
+    }
+
+    #[test]
+    fn trace_sample_keys_are_stable_and_bounded() {
+        assert!(!should_sample_trace_key(b"request-1", 0.0));
+        assert!(should_sample_trace_key(b"request-1", 1.0));
+        assert_eq!(
+            should_sample_trace_key(b"request-1", 0.5),
+            should_sample_trace_key(b"request-1", 0.5)
+        );
     }
 
     static LOG_LINE_SCHEMA: &str = r#"

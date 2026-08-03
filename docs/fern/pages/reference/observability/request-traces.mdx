@@ -33,9 +33,10 @@ Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 `DYN_REQUEST_TRACE_JSONL_*` remain migration aliases. `DYN_AUDIT_*` variables are migration shims,
 not wire-compatibility aliases. Prefer `DYN_REQUEST_TRACE_*` for new deployments.
 
-`OTEL_TRACES_SAMPLE_RATIO` also applies to request-trace records before fan-out. Dynamo uses a
-stable request ID for request-end and payload rows, and the harness session ID for tool rows, so a
-selected record is written to every configured sink and a rejected record is written to none.
+`OTEL_TRACES_SAMPLE_RATIO` also applies to request-trace records before fan-out. Dynamo uses the
+agent session ID for agent request and tool rows, and a stable request ID for other request-end and
+payload rows. A selected record is written to every configured sink and a rejected record is written
+to none. Legacy payload capture enabled by `DYN_AUDIT_FORCE_LOGGING` remains unsampled.
 
 ## Sink Behavior
 
