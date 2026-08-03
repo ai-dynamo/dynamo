@@ -151,7 +151,7 @@ Return:
 
 ## Limitations
 
-- Smoke test is one chat completion; it is not a benchmark. Use `dynamo-benchmark` for throughput/latency numbers.
+- Smoke test is one chat completion; it is not a benchmark. Use `dynamo-benchmark` for throughput/latency numbers. The handoff runs both ways: this smoke check is one of the preconditions `dynamo-benchmark` gates on, and it routes back here when a measurement suggests the router mode itself is the suspect.
 - KV-aware mode without worker KV-event publication degrades to approximate mode; this skill flags but does not fix the underlying worker config.
 - Mode comparisons require matched workloads; cross-mode latency claims need separate benchmark runs.
 
