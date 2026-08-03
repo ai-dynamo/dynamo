@@ -149,8 +149,10 @@ main(int argc, char* argv[])
     return 1;
   }
 
-  /* Create the target directory inside the new namespace. */
-  if (mkdir(dst, 0755) < 0 && errno != EEXIST) {
+  /* Create the target directory inside the new namespace.
+   * Track whether we created it so we only remove it on failure if we own it. */
+  int created_dst = (mkdir(dst, 0755) == 0);
+  if (!created_dst && errno != EEXIST) {
     fprintf(stderr, "mkdir %s: %s\n", dst, strerror(errno));
     return 1;
   }
@@ -158,7 +160,8 @@ main(int argc, char* argv[])
   /* Move the cloned mount into the target namespace at dst. */
   if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
     fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
-    rmdir(dst);
+    if (created_dst)
+      rmdir(dst);
     return 1;
   }
   close(tree_fd);
@@ -166,6 +169,9 @@ main(int argc, char* argv[])
   if (readonly) {
     if (mount(NULL, dst, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) < 0) {
       fprintf(stderr, "remount ro %s: %s\n", dst, strerror(errno));
+      umount2(dst, MNT_DETACH);
+      if (created_dst)
+        rmdir(dst);
       return 1;
     }
   }

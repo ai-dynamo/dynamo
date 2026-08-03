@@ -65,6 +65,14 @@ func NewWithBinary(path string, log logr.Logger) *ExecMounter {
 }
 
 // mountHandle is the concrete MountHandle returned by ExecMounter.Mount.
+//
+// PID-lifetime constraint: Unmount re-enters the target namespace by PID. The
+// caller must invoke Unmount while the target process is still alive; if the
+// process has exited and its PID been recycled, the helper would enter an
+// unrelated namespace. In the current CRIU-restore flow this is guaranteed —
+// Cleanup is deferred inside the same scope that holds the placeholder
+// container alive. If this handle ever outlives the target process, replace
+// pidStr with an open /proc/<pid>/ns/mnt file descriptor held since Mount time.
 type mountHandle struct {
 	binaryPath string
 	pidStr     string
