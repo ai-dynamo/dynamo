@@ -162,7 +162,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-{% if device != "xpu" %}
+{% if device != "xpu" and target not in ("dev", "local-dev") %}
 # Add generic UCX aliases beside NIXL's private libraries so native consumers
 # use the same implementation without breaking UCX's $ORIGIN-based core and
 # module lookup. No existing wheel file or ELF metadata is modified.

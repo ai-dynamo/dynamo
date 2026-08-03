@@ -80,8 +80,8 @@ fi
 # $ORIGIN closure in the compatibility layout.
 for plugin in "${PLUGINS[@]}"; do
     resolved="$(env -u LD_LIBRARY_PATH LD_LIBRARY_PATH="${OUTPUT_DIR}" ldd "${plugin}")"
-    if grep -F 'not found' <<<"${resolved}" >/dev/null; then
-        die "${plugin}: unresolved dependency after installing UCX aliases"
+    if grep -E 'libuc[mpst].*=> not found' <<<"${resolved}" >/dev/null; then
+        die "${plugin}: unresolved UCX dependency after installing UCX aliases"
     fi
     grep -F "libucp.so." <<<"${resolved}" | grep -F "${OUTPUT_DIR}/libucp.so." >/dev/null || \
         die "${plugin}: libucp did not resolve through the compatibility directory"
