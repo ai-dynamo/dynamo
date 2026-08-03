@@ -204,6 +204,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: Shadow Engine Failover
+            path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover.md
 
       - section: Auto Deployment
         icon: wand-magic-sparkles
@@ -231,6 +233,13 @@ navigation:
             path: pages/kubernetes/operations/performance-tuning.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
+          - section: Cold Start Optimizations
+            collapsed: true
+            contents:
+              - page: Dynamo Snapshot
+                path: pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/snapshot.md
+              - page: Model Express
+                path: pages/developer-guide/knowledge-base/kubernetes/model-loading/modelexpress.md
           - section: Simulation with DynoSim
             slug: dynosim
             contents:
