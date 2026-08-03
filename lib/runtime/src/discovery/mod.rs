@@ -1096,7 +1096,9 @@ impl DiscoveryInstanceId {
 /// Events emitted by the discovery watch stream
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryEvent {
-    /// A new instance was added
+    /// An instance was added or its data changed.
+    ///
+    /// Consumers must replace any existing state with the same [`DiscoveryInstanceId`].
     Added(DiscoveryInstance),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),

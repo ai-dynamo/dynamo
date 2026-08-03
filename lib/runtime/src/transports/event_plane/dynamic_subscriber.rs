@@ -30,6 +30,62 @@ pub struct DynamicSubscriber {
     cancel_token: CancellationToken,
 }
 
+#[derive(Debug)]
+struct ActiveEndpoint {
+    endpoint: String,
+    cancel: CancellationToken,
+}
+
+type ActiveEndpoints = HashMap<DiscoveryInstanceId, Arc<ActiveEndpoint>>;
+
+fn upsert_active_endpoint(
+    endpoints: &mut ActiveEndpoints,
+    instance_id: DiscoveryInstanceId,
+    endpoint: &str,
+) -> Option<Arc<ActiveEndpoint>> {
+    if endpoints
+        .get(&instance_id)
+        .is_some_and(|active| active.endpoint == endpoint)
+    {
+        return None;
+    }
+
+    if let Some(previous) = endpoints.remove(&instance_id) {
+        previous.cancel.cancel();
+    }
+
+    let active = Arc::new(ActiveEndpoint {
+        endpoint: endpoint.to_string(),
+        cancel: CancellationToken::new(),
+    });
+    endpoints.insert(instance_id, Arc::clone(&active));
+    Some(active)
+}
+
+fn remove_active_endpoint(
+    endpoints: &mut ActiveEndpoints,
+    instance_id: &DiscoveryInstanceId,
+) -> bool {
+    let Some(active) = endpoints.remove(instance_id) else {
+        return false;
+    };
+    active.cancel.cancel();
+    true
+}
+
+fn remove_active_endpoint_if_current(
+    endpoints: &mut ActiveEndpoints,
+    instance_id: &DiscoveryInstanceId,
+    active: &Arc<ActiveEndpoint>,
+) {
+    if endpoints
+        .get(instance_id)
+        .is_some_and(|current| Arc::ptr_eq(current, active))
+    {
+        endpoints.remove(instance_id);
+    }
+}
+
 impl DynamicSubscriber {
     pub fn new(discovery: Arc<dyn Discovery>, query: DiscoveryQuery, topic: String) -> Self {
         Self::with_cancel_token(discovery, query, topic, CancellationToken::new())
@@ -67,9 +123,7 @@ impl DynamicSubscriber {
         let (event_tx, event_rx) = mpsc::channel::<Bytes>(channel_cap);
 
         // Track active endpoint connections with instance ID to endpoint mapping
-        let active_endpoints: Arc<
-            RwLock<HashMap<DiscoveryInstanceId, (String, CancellationToken)>>,
-        > = Arc::new(RwLock::new(HashMap::new()));
+        let active_endpoints: Arc<RwLock<ActiveEndpoints>> = Arc::new(RwLock::new(HashMap::new()));
 
         // Clone self for the spawned task
         let subscriber_clone = Arc::clone(&self);
@@ -130,50 +184,51 @@ impl DynamicSubscriber {
 
                         // Extract ZMQ endpoint from the instance
                         if let Some(endpoint) = Self::extract_zmq_endpoint(&instance, &zmq_topic) {
-                            let mut endpoints_guard = endpoints.write().await;
+                            let active = {
+                                let mut endpoints_guard = endpoints.write().await;
+                                upsert_active_endpoint(
+                                    &mut endpoints_guard,
+                                    instance_id.clone(),
+                                    &endpoint,
+                                )
+                            };
 
-                            // Skip if instance already tracked
-                            if endpoints_guard.contains_key(&instance_id) {
+                            let Some(active) = active else {
                                 tracing::debug!(endpoint = %endpoint, ?instance_id, "Already connected to ZMQ publisher");
                                 continue;
-                            }
+                            };
 
-                            tracing::info!(endpoint = %endpoint, ?instance_id, "Connecting to new ZMQ publisher");
-
-                            // Create cancellation token for this endpoint's stream
-                            let endpoint_cancel = CancellationToken::new();
-                            endpoints_guard.insert(
-                                instance_id.clone(),
-                                (endpoint.clone(), endpoint_cancel.clone()),
-                            );
-                            drop(endpoints_guard);
+                            tracing::info!(endpoint = %active.endpoint, ?instance_id, "Connecting to ZMQ publisher");
 
                             // Spawn task to handle this endpoint's stream
                             let event_tx_clone = event_tx.clone();
                             let zmq_topic_clone = zmq_topic.clone();
-                            let endpoint_clone = endpoint.clone();
                             let endpoints_clone = Arc::clone(&endpoints);
                             let instance_id_clone = instance_id.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) = Self::consume_endpoint_stream(
-                                    &endpoint_clone,
+                                    &active.endpoint,
                                     &zmq_topic_clone,
                                     event_tx_clone,
-                                    endpoint_cancel,
+                                    active.cancel.clone(),
                                 )
                                 .await
                                 {
                                     tracing::warn!(
-                                        endpoint = %endpoint_clone,
+                                        endpoint = %active.endpoint,
                                         error = %e,
                                         "Error consuming ZMQ endpoint stream"
                                     );
                                 }
-                                // Clean up on stream termination
-                                endpoints_clone.write().await.remove(&instance_id_clone);
+                                remove_active_endpoint_if_current(
+                                    &mut *endpoints_clone.write().await,
+                                    &instance_id_clone,
+                                    &active,
+                                );
                             });
                         } else {
+                            remove_active_endpoint(&mut *endpoints.write().await, &instance_id);
                             tracing::debug!(
                                 instance = ?instance,
                                 expected_topic = %zmq_topic,
@@ -202,10 +257,7 @@ impl DynamicSubscriber {
                         );
 
                         // Cancel the endpoint's stream via its CancellationToken
-                        if let Some((_endpoint, cancel)) =
-                            endpoints.write().await.remove(&instance_id)
-                        {
-                            cancel.cancel();
+                        if remove_active_endpoint(&mut *endpoints.write().await, &instance_id) {
                             tracing::info!(?instance_id, "Cancelled endpoint stream");
                         } else {
                             tracing::debug!(
@@ -223,8 +275,8 @@ impl DynamicSubscriber {
 
             // Cancel all active endpoints on shutdown
             let endpoints_guard = endpoints.write().await;
-            for (_id, (_endpoint, cancel)) in endpoints_guard.iter() {
-                cancel.cancel();
+            for active in endpoints_guard.values() {
+                active.cancel.cancel();
             }
             tracing::info!("Discovery watch stream ended");
         });
@@ -380,6 +432,32 @@ mod tests {
             instance_id: 1,
             transport,
         }
+    }
+
+    #[test]
+    fn replacing_active_endpoint_cancels_old_connection_without_removing_new_one() {
+        let instance_id = event_channel("kv-events", EventTransport::zmq("tcp://127.0.0.1:1")).id();
+        let mut endpoints = ActiveEndpoints::new();
+        let original =
+            upsert_active_endpoint(&mut endpoints, instance_id.clone(), "tcp://127.0.0.1:1")
+                .unwrap();
+
+        assert!(
+            upsert_active_endpoint(&mut endpoints, instance_id.clone(), "tcp://127.0.0.1:1",)
+                .is_none()
+        );
+
+        let replacement =
+            upsert_active_endpoint(&mut endpoints, instance_id.clone(), "tcp://127.0.0.1:2")
+                .unwrap();
+
+        assert!(original.cancel.is_cancelled());
+        assert!(!replacement.cancel.is_cancelled());
+        remove_active_endpoint_if_current(&mut endpoints, &instance_id, &original);
+        assert!(Arc::ptr_eq(
+            endpoints.get(&instance_id).unwrap(),
+            &replacement
+        ));
     }
 
     #[test]
