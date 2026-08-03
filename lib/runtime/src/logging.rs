@@ -52,7 +52,7 @@ use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{
     ConsoleLogFormat, console_log_format, disable_ansi_logging, env_is_truthy,
-    legacy_jsonl_logging_enabled, span_events_enabled,
+    legacy_jsonl_logging_enabled, parse_bool_opt, span_events_enabled,
 };
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
@@ -145,6 +145,18 @@ impl Default for LoggingConfig {
 /// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
 fn otlp_exporter_enabled() -> bool {
     env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
+}
+
+/// Check if OTLP log exporting is enabled. Logs are exported by default when
+/// OTLP export is on; set `OTEL_EXPORT_LOGS_ENABLED` to a falsy value ("0",
+/// "false", "off", "no") to export traces only. This avoids flooding stderr
+/// with endpoint-unavailable errors when the collector accepts traces but not
+/// logs.
+fn otlp_logs_enabled() -> bool {
+    std::env::var(env_logging::otlp::OTEL_EXPORT_LOGS_ENABLED)
+        .ok()
+        .and_then(|value| parse_bool_opt(&value))
+        .unwrap_or(true)
 }
 
 /// Get the service name from environment or use default
@@ -329,7 +341,8 @@ fn log_otel_init_status(
             protocol = %protocol.as_str(),
             service = %service_name,
             console_format = console_format.as_str(),
-            "OpenTelemetry OTLP export enabled (traces and logs)"
+            logs_enabled = otlp_logs_enabled(),
+            "OpenTelemetry OTLP export enabled"
         );
     } else {
         tracing::info!(
@@ -1329,30 +1342,15 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                     .as_deref(),
                 env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
             );
-            let logs_protocol = resolve_signal_otlp_protocol(
-                protocol,
-                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
-                    .ok()
-                    .as_deref(),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
-            );
             let generic_endpoint =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok();
             let traces_endpoint_env =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).ok();
-            let logs_endpoint_env =
-                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).ok();
             let traces_endpoint = resolve_otlp_endpoint(
                 traces_protocol,
                 traces_endpoint_env,
                 generic_endpoint.clone(),
                 "/v1/traces",
-            );
-            let logs_endpoint = resolve_otlp_endpoint(
-                logs_protocol,
-                logs_endpoint_env,
-                generic_endpoint,
-                "/v1/logs",
             );
 
             let resource = opentelemetry_sdk::Resource::builder_empty()
@@ -1372,16 +1370,42 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let tracer_provider = tracer_provider_builder.build();
 
-            let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
+            // Build the OTLP log exporter, unless log export is disabled
+            // (traces-only mode for collectors that accept traces but not
+            // logs). Logs protocol/endpoint resolution also lives inside the
+            // branch so a misconfigured logs protocol cannot warn when log
+            // export is off.
+            let logger_provider_opt = if otlp_logs_enabled() {
+                let logs_protocol = resolve_signal_otlp_protocol(
+                    protocol,
+                    std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
+                        .ok()
+                        .as_deref(),
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+                );
+                let logs_endpoint_env =
+                    std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).ok();
+                let logs_endpoint = resolve_otlp_endpoint(
+                    logs_protocol,
+                    logs_endpoint_env,
+                    generic_endpoint,
+                    "/v1/logs",
+                );
+                let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
 
-            let logger_provider = SdkLoggerProvider::builder()
-                .with_batch_exporter(log_exporter)
-                .with_resource(resource)
-                .build();
+                Some(
+                    SdkLoggerProvider::builder()
+                        .with_batch_exporter(log_exporter)
+                        .with_resource(resource)
+                        .build(),
+                )
+            } else {
+                None
+            };
 
             (
                 tracer_provider,
-                Some(logger_provider),
+                logger_provider_opt,
                 Some((traces_protocol, traces_endpoint)),
             )
         } else {
@@ -3238,6 +3262,85 @@ pub mod tests {
         }
 
         Ok(())
+    }
+
+    /// Verify `otlp_logs_enabled()` defaults to enabled when `OTEL_EXPORT_LOGS_ENABLED`
+    /// is unset, disables logs for falsy values, and keeps logs enabled for truthy
+    /// or unrecognized values.
+    #[test]
+    fn test_otlp_logs_enabled() {
+        use env_logging::otlp::OTEL_EXPORT_LOGS_ENABLED;
+
+        // Default (unset): logs are exported alongside traces.
+        temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, None::<&str>)], || {
+            assert!(otlp_logs_enabled());
+        });
+
+        // Falsy values export traces only.
+        for val in ["0", "false", "off", "no", "OFF", "No"] {
+            temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, Some(val))], || {
+                assert!(!otlp_logs_enabled(), "expected logs disabled for {val:?}");
+            });
+        }
+
+        // Truthy, empty, or unrecognized values keep logs enabled.
+        for val in ["1", "true", "on", "yes", "", "  ", "anything"] {
+            temp_env::with_vars(vec![(OTEL_EXPORT_LOGS_ENABLED, Some(val))], || {
+                assert!(otlp_logs_enabled(), "expected logs enabled for {val:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn test_otlp_export_logs_disabled_ignores_invalid_protocol() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_otlp_export_logs_disabled_ignores_invalid_protocol_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("OTEL_EXPORT_ENABLED", "1")
+            .env("OTEL_EXPORT_LOGS_ENABLED", "false")
+            .env("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "invalid")
+            .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
+            .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+            .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+            .env_remove("DYN_LOGGING_CONSOLE_FORMAT")
+            .env_remove("DYN_LOGGING_JSONL")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code {:?}: {stderr}",
+            output.status.code()
+        );
+        assert!(
+            stderr.contains("OpenTelemetry OTLP export enabled"),
+            "OTLP trace export should initialize: {stderr}"
+        );
+        assert!(
+            !stderr.contains("unsupported OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"),
+            "disabled log export must not resolve the logs protocol: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_otlp_export_logs_disabled_ignores_invalid_protocol_subprocess() {
+        if std::env::var("OTEL_EXPORT_LOGS_ENABLED").is_err() {
+            return;
+        }
+
+        // `init` exercises the real setup_logging path in a fresh process.
+        init();
     }
 
     /// Comprehensive test for span events covering:
