@@ -10,6 +10,7 @@ use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -173,24 +174,42 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
     post(app, "/workers", &body.to_string()).await
 }
 
+#[derive(Default)]
+struct FactoryRendezvous {
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl FactoryRendezvous {
+    fn wait_for_peer(&self) {
+        let mut arrivals = self.arrivals.lock().unwrap();
+        *arrivals += 1;
+        if *arrivals == 2 {
+            self.ready.notify_all();
+            return;
+        }
+
+        let (arrivals, _) = self
+            .ready
+            .wait_timeout_while(arrivals, Duration::from_secs(2), |arrivals| *arrivals < 2)
+            .unwrap();
+        assert_eq!(*arrivals, 2, "selector factories did not run concurrently");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
-    let active_factories = Arc::new(AtomicUsize::new(0));
-    let max_active_factories = Arc::new(AtomicUsize::new(0));
+    let factory_rendezvous = Arc::new(FactoryRendezvous::default());
     let selector_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&factory_calls);
-    let active = Arc::clone(&active_factories);
-    let max_active = Arc::clone(&max_active_factories);
+    let rendezvous = Arc::clone(&factory_rendezvous);
     let selections = Arc::clone(&selector_calls);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
         .worker_selector_factory(Box::new(move || {
             calls.fetch_add(1, Ordering::Relaxed);
-            let active_now = active.fetch_add(1, Ordering::Relaxed) + 1;
-            max_active.fetch_max(active_now, Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(50));
-            active.fetch_sub(1, Ordering::Relaxed);
+            rendezvous.wait_for_peer();
             Box::new(HighestWorkerSelector {
                 calls: Arc::clone(&selections),
                 invalid_first: false,
@@ -222,7 +241,6 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
         other_registration.await.unwrap().status(),
         StatusCode::CREATED
     );
-    assert_eq!(max_active_factories.load(Ordering::Relaxed), 2);
     assert_eq!(
         register_worker_id(app.clone(), 2, None).await.status(),
         StatusCode::CREATED
@@ -285,6 +303,13 @@ async fn invalid_custom_selection_does_not_stop_partition() {
         register_worker(app.clone(), None).await.status(),
         StatusCode::CREATED
     );
+
+    let disallowed_pin = r#"{"model_name":"model","token_ids":[1,2,3,4],"pinned_worker":{"worker_id":1,"dp_rank":0},"allowed_worker_ids":[2]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", disallowed_pin).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 0);
 
     let body = r#"{"model_name":"model","token_ids":[1,2,3,4]}"#;
     assert_eq!(

@@ -21,7 +21,7 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::{DefaultWorkerSelector, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+    ScheduleRequest, TieredOverlapRefresher, WorkerEligibilityError, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -74,6 +74,32 @@ impl WorkerSelector<SelectionWorkerConfig> for SelectionWorkerSelector {
                 selector.select_worker(workers, request, eligibility, block_size)
             }
             Self::Custom(selector) => {
+                eligibility.validate_pinned_worker_allowed()?;
+                if let Some(pinned_worker) = eligibility.pinned_worker() {
+                    match eligibility.validate_worker_rank(workers, pinned_worker) {
+                        Ok(_) => {}
+                        Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
+                            return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                                worker_id: pinned_worker.worker_id,
+                            });
+                        }
+                        Err(_) => return Err(KvSchedulerError::NoEndpoints),
+                    }
+                } else if !eligibility.has_eligible_worker(
+                    workers
+                        .iter()
+                        .map(|(&worker_id, config)| (worker_id, config)),
+                ) {
+                    if eligibility.has_eligible_worker_ignoring_overload(
+                        workers
+                            .iter()
+                            .map(|(&worker_id, config)| (worker_id, config)),
+                    ) {
+                        return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+                    }
+                    return Err(KvSchedulerError::NoEndpoints);
+                }
+
                 let worker = selector
                     .select_worker(workers, request, eligibility, block_size)?
                     .worker;
