@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG DYNAMO_BASE_IMAGE="dynamo-base:latest"
-ARG TRITON_SERVER_IMAGE="nvcr.io/nvidia/tritonserver:25.01-py3"
+ARG TRITON_SERVER_IMAGE="nvcr.io/nvidia/tritonserver:25.11-py3"
 
 FROM ${TRITON_SERVER_IMAGE} AS triton_source
 
