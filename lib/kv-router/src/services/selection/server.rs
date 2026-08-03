@@ -26,7 +26,7 @@ use super::types::{
 #[derive(Debug, Deserialize)]
 struct FilterQuery {
     model_name: Option<String>,
-    tenant_id: Option<String>,
+    routing_group: Option<String>,
 }
 
 pub struct AppState {
@@ -81,11 +81,10 @@ async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FilterQuery>,
 ) -> Response {
-    Json(
-        state
-            .service
-            .list_workers(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.service.list_workers(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
@@ -143,9 +142,9 @@ async fn create_reservation(
 
 async fn prefill_complete(
     State(state): State<Arc<AppState>>,
-    Path(reservation_id): Path<String>,
+    Path(selection_id): Path<String>,
 ) -> Response {
-    match state.service.prefill_complete(&reservation_id).await {
+    match state.service.prefill_complete(&selection_id).await {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => error.into_response(),
     }
@@ -153,9 +152,9 @@ async fn prefill_complete(
 
 async fn delete_reservation(
     State(state): State<Arc<AppState>>,
-    Path(reservation_id): Path<String>,
+    Path(selection_id): Path<String>,
 ) -> Response {
-    match state.service.free_reservation(&reservation_id).await {
+    match state.service.free_reservation(&selection_id).await {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => error.into_response(),
     }
@@ -163,7 +162,7 @@ async fn delete_reservation(
 
 async fn add_output_block(
     State(state): State<Arc<AppState>>,
-    Path(reservation_id): Path<String>,
+    Path(selection_id): Path<String>,
     payload: Result<Json<OutputBlockRequest>, JsonRejection>,
 ) -> Response {
     let Json(req) = match payload {
@@ -172,7 +171,7 @@ async fn add_output_block(
     };
     match state
         .service
-        .add_output_block(&reservation_id, req.decay_fraction)
+        .add_output_block(&selection_id, req.decay_fraction)
     {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => error.into_response(),
@@ -193,11 +192,10 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn loads(State(state): State<Arc<AppState>>, Query(params): Query<FilterQuery>) -> Response {
-    Json(
-        state
-            .service
-            .loads(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.service.loads(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
@@ -315,14 +313,14 @@ pub(crate) fn create_router(state: Arc<AppState>) -> Router {
         .route("/select_and_reserve", post(select_and_reserve))
         .route("/reservations", post(create_reservation))
         .route(
-            "/reservations/{reservation_id}/prefill_complete",
+            "/reservations/{selection_id}/prefill_complete",
             post(prefill_complete),
         )
         .route(
-            "/reservations/{reservation_id}/output_block",
+            "/reservations/{selection_id}/output_block",
             post(add_output_block),
         )
-        .route("/reservations/{reservation_id}", delete(delete_reservation))
+        .route("/reservations/{selection_id}", delete(delete_reservation))
         .route("/workers", post(create_worker).get(list_workers))
         .route(
             "/workers/{worker_id}",

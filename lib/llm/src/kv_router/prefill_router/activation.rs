@@ -7,21 +7,28 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
+use dynamo_kv_router::{
+    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
+    config::KvRouterConfig,
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
+    discovery::DiscoveryQuery,
     pipeline::{PushRouter, RouterMode},
+    prelude::DistributedRuntimeProvider,
     protocols::annotated::Annotated,
 };
 
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouter},
+    model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
     },
+    session_affinity::create_affinity_coordinator,
 };
 
 impl PrefillRouter {
@@ -33,11 +40,16 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
+            decode_router: None,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -53,6 +65,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
@@ -62,14 +75,27 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_disagg_prefill_busy_threshold
+                .or(c.router_queue_threshold)
+        });
+        let conditional_disagg_decode_busy_threshold = kv_router_config
+            .as_ref()
+            .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
             prefill_router,
+            decode_router,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,
@@ -132,22 +158,47 @@ impl PrefillRouter {
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
+            let endpoint_id = endpoint.id();
+            let discovered_cards = endpoint
+                .component()
+                .drt()
+                .discovery()
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace,
+                    component: endpoint_id.component,
+                    endpoint: endpoint_id.name,
+                })
+                .await;
+            let is_eagle = match discovered_cards {
+                Ok(instances) => instances
+                    .into_iter()
+                    .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
+                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
+                    self.is_eagle
+                }
+            };
+
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(
+                .kv_chooser_for_with_worker_role(
                     &endpoint,
                     kv_cache_block_size,
                     kv_router_config,
                     prefill_load_estimator,
+                    Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
-                    self.is_eagle,
+                    is_eagle,
                 )
                 .await?;
 
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -158,15 +209,17 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
                 push_router,
                 kv_chooser,
-                self.session_affinity_ttl,
-            )?))
+                affinity,
+            )))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
             Self::attach_prefill_client(worker_monitor, &client);
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -179,11 +232,11 @@ impl PrefillRouter {
             .await?;
 
             InnerPrefillRouter::SimpleRouter(Arc::new(
-                crate::session_affinity::SessionAffinityPushRouter::new(
+                crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(
                     push_router,
-                    self.session_affinity_ttl,
+                    affinity,
                     self.router_mode.is_direct_routing(),
-                )?,
+                ),
             ))
         };
 

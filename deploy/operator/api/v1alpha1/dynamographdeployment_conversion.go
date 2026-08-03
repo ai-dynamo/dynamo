@@ -616,6 +616,16 @@ func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *S
 func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &v1beta1.PlacementStatus{
+			State: v1beta1.PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -653,6 +663,16 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &PlacementStatus{
+			State: PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
+	} else {
+		dst.Placement = nil
+	}
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -751,16 +771,20 @@ func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *Rolling
 // v1beta1.
 func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
-		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNamesToHub(src),
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNamesToHub(src),
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if src.ReadyReplicas != nil {
 		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
 	}
 }
 
@@ -770,10 +794,11 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{
-		ComponentKind:   ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNames,
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNames,
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]
@@ -783,5 +808,8 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	}
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
 	}
 }

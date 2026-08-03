@@ -19,6 +19,7 @@ IMPORTANT TEST CONTRACT:
 """
 
 import asyncio
+import contextlib
 import gc
 import itertools
 from collections.abc import AsyncIterator
@@ -28,7 +29,7 @@ import pytest
 
 from dynamo.llm import KvRouter, KvRouterConfig
 from tests.router.common import _create_kv_router_with_timeout
-from tests.router.helper import generate_random_suffix, get_runtime
+from tests.router.helper import generate_random_suffix, managed_runtime
 from tests.router.mocker_process import MockerProcess, launch_disagg_workers
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -75,8 +76,11 @@ def _create_router(
     router_config: KvRouterConfig,
     discovery_backend: str,
     request_plane: str,
+    runtime_stack: contextlib.ExitStack,
 ):
-    runtime = get_runtime(discovery_backend, request_plane)
+    runtime = runtime_stack.enter_context(
+        managed_runtime(discovery_backend, request_plane)
+    )
     endpoint = runtime.endpoint(
         f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
     )
@@ -288,7 +292,6 @@ def aggregated_mocker(
     predownload_tokenizers,
     discovery_backend,
     request_plane,
-    durable_kv_events,
 ):
     _ = runtime_services_dynamic_ports, predownload_tokenizers
     with MockerProcess(
@@ -296,7 +299,6 @@ def aggregated_mocker(
         mocker_args={
             "speedup_ratio": 10.0,
             "block_size": BLOCK_SIZE,
-            "durable_kv_events": durable_kv_events,
         },
         num_mockers=1,
         store_backend=discovery_backend,
@@ -312,14 +314,12 @@ def disagg_mockers(
     predownload_tokenizers,
     discovery_backend,
     request_plane,
-    durable_kv_events,
 ):
     _ = runtime_services_dynamic_ports, predownload_tokenizers
     namespace = f"slot-tracker-{generate_random_suffix()}"
     mocker_args = {
         "speedup_ratio": 10.0,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
     with launch_disagg_workers(
         request,
@@ -341,12 +341,13 @@ def test_unexpected_drop_and_normal_completion(
     discovery_backend,
     request_plane,
 ) -> None:
-    async def run() -> None:
+    async def run_test(runtime_stack: contextlib.ExitStack) -> None:
         runtime, endpoint, router = _create_router(
             aggregated_mocker,
             _router_config(),
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         _ = runtime, endpoint
         baseline = await _snapshot(router)
@@ -397,6 +398,10 @@ def test_unexpected_drop_and_normal_completion(
             del dropped_stream, completed_stream
             gc.collect()
 
+    async def run() -> None:
+        with contextlib.ExitStack() as runtime_stack:
+            await run_test(runtime_stack)
+
     asyncio.run(run())
 
 
@@ -405,12 +410,13 @@ def test_router_observed_first_token_marks_prefill_complete(
     discovery_backend,
     request_plane,
 ) -> None:
-    async def run() -> None:
+    async def run_test(runtime_stack: contextlib.ExitStack) -> None:
         runtime, endpoint, router = _create_router(
             aggregated_mocker,
             _router_config(),
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         _ = runtime, endpoint
         baseline = await _snapshot(router)
@@ -444,6 +450,10 @@ def test_router_observed_first_token_marks_prefill_complete(
             description="decode cleanup after first-token drop",
         )
 
+    async def run() -> None:
+        with contextlib.ExitStack() as runtime_stack:
+            await run_test(runtime_stack)
+
     asyncio.run(run())
 
 
@@ -452,19 +462,21 @@ def test_bidirectional_replica_lifecycle(
     discovery_backend,
     request_plane,
 ) -> None:
-    async def run() -> None:
+    async def run_test(runtime_stack: contextlib.ExitStack) -> None:
         config = _router_config(router_replica_sync=True)
         runtime_a, endpoint_a, router_a = _create_router(
             aggregated_mocker,
             config,
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         runtime_b, endpoint_b, router_b = _create_router(
             aggregated_mocker,
             config,
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         _ = runtime_a, endpoint_a, runtime_b, endpoint_b
         baseline_a = await _snapshot(router_a)
@@ -475,6 +487,10 @@ def test_bidirectional_replica_lifecycle(
         await _assert_replicated_lifecycle(router_a, router_b, baseline_a, baseline_b)
         await _assert_replicated_lifecycle(router_b, router_a, baseline_b, baseline_a)
 
+    async def run() -> None:
+        with contextlib.ExitStack() as runtime_stack:
+            await run_test(runtime_stack)
+
     asyncio.run(run())
 
 
@@ -483,19 +499,21 @@ def test_disaggregated_role_attribution(
     discovery_backend,
     request_plane,
 ) -> None:
-    async def run() -> None:
+    async def run_test(runtime_stack: contextlib.ExitStack) -> None:
         prefill_workers, decode_workers = disagg_mockers
         prefill_runtime, prefill_endpoint, prefill_router = _create_router(
             prefill_workers,
             _router_config(router_track_active_blocks=False),
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         decode_runtime, decode_endpoint, decode_router = _create_router(
             decode_workers,
             _router_config(router_track_prefill_tokens=False),
             discovery_backend,
             request_plane,
+            runtime_stack,
         )
         _ = (
             prefill_runtime,
@@ -548,5 +566,9 @@ def test_disaggregated_role_attribution(
         finally:
             del prefill_stream, decode_stream
             gc.collect()
+
+    async def run() -> None:
+        with contextlib.ExitStack() as runtime_stack:
+            await run_test(runtime_stack)
 
     asyncio.run(run())

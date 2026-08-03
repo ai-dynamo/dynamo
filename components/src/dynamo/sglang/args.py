@@ -20,6 +20,7 @@ from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import (
@@ -28,10 +29,7 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import (
-    enable_disjoint_streaming_output,
-    ensure_sglang_tensor_image_size,
-)
+from dynamo.sglang._compat import ensure_sglang_tensor_image_size
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -404,6 +402,10 @@ async def parse_args(
     # otherwise fall back to default endpoints
     namespace = dynamo_config.namespace
 
+    # Dynamo's parser consumes --enable-multimodal; forward it to SGLang.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # If --embedding-worker is set, also set SGLang's --is-embedding flag
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
@@ -441,17 +443,13 @@ async def parse_args(
         endpoint
     )
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
-    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    # Native and Dynamo tool parsers both construct tool calls, so they remain
+    # mutually exclusive. Reasoning parsers intentionally may be paired: the
+    # native parser gates guided decoding while Dynamo constructs the response.
     _validate_parser_flags(
         parsed_args.tool_call_parser,
         dynamo_config.dyn_tool_call_parser,
         "tool-call-parser",
-    )
-    _validate_parser_flags(
-        parsed_args.reasoning_parser,
-        dynamo_config.dyn_reasoning_parser,
-        "reasoning-parser",
     )
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
@@ -477,7 +475,24 @@ async def parse_args(
             )
 
     model_path = parsed_args.model_path
-    # Name the model
+
+    # --served-model-name may pack several names (whitespace-/comma-separated);
+    # the first is the primary, the rest are aliases. Split BEFORE the
+    # model_path fallback so a model path containing whitespace doesn't produce
+    # spurious aliases.
+    served_names = split_served_model_names(parsed_args.served_model_name)
+    if served_names:
+        parsed_args.served_model_name = served_names[0]
+        dynamo_config.served_model_aliases = served_names[1:]
+        if served_names[1:]:
+            logging.info(
+                "Multi-name registration: primary=%r, aliases=%s",
+                served_names[0],
+                served_names[1:],
+            )
+
+    # Name the model — falls back to model_path only if neither
+    # --served-model-name nor an env var supplied one.
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
     # Download the model if necessary using modelexpress.
@@ -501,6 +516,22 @@ async def parse_args(
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = dynamo_config.image_diffusion_worker
     video_generation_worker = dynamo_config.video_generation_worker
+
+    # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    fpm_source = _forward_pass_metrics_source(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
+        parsed_args.enable_forward_pass_metrics = True
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
+
+    if (
+        parsed_args.dllm_algorithm
+        and getattr(parsed_args, "max_running_requests", None) is None
+    ):
+        parsed_args.max_running_requests = 8
+        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     if image_diffusion_worker or video_generation_worker:
         worker_type = (
@@ -527,10 +558,15 @@ async def parse_args(
         server_args.dllm_algorithm = False
         server_args.load_format = None
         server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
+        server_args.enable_forward_pass_metrics = getattr(
+            parsed_args, "enable_forward_pass_metrics", False
+        )
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
     else:
+        # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
+        parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
         if server_args.get_model_config().is_multimodal:
             ensure_sglang_tensor_image_size()
@@ -541,12 +577,6 @@ async def parse_args(
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
         )
-
-    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens. Modern SGLang gates this
-    # behavior behind incremental_streaming_output, while older releases used
-    # stream_output.
-    enable_disjoint_streaming_output(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
@@ -576,30 +606,8 @@ async def parse_args(
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
-    # Enable forward pass metrics from dynamo env var if configured
-    fpm_source = _forward_pass_metrics_source(
-        dynamo_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
-    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
-        server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
-
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
-
-    # SGLang's DLLM scheduler reads server_args.max_running_requests directly
-    # but the field stays None until the normal scheduler init sets it from
-    # tp_worker.get_worker_info(). Set a safe default so the DLLM mixin
-    # doesn't crash on `None - int`.
-    # Only applies to real DLLM workers (truthy algorithm string), not
-    # video/image diffusion stubs where dllm_algorithm=False.
-    if (
-        server_args.dllm_algorithm
-        and getattr(server_args, "max_running_requests", None) is None
-    ):
-        server_args.max_running_requests = 8
-        logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
     dynamo_config.namespace = parsed_namespace
     dynamo_config.component = parsed_component_name

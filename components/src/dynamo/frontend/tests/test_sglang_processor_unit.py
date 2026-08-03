@@ -10,6 +10,7 @@ Parallels test_vllm_unit.py for the vLLM backend.
 """
 
 import asyncio
+import copy
 import json
 import sys
 import types
@@ -26,6 +27,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
+    _guided_tool_choice_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -44,7 +46,9 @@ from dynamo.frontend.sglang_processor import (
     _init_worker,
     _load_chat_template,
     _map_finish_reason,
+    _model_eos_token_ids,
     _normalize_eos_token_ids,
+    _preprocess_worker,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
 )
@@ -98,6 +102,71 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+
+    @pytest.mark.multimodal
+    def test_rejects_multimodal_cache_uuid(self):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.png"},
+                            "uuid": "cached-image",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match="supported only by the vLLM backend"):
+            _build_dynamo_preproc(request, [1], "test", None)
+
+    @pytest.mark.multimodal
+    @pytest.mark.parametrize(
+        ("content_part", "message"),
+        [
+            (
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
+                    "uuid": "cached-video",
+                },
+                "supported only for image_url",
+            ),
+            (
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/image.png"},
+                    "uuid": "",
+                },
+                "must be a non-empty string",
+            ),
+            (
+                {"type": "image_url", "image_url": None},
+                "must contain a non-empty URL or uuid",
+            ),
+        ],
+    )
+    def test_maps_invalid_multimodal_input_to_preprocess_error(
+        self,
+        content_part,
+        message,
+    ):
+        request = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [content_part],
+                }
+            ],
+        }
+
+        with pytest.raises(PreprocessError, match=message):
+            _build_dynamo_preproc(request, [1], "test", None)
 
     def test_top_k_zero_maps_to_negative_one(self):
         """SGLang uses -1 for disabled top_k, OpenAI uses 0."""
@@ -155,6 +224,18 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    @pytest.mark.parametrize("require_reasoning", [False, True])
+    def test_require_reasoning_passthrough(self, require_reasoning):
+        """The Python chat processor preserves SGLang's reasoning gate."""
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_ids=None,
+            require_reasoning=require_reasoning,
+        )
+        assert result["require_reasoning"] is require_reasoning
 
     def test_stop_conditions_string(self):
         """Single stop string is wrapped in a list."""
@@ -228,6 +309,20 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     def test_tokenizer_eos_token_ids_falls_back_to_single_id(self):
         tokenizer = types.SimpleNamespace(eos_token_id=2)
         assert _tokenizer_eos_token_ids(tokenizer) == [2]
+
+    def test_model_eos_token_ids_merge_generation_config(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_ids=[2, 3], eos_token_id=2)
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps({"eos_token_id": [3, 4, 5]}),
+            encoding="utf-8",
+        )
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2, 3, 4, 5]
+
+    def test_model_eos_token_ids_fall_back_when_config_is_absent(self, tmp_path):
+        tokenizer = types.SimpleNamespace(eos_token_id=2)
+
+        assert _model_eos_token_ids(tokenizer, str(tmp_path)) == [2]
 
     def test_normalize_eos_token_ids_ignores_non_ints_and_bools(self):
         assert _normalize_eos_token_ids([2, True, "3", 4, 2]) == [2, 4]
@@ -496,8 +591,9 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is None
         assert rp is not None
 
-    def test_reasoning_disabled_when_tool_choice_required(self):
-        """Reasoning parser is skipped when guided decoding is active."""
+    @pytest.mark.parametrize("force_reasoning", [False, True])
+    def test_reasoning_for_required_tool_follows_effective_mode(self, force_reasoning):
+        """Required tools parse reasoning only when the prompt enables it."""
         tools = [
             {
                 "type": "function",
@@ -511,12 +607,14 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             {"tools": tools, "tool_choice": "required"},
             tool_call_parser_name="qwen25",
             reasoning_parser_name="qwen3",
+            force_reasoning=force_reasoning,
         )
         assert tcp is not None
-        assert rp is None
+        assert (rp is not None) is force_reasoning
 
-    def test_reasoning_disabled_when_tool_choice_named(self):
-        """Reasoning parser is skipped for named tool_choice (guided decoding)."""
+    @pytest.mark.parametrize("force_reasoning", [False, True])
+    def test_reasoning_for_named_tool_follows_effective_mode(self, force_reasoning):
+        """Named tools parse reasoning only when the prompt enables it."""
         tools = [
             {
                 "type": "function",
@@ -536,9 +634,10 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             },
             tool_call_parser_name="qwen25",
             reasoning_parser_name="qwen3",
+            force_reasoning=force_reasoning,
         )
         assert tcp is not None
-        assert rp is None
+        assert (rp is not None) is force_reasoning
 
     def test_reasoning_active_when_tool_choice_auto(self):
         """Reasoning parser remains active for tool_choice=auto (no guided decoding)."""
@@ -613,6 +712,7 @@ def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
     assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
     assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+    assert _normalize_sglang_parser_name("kimi-k3") == "kimi_k3"
 
 
 def test_minimax_m3_force_reasoning_uses_thinking_mode():
@@ -632,6 +732,206 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({}, False),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "high"}, True),
+        ({"chat_template_kwargs": {"reasoning_effort": "medium"}}, True),
+    ],
+)
+def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
+    """Mistral follows SGLang's explicit non-none reasoning-effort rule."""
+    assert (
+        resolve_request_force_reasoning(request_data, "mistral", template_default=False)
+        is expected
+    )
+
+
+def _mistral_guided_request(tool_choice):
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Check the weather."}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        "tool_choice": tool_choice,
+        "reasoning_effort": "high",
+    }
+
+
+def _qwen_guided_request_without_separation(tool_choice):
+    request = _mistral_guided_request(tool_choice)
+    request.pop("reasoning_effort")
+    request["separate_reasoning"] = False
+    return request
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_mistral_high_effort_sets_reasoning_gate_inline(tokenizer, tool_choice):
+    """Inline preprocessing enables SGLang's gate for required and named tools."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="mistral",
+        eos_token_ids=None,
+    )
+
+    async def collect():
+        return [
+            item
+            async for item in processor.generator(_mistral_guided_request(tool_choice))
+        ]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_mistral_high_effort_sets_reasoning_gate_pool(
+    tokenizer, tool_choice, monkeypatch
+):
+    """Pool-worker preprocessing enables the same required and named gates."""
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "mistral")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _mistral_guided_request(tool_choice), MODEL, eos_token_ids=None
+    )
+    assert result.force_reasoning is True
+    assert result.dynamo_preproc["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_choice):
+    """Response placement does not disable Qwen's guided reasoning gate."""
+    request = _qwen_guided_request_without_separation(tool_choice)
+    result = preprocess_chat_request(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+    )
+
+    assert result.force_reasoning is True
+    assert result.reasoning_parser is None
+    assert _guided_tool_choice_requires_reasoning(request, result.force_reasoning)
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
+    """Inline preprocessing forwards the generation gate without a reasoner."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=None,
+    )
+
+    async def collect():
+        return [
+            item
+            async for item in processor.generator(
+                _qwen_guided_request_without_separation(tool_choice)
+            )
+        ]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_sets_gate_pool(
+    tokenizer, tool_choice, monkeypatch
+):
+    """Pool preprocessing forwards the gate while omitting response parsing."""
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "qwen3")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _qwen_guided_request_without_separation(tool_choice),
+        MODEL,
+        eos_token_ids=None,
+    )
+    assert result.force_reasoning is True
+    assert result.dynamo_preproc["require_reasoning"] is True
+    assert result.effective_reasoning_parser_name is None
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "force_reasoning", "expected"),
+    [
+        ("required", True, True),
+        ({"type": "function", "function": {"name": "get_weather"}}, True, True),
+        ("auto", True, False),
+        ("none", True, False),
+        ("required", False, False),
+    ],
+)
+def test_guided_tool_choice_requires_effective_reasoning(
+    tool_choice, force_reasoning, expected
+):
+    """Only reasoning-enabled required or named tools activate the gate."""
+    request = {"tool_choice": tool_choice}
+    assert _guided_tool_choice_requires_reasoning(request, force_reasoning) is expected
 
 
 class _CapturingReasoningParser:
@@ -1710,8 +2010,10 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             None,
             exclude_tools_when_tool_choice_none=True,
             chat_template="custom template",
+            default_thinking_mode="disabled",
         )
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
+        assert sglang_processor_module._w_default_thinking_mode == "disabled"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
@@ -2047,6 +2349,141 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["enable_thinking"] is True
         assert result.force_reasoning is True
 
+    def test_default_thinking_mode_disabled_reaches_generic_chat_template(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is False
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert captured["kwargs"]["thinking_mode"] == "disabled"
+        assert result.request["chat_template_kwargs"]["thinking_mode"] == "disabled"
+        assert "chat_template_kwargs" not in request
+
+    def test_default_thinking_mode_does_not_override_request_kwargs(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_default_thinking_mode_does_not_override_pythonized_args(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": True},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert "thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
+    def test_null_root_thinking_does_not_suppress_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": None,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["enable_thinking"] is False
+
+    def test_reasoning_effort_takes_precedence_over_deployment_default(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        preprocess_chat_request(
+            {
+                "model": "generic-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert captured["kwargs"]["reasoning_effort"] == "high"
+        assert "thinking" not in captured["kwargs"]
+        assert "enable_thinking" not in captured["kwargs"]
+        assert "thinking_mode" not in captured["kwargs"]
+
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
@@ -2253,6 +2690,118 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    # Only the explicit case is covered: with no `thinking` key we deliberately
+    # do NOT materialize one, so the K3 chat template applies its own default
+    # (measured: an unset `thinking` renders byte-identically to `thinking=True`).
+    # The parser reaches the same conclusion independently via
+    # `_THINKING_BY_DEFAULT`, so template and parser agree without our help.
+    @pytest.mark.parametrize(
+        ("chat_template_kwargs", "expected"),
+        [
+            ({"thinking": False}, False),
+        ],
+    )
+    def test_kimi_k3_template_and_parser_share_thinking_state(
+        self,
+        monkeypatch,
+        chat_template_kwargs,
+        expected,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        def fake_create_parsers(*args, force_reasoning=False, **kwargs):
+            return None, types.SimpleNamespace(force_reasoning=force_reasoning)
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            fake_create_parsers,
+        )
+
+        result = preprocess_chat_request(
+            {
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": chat_template_kwargs,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="kimi_k3",
+        )
+
+        assert captured["kwargs"]["thinking"] is expected
+        assert result.request["chat_template_kwargs"]["thinking"] is expected
+        assert result.force_reasoning is expected
+        assert result.reasoning_parser.force_reasoning is expected
+
+    @pytest.mark.multimodal
+    def test_kimi_k3_normalizes_template_media_but_forwards_original_url(
+        self,
+        monkeypatch,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                return [1, 2, 3]
+
+        def normalize_for_template(message, *args, **kwargs):
+            normalized = copy.deepcopy(message)
+            for part in normalized.get("content", []):
+                if part.get("type") == "image_url":
+                    part["type"] = "image"
+            return normalized
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "process_content_for_template_format",
+            normalize_for_template,
+        )
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/k3.png"},
+                        },
+                    ],
+                }
+            ],
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        dynamo_preproc = _build_dynamo_preproc(
+            result.request,
+            result.prompt_token_ids,
+            request["model"],
+            None,
+        )
+
+        assert captured["messages"][0]["content"][1]["type"] == "image"
+        assert request["messages"][0]["content"][1]["type"] == "image_url"
+        assert dynamo_preproc["multi_modal_data"] == {
+            "image_url": [{"Url": "https://example.com/k3.png"}]
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -2524,6 +3073,95 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
 
         assert "think about this" in reasoning
         assert "42" in content
+
+    @pytest.mark.parametrize(
+        ("parser_name", "reasoning_output", "expected_reasoning"),
+        [
+            ("qwen3", None, ""),
+            ("qwen3", "Check the request.</think>", "Check the request."),
+            ("qwen3", "[check the request]</think>", "[check the request]"),
+            ("mistral", "[THINK]Check the request.[/THINK]", "Check the request."),
+        ],
+    )
+    def test_required_tool_distinguishes_bare_json_from_reasoning(
+        self, tokenizer, parser_name, reasoning_output, expected_reasoning
+    ):
+        """Guided tool JSON bypasses only when the complete output is bare JSON."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tools = convert_tools(request["tools"])
+        tool_parser, reasoning_parser = create_parsers(
+            request,
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name=parser_name,
+            sglang_tools=tools,
+            force_reasoning=True,
+        )
+        assert reasoning_parser is not None
+        case_tokenizer = copy.deepcopy(tokenizer)
+        detector = reasoning_parser.detector
+        # Model tokenizers keep their reasoning delimiters atomic.
+        case_tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    detector.think_start_token,
+                    detector.think_end_token,
+                ]
+            }
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=case_tokenizer,
+            tool_call_parser=tool_parser,
+            reasoning_parser=reasoning_parser,
+            sglang_tools=tools,
+            tool_call_parser_name="qwen25",
+        )
+
+        tool_json = json.dumps(
+            [{"name": "get_weather", "parameters": {"city": "New York"}}]
+        )
+        text = f"{reasoning_output or ''}{tool_json}"
+        token_ids = case_tokenizer.encode(text)
+        reasoning = ""
+        content = ""
+        tool_calls = []
+        finish_reason = None
+        for offset in range(0, len(token_ids), 3):
+            batch = token_ids[offset : offset + 3]
+            is_last = offset + 3 >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                delta = choice.get("delta", {})
+                reasoning += delta.get("reasoning_content", "")
+                content += delta.get("content", "")
+                tool_calls.extend(delta.get("tool_calls", []))
+                finish_reason = choice.get("finish_reason") or finish_reason
+
+        assert reasoning == expected_reasoning
+        assert content == ""
+        assert finish_reason == "tool_calls"
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(tool_calls[0]["function"]["arguments"]) == {
+            "city": "New York"
+        }
 
 
 # ---------------------------------------------------------------------------

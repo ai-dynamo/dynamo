@@ -47,11 +47,9 @@ func main() {
 		}
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
@@ -59,34 +57,13 @@ func main() {
 		"runtime", *runtimeType,
 	)
 
+	// The node controller handles both restore and capture paths.
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-
-	// Run the node-local controller in the background.
-	controllerDone := make(chan error, 1)
-	go func() {
-		agentLog.Info("Snapshot node controller started")
-		controllerDone <- nodeController.Run(ctx)
-	}()
-
-	// Wait for signal or controller exit.
-	select {
-	case <-sigChan:
-		agentLog.Info("Shutting down")
-		cancel()
-		select {
-		case err := <-controllerDone:
-			if err != nil {
-				agentLog.Error(err, "Snapshot node controller exited with error during shutdown")
-			}
-		default:
-		}
-	case err := <-controllerDone:
-		if err != nil {
-			fatal(agentLog, err, "Snapshot node controller exited with error")
-		}
+	if runErr := nodeController.Run(rootCtx); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot node controller exited with error")
 	}
 
 	agentLog.Info("Agent stopped")

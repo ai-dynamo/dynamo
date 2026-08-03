@@ -1,0 +1,120 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DGDR Templates
+subtitle: Ready-to-apply DynamoGraphDeploymentRequest manifests for profiling and generating DynamoGraphDeployments.
+---
+
+A `DynamoGraphDeploymentRequest` (DGDR) describes a model, workload, hardware, and optional latency
+targets. Dynamo profiles that intent and generates the `DynamoGraphDeployment` (DGD) that serves
+traffic. Use these templates when you want Dynamo to choose a deployment configuration instead of
+writing the complete DGD yourself.
+
+Each manifest is embedded from
+[`examples/deployments/dgdr/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/dgdr).
+Open an example, use the copy button, and adjust its model, backend, hardware, and namespace before
+applying it.
+
+## Prerequisites
+
+- Install the Dynamo Kubernetes platform and operator.
+- Create `hf-token-secret` in the target namespace when the model requires authentication.
+- For namespace-restricted operator installations, set `hardware.gpuSku`, `hardware.vramMb`, and
+  `hardware.numGpusPerNode` explicitly.
+
+Release installations select the matching profiler image when `spec.image` is omitted. For a local
+operator build without a known release version, set `spec.image` to a compatible `dynamo-planner`
+image.
+
+Apply a template with:
+
+```bash
+export NAMESPACE=dynamo-cloud
+kubectl apply -f rapid.yaml -n ${NAMESPACE}
+```
+
+## Generate a DGD
+
+<AccordionGroup>
+  <Accordion title="rapid.yaml · Fast generation with AIConfigurator estimates">
+    Uses simulated performance estimates to generate a DGD without benchmarking candidate engines
+    on real GPUs.
+
+    <Code src="../../../../../examples/deployments/dgdr/rapid.yaml" title="rapid.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="thorough.yaml · Measure candidate configurations on GPUs">
+    Deploys and benchmarks candidate configurations before selecting and generating the DGD.
+
+    <Code src="../../../../../examples/deployments/dgdr/thorough.yaml" title="thorough.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="planner.yaml · Generate a deployment with SLA-driven autoscaling">
+    Adds a Planner configuration so the generated disaggregated deployment can adjust prefill and
+    decode replicas at runtime.
+
+    <Code src="../../../../../examples/deployments/dgdr/planner.yaml" title="planner.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="moe-sglang.yaml · Profile a multinode MoE deployment">
+    Uses SGLang and a 32-GPU budget for a large Mixture-of-Experts model. Adapt its hardware,
+    scheduling, model-cache, and SLA settings before applying it.
+
+    <Code src="../../../../../examples/deployments/dgdr/moe-sglang.yaml" title="moe-sglang.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+</AccordionGroup>
+
+## Review and Customize the Generated DGD
+
+<AccordionGroup>
+  <Accordion title="review-before-deploy.yaml · Inspect the generated DGD first">
+    Sets `autoApply: false` so the request stops after generation instead of creating the DGD.
+
+    <Code src="../../../../../examples/deployments/dgdr/review-before-deploy.yaml" title="review-before-deploy.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="generated-dgd-override.yaml · Add KV-aware routing">
+    Merges an environment-variable override into the generated frontend component. Overrides can
+    modify generated components but cannot add a new topology component.
+
+    <Code src="../../../../../examples/deployments/dgdr/generated-dgd-override.yaml" title="generated-dgd-override.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="model-cache.yaml · Load weights from a shared PVC">
+    Mounts a pre-populated model cache into the profiling job and generated workers. Replace the
+    snapshot placeholder and create the PVC before applying the request.
+
+    <Code src="../../../../../examples/deployments/dgdr/model-cache.yaml" title="model-cache.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+</AccordionGroup>
+
+## Test and Inspect Profiling
+
+<AccordionGroup>
+  <Accordion title="mocker.yaml · Generate a simulated deployment">
+    Replaces model-serving workers with mock workers for testing routing, profiling, and Planner
+    behavior without serving the model on GPUs.
+
+    <Code src="../../../../../examples/deployments/dgdr/mocker.yaml" title="mocker.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+  <Accordion title="profiling-artifacts.yaml · Persist detailed profiler output">
+    Replaces the profiling output volume with the existing `dynamo-pvc` claim so plots, logs,
+    configurations, and raw profiling data remain available after the Job completes.
+
+    <Code src="../../../../../examples/deployments/dgdr/profiling-artifacts.yaml" title="profiling-artifacts.yaml" language="yaml" maxLines={0} />
+  </Accordion>
+</AccordionGroup>
+
+## Inspect the Result
+
+Watch the request until it reaches `Deployed` or `Ready`:
+
+```bash
+kubectl get dgdr <request-name> -n ${NAMESPACE} -w
+```
+
+For a request with `autoApply: false`, extract the generated DGD:
+
+```bash
+kubectl get dgdr <request-name> -n ${NAMESPACE} \
+  -o jsonpath='{.status.profilingResults.selectedConfig}' > generated-dgd.yaml
+```
+
+See [Auto Deploy with DGDR](../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md) for the task-oriented workflow and the
+[DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) for field definitions, lifecycle phases, and
+validation behavior.

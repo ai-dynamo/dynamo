@@ -1092,8 +1092,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(dynamo_frontend_inflight_requests{model=\"$model\"})",
-          "legendFormat": "inflight",
+          "expr": "sum(dynamo_frontend_active_requests{model=\"$model\"})",
+          "legendFormat": "active",
           "range": true,
           "refId": "A"
         },
@@ -1109,7 +1109,7 @@
           "refId": "B"
         }
       ],
-      "title": "Inflight vs Queued Requests",
+      "title": "Active vs Queued Requests",
       "type": "timeseries"
     },
     {

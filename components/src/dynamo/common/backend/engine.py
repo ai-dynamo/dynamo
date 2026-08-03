@@ -61,6 +61,7 @@ class GenerateRequest(TypedDict, total=False):
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    require_reasoning: bool
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
     multi_modal_data: dict[str, Any]

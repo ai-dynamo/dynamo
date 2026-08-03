@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +23,7 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -59,6 +59,7 @@ use crate::protocols::openai::{
         NvCreateChatCompletionStreamResponse,
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
@@ -80,6 +81,14 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str = "Batch file storage is not implemented yet.";
+const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
+    "Batch job lifecycle persistence is not implemented yet.";
+const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
+    "Batch output file retrieval is not implemented yet.";
+
+static FORCE_INCLUDE_USAGE: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
 use super::error::{SanitizedError, overload_status_code};
 
@@ -539,7 +548,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn context_from_headers<T: Send + Sync + 'static>(
+pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
@@ -630,6 +639,9 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
@@ -645,10 +657,12 @@ async fn handler_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
-            .metric_model_for(&request.inner.model)
+            .metric_model_for(&canonical_model)
             .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
@@ -715,7 +729,7 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn completions_single(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
@@ -725,6 +739,15 @@ async fn completions_single(
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang, where an alias request still
+    // responds with the primary served name). Non-aliases pass through, so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -862,11 +885,91 @@ async fn completions_single(
     }
 }
 
+fn add_optional_token_count(total: &mut Option<u32>, value: Option<u32>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or_default().saturating_add(value));
+    }
+}
+
+fn merge_completion_usage(
+    total: &mut dynamo_protocols::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
+) {
+    total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+    total.completion_tokens = total
+        .completion_tokens
+        .saturating_add(usage.completion_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
+
+    if let Some(details) = usage.prompt_tokens_details {
+        let total_details = total.prompt_tokens_details.get_or_insert_default();
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(&mut total_details.cached_tokens, details.cached_tokens);
+    }
+
+    if let Some(details) = usage.completion_tokens_details {
+        let total_details = total.completion_tokens_details.get_or_insert_default();
+        add_optional_token_count(
+            &mut total_details.accepted_prediction_tokens,
+            details.accepted_prediction_tokens,
+        );
+        add_optional_token_count(&mut total_details.audio_tokens, details.audio_tokens);
+        add_optional_token_count(
+            &mut total_details.reasoning_tokens,
+            details.reasoning_tokens,
+        );
+        add_optional_token_count(
+            &mut total_details.rejected_prediction_tokens,
+            details.rejected_prediction_tokens,
+        );
+    }
+}
+
+/// Combine the terminal usage-only chunks from per-prompt streams into one
+/// request-level chunk. Continuous usage attached to content chunks passes
+/// through unchanged because those values are cumulative snapshots.
+fn aggregate_batch_completion_usage(
+    stream: impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>>,
+    request_id: String,
+) -> impl futures::Stream<Item = Annotated<NvCreateCompletionResponse>> {
+    async_stream::stream! {
+        let mut stream = Box::pin(stream);
+        let mut aggregate_usage = dynamo_protocols::types::CompletionUsage::default();
+        let mut final_usage_chunk = None;
+
+        while let Some(mut response) = stream.next().await {
+            let terminal_usage = response.data.as_mut().and_then(|data| {
+                data.inner
+                    .choices
+                    .is_empty()
+                    .then(|| data.inner.usage.take())
+                    .flatten()
+            });
+
+            if let Some(usage) = terminal_usage {
+                merge_completion_usage(&mut aggregate_usage, usage);
+                final_usage_chunk = Some(response);
+                continue;
+            }
+
+            yield response;
+        }
+
+        if let Some(mut response) = final_usage_chunk {
+            if let Some(data) = response.data.as_mut() {
+                data.inner.id = format!("cmpl-{request_id}");
+                data.inner.usage = Some(aggregate_usage);
+            }
+            yield response;
+        }
+    }
+}
+
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
     batch_size: usize,
     n: u8,
@@ -876,6 +979,11 @@ async fn completions_batch(
 
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
+    // Resolve alias → primary served name (see completions_single).
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -961,6 +1069,7 @@ async fn completions_batch(
 
     // Merge all streams
     let merged_stream = stream::select_all(all_streams);
+    let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = first_ctx.expect("At least one stream should be generated");
@@ -1071,6 +1180,13 @@ async fn embeddings(
         request.nvext = None;
     }
 
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (see completions_single). `request` is still owned + mutable here.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -1228,6 +1344,9 @@ async fn handler_chat_completions(
 ) -> Result<Response, ErrorResponse> {
     ensure_json_content_type(&headers)?;
     let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+        delta_common::force_include_usage(&mut request.inner.stream_options);
+    }
 
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
@@ -1250,12 +1369,23 @@ async fn handler_chat_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles
@@ -1434,6 +1564,17 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        // Classify only this event's error, not its causes. An inner invalid
+        // argument must not override an outer unavailable or internal error.
+        let invalid_argument = event.error.as_ref().filter(|error| {
+            matches!(
+                error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        });
+
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
         // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
@@ -1457,14 +1598,34 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
-        // Try to parse as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
-            let code = error_payload
-                .code
-                .and_then(|c| StatusCode::from_u16(c).ok())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(error_str);
+        // Parse the status-bearing node's own message. The diagnostic string
+        // above includes its causes and therefore is not necessarily JSON.
+        let status_message = event
+            .error
+            .as_ref()
+            .map(|error| error.message())
+            .unwrap_or(&error_str);
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
+            // Preserve explicit HTTP-like statuses (for example 415); Python
+            // 4xx exceptions share the Backend(InvalidArgument) category.
+            let code = match error_payload.code {
+                Some(code) => {
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
+                None => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let message = error_payload
+                .message
+                .unwrap_or_else(|| status_message.to_string());
             return Some((message, code));
+        }
+
+        if let Some(invalid_argument) = invalid_argument {
+            return Some((
+                invalid_argument.message().to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
@@ -1534,48 +1695,107 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
 const MAX_LEADING_ANNOTATIONS: usize = 16;
 
 /// Inspect the first non-annotation event in the stream for a backend error.
-/// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
-/// returned stream replays any buffered annotation frames in their original
-/// order before yielding the remaining items.
+///
+/// `timeout = None` — await stream events indefinitely (non-streaming preflight).
+/// `timeout = Some(dur)` — race against a single deadline captured at function
+/// entry (streaming pre-commit peek). If the deadline elapses before a
+/// non-annotation event arrives, return the buffered annotations chained with
+/// the remaining stream so downstream sees the original ordering.
+///
+/// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
+/// error, `Ok(stream)` otherwise.
 pub(super) async fn check_for_backend_error(
     mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
     + Unpin
     + 'static,
+    timeout: Option<std::time::Duration>,
 ) -> Result<
-    impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
+    std::pin::Pin<
+        Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+    >,
     ErrorResponse,
 > {
     use futures::stream::StreamExt;
 
+    // Single deadline captured at entry so the peek window is bounded in total,
+    // not per-iteration.
+    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
-    while let Some(event) = stream.next().await {
+
+    loop {
+        let next = match deadline {
+            Some(d) => tokio::select! {
+                item = stream.next() => item,
+                _ = tokio::time::sleep_until(d) => {
+                    return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
+                }
+            },
+            None => stream.next().await,
+        };
+
+        let Some(event) = next else {
+            // Backend closed before yielding any non-annotation event; replay
+            // buffered annotations so downstream sees them.
+            return Ok(Box::pin(futures::stream::iter(buffered)));
+        };
+
         if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
             buffered.push(event);
             continue;
         }
+
         if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(match SanitizedError::for_backend_status(status_code) {
-                Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
-                // 4xx (non-499): protocol contract — forward backend message as-is.
-                None => (
-                    status_code,
-                    Json(ErrorMessage {
-                        message: error_msg,
-                        error_type: map_error_code_to_error_type(status_code),
-                        code: status_code.as_u16(),
-                        details: None,
-                    }),
-                ),
-            });
+            return Err(backend_error_response(error_msg, status_code));
         }
 
-        // First non-annotation, non-error event — push it back and stop;
-        // downstream consumers see the original ordering.
+        // First non-annotation, non-error event — hand back for downstream
+        // consumption with original ordering preserved.
         buffered.push(event);
-        break;
+        return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
     }
-    Ok(futures::stream::iter(buffered).chain(stream))
+}
+
+/// Convert an `(error_msg, status_code)` pair from `extract_backend_error_if_present`
+/// into the wire `ErrorResponse`. Shared between the non-streaming preflight
+/// (`check_for_backend_error`) and the streaming preflight so both paths speak
+/// the same sanitization + status contract to the client.
+fn backend_error_response(error_msg: String, status_code: StatusCode) -> ErrorResponse {
+    match SanitizedError::for_backend_status(status_code) {
+        Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
+        // 4xx (non-499): protocol contract — forward backend message as-is.
+        None => (
+            status_code,
+            Json(ErrorMessage {
+                message: error_msg,
+                error_type: map_error_code_to_error_type(status_code),
+                code: status_code.as_u16(),
+                details: None,
+            }),
+        ),
+    }
+}
+
+/// Read the pre-commit peek window from the environment.
+///
+/// `Some(dur)` — poll for that duration before committing SSE.
+/// `None` — the peek is disabled entirely (default; matches pre-fix behavior
+/// where all backend errors surface as SSE frames post-HTTP-200).
+///
+/// Read live per streaming request. Reading `std::env::var` is a hashmap
+/// lookup — sub-microsecond, negligible next to the peek window
+/// itself. Live reads make the value tunable at test time without a
+/// process restart.
+// FIXME: unify env-var initialization with the rest of `env_llm::*` once that
+// module gets a standard reader.
+fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
+    match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(0) | None => None,
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+    }
 }
 
 #[derive(Serialize)]
@@ -1748,7 +1968,7 @@ async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateChatCompletionRequest>,
-    mut stream_handle: ConnectionHandle,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1775,6 +1995,14 @@ async fn chat_completions(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -1847,6 +2075,11 @@ async fn chat_completions(
         ),
     );
 
+    // When parallel_tool_calls is false, limit the response to a single tool call.
+    let parsing_options =
+        parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
+    let enforce_single_tool_call = request.inner.parallel_tool_calls == Some(false);
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -1889,11 +2122,29 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events with `event: error` in the stream (handled by
-        // EventConverter and monitor_for_disconnects). This is standard SSE behavior.
-        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+        // Peek the first non-annotation event for a synchronous backend error
+        // (e.g. `Backend(InvalidArgument)` from a text-only model receiving
+        // image content) before committing HTTP 200, so we can return the
+        // typed 4xx that the non-streaming path returns. The peek window is
+        // short (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`) — if no signal arrives,
+        // fall through to SSE, and `monitor_for_disconnects` owns the long
+        // backend-inactivity timeout from there.
+        let stream = match pre_commit_error_peek_timeout() {
+            Some(dur) => check_for_backend_error(stream, Some(dur))
+                .await
+                .map_err(|err_response| {
+                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?,
+            // Env var unset → skip peek, commit HTTP 200 immediately (pre-fix
+            // behavior). Backend errors will surface as SSE error frames via
+            // monitor_for_disconnects.
+            None => Box::pin(stream)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = _> + Send>,
+                >,
+        };
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -1908,8 +2159,23 @@ async fn chat_completions(
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
 
-            while let Some(response) = stream.next().await {
+            while let Some(mut response) = stream.next().await {
                 events.clear();
+
+                // When parallel_tool_calls is false, surface only the first tool call
+                // Keep index 0 and drop any higher indexes
+                if enforce_single_tool_call
+                    && let Some(data) = response.data.as_mut()
+                {
+                    for choice in data.inner.choices.iter_mut() {
+                        if let Some(tool_calls) = choice.delta.tool_calls.as_mut() {
+                            tool_calls.retain(|tc| tc.index == 0);
+                            if tool_calls.is_empty() {
+                                choice.delta.tool_calls = None;
+                            }
+                        }
+                    }
+                }
 
                 // Drop empty chunks from multi-byte token assembly.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
@@ -1963,7 +2229,7 @@ async fn chat_completions(
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
         let stream_with_check =
-            check_for_backend_error(stream)
+            check_for_backend_error(stream, None)
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -2155,12 +2421,23 @@ async fn handler_responses(
     let streaming = request.inner.stream.unwrap_or(false);
     let raw_model = request.inner.model.as_deref().unwrap_or("");
     let resolved_model = resolve_request_model(raw_model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles
@@ -2193,7 +2470,7 @@ async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
-    mut stream_handle: ConnectionHandle,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -2215,7 +2492,16 @@ async fn responses(
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
 
-    let model = request.inner.model.clone().unwrap_or_default();
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary. The Responses API wraps model in Option<String>, so re-wrap
+    // after resolution. Non-aliases pass through metric_model_for's guard.
+    let original_model = request.inner.model.clone().unwrap_or_default();
+    let canonical = state.manager().resolve_canonical_name(&original_model);
+    if canonical != original_model {
+        request.inner.model = Some(canonical.clone());
+    }
+    let model = canonical;
     let streaming = request.inner.stream.unwrap_or(false);
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2348,10 +2634,24 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events in the stream. This is standard SSE behavior.
-        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
+        // Peek the first non-annotation event for a synchronous backend error
+        // before committing HTTP 200 — same rationale as chat_completions
+        // above. Short peek window; the long backend-inactivity safety net
+        // lives in `monitor_for_disconnects`.
+        let engine_stream = match pre_commit_error_peek_timeout() {
+            Some(dur) => check_for_backend_error(engine_stream, Some(dur))
+                .await
+                .map_err(|err_response| {
+                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                    err_response
+                })?,
+            // Env var unset → skip peek, commit HTTP 200 immediately.
+            None => Box::pin(engine_stream)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = _> + Send>,
+                >,
+        };
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
@@ -2423,7 +2723,7 @@ async fn responses(
 
         // Check first event for backend errors before aggregating (non-streaming only)
         let stream_with_check =
-            check_for_backend_error(engine_stream)
+            check_for_backend_error(engine_stream, None)
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -2633,7 +2933,14 @@ async fn list_models_openai(
     // is hidden until a peer joins.
     let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
+        // Alias entries have no card of their own (keyed by the primary's
+        // display_name); fall back to the primary's context length.
+        let context_window = cw_override.or_else(|| {
+            card_map
+                .get(&model_name)
+                .or_else(|| card_map.get(&state.manager().resolve_canonical_name(&model_name)))
+                .map(|&cl| cl as u64)
+        });
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model",
@@ -2718,6 +3025,69 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
+/// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
+///
+/// The first slice exposes the route and protocol shape. Durable file storage,
+/// batch job persistence, dispatch, and output assembly are implemented by
+/// follow-up work, so handlers return explicit 501 responses instead of
+/// accepting work that cannot complete yet.
+pub fn batch_router(
+    state: Arc<service_v2::State>,
+    files_path: Option<String>,
+    batches_path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let files_path = files_path.unwrap_or("/v1/files".to_string());
+    let file_content_path = format!("{}/{{file_id}}/content", files_path);
+    let batches_path = batches_path.unwrap_or("/v1/batches".to_string());
+    let batch_path = format!("{}/{{batch_id}}", batches_path);
+
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, &files_path),
+        RouteDoc::new(axum::http::Method::GET, &file_content_path),
+        RouteDoc::new(axum::http::Method::POST, &batches_path),
+        RouteDoc::new(axum::http::Method::GET, &batch_path),
+    ];
+
+    let router = Router::new()
+        .route(&files_path, post(create_batch_file))
+        .route(&file_content_path, get(retrieve_batch_file_content))
+        .route(&batches_path, post(create_batch))
+        .route(&batch_path, get(retrieve_batch))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+
+    (docs, router)
+}
+
+async fn create_batch_file() -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_FILE_STORAGE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn create_batch() -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch(
+    axum::extract::Path(_batch_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch_file_content(
+    axum::extract::Path(_file_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED,
+    ))
+}
+
 /// List Models
 pub fn list_models_router(
     state: Arc<service_v2::State>,
@@ -2800,10 +3170,14 @@ fn get_model_retrieve(
         .unwrap()
         .as_secs();
 
+    // Alias entries have no card of their own (cards are keyed by the primary's
+    // display_name); fall back to the primary so an alias reports the same
+    // context_window that `GET /v1/models` lists for it.
+    let canonical_model = state.manager().resolve_canonical_name(model_id);
     let cards = state.manager().get_model_cards();
     let context_length = cards
         .iter()
-        .find(|c| c.display_name == model_id)
+        .find(|c| c.display_name == model_id || c.display_name == canonical_model)
         .map(|c| c.effective_context_length() as u64);
     let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
         .ok()
@@ -2884,6 +3258,7 @@ async fn images(
             dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
             dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage2 => "gpt-image-2".to_string(),
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
@@ -3530,6 +3905,38 @@ mod tests {
             "unexpected error: {}",
             err.1.message
         );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_accepts_empty_image_url_with_uuid() {
+        let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
+        assert_eq!(
+            request["messages"][0]["content"][0]["image_url"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let request = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(
+            request["messages"][0]["content"][0]["text"],
+            "raw \u{fffd} \u{1b} data"
+        );
+        assert_eq!(
+            request["messages"][0]["content"][1]["image_url"],
+            serde_json::Value::Null
+        );
+        assert_eq!(request["messages"][0]["content"][1]["uuid"], "image-42");
     }
 
     #[test]
@@ -4570,7 +4977,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         // Should return an error
         assert!(result.is_err());
@@ -4584,6 +4991,42 @@ mod tests {
                     .message
                     .contains("Backend service unavailable")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_typed_invalid_argument() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        for error_type in [
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+        ] {
+            let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("unsupported JSON schema keyword")
+                        .build(),
+                ),
+            };
+
+            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+
+            let error_response = match result {
+                Err(error_response) => error_response,
+                Ok(_) => panic!("typed invalid argument must fail"),
+            };
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+            assert_eq!(error_response.1.error_type, "Bad Request");
+            assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
     }
 
@@ -4604,7 +5047,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         // Should return an error with correct status code extracted from JSON
         assert!(result.is_err());
@@ -4637,7 +5080,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -4666,7 +5109,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -4696,7 +5139,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -4733,7 +5176,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         assert!(
             result.is_err(),
@@ -4781,7 +5224,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, normal_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         assert!(result.is_ok());
         let mut returned: Vec<_> = result.unwrap().collect().await;
@@ -4821,7 +5264,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         // Should return Ok with the stream
         assert!(result.is_ok());
@@ -4842,7 +5285,7 @@ mod tests {
         // Create an empty stream
         let test_stream =
             stream::iter::<Vec<Annotated<NvCreateChatCompletionStreamResponse>>>(vec![]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         // Should return Ok with an empty stream
         assert!(result.is_ok());
@@ -4868,7 +5311,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream).await;
+        let result = check_for_backend_error(test_stream, None).await;
 
         // Should return an error based on is_backend_error_event logic
         assert!(result.is_err());
@@ -6081,6 +6524,139 @@ mod tests {
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
         );
+    }
+
+    fn make_completion_usage_chunk(
+        id: &str,
+        usage: dynamo_protocols::types::CompletionUsage,
+    ) -> NvCreateCompletionResponse {
+        NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: id.to_string(),
+                choices: vec![],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "text_completion".to_string(),
+                usage: Some(usage),
+            },
+            nvext: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_completion_usage_is_aggregated_once() {
+        use dynamo_protocols::types::{
+            CompletionTokensDetails, CompletionUsage, PromptTokensDetails,
+        };
+
+        let continuous_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        let first_usage = CompletionUsage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(1),
+                cached_tokens: Some(2),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(1),
+                audio_tokens: None,
+                reasoning_tokens: Some(2),
+                rejected_prediction_tokens: Some(0),
+            }),
+        };
+        let second_usage = CompletionUsage {
+            prompt_tokens: 4,
+            completion_tokens: 1,
+            total_tokens: 5,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                audio_tokens: Some(2),
+                cached_tokens: Some(3),
+            }),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                accepted_prediction_tokens: Some(2),
+                audio_tokens: Some(1),
+                reasoning_tokens: None,
+                rejected_prediction_tokens: Some(1),
+            }),
+        };
+
+        let chunks = vec![
+            Annotated::from_data(make_completion_chunk(
+                "first",
+                None,
+                Some(continuous_usage.clone()),
+            )),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-0", first_usage)),
+            Annotated::from_data(make_completion_chunk("second", None, None)),
+            Annotated::from_data(make_completion_usage_chunk("cmpl-request-1", second_usage)),
+        ];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 3, "two content chunks and one usage chunk");
+        assert_eq!(
+            output[0]
+                .data
+                .as_ref()
+                .and_then(|data| data.inner.usage.as_ref()),
+            Some(&continuous_usage),
+            "continuous usage must pass through unchanged",
+        );
+
+        let final_response = output[2].data.as_ref().expect("final data chunk");
+        assert_eq!(final_response.inner.id, "cmpl-request");
+        assert!(final_response.inner.choices.is_empty());
+        let usage = final_response
+            .inner
+            .usage
+            .as_ref()
+            .expect("aggregate usage");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 10);
+        let prompt_details = usage
+            .prompt_tokens_details
+            .as_ref()
+            .expect("prompt token details");
+        assert_eq!(prompt_details.audio_tokens, Some(3));
+        assert_eq!(prompt_details.cached_tokens, Some(5));
+        let completion_details = usage
+            .completion_tokens_details
+            .as_ref()
+            .expect("completion token details");
+        assert_eq!(completion_details.accepted_prediction_tokens, Some(3));
+        assert_eq!(completion_details.audio_tokens, Some(1));
+        assert_eq!(completion_details.reasoning_tokens, Some(2));
+        assert_eq!(completion_details.rejected_prediction_tokens, Some(1));
+    }
+
+    #[tokio::test]
+    async fn batch_completion_without_usage_is_unchanged() {
+        let chunks = vec![Annotated::from_data(make_completion_chunk(
+            "content", None, None,
+        ))];
+
+        let output: Vec<_> =
+            aggregate_batch_completion_usage(futures::stream::iter(chunks), "request".to_string())
+                .collect()
+                .await;
+
+        assert_eq!(output.len(), 1);
+        let response = output[0].data.as_ref().expect("content chunk");
+        assert_eq!(response.inner.id, "test");
+        assert_eq!(response.inner.choices[0].text, "content");
+        assert!(response.inner.usage.is_none());
     }
 
     // ── decode_base64_embedding_to_floats ────────────────────────────────

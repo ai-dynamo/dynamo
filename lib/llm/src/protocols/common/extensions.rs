@@ -331,15 +331,16 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    let priority = headers
+    let priority_header = headers
         .get(HEADER_REQUEST_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i32>().ok());
-
-    let strict_priority = headers
+        .and_then(|v| v.to_str().ok());
+    let strict_priority_header = headers
         .get(HEADER_REQUEST_STRICT_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
+        .and_then(|v| v.to_str().ok());
+    // Parsed only for the "header present?" gate below; the merge is delegated to
+    // `resolve_request_priority`.
+    let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
+    let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
     let tenant_id = headers
         .get(HEADER_TENANT_ID)
         .and_then(|v| v.to_str().ok())
@@ -372,18 +373,58 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         ext.prefill_dp_rank = Some(rank);
     }
     if priority.is_some() || strict_priority.is_some() {
+        // Bake the effective header-over-body priority into the body.
+        let resolved = resolve_request_priority(
+            ext.agent_hints.as_ref(),
+            priority_header,
+            strict_priority_header,
+        );
         let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
-        if let Some(priority) = priority {
-            hints.priority = Some(priority);
-        }
-        if let Some(strict_priority) = strict_priority {
-            hints.strict_priority = Some(strict_priority);
-        }
+        hints.priority = resolved.priority;
+        hints.strict_priority = resolved.strict_priority;
     }
     if let Some(salt) = tenant_id {
         ext.cache_salt = Some(salt);
     }
     Some(ext)
+}
+
+/// Priority resolved with header-over-body precedence, per field: a well-formed
+/// header (incl. `0`/negative) wins; a missing/malformed one falls back to the
+/// body; `latency_sensitivity` feeds only `priority_jump`, only when no priority
+/// exists. Transport-neutral — the caller passes header strings from an
+/// `http::HeaderMap` or Envoy `ext_proc` headers, so one policy serves both.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ResolvedPriority {
+    /// Effective `x-dynamo-request-priority`.
+    pub priority: Option<i32>,
+    /// Effective `x-dynamo-request-strict-priority` (queue tier).
+    pub strict_priority: Option<u32>,
+    /// `priority` as `f64`, else deprecated `latency_sensitivity`, else `None`.
+    pub priority_jump: Option<f64>,
+}
+
+/// Resolve request priority from body hints and already-looked-up raw header
+/// values. See [`ResolvedPriority`] for the precedence contract.
+pub fn resolve_request_priority(
+    hints: Option<&AgentHints>,
+    priority_header: Option<&str>,
+    strict_priority_header: Option<&str>,
+) -> ResolvedPriority {
+    let priority = priority_header
+        .and_then(|h| h.trim().parse::<i32>().ok())
+        .or_else(|| hints.and_then(|h| h.priority));
+    let strict_priority = strict_priority_header
+        .and_then(|h| h.trim().parse::<u32>().ok())
+        .or_else(|| hints.and_then(|h| h.strict_priority));
+    let priority_jump = priority
+        .map(|p| p as f64)
+        .or_else(|| hints.and_then(|h| h.latency_sensitivity));
+    ResolvedPriority {
+        priority,
+        strict_priority,
+        priority_jump,
+    }
 }
 
 pub trait NvExtProvider {
@@ -883,6 +924,60 @@ mod tests {
     }
 
     #[test]
+    fn resolve_request_priority_header_over_body_with_independent_fallback() {
+        let hints = AgentHints {
+            priority: Some(5),
+            strict_priority: Some(2),
+            latency_sensitivity: Some(1.5),
+            ..Default::default()
+        };
+
+        // Valid headers (including negative) override the body, per field.
+        let r = resolve_request_priority(Some(&hints), Some("-3"), Some("7"));
+        assert_eq!(r.priority, Some(-3));
+        assert_eq!(r.strict_priority, Some(7));
+        assert_eq!(r.priority_jump, Some(-3.0));
+
+        // Zero is a valid override, not "absent"; the other field falls back.
+        let r = resolve_request_priority(Some(&hints), Some("0"), None);
+        assert_eq!(r.priority, Some(0));
+        assert_eq!(r.priority_jump, Some(0.0));
+        assert_eq!(r.strict_priority, Some(2));
+
+        // Malformed/missing headers fall back to the body, independently.
+        let r = resolve_request_priority(Some(&hints), Some("abc"), None);
+        assert_eq!(r.priority, Some(5));
+        assert_eq!(r.strict_priority, Some(2));
+        assert_eq!(r.priority_jump, Some(5.0));
+
+        // `latency_sensitivity` drives `priority_jump` only when no priority exists.
+        let ls_only = AgentHints {
+            latency_sensitivity: Some(2.5),
+            ..Default::default()
+        };
+        let r = resolve_request_priority(Some(&ls_only), None, None);
+        assert_eq!(r.priority, None);
+        assert_eq!(r.priority_jump, Some(2.5));
+
+        // A real priority beats the deprecated `latency_sensitivity`.
+        let both = AgentHints {
+            priority: Some(4),
+            latency_sensitivity: Some(9.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_request_priority(Some(&both), None, None).priority_jump,
+            Some(4.0)
+        );
+
+        // Nothing set anywhere.
+        assert_eq!(
+            resolve_request_priority(None, None, None),
+            ResolvedPriority::default()
+        );
+    }
+
+    #[test]
     fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
@@ -971,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_requires_explicit_dynamo_header() {
+    fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -982,20 +1077,30 @@ mod tests {
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
         );
-        assert!(session_affinity_from_headers(&headers).is_none());
+        // Without a canonical header, affinity falls back to the first matching
+        // agent mapping. Claude precedes Codex and OpenCode in AGENT_HEADER_MAPPINGS.
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
 
+        // The explicit Dynamo session header always wins over agent mappings.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "canonical"
         );
 
+        // A blank Dynamo header is ignored and affinity falls back to the mapping.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
     }
 
     #[test]
-    fn native_agent_session_does_not_enable_affinity() {
+    fn session_affinity_uses_agent_child_session_when_present() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -1003,10 +1108,16 @@ mod tests {
         );
         headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
 
+        // Affinity keys on the same id the agent context resolves to: the child
+        // (sub-agent) session when present, not the root session.
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-agent"
+        );
 
+        // The explicit Dynamo session header still takes precedence.
         headers.insert(
             HEADER_DYNAMO_SESSION_ID,
             "affinity-session".parse().unwrap(),
@@ -1017,6 +1128,16 @@ mod tests {
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "affinity-session"
         );
+    }
+
+    #[test]
+    fn session_affinity_absent_without_any_session_header() {
+        let mut headers = HeaderMap::new();
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        // A blank canonical header with no agent headers yields no affinity.
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
     }
 
     #[test]
