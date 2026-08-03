@@ -14,6 +14,11 @@
  * dim neutral. Cells with a note carry an information marker and reveal the
  * note in a CSS-only tooltip on hover or keyboard focus.
  *
+ * CSS is injected via dangerouslySetInnerHTML, not as a <style> text child:
+ * a text child is escaped on render, so a `>` child combinator becomes &gt;
+ * and the double quotes in the [data-backend="..."] selectors below become
+ * &quot;, silently dropping those rules (see #12402).
+ *
  * Server component (no "use client"); shares .dynref-* base classes from
  * ReferenceStyles.tsx and carries only its own .dynref-heat-* layout rules.
  */
@@ -364,7 +369,7 @@ function StatusCell({ cell, feature, backend }: { cell: FeatureCell; feature: st
 export function FeatureHeatmap() {
   return (
     <div className="dynref-panel">
-      <style>{HEAT_CSS}</style>
+      <style dangerouslySetInnerHTML={{ __html: HEAT_CSS }} />
       <div className="dynref-panel-header">
         <span className="dynref-h">Feature support by backend</span>
         <div className="dynref-heat-legend">
