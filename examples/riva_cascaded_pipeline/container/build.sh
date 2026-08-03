@@ -18,12 +18,12 @@
 # cascaded voice pipeline example.
 #
 #   BASE_IMAGE  Dynamo image to layer on (default: dynamo:latest-vllm-runtime)
-#   TAG         Output image tag        (default: dynamo-riva:latest)
+#   TAG         Output image tag        (default: dynamo-riva-custom:latest)
 
 set -euo pipefail
 
 BASE_IMAGE="${BASE_IMAGE:-dynamo:latest-vllm-runtime}"
-TAG="${TAG:-dynamo-riva:latest}"
+TAG="${TAG:-dynamo-riva-custom:latest}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXAMPLE_DIR="$(dirname "${SCRIPT_DIR}")"

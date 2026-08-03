@@ -25,7 +25,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${DYNAMO_IMAGE}
+              image: ${CUSTOM_DYNAMO_IMAGE}
               command: [python3, -m, dynamo.frontend]
               args: [--http-port, "8000"]
           imagePullSecrets: &imagePullSecrets
@@ -38,7 +38,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${DYNAMO_IMAGE}
+              image: ${CUSTOM_DYNAMO_IMAGE}
               command: [python3, -m, riva_nim.asr_worker]
               args:
                 - --riva-server
@@ -96,7 +96,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${DYNAMO_IMAGE}
+              image: ${CUSTOM_DYNAMO_IMAGE}
               command: [python3, -m, dynamo.vllm]
               args:
                 - --model
@@ -145,7 +145,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: ${DYNAMO_IMAGE}
+              image: ${CUSTOM_DYNAMO_IMAGE}
               command: [python3, -m, riva_nim.tts_worker]
               args:
                 - --riva-server
