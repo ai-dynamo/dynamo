@@ -50,6 +50,7 @@ use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
     agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
+    validate_custom_encoder_response_without_tools,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -2395,6 +2396,24 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+fn validate_responses_custom_encoder_request(
+    request: &NvCreateResponse,
+) -> Result<(), ErrorResponse> {
+    validate_custom_encoder_response_without_tools(
+        request
+            .inner
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty()),
+    )
+    .map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+        })
+    })
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -2421,6 +2440,14 @@ async fn handler_responses(
         warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
         None
     };
+
+    if request
+        .nvext
+        .as_ref()
+        .is_some_and(|nvext| nvext.requests_extra_field("custom_encoder"))
+    {
+        validate_responses_custom_encoder_request(&request)?;
+    }
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -3992,6 +4019,29 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    #[test]
+    fn test_responses_rejects_custom_encoder_response_with_tools() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello",
+            "tools": [{
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object"}
+            }],
+            "nvext": {
+                "extra_fields": ["custom_encoder"]
+            }
+        }))
+        .expect("valid responses request");
+
+        let err = validate_responses_custom_encoder_request(&request)
+            .expect_err("custom encoder response data with tools");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.message.contains("custom_encoder"));
+        assert!(err.1.message.contains("tools"));
     }
 
     #[test]

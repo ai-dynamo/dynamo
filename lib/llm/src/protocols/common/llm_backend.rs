@@ -145,7 +145,8 @@ pub struct BackendOutput {
     pub engine_data: Option<serde_json::Value>,
 
     /// JSON metadata emitted by an in-process custom encoder.
-    /// This is surfaced automatically as `nvext.custom_encoder`.
+    /// This is surfaced as `nvext.custom_encoder` when selected through
+    /// `nvext.extra_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_encoder_data: Option<serde_json::Value>,
 

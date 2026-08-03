@@ -3170,8 +3170,9 @@ impl OpenAIPreprocessor {
     /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
     /// re-wraps the result.
     ///
-    /// Dynamo-only response fields are buffered while the jail rewrites the
-    /// shared response payload, then attached to the next emitted data chunk.
+    /// `nvext` is not populated on the streaming tool-call path (only the unary
+    /// aggregator/anthropic paths set it), so the jail never needs to preserve
+    /// it and re-wrapped chunks carry `nvext: None`.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -3185,8 +3186,7 @@ impl OpenAIPreprocessor {
         use dynamo_parsers::tool_calling::jail::{
             Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
         };
-        use parking_lot::Mutex;
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
 
         // The jail operates on the shared `Create` payload and never touches the
         // dynamo-only typed `llm_metrics`, which `transform_postprocessor_stream`
@@ -3203,26 +3203,19 @@ impl OpenAIPreprocessor {
         // annotation form on data-less usage chunks rides through untouched via
         // `event`/`comment`.)
         #[derive(Default)]
-        struct PendingFields {
-            metrics: Option<LLMMetricAnnotation>,
+        struct PendingMetrics {
+            template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
-            nvext: Option<serde_json::Value>,
         }
-        let pending = Arc::new(Mutex::new(PendingFields::default()));
+        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
         let pending_in = Arc::clone(&pending);
 
-        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>`
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
-            if let Some(nv) = a.data.as_mut() {
-                let mut p = pending_in.lock();
-                if let Some(metrics) = nv.llm_metrics.take() {
-                    p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
-                    p.metrics = Some(metrics);
-                }
-                crate::protocols::common::extensions::merge_response_nvext(
-                    &mut p.nvext,
-                    nv.nvext.take(),
-                );
+            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
+                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
+                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                p.template = Some(metrics);
             }
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
@@ -3233,7 +3226,7 @@ impl OpenAIPreprocessor {
             }
         });
 
-        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>`
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
         jail_apply(
             tool_call_parser,
             tool_choice,
@@ -3244,20 +3237,19 @@ impl OpenAIPreprocessor {
         .map(move |a| {
             // Stamp the accumulated metrics onto the next emitted data chunk;
             // data-less/synthesized chunks carry it forward (or `None`).
-            let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
-                let mut p = pending.lock();
+            let llm_metrics = a.data.as_ref().and_then(|_| {
+                let mut p = pending.lock().expect("jail metrics buffer poisoned");
                 let chunk_tokens = p.chunk_tokens;
                 p.chunk_tokens = 0;
-                let metrics = p.metrics.take().map(|mut metrics| {
+                p.template.take().map(|mut metrics| {
                     metrics.chunk_tokens = chunk_tokens;
                     metrics
-                });
-                (metrics, p.nvext.take())
+                })
             });
             Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
-                    nvext,
+                    nvext: None,
                     llm_metrics,
                 }),
                 id: a.id,

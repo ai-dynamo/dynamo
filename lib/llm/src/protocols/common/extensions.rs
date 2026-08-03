@@ -210,6 +210,12 @@ impl NvExt {
         NvExtBuilder::default()
     }
 
+    pub(crate) fn requests_extra_field(&self, field: &str) -> bool {
+        self.extra_fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|item| item == field))
+    }
+
     pub fn has_query_instance_id_annotation(&self) -> bool {
         self.annotations.as_ref().is_some_and(|annotations| {
             annotations
@@ -556,6 +562,7 @@ pub struct NvExtResponseFieldSelection {
     pub token_ids: bool,
     pub routed_experts: bool,
     pub engine_data: bool,
+    pub custom_encoder: bool,
     pub stop_reason: bool,
     pub completion_token_ids: bool,
     pub prompt_logprobs: bool,
@@ -575,6 +582,7 @@ impl NvExtResponseFieldSelection {
                     "timing" => selection.timing = true,
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
+                    "custom_encoder" => selection.custom_encoder = true,
                     "stop_reason" => selection.stop_reason = true,
                     "completion_token_ids" => selection.completion_token_ids = true,
                     "prompt_logprobs" => selection.prompt_logprobs = true,
@@ -632,7 +640,11 @@ impl NvExtResponseFieldSelection {
         } else {
             None
         };
-        let custom_encoder = custom_encoder_data_from_backend;
+        let custom_encoder = if self.custom_encoder {
+            custom_encoder_data_from_backend
+        } else {
+            None
+        };
 
         let stop_reason = if self.stop_reason {
             stop_reason_from_backend.and_then(|reason| serde_json::to_value(reason).ok())
@@ -690,6 +702,18 @@ pub(crate) fn validate_completion_token_ids_single_choice(
     if requested && total_choices > 1 {
         anyhow::bail!(
             "`nvext.extra_fields=[\"completion_token_ids\"]` requires exactly one generated choice"
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_custom_encoder_response_without_tools(
+    has_tools: bool,
+) -> anyhow::Result<()> {
+    if has_tools {
+        anyhow::bail!(
+            "`nvext.extra_fields=[\"custom_encoder\"]` does not support requests with tools"
         );
     }
 
@@ -1364,12 +1388,22 @@ mod tests {
     }
 
     #[test]
-    fn build_response_nvext_custom_encoder_is_not_gated_by_extra_fields() {
+    fn build_response_nvext_custom_encoder_requires_opt_in() {
         let payload = serde_json::json!({"items": [{"score": 0.75}, null]});
 
-        let out = NvExtResponseFieldSelection::default()
+        assert!(
+            NvExtResponseFieldSelection::default()
+                .build_response_nvext(None, false, Some(payload.clone()), None, None, None, None,)
+                .is_none()
+        );
+
+        let selection = NvExtResponseFieldSelection {
+            custom_encoder: true,
+            ..Default::default()
+        };
+        let out = selection
             .build_response_nvext(None, false, Some(payload.clone()), None, None, None, None)
-            .expect("custom encoder data should create nvext");
+            .expect("requested custom encoder data should create nvext");
 
         assert_eq!(out.custom_encoder, Some(payload));
         assert!(out.engine_data.is_none());

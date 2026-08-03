@@ -742,8 +742,25 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_encoder_data_is_included_without_opt_in() {
+    fn test_custom_encoder_data_is_excluded_without_opt_in() {
         let request = create_test_request();
+        let mut generator = request.response_generator("req-custom-encoder".to_string());
+        let mut backend_output = make_backend_output_with_engine_data();
+        backend_output.custom_encoder_data = Some(serde_json::json!({
+            "items": [{"score": 0.75}, null]
+        }));
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+        if let Some(nvext) = response.nvext {
+            assert!(nvext.get("custom_encoder").is_none());
+        }
+    }
+
+    #[test]
+    fn test_custom_encoder_data_is_included_when_requested() {
+        let request = create_test_request_with_extra_fields(vec!["custom_encoder".to_string()]);
         let mut generator = request.response_generator("req-custom-encoder".to_string());
         let mut backend_output = make_backend_output_with_engine_data();
         backend_output.custom_encoder_data = Some(serde_json::json!({
@@ -755,7 +772,7 @@ mod tests {
             .expect("should produce a response");
         let nvext = response
             .nvext
-            .expect("custom encoder data should create nvext");
+            .expect("requested custom encoder data should create nvext");
 
         assert_eq!(
             nvext.get("custom_encoder"),

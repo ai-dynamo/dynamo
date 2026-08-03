@@ -75,6 +75,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
             encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
+            custom_encoder_data: None,
             routing_data: None,
         };
 

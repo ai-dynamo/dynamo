@@ -1915,8 +1915,13 @@ mod tests {
         );
     }
 
+    // The jail moved to dynamo-parsers and operates on the shared
+    // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
+    // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
+    // the buffered chunk_tokens sum and latest output_tokens survive the jail on
+    // a tool-call stream (they'd all be None without the buffer/re-attach).
     #[tokio::test]
-    async fn jail_preserves_dynamo_fields_across_buffered_tool_call() {
+    async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
         use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
         use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::{
@@ -1930,7 +1935,6 @@ mod tests {
             text: &str,
             chunk_tokens: usize,
             output_tokens: usize,
-            nvext: Option<serde_json::Value>,
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
             #[allow(deprecated)]
             let choice = ChatChoiceStream {
@@ -1958,7 +1962,7 @@ mod tests {
                         service_tier: None,
                         system_fingerprint: None,
                     },
-                    nvext,
+                    nvext: None,
                     llm_metrics: Some(LLMMetricAnnotation {
                         input_tokens: 7,
                         output_tokens,
@@ -1986,22 +1990,8 @@ mod tests {
         // Hermes tool call split across two metric-bearing chunks -> the jail
         // buffers both, then emits one tool-call chunk.
         let chunks = vec![
-            chunk(
-                "<tool_call>\n{\"name\": \"get_weather\", \"arg",
-                3,
-                3,
-                Some(serde_json::json!({
-                    "custom_encoder": {"items": [{"score": 0.75}]}
-                })),
-            ),
-            chunk(
-                "uments\": {\"location\": \"SF\"}}\n</tool_call>",
-                4,
-                7,
-                Some(serde_json::json!({
-                    "engine_data": {"source": "second-buffered-chunk"}
-                })),
-            ),
+            chunk("<tool_call>\n{\"name\": \"get_weather\", \"arg", 3, 3),
+            chunk("uments\": {\"location\": \"SF\"}}\n</tool_call>", 4, 7),
         ];
         let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
             Some("hermes".to_string()),
@@ -2031,18 +2021,6 @@ mod tests {
             max_osl,
             Some(7),
             "final cumulative output_tokens must survive the jail"
-        );
-        let nvexts: Vec<_> = out
-            .iter()
-            .filter_map(|a| a.data.as_ref().and_then(|d| d.nvext.as_ref()))
-            .collect();
-        assert_eq!(
-            nvexts,
-            vec![&serde_json::json!({
-                "custom_encoder": {"items": [{"score": 0.75}]},
-                "engine_data": {"source": "second-buffered-chunk"}
-            })],
-            "all buffered nvext fields must be merged onto exactly one output chunk"
         );
     }
 }

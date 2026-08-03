@@ -18,6 +18,7 @@ use super::{
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_custom_encoder_response_without_tools,
 };
 
 pub mod aggregator;
@@ -556,6 +557,18 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
+        if self
+            .nvext
+            .as_ref()
+            .is_some_and(|nvext| nvext.requests_extra_field("custom_encoder"))
+        {
+            validate_custom_encoder_response_without_tools(
+                self.inner
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| !tools.is_empty()),
+            )?;
+        }
         // none for modalities
         // none for prediction
         // none for audio
@@ -816,6 +829,46 @@ mod tests {
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
         assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_custom_encoder_response_rejected_with_tools() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "nvext": {
+                "extra_fields": ["custom_encoder"]
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("custom encoder data with tools");
+        assert!(err.to_string().contains("custom_encoder"));
+        assert!(err.to_string().contains("tools"));
+    }
+
+    #[test]
+    fn test_custom_encoder_response_allows_streaming_without_tools() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+            "nvext": {
+                "extra_fields": ["custom_encoder"]
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
     }
 
     #[test]
