@@ -293,63 +293,6 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 	})
 }
 
-func TestValidateDynamoComponentDeploymentSharedSpecGMSExtraClientContainers(t *testing.T) {
-	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
-	componentPath := field.NewPath("spec", "components").Index(0)
-
-	newSpec := func(extraClientContainers []string, sidecars ...corev1.Container) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
-		containers := []corev1.Container{{
-			Name:  consts.MainContainerName,
-			Image: "registry.example/runtime:1.1.0",
-			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
-				corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
-			}},
-		}}
-		containers = append(containers, sidecars...)
-		return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
-			PodTemplate:   &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: containers}},
-			Experimental: &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
-				Mode:                  nvidiacomv1beta1.GMSModeIntraPod,
-				ExtraClientContainers: extraClientContainers,
-			}},
-		}
-	}
-
-	t.Run("rejects every unresolved client", func(t *testing.T) {
-		spec := newSpec([]string{"missing-a", "missing-b"})
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
-		assertFieldPaths(t, errs, []string{
-			"spec.components[0].experimental.gpuMemoryService.extraClientContainers[0]",
-			"spec.components[0].experimental.gpuMemoryService.extraClientContainers[1]",
-		})
-		if got := errs.ToAggregate().Error(); !strings.Contains(got, "missing-a") || !strings.Contains(got, "missing-b") {
-			t.Fatalf("errors = %q, want every unresolved client name", got)
-		}
-	})
-
-	t.Run("rejects duplicate clients", func(t *testing.T) {
-		spec := newSpec(
-			[]string{"loader", "loader"},
-			corev1.Container{Name: "loader", Image: "loader:latest"},
-		)
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
-		assertFieldPaths(t, errs, []string{
-			"spec.components[0].experimental.gpuMemoryService.extraClientContainers[1]",
-		})
-	})
-
-	t.Run("accepts multiple declared clients", func(t *testing.T) {
-		spec := newSpec(
-			[]string{"loader", "metrics-client"},
-			corev1.Container{Name: "loader", Image: "loader:latest"},
-			corev1.Container{Name: "metrics-client", Image: "metrics:latest"},
-		)
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
-		assertFieldPaths(t, errs, nil)
-	})
-}
-
 func TestValidateComponentCheckpointJobConfigFieldPaths(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	fldPath := field.NewPath("spec", "components").Index(0).Child("experimental", "checkpoint", "job")

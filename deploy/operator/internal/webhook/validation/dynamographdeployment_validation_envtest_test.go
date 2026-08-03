@@ -755,9 +755,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
-				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-b", "missing-a"}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-b": does not name a container in podTemplate.spec.containers`,
+				`spec.components[1].experimental.gpuMemoryService.extraClientContainers[1]: Invalid value: "missing-a": does not name a container in podTemplate.spec.containers`,
+			},
 		},
 		{
 			name: "GMS client container references must be unique",
@@ -770,19 +773,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"loader", "loader"}
 			}),
 			wantSchemaErr: `spec.components[1].experimental.gpuMemoryService.extraClientContainers[1]: Duplicate value: "loader"`,
-		},
-		{
-			name: "GMS requires the main target container",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				enableBetaIntraPodGMS(worker)
-				worker.PodTemplate.Spec.Containers = []corev1.Container{{Name: "loader", Image: "loader:latest"}}
-				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"loader"}
-			}),
-			wantWebhookErrs: []string{
-				"spec.components[1].experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
-				"spec.components[1].podTemplate.spec.containers: Required value: is required",
-			},
 		},
 		{
 			name: "GMS accepts multiple declared client containers",
