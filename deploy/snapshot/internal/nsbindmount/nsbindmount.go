@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 )
@@ -23,16 +25,26 @@ const (
 	defaultBinaryPath = "/usr/local/sbin/" + binaryName
 )
 
-// MountOptions controls bind mount behavior.
+// MountOptions configures a single namespace-aware mount operation.
 type MountOptions struct {
-	ReadOnly bool
+	ReadOnly bool // mount with MS_RDONLY
 }
 
-// Mounter performs a bind mount of src into the mount namespace of pid at dst.
-// It returns an unmount func that reverts the mount; the func is safe to call
-// after the target process has exited.
+// MountHandle represents an active mount inside a foreign namespace.
+// The owner must call Unmount when the mount is no longer needed.
+type MountHandle interface {
+	// Unmount detaches the mount from the target namespace.
+	// Idempotent — safe to call multiple times.
+	Unmount(ctx context.Context) error
+
+	// TargetPath returns the dst path as seen inside the target namespace.
+	TargetPath() string
+}
+
+// Mounter mounts src at dst inside the mount namespace identified by pid.
+// The returned MountHandle must be Unmount-ed by the caller.
 type Mounter interface {
-	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (unmount func() error, err error)
+	Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error)
 }
 
 // ExecMounter implements Mounter by invoking the ns-bind-mount C helper as a
@@ -52,10 +64,40 @@ func NewWithBinary(path string, log logr.Logger) *ExecMounter {
 	return &ExecMounter{binaryPath: path, log: log}
 }
 
+// mountHandle is the concrete MountHandle returned by ExecMounter.Mount.
+type mountHandle struct {
+	binaryPath string
+	pidStr     string
+	dst        string
+	log        logr.Logger
+	once       sync.Once
+	unmountErr error
+}
+
+func (h *mountHandle) TargetPath() string { return h.dst }
+
+func (h *mountHandle) Unmount(_ context.Context) error {
+	h.once.Do(func() {
+		// Use a fresh context with a hard timeout so a hung umount does not block
+		// indefinitely. Parent context is intentionally not forwarded: cleanup must
+		// complete even if the caller's context is already cancelled.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, h.binaryPath, "umount", h.pidStr, h.dst).CombinedOutput()
+		if err != nil {
+			h.log.Error(err, "failed to unmount from namespace", "dst", h.dst, "output", strings.TrimSpace(string(out)))
+			h.unmountErr = fmt.Errorf("ns-bind-mount umount %s: %w\noutput: %s", h.dst, err, strings.TrimSpace(string(out)))
+			return
+		}
+		h.log.Info("unmounted from namespace", "dst", h.dst)
+	})
+	return h.unmountErr
+}
+
 // Mount bind-mounts src (in the current namespace) to dst inside the mount
 // namespace of pid. It uses open_tree(OPEN_TREE_CLONE) to capture the source
 // before the namespace switch so the mount is independent of the source tree.
-func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (func() error, error) {
+func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts MountOptions) (MountHandle, error) {
 	pidStr := strconv.Itoa(pid)
 	args := []string{pidStr, src, dst}
 	if opts.ReadOnly {
@@ -67,15 +109,10 @@ func (m *ExecMounter) Mount(ctx context.Context, pid int, src, dst string, opts 
 	}
 	m.log.Info("mounted into namespace", "src", src, "dst", dst, "readonly", opts.ReadOnly, "pid", pid)
 
-	return func() error {
-		// umount tolerates ENOENT/EINVAL: the mount may already be gone if CRIU
-		// cleaned up the namespace during restore.
-		out, err := exec.Command(m.binaryPath, "umount", pidStr, dst).CombinedOutput()
-		if err != nil {
-			m.log.Error(err, "failed to unmount from namespace", "dst", dst, "output", strings.TrimSpace(string(out)))
-			return err
-		}
-		m.log.Info("unmounted from namespace", "dst", dst)
-		return nil
+	return &mountHandle{
+		binaryPath: m.binaryPath,
+		pidStr:     pidStr,
+		dst:        dst,
+		log:        m.log,
 	}, nil
 }
