@@ -29,6 +29,7 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
+    SearchStrategy,
 )
 from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
@@ -201,28 +202,46 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
+def needs_mocker_aic_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when mocker workers should load performance data from AIC.
+
+    Requests with Planner configuration use its pre-deployment sweep mode. For
+    mocker-only requests there is no Planner mode, so the DGDR search strategy
+    determines whether the profiler uses rapid AIC data or thorough NPZ data.
+    """
+    if not is_mocker_enabled(dgdr):
+        return False
+    if dgdr.features is not None and dgdr.features.planner is not None:
+        return (
+            dgdr.features.planner.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+        )
+    return dgdr.searchStrategy == SearchStrategy.Rapid
+
+
 def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when the DGDR requires profiling interpolation data *at this stage*.
 
     Profile data (NPZ/JSON on disk) is consumed by:
 
-    * **Mocker workers** for latency simulation — required for thorough
-      mode. In rapid mode the mocker pulls latency data directly from the
-      AIConfigurator SDK via ``--aic-perf-model`` flags injected by the
-      profiler, so no NPZ is emitted.
+    * **Mocker workers** for latency simulation — required for thorough mode.
+      Requests with Planner configuration use its sweep mode; mocker-only
+      requests use the DGDR search strategy. In rapid mode the mocker pulls
+      latency data directly from the AIConfigurator SDK via
+      ``--aic-perf-model`` flags injected by the profiler, so no NPZ is
+      emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
       mode the planner receives ``aic_perf_model`` and can also run AIC
       interpolation in-process at bootstrap; in none mode it starts from
       native AIC or live FPM regression warmup.
     """
+    if is_mocker_enabled(dgdr):
+        return not needs_mocker_aic_perf_model(dgdr)
     sweep_mode = (
         dgdr.features.planner.pre_deployment_sweeping_mode
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    is_rapid = sweep_mode == PlannerPreDeploymentSweepMode.Rapid
-    if is_mocker_enabled(dgdr):
-        return not is_rapid
     if (
         dgdr.features is not None
         and dgdr.features.planner is not None
