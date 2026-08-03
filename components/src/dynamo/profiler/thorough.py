@@ -23,7 +23,7 @@ import pandas as pd
 import yaml
 from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 
 from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick
@@ -528,11 +528,14 @@ async def run_thorough(
     best_config_df = result.get("best_config_df", pd.DataFrame())
 
     # --- Stage 4: DGD generation ---
-    task = TaskConfig(
+    task = Task(
         serving_mode="disagg",
-        model_path=local_or_hf_model,
-        system_name=system,
-        backend_name=backend,
+        prefill_model_path=local_or_hf_model,
+        decode_model_path=local_or_hf_model,
+        prefill_system_name=system,
+        decode_system_name=system,
+        prefill_backend_name=backend,
+        decode_backend_name=backend,
         total_gpus=total_gpus,
         isl=isl,
         osl=osl,

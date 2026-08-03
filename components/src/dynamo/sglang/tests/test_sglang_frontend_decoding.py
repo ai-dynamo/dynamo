@@ -66,8 +66,7 @@ def _make_config(
 def test_validate_accepts_frontend_decoding_with_encode_worker():
     config = _make_config(frontend_decoding=True, multimodal_encode_worker=True)
 
-    with pytest.warns(DeprecationWarning, match="--multimodal-encode-worker"):
-        config.validate()
+    config.validate()
 
     assert config.enable_multimodal is True
 

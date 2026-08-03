@@ -44,7 +44,7 @@ Two things are reported per workload:
   2. SPEEDUP — median wall-clock ratio (python / rust) over ``--repeat`` runs.
 
 Run:  python benchmarks/mocker/bench_aic_rust_callback.py
-Requires: aiconfigurator SDK installed with loadable systems/perf data for the
+Requires: aiconfigurator-core installed with loadable systems/perf data for the
 model/system/backend tuple, and the bindings built with the ``aic-forward-pass``
 feature.
 """
@@ -121,7 +121,7 @@ def _worker_main():
     """Subprocess entry: time one workload `repeat` times, emit JSON to stdout.
 
     Runs `warmup` UNTIMED replays first. The one-time engine build
-    (``build_aic_engine`` -> Python ``compile_engine`` + Rust parquet load) and
+    (``AicEngineBuilder::build`` -> Python ``compile_engine`` + Rust parquet load) and
     cold OS-cache costs are paid then and cached process-globally, so the timed
     runs isolate steady-state replay — which is where the per-predict dispatch
     cost (the thing RustAicCallback removes) actually lives.
