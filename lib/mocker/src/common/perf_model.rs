@@ -82,7 +82,7 @@ pub enum PerfModel {
     #[default]
     Polynomial,
     /// Interpolation-based model using profiler data
-    /// Decode axes: (active_kv_tokens, context_length)
+    /// Decode axes: (scheduled logical KV tokens, mean context length)
     Interpolated {
         prefill_interp: Arc<dyn PrefillInterpolator>,
         decode_interp: Arc<dyn DecodeInterpolator>,
@@ -126,7 +126,7 @@ impl PerfModel {
     /// Expected arrays in NPZ file:
     /// - prefill_isl: 1D array of input sequence lengths
     /// - prefill_ttft_ms: 1D array of time to first token in milliseconds
-    /// - decode_active_kv_tokens: 1D array of active KV token counts
+    /// - decode_active_kv_tokens: 1D array of scheduled logical KV token counts
     /// - decode_context_length: 1D array of context lengths
     /// - decode_itl: 2D array of inter-token latencies in milliseconds
     pub fn from_npz(path: &Path) -> Result<Self> {
@@ -248,8 +248,11 @@ impl PerfModel {
 
     /// Predict decode time in milliseconds.
     ///
+    /// `active_kv_tokens` is the capped sum of logical context lengths in the
+    /// scheduled batch, not the number of distinct physically resident tokens.
+    ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses (active_kv_tokens, total_kv_tokens) as utilization
+    /// - Polynomial: uses logical active KV tokens relative to total capacity
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
