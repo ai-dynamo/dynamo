@@ -5,10 +5,7 @@
 
 package runtime
 
-import (
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-)
+import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
 // Gate controls a feature's rendered defaults by Dynamo runtime version.
 type Gate struct {
@@ -18,22 +15,9 @@ type Gate struct {
 
 // Enabled reports whether a known runtime version meets the feature threshold.
 func (g Gate) Enabled(version *runtimeversion.Version) bool {
-	logger := log.Log.WithName("runtime-features").WithValues("feature", g.Name)
-
-	// Keep the feature disabled when runtime compatibility cannot be resolved.
 	if version == nil {
-		logger.V(1).Info("Runtime version unknown, feature disabled")
-
 		return false
 	}
 
-	enabled := version.AtLeast(g.MinRuntimeVersion)
-
-	// Record the version comparison so rendering decisions remain traceable.
-	logger.V(1).Info("Runtime feature gate evaluated",
-		"runtimeVersion", version.String(),
-		"threshold", g.MinRuntimeVersion.String(),
-		"enabled", enabled)
-
-	return enabled
+	return version.Compare(g.MinRuntimeVersion) >= 0
 }
