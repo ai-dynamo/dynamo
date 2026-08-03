@@ -3127,6 +3127,30 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert final["delta"] == {}
         assert final["finish_reason"] == "stop"
 
+    def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"<|user|>"},
+        )
+
+        first = post.process_output(
+            {"token_ids": tokenizer.encode("Hello<|us"), "finish_reason": None}
+        )
+        final = post.process_output(
+            {
+                "token_ids": tokenizer.encode("er|>"),
+                "finish_reason": "stop",
+            }
+        )
+
+        assert first is not None
+        assert first["delta"]["content"] == "Hello"
+        assert final is not None
+        assert final["delta"] == {}
+        assert final["finish_reason"] == "stop"
+
     def test_empty_token_ids(self, tokenizer):
         """Empty token_ids with no finish_reason returns None."""
         post = SglangStreamingPostProcessor(
