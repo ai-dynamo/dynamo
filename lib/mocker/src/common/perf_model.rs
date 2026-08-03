@@ -248,11 +248,12 @@ impl PerfModel {
 
     /// Predict decode time in milliseconds.
     ///
-    /// `active_kv_tokens` is the capped sum of logical context lengths in the
-    /// scheduled batch, not the number of distinct physically resident tokens.
+    /// `active_kv_tokens` is the sum of logical context lengths in the scheduled
+    /// batch, not the number of distinct physically resident tokens.
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses logical active KV tokens relative to total capacity
+    /// - Polynomial: uses logical active KV tokens relative to total capacity,
+    ///   clamped to full utilization
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
@@ -291,7 +292,7 @@ fn polynomial_prefill_time(batch_size: usize, new_tokens_per_request: usize) -> 
 
 fn polynomial_decode_time(active_kv_tokens: usize, total_kv_tokens: usize) -> f64 {
     let active_perc = if total_kv_tokens > 0 {
-        active_kv_tokens as f64 / total_kv_tokens as f64
+        (active_kv_tokens as f64 / total_kv_tokens as f64).min(1.0)
     } else {
         tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
         1.0
