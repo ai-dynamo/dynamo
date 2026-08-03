@@ -121,6 +121,29 @@ func TestExecMounter_Mount_NsFdOpenFailure(t *testing.T) {
 	}
 }
 
+func TestExecMounter_Unmount_Error(t *testing.T) {
+	bin := writeFakeBinary(t, `if [ "$1" = "umount-fd" ]; then echo "boom" >&2; exit 1; fi`)
+	m := NewWithBinary(bin, logr.Discard())
+	handle, err := m.Mount(context.Background(), os.Getpid(), "/src", "/dst", MountOptions{})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	err = handle.Unmount(context.Background())
+	if err == nil {
+		t.Fatal("expected error from umount-fd, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error should contain subprocess output, got: %v", err)
+	}
+
+	// Second call must return the same stored error without invoking the binary again.
+	err2 := handle.Unmount(context.Background())
+	if err2 != err {
+		t.Errorf("second Unmount returned different error: %v", err2)
+	}
+}
+
 func TestExecMounter_Unmount_Idempotent(t *testing.T) {
 	callLog := filepath.Join(t.TempDir(), "calls.log")
 	// Record the first argument of each invocation (subcommand or pid for mount).

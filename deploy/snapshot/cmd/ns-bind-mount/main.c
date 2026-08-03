@@ -199,6 +199,7 @@ main(int argc, char* argv[])
   /* Move the cloned mount into the target namespace at dst. */
   if (sys_move_mount(tree_fd, "", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
     fprintf(stderr, "move_mount -> %s: %s\n", dst, strerror(errno));
+    close(tree_fd);
     if (created_dst)
       rmdir(dst);
     return 1;
