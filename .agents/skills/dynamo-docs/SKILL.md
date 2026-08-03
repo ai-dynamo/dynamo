@@ -23,8 +23,8 @@ site, in line with the project's authoring guides.
 
 Two authoring guides govern this work; read whichever applies before writing:
 
-- [`docs/documentation-style-guide.md`](https://github.com/ai-dynamo/dynamo/blob/main/docs/documentation-style-guide.md) — the standard for **every** page: frontmatter, headings, prose, terminology, links, callouts. The must-fix subset is distilled in [Style Guide Is the Standard](#style-guide-is-the-standard) and [Content Rules](#content-rules) below.
-- [`docs/recipes/_catalog/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/docs/recipes/_catalog/README.md) — the standard for **recipe and feature-benchmark pages** (the catalog contract, the `.mdx` page blueprint, and the pure-CSS target picker). See [Add a Recipe or Feature Benchmark Page](#add-a-recipe-or-feature-benchmark-page).
+- [`docs/fern/pages/community/contributing/documentation/documentation-style-guide.md`](../../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md) — the standard for **every** page: frontmatter, headings, prose, terminology, links, callouts. The must-fix subset is distilled in [Style Guide Is the Standard](#style-guide-is-the-standard) and [Content Rules](#content-rules) below.
+- [`docs/fern/pages/recipes/_catalog/README.md`](../../../docs/fern/pages/recipes/_catalog/README.md) — the standard for **recipe and feature-benchmark pages** (the catalog contract, the `.mdx` page blueprint, and the pure-CSS target picker). See [Add a Recipe or Feature Benchmark Page](#add-a-recipe-or-feature-benchmark-page).
 
 ## Branch Rule
 
@@ -34,7 +34,7 @@ The `docs-website` branch is CI-managed and must **never** be edited by hand.
 ## Style Guide Is the Standard
 
 Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) follows the
-[Documentation Style Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/documentation-style-guide.md)
+[Documentation Style Guide](../../../docs/fern/pages/community/contributing/documentation/documentation-style-guide.md)
 (`docs/documentation-style-guide.md`). Read it before writing content. The docs bot enforces a
 **must-fix** subset on every PR — get these right or the checks fail:
 
@@ -44,7 +44,7 @@ Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) foll
   `# H1`**. Fern renders the page H1 from the nav `page:` value, so a body `# H1` produces a
   duplicate title — and a bare `#` SPDX line left in the body also renders as an H1. Start the body
   at `##`.
-- **A nav entry** in `docs/index.yml` for every new page — a page not in the nav is unreachable.
+- **A nav entry** in `docs/fern/index.yml` for every new page — a page not in the nav is unreachable.
 - **Links**: relative path *with extension* within `docs/` (`[Routing](router-concepts.md)`);
   absolute `https://github.com/ai-dynamo/dynamo/blob/main/<path>` URL for targets outside `docs/`
   (examples, recipes, source; `/tree/main/` for a directory). No `../` path that escapes `docs/`, and
@@ -103,7 +103,7 @@ Pick your operation:
 
 ### Add a Page
 
-1. **Choose placement from the live nav.** Open `docs/index.yml` and find the existing page closest
+1. **Choose placement from the live nav.** Open `docs/fern/index.yml` and find the existing page closest
    in topic to yours — your page joins **that** section, and its file goes in that sibling's
    subdirectory under `docs/`. Page *type* narrows the field (tutorial → `getting-started/`, how-to →
    `backends/<engine>/` or `kubernetes/`, reference → flags/APIs/config, explanation →
@@ -126,7 +126,7 @@ Short intro paragraph stating what the page covers.
 ## <First section>
 ```
 
-3. Add a nav entry in `docs/index.yml` under the section you chose in step 1 — a `- page:` in that
+3. Add a nav entry in `docs/fern/index.yml` under the section you chose in step 1 — a `- page:` in that
    section's `contents:`, 2-space indent, `path:` relative to `docs/` (see
    [Navigation](#navigation-tabs-and-sections) for the grammar):
 
@@ -140,15 +140,15 @@ Short intro paragraph stating what the page covers.
 1. Locate by file path, page title, or keyword search (`grep -rn` in `docs/`).
 2. **Content only** -- edit the markdown file directly; keep it within the style guide.
 3. **Title/label change** -- update the frontmatter (`title`/`sidebar-title`) and the `- page:` name
-   in `docs/index.yml`.
+   in `docs/fern/index.yml`.
 4. **Section move** -- `git mv` the file when the subdirectory changes, move the nav entry to the new
    section, and update every incoming link.
 
 > [!IMPORTANT]
 > A page's URL is `<section-slug>/<page-name-slug>`, where the page-name slug comes from the nav
 > `page:` label. Moving a page to another section **or** renaming its label changes that URL. Add a
-> **dev-scoped** redirect to the `redirects:` list in `fern/docs.yml`: `/dynamo/dev/<old>` →
-> `/dynamo/dev/<new>`. Editing `docs/index.yml` regenerates only the `dev` nav, so do **not** redirect
+> **dev-scoped** redirect to the `redirects:` list in `docs/fern/docs.yml`: `/dynamo/dev/<old>` →
+> `/dynamo/dev/<new>`. Editing `docs/fern/index.yml` regenerates only the `dev` nav, so do **not** redirect
 > the unversioned (`/dynamo/<old>`) or `/dynamo/latest/<old>` forms — those serve **Latest**, a frozen
 > release snapshot that `main` edits don't touch, and a redirect there would break a working URL. See
 > [Redirects and the version model](#redirects-and-the-version-model).
@@ -157,19 +157,19 @@ Short intro paragraph stating what the page covers.
 
 1. Find incoming links: `grep -rn "<filename>" docs/`.
 2. `git rm docs/<subdirectory>/<filename>.md`.
-3. Remove the `- page:` block from `docs/index.yml`. If it was the last page in a section, remove the
+3. Remove the `- page:` block from `docs/fern/index.yml`. If it was the last page in a section, remove the
    whole `- section:` block.
-4. Fix or remove every incoming link found in step 1, and add a `fern/docs.yml` redirect if the page
+4. Fix or remove every incoming link found in step 1, and add a `docs/fern/docs.yml` redirect if the page
    had a stable URL.
 
 ### Add a Recipe or Feature Benchmark Page
 
 Recipe and feature-benchmark pages are **catalog-driven** and use `.mdx` (they embed a pure-CSS
 target picker). Authoritative guide:
-[`docs/recipes/_catalog/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/docs/recipes/_catalog/README.md).
+[`docs/fern/pages/recipes/_catalog/README.md`](../../../docs/fern/pages/recipes/_catalog/README.md).
 Each page is a triple — page + catalog entry + nav:
 
-1. **Write the `.mdx`** at `docs/recipes/<slug>.mdx` (or `docs/benchmarks/<slug>.mdx`). Frontmatter
+1. **Write the `.mdx`** at `docs/fern/pages/recipes/model-recipes/<slug>.mdx` (or `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`). Frontmatter
    carries SPDX + `title` + one-sentence `subtitle`; body starts with a short intro, then the target
    picker — multi-target pages use the radio picker, single-target pages use the **static** form
    (exact classes under [Target picker](#target-picker) below) — then the fixed section order:
@@ -177,10 +177,10 @@ Each page is a triple — page + catalog entry + nav:
    (omit if no numbers) → `## Compare All Targets` (multi-target only) → `## Related Feature
    Benchmarks` → `## Notes` → `## Source`. **MDX rule:** blank line after `<div ...>` and before
    `</div>`; keep code fences at column 0.
-2. **Add a catalog entry** — one file at `docs/recipes/_catalog/recipes/<id>.yaml` (or
-   `docs/benchmarks/_catalog/benchmarks/<id>.yaml`), SPDX header, exactly one object. **Read the
-   sibling `schema.json` first for the exact field set** (`docs/recipes/_catalog/schema.json` for
-   recipes, `docs/benchmarks/_catalog/schema.json` for benchmarks — they are **different** schemas) —
+2. **Add a catalog entry** — one file at `docs/fern/pages/recipes/_catalog/recipes/<id>.yaml` (or
+   `docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/<id>.yaml`), SPDX header, exactly one object. **Read the
+   sibling `schema.json` first for the exact field set** (`docs/fern/pages/recipes/_catalog/schema.json` for
+   recipes, `docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json` for benchmarks — they are **different** schemas) —
    each is `additionalProperties: false`, so an invented or misspelled key fails validation; don't
    guess the shape. A **recipe** entry requires `id`,
    `title`, `provider`, `model`, `status`, `targets`, `maintainer`, and each `targets[]` item
@@ -189,15 +189,15 @@ Each page is a triple — page + catalog entry + nav:
    `page:`, deferred ones carry `deferred_reason` and omit `page:`. Add the `<id>` to the matching
    `_catalog/index.yaml` (`recipes:` for active, `deferred_recipes:` for deferred — it controls
    sidebar/landing order).
-3. **Wire navigation** in `docs/index.yml`: a `- page:` under `- tab: recipes` for recipes, or under
+3. **Wire navigation** in `docs/fern/index.yml`: a `- page:` under `- tab: recipes` for recipes, or under
    the **Feature Benchmarks** section (`- tab: docs`) for benchmarks. Per-benchmark pages are usually
    `hidden: true` (surfaced from the landing page).
-4. **Patch `fern/main.css` only if** the page introduces a picker axis value not already supported
+4. **Patch `docs/fern/main.css` only if** the page introduces a picker axis value not already supported
    (`recipe-sku`: `b200`/`h200`/`h100`/`gb200`/`hopper`/`blackwell`; `recipe-usecase`:
    `chat`/`agentic`; `recipe-variant`: `agg`/`disagg`/…). A value missing from CSS renders but
    filters nothing.
-5. **Add the landing card** in `docs/recipes/README.mdx` and update the model/target counts.
-6. **Validate**: `python3 docs/recipes/_catalog/validate.py` (covers both catalogs), then `fern
+5. **Add the landing card** in `docs/fern/pages/recipes/model-recipes/overview.mdx` and update the model/target counts.
+6. **Validate**: `python3 docs/fern/pages/recipes/_catalog/validate.py` (covers both catalogs), then `fern
    check` and `fern docs broken-links`.
 
 #### Catalog entry shape
@@ -230,8 +230,8 @@ targets:                          # >= 1 item
     expected_performance: { available: false }   # add summary: when numbers exist
 ```
 
-**Benchmarks use a different schema.** A `docs/benchmarks/_catalog/benchmarks/<id>.yaml` entry
-validates against `docs/benchmarks/_catalog/schema.json`, whose required set is `id`, `title`, `page`,
+**Benchmarks use a different schema.** A `docs/fern/pages/recipes/feature-benchmarks/_catalog/benchmarks/<id>.yaml` entry
+validates against `docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json`, whose required set is `id`, `title`, `page`,
 `claim`, `subtype` (enum: `ab-test`/`feature-stack`/`topology`/`provider-comparison`/`hands-on`),
 `features`, `model`, `hardware`, `traffic`, `arms`, `results`, `maintainer` — **no** `provider`,
 `status`, or `targets`. The skeleton above is recipe-only; read the benchmark schema for that shape.
@@ -262,15 +262,15 @@ radios, no `data-*`:
 A catalog page is a triple (page + entry + nav) — never touch just one part:
 
 - **Rename or move**: rename `_catalog/<id>.yaml` and its `id:` together, update the `page:` path, the
-  `<id>` in `index.yaml`, the `- page:` in `docs/index.yml`, and the landing card; add a
-  `fern/docs.yml` redirect for the old URL.
+  `<id>` in `index.yaml`, the `- page:` in `docs/fern/index.yml`, and the landing card; add a
+  `docs/fern/docs.yml` redirect for the old URL.
 - **Defer** (hold off the rendered surface): drop `page:` from the entry, add `deferred_reason`, move
   the `<id>` from `recipes:` to `deferred_recipes:` in `index.yaml`, and delete the `.mdx` page, its
   nav `- page:`, and its landing card.
 - **Remove**: delete the `.mdx`, the `_catalog/<id>.yaml`, the `index.yaml` entry, the nav `- page:`,
   and the landing card; update the model/target counts; add a redirect.
 
-Run `python3 docs/recipes/_catalog/validate.py` after any of these.
+Run `python3 docs/fern/pages/recipes/_catalog/validate.py` after any of these.
 
 ### Add an Example or Recipe (code)
 
@@ -291,7 +291,7 @@ docs link to them with absolute GitHub URLs.
 
 ## Callouts
 
-Write admonitions GitHub-style; the Fern build auto-converts them (don't hand-write `<Note>`). Put
+Match admonition syntax to the extension: use Fern callout components in `.mdx`, and GitHub-style blockquotes in `.md`. Put
 images under `docs/assets/img/` with descriptive alt text.
 
 | GitHub Syntax | Fern Component |
@@ -304,13 +304,13 @@ images under `docs/assets/img/` with descriptive alt text.
 
 ## Navigation: Tabs and Sections
 
-**`docs/index.yml` is the source of truth — read it for the live structure.** The section names below
+**`docs/fern/index.yml` is the source of truth — read it for the live structure.** The section names below
 are a snapshot, not an authority; sections get added, renamed, and removed. What stays stable is the
 *grammar*:
 
 - Two tabs under `navigation:`. **`- tab: docs`** holds the main documentation; **`- tab: recipes`**
   is a flat list of `- page:` entries (`recipes/<slug>.mdx`), order mirroring
-  `docs/recipes/_catalog/index.yaml`.
+  `docs/fern/pages/recipes/_catalog/index.yaml`.
 - In the docs tab, each section is marked by a banner comment
   (`# ==================== <Section> ====================`); a `- page:` sits under that section's
   `contents:` at 2-space indent, `path:` relative to `docs/`. In the recipes tab a `- page:` sits
@@ -333,9 +333,10 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
   deep-relative into `docs/` — count `../` as 4 plus one per directory level of the page under
   `pages-dev/` (`getting-started/x.md` → 5, `components/router/x.md` → 6) — so the repo link
   checker and GitHub browsing stay valid; the sync workflow rewrites them to site URLs at publish
-  via `fern/resolve_translation_links.py`. Image refs stay shallow-relative (`../assets/...`) and
-  are **not** copied into the mirror — Fern resolves them against the base page. Translate prose, not code, flags, or terminology
-  (vLLM / SGLang / TensorRT-LLM stay verbatim). Keep it in sync when the English page changes,
+  via `docs/fern/scripts/resolve_translation_links.py`. Image refs stay shallow-relative
+  (`../assets/...`) and are **not** copied into the mirror — Fern resolves them against the base
+  page. Translate prose, not code, flags, or terminology (vLLM / SGLang / TensorRT-LLM stay
+  verbatim). Keep it in sync when the English page changes,
   or don't ship it stale.
 - **Versioned navs.** Author only against `docs/` on `main` (the `pages-dev` set). When a release is
   cut, the publish step builds `pages-vX.Y.Z/` from the tagged `docs/` tree and rewrites nav paths —
@@ -348,10 +349,10 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
 The site serves the same nav under three prefixes: **`dev`** (slug `dev`, tracks `main`, regenerated on
 every push), **Latest** (slug `/` — the unversioned root `/dynamo/...` *and* `/dynamo/latest/...`, a
 frozen snapshot of the newest release), and pinned **`vX.Y.Z`** (immutable snapshots). A
-`docs/index.yml` edit on `main` regenerates **only the `dev` nav**.
+`docs/fern/index.yml` edit on `main` regenerates **only the `dev` nav**.
 
 So a moved or renamed page (changed section or `page:` label) changes only its `/dynamo/dev/<old>` URL.
-Add one dev-scoped `fern/docs.yml` redirect:
+Add one dev-scoped `docs/fern/docs.yml` redirect:
 
 ```yaml
 - source: "/dynamo/dev/<old>"
@@ -378,7 +379,7 @@ fails the PR on any of these.
 ```bash
 fern check                          # nav + frontmatter structure
 fern docs broken-links              # link resolution
-python3 docs/recipes/_catalog/validate.py   # recipe/benchmark changes only — validates BOTH catalogs
+python3 docs/fern/pages/recipes/_catalog/validate.py   # recipe/benchmark changes only — validates BOTH catalogs
 ```
 
 `fern check` and `broken-links` mirror the PR checks. The catalog validator is **not yet wired into
@@ -388,7 +389,7 @@ CI**, so run it by hand for any `_catalog/` change. Optional local preview: `fer
 ## Commit
 
 ```bash
-git add docs/ fern/docs.yml          # also recipes/ examples/ fern/main.css when touched
+git add docs/ docs/fern/docs.yml          # also recipes/ examples/ docs/fern/main.css when touched
 git commit -s -m "docs: <add|update|move|remove> <page-title>"
 ```
 
@@ -401,10 +402,10 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | `fern check` YAML error | Check 2-space indent; `- page:` must sit under a section's `contents:` |
 | Missing/orphaned file | `path:` in `index.yml` must match the actual file location |
 | Broken links in CI | `grep -rn "<filename>" docs/` and fix stale references |
-| 404 after a move/rename | Add a **dev-scoped** `fern/docs.yml` redirect (`/dynamo/dev/<old>` → `/dynamo/dev/<new>`); don't redirect `latest`/unversioned (those serve the frozen newest release) |
+| 404 after a move/rename | Add a **dev-scoped** `docs/fern/docs.yml` redirect (`/dynamo/dev/<old>` → `/dynamo/dev/<new>`); don't redirect `latest`/unversioned (those serve the frozen newest release) |
 | MDX parse error | Replace `<https://...>` with `[text](https://...)`; escape stray `<`/`>`; blank line after `<div ...>` and before `</div>`, code fences at column 0 |
 | Page missing from site | Ensure the nav entry exists in `index.yml`; allow a few minutes for sync |
-| Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `fern/main.css` (add its hide rule) |
+| Target picker renders but filters nothing | Use `className` (not `class`) and the exact `dynamo-target-picker` classes; and ensure the axis `value=` is in `docs/fern/main.css` (add its hide rule) |
 | `validate.py` fails (orphan/dangling/id) | `_catalog/<id>.yaml` filename, internal `id:`, and the `index.yaml` entry must all match; every deploy/perf asset path must resolve |
 | Recipe page absent from the Recipes tab | Add the `- page:` under `- tab: recipes` **and** the `<id>` to `_catalog/index.yaml` |
 
@@ -413,14 +414,14 @@ git commit -s -m "docs: <add|update|move|remove> <page-title>"
 | File | Purpose |
 |---|---|
 | `docs/documentation-style-guide.md` | Authoring standard for every page (must-fix + guidance) |
-| `docs/recipes/_catalog/README.md` | Recipe/benchmark page authoring (catalog contract, blueprint, picker) |
-| `docs/recipes/_catalog/validate.py` | Catalog validator (covers both recipe and benchmark catalogs) |
-| `docs/index.yml` | Navigation tree (two tabs: `docs` + `recipes`) |
+| `docs/fern/pages/recipes/_catalog/README.md` | Recipe/benchmark page authoring (catalog contract, blueprint, picker) |
+| `docs/fern/pages/recipes/_catalog/validate.py` | Catalog validator (covers both recipe and benchmark catalogs) |
+| `docs/fern/index.yml` | Navigation tree (two tabs: `docs` + `recipes`) |
 | `docs/` | Content directory (`.md`, plus `.mdx` for recipe/benchmark pages) |
 | `docs/assets/` | Images, SVGs, fonts |
-| `fern/docs.yml` | Fern site configuration + `redirects:` |
-| `fern/main.css` | Pure-CSS target-picker axis values (recipe/benchmark pages) |
-| `fern/convert_callouts.py` | Callout conversion (GitHub -> Fern) |
+| `docs/fern/docs.yml` | Fern site configuration + `redirects:` |
+| `docs/fern/main.css` | Pure-CSS target-picker axis values (recipe/benchmark pages) |
+| `docs/fern/scripts/convert_callouts.py` | Callout conversion (GitHub -> Fern) |
 | `recipes/README.md` | Available Recipes tables (code recipes) |
 | `recipes/CONTRIBUTING.md` | How to contribute a code recipe |
 | `docs/README.md` | Docs system guide (build, sync, publish) |

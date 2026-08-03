@@ -20,6 +20,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -40,6 +41,33 @@ struct RawAppliedComputeAgenticRecord {
     tool_call_output_length: Vec<usize>,
     tool_call_latency: Vec<f64>,
     final_assistant_response_length: usize,
+}
+
+#[derive(Debug, Default)]
+struct HashIdInterner {
+    canonical_ids: FxHashMap<u64, u32>,
+}
+
+impl HashIdInterner {
+    fn intern_all(&mut self, hash_ids: Vec<u64>) -> Result<Vec<u32>> {
+        hash_ids
+            .into_iter()
+            .map(|hash_id| self.intern(hash_id))
+            .collect()
+    }
+
+    fn intern(&mut self, hash_id: u64) -> Result<u32> {
+        let next_id = self.canonical_ids.len();
+        match self.canonical_ids.entry(hash_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(*entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let canonical_id = u32::try_from(next_id)
+                    .context("trace contains more unique hash IDs than u32 can represent")?;
+                entry.insert(canonical_id);
+                Ok(canonical_id)
+            }
+        }
+    }
 }
 
 impl DynamoRequestTrace {
@@ -122,7 +150,7 @@ fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
 
 pub(super) fn validate_synthesizable_prompt(
     input_length: usize,
-    hash_ids: &[u64],
+    hash_ids: &[u32],
     trace_block_size: usize,
 ) -> Result<()> {
     if trace_block_size == 0 {
@@ -146,17 +174,28 @@ pub(super) fn validate_synthesizable_prompt(
 
 pub(super) fn synthesize_trace_tokens(
     input_length: usize,
-    hash_ids: &[u64],
+    hash_ids: &[u32],
     trace_block_size: usize,
 ) -> Result<Vec<u32>> {
     validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
+    Ok(synthesize_validated_trace_tokens(
+        input_length,
+        hash_ids,
+        trace_block_size,
+    ))
+}
+
+pub(super) fn synthesize_validated_trace_tokens(
+    input_length: usize,
+    hash_ids: &[u32],
+    trace_block_size: usize,
+) -> Vec<u32> {
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
-        let token_id = hash_id as u32;
         let remaining = input_length - tokens.len();
         tokens.extend(std::iter::repeat_n(
-            token_id,
+            hash_id,
             remaining.min(trace_block_size),
         ));
         if tokens.len() == input_length {
@@ -164,20 +203,13 @@ pub(super) fn synthesize_trace_tokens(
         }
     }
 
-    if tokens.len() != input_length {
-        bail!(
-            "failed to synthesize {} tokens from {} hash_ids",
-            input_length,
-            hash_ids.len()
-        );
-    }
-
-    Ok(tokens)
+    debug_assert_eq!(tokens.len(), input_length);
+    tokens
 }
 
 fn trace_to_replay_hashes(
     input_length: usize,
-    hash_ids: &[u64],
+    hash_ids: &[u32],
     trace_block_size: usize,
     engine_block_size: usize,
 ) -> Result<ReplayRequestHashes> {
@@ -251,6 +283,7 @@ impl AgenticTurnTrace {
 
 struct MooncakeTraceBuilder {
     trace_block_size: usize,
+    hash_id_interner: HashIdInterner,
     sessions: Vec<SessionTrace>,
     session_indices: HashMap<String, usize>,
     last_timestamps: Vec<Option<f64>>,
@@ -260,6 +293,7 @@ impl MooncakeTraceBuilder {
     fn new(trace_block_size: usize) -> Self {
         Self {
             trace_block_size,
+            hash_id_interner: HashIdInterner::default(),
             sessions: Vec::new(),
             session_indices: HashMap::new(),
             last_timestamps: Vec::new(),
@@ -379,6 +413,8 @@ impl MooncakeTraceBuilder {
             );
         }
 
+        let hash_ids = self.hash_id_interner.intern_all(hash_ids)?;
+
         session.turns.push(TurnTrace {
             input_length,
             max_output_tokens: output_length,
@@ -478,6 +514,7 @@ impl Trace {
             .with_context(|| format!("failed to open trace file {}", path.display()))?;
         let reader = BufReader::new(file);
         let mut sessions = Vec::new();
+        let mut hash_id_interner = HashIdInterner::default();
         let mut next_unique_hash = 1_u64;
 
         for (line_idx, line) in reader.lines().enumerate() {
@@ -561,7 +598,7 @@ impl Trace {
                 turns.push(TurnTrace {
                     input_length: current_input_length,
                     max_output_tokens: raw.assistant_response_length[turn_idx],
-                    hash_ids: hash_ids.clone(),
+                    hash_ids: hash_id_interner.intern_all(hash_ids.clone())?,
                     delay_after_previous_ms: next_turn_delay_ms,
                     ..Default::default()
                 });
@@ -589,7 +626,7 @@ impl Trace {
             turns.push(TurnTrace {
                 input_length: current_input_length,
                 max_output_tokens: raw.final_assistant_response_length,
-                hash_ids,
+                hash_ids: hash_id_interner.intern_all(hash_ids)?,
                 delay_after_previous_ms: next_turn_delay_ms,
                 ..Default::default()
             });
@@ -635,6 +672,7 @@ impl Trace {
             .timestamps(spec.num_sessions, spec.arrival_seed)?;
 
         let mut next_unique_hash = 1_u64;
+        let mut hash_id_interner = HashIdInterner::default();
         for (session_idx, first_arrival_timestamp_ms) in first_arrivals.into_iter().enumerate() {
             let group_id = if spec.num_prefix_groups > 0 && spec.shared_prefix_ratio > 0.0 {
                 Some(rng.random_range(0..spec.num_prefix_groups) as u64)
@@ -667,7 +705,7 @@ impl Trace {
                 turns.push(TurnTrace {
                     input_length,
                     max_output_tokens,
-                    hash_ids,
+                    hash_ids: hash_id_interner.intern_all(hash_ids)?,
                     delay_after_previous_ms: if turn_idx == 0 {
                         0.0
                     } else {
@@ -810,20 +848,24 @@ impl Trace {
         if factor <= 1 {
             return self;
         }
+        let factor = u32::try_from(factor).expect("hash prefix expansion factor exceeds u32");
         for session in &mut self.sessions {
             for turn in &mut session.turns {
                 turn.input_length = turn
                     .input_length
-                    .checked_mul(factor)
+                    .checked_mul(factor as usize)
                     .expect("input_length expansion overflow");
                 turn.hash_ids = turn
                     .hash_ids
                     .iter()
                     .flat_map(|&hash_id| {
                         let base = hash_id
-                            .checked_mul(factor as u64)
+                            .checked_mul(factor)
                             .expect("hash prefix expansion overflow");
-                        (0..factor as u64).map(move |offset| base + offset)
+                        (0..factor).map(move |offset| {
+                            base.checked_add(offset)
+                                .expect("hash prefix expansion overflow")
+                        })
                     })
                     .collect();
             }
@@ -843,12 +885,17 @@ impl Trace {
             .flat_map(|turn| turn.hash_ids.iter().copied())
             .max()
             .unwrap_or(0);
-        let offset_base = max_hash_id + 1;
+        let offset_base = max_hash_id
+            .checked_add(1)
+            .expect("hash duplication offset overflow");
         let original_sessions = self.sessions.clone();
         self.sessions.clear();
 
         for copy_idx in 0..copies {
-            let offset = offset_base * copy_idx as u64;
+            let copy_idx = u32::try_from(copy_idx).expect("hash copy index exceeds u32");
+            let offset = offset_base
+                .checked_mul(copy_idx)
+                .expect("hash duplication offset overflow");
             for session in &original_sessions {
                 let mut duplicated = session.clone();
                 duplicated.session_id = format!("{}:copy_{copy_idx}", session.session_id);
@@ -1107,6 +1154,7 @@ impl Trace {
 
 struct AgenticTraceBuilder {
     trace_block_size: usize,
+    hash_id_interner: HashIdInterner,
     turns: Vec<AgenticTurnTrace>,
     request_ids: std::collections::HashSet<String>,
 }
@@ -1115,6 +1163,7 @@ impl AgenticTraceBuilder {
     fn new(trace_block_size: usize) -> Self {
         Self {
             trace_block_size,
+            hash_id_interner: HashIdInterner::default(),
             turns: Vec::new(),
             request_ids: std::collections::HashSet::new(),
         }
@@ -1188,6 +1237,8 @@ impl AgenticTraceBuilder {
                 timestamp_ms
             );
         }
+
+        let hash_ids = self.hash_id_interner.intern_all(hash_ids)?;
 
         let replay_key = output_token_ids.as_ref().map(|_| {
             effective_replay_key(
@@ -1447,8 +1498,8 @@ fn sample_exponential_delay_ms(mean_ms: f64, rng: &mut StdRng) -> f64 {
     -mean_ms * u.ln()
 }
 
-fn local_block_hash_from_id(hash_id: u64, block_size: usize) -> LocalBlockHash {
-    let tokens: Vec<u32> = (0..block_size).map(|_| hash_id as u32).collect();
+fn local_block_hash_from_id(hash_id: u32, block_size: usize) -> LocalBlockHash {
+    let tokens: Vec<u32> = (0..block_size).map(|_| hash_id).collect();
     let bytes = unsafe {
         std::slice::from_raw_parts(
             tokens.as_ptr() as *const u8,

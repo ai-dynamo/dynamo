@@ -20,7 +20,7 @@ This directory contains benchmarking tools and scripts for Dynamo deployments. B
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
@@ -59,4 +59,4 @@ aiperf plot artifacts/my-benchmark
 
 ## Comprehensive Guide
 
-For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).
+For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md).

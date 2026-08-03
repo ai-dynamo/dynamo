@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dynamo_kv_router::config::{RouterConfigOverride, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
@@ -26,7 +26,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -97,6 +97,7 @@ pub struct Router {
     runtime: Runtime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
+    served_model: String,
 }
 
 impl Router {
@@ -121,7 +122,8 @@ impl Router {
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
         // generation-suffixed worker namespace changes during a rolling update.
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -132,11 +134,12 @@ impl Router {
         let model_manager = Arc::new(ModelManager::new());
 
         let decode_router = model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -174,6 +177,7 @@ impl Router {
             Some(prefill_config),
             None,
             None,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
@@ -204,7 +208,16 @@ impl Router {
             runtime,
             pod_store,
             pod_store_ready,
+            served_model: model_name,
         })
+    }
+
+    /// The model this pool serves, from the discovered model card.
+    ///
+    /// Authoritative, unlike the `model` field of a request body, which the
+    /// router accepts without checking.
+    pub fn served_model(&self) -> &str {
+        &self.served_model
     }
 
     /// Tokenize a JSON request body and extract router queue priorities.
@@ -223,12 +236,10 @@ impl Router {
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let formatted_prompt = self
-            .preprocessor
-            .apply_template(&request)?
-            .unwrap_or_default();
-
-        let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
+        let encoding = match self.preprocessor.apply_template(&request)? {
+            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
+            None => self.preprocessor.tokenize("")?,
+        };
         Ok((
             encoding.token_ids().to_vec(),
             cache_namespace,
@@ -1078,6 +1089,7 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            reservation_id: None,
         })
     }
 
@@ -1094,9 +1106,19 @@ impl EndpointPicker for Router {
         }
     }
 
-    async fn on_request_complete(&self, request_id: &str) {
+    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
         if request_id.is_empty() {
             return;
+        }
+        if let Some(usage) = usage {
+            tracing::debug!(
+                request_id,
+                prompt_tokens = ?usage.prompt_tokens,
+                completion_tokens = ?usage.completion_tokens,
+                total_tokens = ?usage.total_tokens,
+                cached_tokens = ?usage.cached_tokens,
+                "Request complete with usage"
+            );
         }
         if let Err(e) = self.free_request(request_id).await {
             tracing::debug!(

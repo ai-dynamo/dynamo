@@ -16,7 +16,7 @@ guided decoding / structural tag.
 > path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
-> [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
+> [Writing Unified Backends](../../../../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
 > guide and choose the Python tab. This README is the in-tree reference:
 > file layout, per-engine cancellation cookbook, disaggregation contract,
 > error-handling table, and the feature-gap matrix.
@@ -623,7 +623,7 @@ Request handling:
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
-| `--enable-rl` | RL support via `call_tokenizer_manager` route |
+| Configurable SGLang method routes | Legacy workers can expose startup-allowlisted Engine or tokenizer-manager methods through `DYN_SGLANG_ENGINE_ROUTES`; the unified path does not register these routes |
 
 ### TRT-LLM-specific gaps
 

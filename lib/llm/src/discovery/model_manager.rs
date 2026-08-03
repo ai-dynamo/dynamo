@@ -32,7 +32,7 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::{
-        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
+        KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
@@ -49,6 +49,7 @@ use crate::{
             images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
+    worker_type::WorkerType,
 };
 
 /// State for prefill router activation rendezvous.
@@ -147,6 +148,9 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
+    /// Per-endpoint HiCache state and its one Mooncake event subscriber.
+    hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
+
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
     kv_source_memberships: DashMap<EndpointId, Weak<KvSourceMembershipCoordinator>>,
@@ -187,6 +191,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             lora_enabled: crate::lora::lora_serving_enabled(),
@@ -1037,7 +1042,7 @@ impl ModelManager {
 
     // -- KV Router creation --
 
-    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    /// Whether to start the LoRA load-estimator feed for a KV router's metric worker type.
     ///
     /// The feed must run for the worker mode that carries the routable request load. In dynamo's
     /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
@@ -1049,6 +1054,45 @@ impl ModelManager {
         lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
     }
 
+    fn hicache_cache_for(
+        &self,
+        endpoint: &Endpoint,
+        runtime_configs: RuntimeConfigWatch,
+    ) -> HicacheSharedKvCache {
+        self.hicache_caches
+            .entry(endpoint.id())
+            .or_insert_with(|| {
+                let frontend_kv_events_endpoint = std::env::var("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+                    .ok()
+                    .filter(|endpoint| !endpoint.is_empty());
+                let cache = HicacheSharedKvCache::new_with_cancellation_and_endpoint(
+                    runtime_configs,
+                    endpoint.component().drt().child_token(),
+                    frontend_kv_events_endpoint,
+                );
+                cache.start_subscriber();
+                cache
+            })
+            .clone()
+    }
+
+    pub fn remove_hicache_caches(&self, namespace: &str, component: &str) {
+        let endpoint_ids = self
+            .hicache_caches
+            .iter()
+            .filter(|entry| {
+                entry.key().namespace == namespace && entry.key().component == component
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+
+        for endpoint_id in endpoint_ids {
+            if let Some((_, cache)) = self.hicache_caches.remove(&endpoint_id) {
+                cache.shutdown();
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -1056,7 +1100,32 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<Arc<KvRouter>> {
+        self.kv_chooser_for_with_worker_role(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_worker_role(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
@@ -1086,7 +1155,7 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
@@ -1101,25 +1170,26 @@ impl ModelManager {
                     worker_component = worker_component_name,
                     "Using HiCache shared KV cache"
                 );
-                Some(Box::new(HicacheSharedKvCache::new(
-                    workers_with_configs.clone(),
-                )))
+                Some(Box::new(
+                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                ))
             }
         };
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
-        let kv_source_membership = if !effective_kv_router_config.use_remote_indexer
-            && effective_kv_router_config.should_subscribe_to_kv_events()
-        {
-            Some(
-                self.get_or_create_kv_source_membership_watch(endpoint)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
+        let kv_source_membership =
+            if kv_event_source_requirement.should_subscribe(&effective_kv_router_config) {
+                Some(
+                    self.get_or_create_kv_source_membership_watch(endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
-        let chooser = KvRouter::new(
+        let chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -1128,7 +1198,8 @@ impl ModelManager {
             selector,
             kv_router_config,
             prefill_load_estimator,
-            worker_type,
+            worker_role,
+            metric_worker_type,
             model_name,
             is_eagle,
             shared_cache,
@@ -1149,7 +1220,7 @@ impl ModelManager {
         // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
         // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
         // directly, e.g. the watcher / C bindings, are unaffected.)
-        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
+        if Self::should_start_lora_load_feed(self.lora_enabled, metric_worker_type) {
             let feed_key = endpoint.id().to_string();
             // Start a feed if none runs for this endpoint yet, or restart it if the previous
             // one exited (so a dead subscription does not permanently disable load tracking).
@@ -2348,6 +2419,38 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn remove_hicache_caches_cancels_only_the_removed_component() {
+        let manager = ModelManager::new();
+        let (_tx, runtime_configs) =
+            tokio::sync::watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let retained = tokio_util::sync::CancellationToken::new();
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.worker.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs.clone(), cancelled.clone()),
+        );
+        manager.hicache_caches.insert(
+            EndpointId::from("ns.other.generate"),
+            HicacheSharedKvCache::new_with_cancellation(runtime_configs, retained.clone()),
+        );
+
+        manager.remove_hicache_caches("ns", "worker");
+
+        assert!(cancelled.is_cancelled());
+        assert!(!retained.is_cancelled());
+        assert!(
+            !manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.worker.generate"))
+        );
+        assert!(
+            manager
+                .hicache_caches
+                .contains_key(&EndpointId::from("ns.other.generate"))
+        );
     }
 
     #[test]
