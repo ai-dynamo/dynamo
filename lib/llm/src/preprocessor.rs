@@ -2532,6 +2532,40 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        use crate::protocols::openai::chat_completions::unified_parser;
+
+        // When a request's parser pair has a unified parser and it is switched on, ONE
+        // state machine owns reasoning + text + tool calls for the whole stream. It
+        // replaces everything below — the reasoning-parser stage AND the tool-call jail
+        // — because the ordering it recovers is exactly what is lost at the seam
+        // between those two stages.
+        if let Some(family) = unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                        name: tool.function.name.clone(),
+                        parameters: tool.function.parameters.clone(),
+                        strict: tool.function.strict,
+                    })
+                    .collect()
+            });
+            return Ok(Box::pin(unified_parser::apply_stream(
+                stream,
+                tool_definitions,
+                request.inner.tool_choice.clone(),
+                uses_tool_call_structural_tag,
+                unified_parser::stream_prefill(family, prompt_injected_reasoning),
+                family,
+            ))
+                as Pin<
+                    Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+                >);
+        }
+
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
         // parsers inspect the stream shape before deciding whether to parse it.
         let is_guided_tool_choice = matches!(
