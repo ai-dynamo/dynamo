@@ -1675,9 +1675,10 @@ where
                 };
 
             // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
-            // monitor can be handed directly to PrefillRouter::new. Each WorkerSet gets its own
-            // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
-            // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
+            // monitor can be handed directly to PrefillRouter::new_with_selector_factory. Each
+            // WorkerSet gets its own monitor (1-to-1), scoped to this WorkerSet's Client/namespace.
+            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
+            // worker TTFT/ITL
             // cleanup); thresholds control overload detection. The monitor and prefill router are
             // created together here, so the monitor is passed into the prefill router directly.
             //
