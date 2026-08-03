@@ -24,22 +24,28 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(
         self,
-        endpoint: Endpoint,
+        endpoint: Optional[Endpoint] = None,
         dp_rank: int = 0,
         component_gauges: Optional[LLMBackendMetrics] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        self._endpoint = endpoint
         self.dp_rank = dp_rank
         self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
-        # Schedule async endpoint creation
-        self._endpoint_task = asyncio.create_task(self._create_endpoint())
+        self._endpoint_task: Optional[asyncio.Task[None]] = None
+        if endpoint is not None:
+            self.bind_endpoint(endpoint)
 
-    async def _create_endpoint(self) -> None:
+    def bind_endpoint(self, endpoint: Endpoint) -> None:
+        """Attach the runtime endpoint after snapshot restore if necessary."""
+        if self._endpoint_task is not None:
+            raise RuntimeError("vLLM stat logger endpoint is already bound")
+        self._endpoint_task = asyncio.create_task(self._create_endpoint(endpoint))
+
+    async def _create_endpoint(self, endpoint: Endpoint) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
-            await self.inner.create_endpoint(self._endpoint)
+            await self.inner.create_endpoint(endpoint)
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create vLLM metrics publisher endpoint")
@@ -134,7 +140,7 @@ class StatLoggerFactory:
 
     def __init__(
         self,
-        endpoint: Endpoint,
+        endpoint: Optional[Endpoint] = None,
         component_gauges: Optional[LLMBackendMetrics] = None,
         embedding_worker: bool = False,
     ) -> None:
@@ -165,6 +171,14 @@ class StatLoggerFactory:
 
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
         return self.create_stat_logger(dp_rank=dp_rank)
+
+    def bind_endpoint(self, endpoint: Endpoint) -> None:
+        """Bind a factory created before the Dynamo runtime was available."""
+        if self.endpoint is not None:
+            raise RuntimeError("vLLM stat logger factory endpoint is already bound")
+        self.endpoint = endpoint
+        if self.created_logger is not None:
+            self.created_logger.bind_endpoint(endpoint)
 
     # TODO Remove once we publish metadata to shared storage
     def set_num_gpu_blocks_all(self, num_blocks: int) -> None:

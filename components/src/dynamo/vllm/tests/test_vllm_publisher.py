@@ -12,7 +12,7 @@ the chat-shaped pipeline.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -125,3 +125,37 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+
+
+@pytest.mark.asyncio
+async def test_snapshot_factory_defers_endpoint_and_publishes_gauges(monkeypatch):
+    inner = Mock(create_endpoint=AsyncMock())
+    monkeypatch.setattr(
+        publisher_mod,
+        "WorkerMetricsPublisher",
+        Mock(return_value=inner),
+    )
+    component_gauges = Mock()
+    factory = StatLoggerFactory(component_gauges=component_gauges)
+
+    logger = factory.create_stat_logger(dp_rank=0)
+    assert isinstance(logger, DynamoStatLoggerPublisher)
+    assert logger._endpoint_task is None
+
+    factory.set_num_gpu_blocks_all(48)
+    factory.init_publish()
+    logger.record(Mock(kv_cache_usage=0.25), None)
+
+    inner.publish.assert_has_calls(
+        [call(0, kv_used_blocks=0), call(0, kv_used_blocks=12)]
+    )
+    component_gauges.set_total_blocks.assert_has_calls([call("0", 0), call("0", 48)])
+    component_gauges.set_gpu_cache_usage.assert_has_calls(
+        [call("0", 0.0), call("0", 0.25)]
+    )
+
+    endpoint = SimpleNamespace()
+    factory.bind_endpoint(endpoint)
+    assert logger._endpoint_task is not None
+    await logger._endpoint_task
+    inner.create_endpoint.assert_awaited_once_with(endpoint)
