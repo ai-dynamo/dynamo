@@ -679,7 +679,10 @@ pub struct DistributedConfig {
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
-        let request_plane = RequestPlaneMode::from_env();
+        // Fail fast on a present-but-invalid DYN_REQUEST_PLANE, surfacing the parse error so the
+        // operator sees the offending value and the valid options. Same convention as the
+        // DYN_DISCOVERY_BACKEND handling a few lines below.
+        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
@@ -739,7 +742,7 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
-        let request_plane = RequestPlaneMode::from_env();
+        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
@@ -816,15 +819,110 @@ impl std::str::FromStr for RequestPlaneMode {
 impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
-    fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default()
+    ///
+    /// The variable has a three-way contract:
+    /// - Unset, or set to the empty string: the default, [`RequestPlaneMode::Tcp`].
+    /// - Set to a valid value (`nats` / `tcp`, case-insensitive): that mode.
+    /// - Set to anything else: `Err` carrying the [`std::str::FromStr`] error, which names both
+    ///   the offending value and the valid options. A typo such as `DYN_REQUEST_PLANE=nat` must
+    ///   not silently start the process on a transport the operator did not configure.
+    fn from_env() -> Result<Self> {
+        match std::env::var("DYN_REQUEST_PLANE") {
+            // Unset or empty: keep the historical default. Empty is treated as absent to match
+            // the adjacent `DYN_EVENT_PLANE` handling in `resolve_event_transport_kind`.
+            Err(_) => Ok(Self::default()),
+            Ok(s) if s.is_empty() => Ok(Self::default()),
+            Ok(s) => s.parse(),
+        }
     }
 
     pub fn is_nats(&self) -> bool {
         matches!(self, RequestPlaneMode::Nats)
+    }
+}
+
+/// Tests for `DYN_REQUEST_PLANE` resolution.
+///
+/// Deliberately **not** gated behind the `integration` feature: these exercise pure environment
+/// parsing with no I/O, so they must run under a plain `cargo test -p dynamo-runtime --lib`.
+#[cfg(test)]
+mod request_plane_env_tests {
+    use super::{DistributedConfig, RequestPlaneMode};
+    use std::sync::Mutex;
+
+    /// Environment variables are process-global and Rust runs tests in parallel by default, so
+    /// every test that mutates `DYN_REQUEST_PLANE` serializes through this lock. A `#[should_panic]`
+    /// test poisons the mutex on the way out, so recover the guard rather than propagating.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_request_plane<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match value {
+            Some(v) => temp_env::with_vars([("DYN_REQUEST_PLANE", Some(v))], f),
+            None => temp_env::with_vars_unset(["DYN_REQUEST_PLANE"], f),
+        }
+    }
+
+    /// Negative control: an absent variable must keep resolving to the historical TCP default.
+    /// This is the case the fix must *not* disturb.
+    #[test]
+    fn absent_request_plane_defaults_to_tcp() {
+        let mode = with_request_plane(None, RequestPlaneMode::from_env)
+            .expect("an absent DYN_REQUEST_PLANE must not be an error");
+        assert_eq!(mode, RequestPlaneMode::Tcp);
+    }
+
+    /// An empty value is treated as absent, matching the adjacent `DYN_EVENT_PLANE` handling.
+    #[test]
+    fn empty_request_plane_defaults_to_tcp() {
+        let mode = with_request_plane(Some(""), RequestPlaneMode::from_env)
+            .expect("an empty DYN_REQUEST_PLANE must not be an error");
+        assert_eq!(mode, RequestPlaneMode::Tcp);
+    }
+
+    /// Valid values, including mixed case, still resolve to the matching variant.
+    #[test]
+    fn valid_request_plane_values_resolve() {
+        for (value, expected) in [
+            ("nats", RequestPlaneMode::Nats),
+            ("tcp", RequestPlaneMode::Tcp),
+            ("NaTs", RequestPlaneMode::Nats),
+            ("TCP", RequestPlaneMode::Tcp),
+        ] {
+            let mode = with_request_plane(Some(value), RequestPlaneMode::from_env)
+                .unwrap_or_else(|err| panic!("DYN_REQUEST_PLANE={value} should resolve: {err}"));
+            assert_eq!(mode, expected, "DYN_REQUEST_PLANE={value}");
+        }
+    }
+
+    /// Regression test for the reported defect: `DYN_REQUEST_PLANE=nat` used to be swallowed and
+    /// silently resolve to TCP. It must now surface the `FromStr` error, naming both the offending
+    /// value and the valid options.
+    #[test]
+    fn invalid_request_plane_is_an_error_naming_value_and_options() {
+        let err = with_request_plane(Some("nat"), RequestPlaneMode::from_env)
+            .expect_err("a misspelled DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("nat"),
+            "error should name the offending value, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
+    }
+
+    /// The fail-fast must reach the real configuration entry point, not stop at the private helper.
+    /// Before the fix this returned a `DistributedConfig` with `request_plane == Tcp`.
+    #[test]
+    #[should_panic(expected = "Invalid request plane mode: 'nat'")]
+    fn from_settings_aborts_on_invalid_request_plane() {
+        with_request_plane(Some("nat"), || {
+            let _ = DistributedConfig::from_settings();
+        });
     }
 }
 
