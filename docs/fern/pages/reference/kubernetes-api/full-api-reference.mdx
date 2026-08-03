@@ -3546,7 +3546,7 @@ GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 **Kind:** `enum`
 **Underlying type:** `string`
-**Validation:** Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+**Validation:** Enum: [gb200_sxm gb10 b200_sxm rtx_pro_6000_server h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 **Appears in:** [HardwareSpec](#hardwarespec)
 
 **Allowed values**
@@ -3554,6 +3554,7 @@ GPUSKUType is the AIC hardware system identifier for a supported GPU.
 - <Badge intent="note" minimal>gb200_sxm</Badge> --- Blackwell ---
 - <Badge intent="note" minimal>gb10</Badge>
 - <Badge intent="note" minimal>b200_sxm</Badge>
+- <Badge intent="note" minimal>rtx_pro_6000_server</Badge>
 - <Badge intent="note" minimal>h200_sxm</Badge> --- Hopper ---
 - <Badge intent="note" minimal>h100_sxm</Badge>
 - <Badge intent="note" minimal>h100_pcie</Badge>
@@ -3598,7 +3599,7 @@ If all four fields are set, discovery is skipped.
 <ParamField path="gpuSku" type="GPUSKUType">
 GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.
 See [GPUSKUType](#gpuskutype).
-**Validation:** Enum: [gb200_sxm gb10 b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]  Optional: \&#123;\&#125;
+**Validation:** Enum: [gb200_sxm gb10 b200_sxm rtx_pro_6000_server h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="vramMb" type="float">

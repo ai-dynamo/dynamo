@@ -502,6 +502,26 @@ func TestInferHardwareSystem(t *testing.T) {
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
 		},
+		{
+			name:     "RTX PRO 6000 Blackwell Server Edition (full product name)",
+			input:    "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 Blackwell Workstation Edition",
+			input:    "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 bare",
+			input:    "RTX PRO 6000",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
+		{
+			name:     "RTX PRO 6000 dashed (DCGM format)",
+			input:    "NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition",
+			expected: nvidiacomv1beta1.GPUSKUTypeRTXPRO6000Server,
+		},
 
 		// --- Hopper ---
 		{
