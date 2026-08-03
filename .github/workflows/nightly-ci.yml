@@ -60,6 +60,7 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           suppress_fallback_warning: 'true'
 
   # ============================================================================
@@ -369,6 +370,7 @@ jobs:
           # independent of the -nightly image-tag suffix.
           artifact_tag: ${{ github.sha }}-operator
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -456,6 +458,7 @@ jobs:
           # independent of the -nightly image-tag suffix.
           artifact_tag: ${{ github.sha }}-snapshot-agent
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           # OSRB CSV diff baseline: previous successful scheduled nightly run
@@ -1302,6 +1305,7 @@ jobs:
         with:
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           skip_bootstrap: 'true'
       - name: Remove K8s builder
         shell: bash

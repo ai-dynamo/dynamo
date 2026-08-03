@@ -144,6 +144,7 @@ jobs:
           builder_name: ${{ needs.init.outputs.builder_name }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -202,6 +203,7 @@ jobs:
       with:
         builder_name: ${{ needs.init.outputs.builder_name }}
         buildkit_worker_addresses: ''
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
         skip_bootstrap: true
     - name: Builder Cleanup in case of k8s builder
       shell: bash

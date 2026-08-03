@@ -87,6 +87,7 @@ jobs:
           component: operator
           image_tag: ${{ github.sha }}-operator
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -117,6 +118,7 @@ jobs:
           component: snapshot
           image_tag: ${{ github.sha }}-snapshot-agent
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -148,6 +150,7 @@ jobs:
           target: runtime  # push the slim shipped stage, not the test stage
           image_tag: ${{ github.sha }}-power-agent
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -163,6 +166,7 @@ jobs:
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: general
           arch: linux/amd64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Run unit tests inside the container image
         # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
         # the suite against the exact shipped image (Python 3.12 + baked deps),
@@ -701,6 +705,7 @@ jobs:
           target: placeholder
           image_tag: ${{ github.sha }}-vllm-placeholder
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -751,6 +756,7 @@ jobs:
           target: placeholder
           image_tag: ${{ github.sha }}-sglang-placeholder
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -804,6 +810,7 @@ jobs:
           target: placeholder
           image_tag: ${{ github.sha }}-trtllm-placeholder
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -1480,6 +1487,7 @@ jobs:
       with:
         builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
         buildkit_worker_addresses: '' # k8s builder
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
         skip_bootstrap: true
     - name: Builder Cleanup in case of k8s builder
       shell: bash

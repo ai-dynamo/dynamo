@@ -27,6 +27,9 @@ inputs:
   builder_name:
     description: 'Buildx builder name'
     required: true
+  namespace:
+    description: 'Kubernetes namespace for BuildKit workers and fallback pods'
+    required: true
   aws_default_region:
     description: 'AWS Default Region'
     required: true
@@ -147,6 +150,7 @@ runs:
         builder_name: ${{ inputs.builder_name }}
         flavor: general
         arch: ${{ steps.settings.outputs.build_platforms }}
+        namespace: ${{ inputs.namespace }}
 
     - name: Docker Login
       uses: ./.github/actions/docker-login
