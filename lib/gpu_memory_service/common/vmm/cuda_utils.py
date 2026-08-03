@@ -335,7 +335,7 @@ class CudaVMM(VMMDevice):
     def export_to_shareable_handle(self, handle: int) -> int:
         return cumem_export_to_shareable_handle(handle)
 
-    def import_shareable_handle_close_fd(self, fd: int) -> int:
+    def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
         return cumem_import_from_shareable_handle_close_fd(fd)
 
     # ----- virtual address space + mapping ----------------------------------
