@@ -34,6 +34,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
 - `dep-status` — check DEP status and list DEPs by lifecycle state or area
 - `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
+- `dynamo-benchmark` — route a performance question to the right harness and run protocol
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
