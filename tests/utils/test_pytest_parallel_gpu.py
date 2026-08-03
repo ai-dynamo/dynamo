@@ -11,13 +11,28 @@ the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+
 import pytest
 
+from tests.utils import pytest_parallel_gpu
 from tests.utils.pytest_parallel_gpu import (
+    _HARD_KILL_GRACE_S,
+    _SIGKILL_AFTER_SIGTERM_S,
+    _aggregate_junit_xml,
+    _deadline_action,
     _GpuState,
+    _junit_ids,
     _priority_key,
+    _RunningTest,
     _select_launches,
+    _signal_group,
     _TestEntry,
+    _write_timeout_junit,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -184,6 +199,143 @@ def test_blocked_test_launches_once_occupant_frees():
     # 12 fits (19-3.8=15.2) and is highest priority; the extra 3.8 no longer fits
     # (19-15.8=3.2<3.8).
     assert launches == [(0, 0)]
+
+
+# --------------------------------------------------------------------------- #
+# hard-kill backstop: deadline state machine
+# --------------------------------------------------------------------------- #
+def _running(timeout: float = 300.0, start_time: float = 0.0) -> _RunningTest:
+    """A _RunningTest with a dummy proc -- _deadline_action never touches it."""
+    return _RunningTest(
+        proc=None,  # type: ignore[arg-type]
+        test=_t("hang", 12.0, timeout=timeout),
+        start_time=start_time,
+    )
+
+
+def test_deadline_is_test_timeout_plus_grace():
+    run_info = _running(timeout=320.0, start_time=1000.0)
+    assert run_info.deadline == 1000.0 + 320.0 + _HARD_KILL_GRACE_S
+
+
+def test_no_action_before_the_deadline():
+    run_info = _running(timeout=320.0)
+    # A test at 319s is still inside its own --timeout; pytest-timeout owns it.
+    assert _deadline_action(run_info, 319.0) is None
+    # And through the grace window, where teardown legitimately runs.
+    assert _deadline_action(run_info, 320.0 + _HARD_KILL_GRACE_S - 1) is None
+    assert not run_info.hard_killed
+
+
+def test_sigterm_at_the_deadline_then_sigkill_after_grace():
+    run_info = _running(timeout=320.0)
+    deadline = run_info.deadline
+
+    assert _deadline_action(run_info, deadline) == "term"
+    run_info.term_sent_at = deadline  # caller records what it sent
+    assert run_info.hard_killed
+
+    # SIGTERM gets its own window before we escalate.
+    assert _deadline_action(run_info, deadline + _SIGKILL_AFTER_SIGTERM_S - 1) is None
+    assert _deadline_action(run_info, deadline + _SIGKILL_AFTER_SIGTERM_S) == "kill"
+
+    # Once SIGKILL is out there is nothing left to escalate to.
+    run_info.kill_sent_at = deadline + _SIGKILL_AFTER_SIGTERM_S
+    assert _deadline_action(run_info, deadline + 10_000) is None
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_kills_the_whole_process_group_not_just_the_child(tmp_path):
+    # The failure this guards: killing only the pytest child leaves its engine
+    # workers alive holding VRAM, poisoning every test scheduled after it. The
+    # backgrounded grandchild here stands in for those workers -- it survives a
+    # plain proc.kill() and dies only when the whole group is signalled.
+    pid_file = tmp_path / "grandchild.pid"
+    proc = subprocess.Popen(
+        ["sh", "-c", f"sleep 60 & echo $! > {pid_file}; sleep 60"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    run_info = _RunningTest(proc=proc, test=_t("hang", 12.0), start_time=0.0)
+    pgid = os.getpgid(proc.pid)
+    try:
+        grandchild = -1
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            raw = pid_file.read_text().strip() if pid_file.exists() else ""
+            if raw:
+                grandchild = int(raw)
+                break
+            time.sleep(0.05)
+        assert grandchild > 0, "grandchild never reported its pid"
+        assert _alive(grandchild)
+
+        _signal_group(run_info, signal.SIGKILL)
+        proc.wait(timeout=10)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and _alive(grandchild):
+            time.sleep(0.05)
+        assert not _alive(grandchild), "grandchild outlived the process-group kill"
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+# --------------------------------------------------------------------------- #
+# hard-kill backstop: JUnit record for a killed child
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "test_id, expected",
+    [
+        (
+            "tests/router/test_r.py::test_sync[nats-tcp]",
+            ("tests.router.test_r", "test_sync[nats-tcp]"),
+        ),
+        (
+            "tests/utils/test_u.py::TestGroup::test_case",
+            ("tests.utils.test_u.TestGroup", "test_case"),
+        ),
+    ],
+)
+def test_junit_ids_match_pytest_conventions(test_id, expected):
+    assert _junit_ids(test_id) == expected
+
+
+def test_killed_child_still_lands_in_the_combined_junit(tmp_path, monkeypatch):
+    # Without a synthesized record the killed test vanishes from the report and
+    # the stage fails with no attributable test.
+    # _aggregate_junit_xml always writes to the module-global combined path.
+    monkeypatch.setattr(
+        pytest_parallel_gpu, "_JUNIT_COMBINED", str(tmp_path / "combined.xml")
+    )
+    test = _t("tests/router/test_r.py::test_sync[nats-tcp]", 12.0, timeout=320)
+    junit_path = str(tmp_path / "killed.xml")
+    _write_timeout_junit(junit_path, test, duration=443.0, message="killed by X")
+
+    combined = _aggregate_junit_xml(str(tmp_path))
+    assert combined is not None
+    suite = ET.parse(combined).getroot()
+    assert suite.get("tests") == "1"
+    assert suite.get("failures") == "1"
+    case = suite.find("testcase")
+    assert case is not None
+    assert case.get("classname") == "tests.router.test_r"
+    assert case.get("name") == "test_sync[nats-tcp]"
+    assert case.find("failure").get("message") == "killed by X"
 
 
 # --------------------------------------------------------------------------- #
