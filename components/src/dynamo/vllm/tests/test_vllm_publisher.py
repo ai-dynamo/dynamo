@@ -149,7 +149,7 @@ async def test_snapshot_factory_defers_endpoint_and_publishes_gauges(monkeypatch
     inner.publish.assert_has_calls(
         [call(0, kv_used_blocks=0), call(0, kv_used_blocks=12)]
     )
-    component_gauges.set_total_blocks.assert_has_calls([call("0", 0), call("0", 48)])
+    component_gauges.set_total_blocks.assert_has_calls([call("0", 48), call("0", 48)])
     component_gauges.set_gpu_cache_usage.assert_has_calls(
         [call("0", 0.0), call("0", 0.25)]
     )

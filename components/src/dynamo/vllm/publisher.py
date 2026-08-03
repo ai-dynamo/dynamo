@@ -84,7 +84,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     def init_publish(self) -> None:
         self.inner.publish(self.dp_rank, kv_used_blocks=0)
         dp_rank_str = str(self.dp_rank)
-        self.component_gauges.set_total_blocks(dp_rank_str, 0)
+        self.component_gauges.set_total_blocks(dp_rank_str, self.num_gpu_block)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def log_engine_initialized(self) -> None:
