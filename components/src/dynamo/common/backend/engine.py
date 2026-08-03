@@ -105,7 +105,8 @@ class GenerateChunk(TypedDict, total=False):
     # JSON object. Carries `prompt_logprobs` on the final chunk.
     engine_data: dict[str, Any]
     # Internal custom-encoder metadata handoff from Python backends to the LLM
-    # frontend transport. Kept separate from the opt-in `engine_data` channel.
+    # frontend transport. Emitted only when requested through
+    # `nvext.extra_fields=["custom_encoder"]`.
     custom_encoder_data: dict[str, Any]
 
 

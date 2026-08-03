@@ -145,36 +145,11 @@ def test_prepare_custom_encoder_results_omits_empty_response_payload():
             ),
             "JSON-serializable",
         ),
-        (
-            EncoderResult(
-                artifact=torch.ones((1, 4)),
-                response_data={"value": -(1 << 63) - 1},
-            ),
-            "i64/u64 range",
-        ),
-        (
-            EncoderResult(
-                artifact=torch.ones((1, 4)),
-                response_data={"value": 1 << 64},
-            ),
-            "i64/u64 range",
-        ),
     ],
 )
 def test_prepare_custom_encoder_results_rejects_invalid_results(result, message):
     with pytest.raises((TypeError, ValueError), match=message):
         _prepare_custom_encoder_results([result])
-
-
-@pytest.mark.parametrize("value", [-(1 << 63), (1 << 64) - 1])
-def test_prepare_custom_encoder_results_accepts_serde_json_integer_limits(value):
-    artifact = torch.ones((1, 4))
-
-    _, response_data = _prepare_custom_encoder_results(
-        [EncoderResult(artifact=artifact, response_data={"value": value})]
-    )
-
-    assert response_data == {"items": [{"value": value}]}
 
 
 def test_prepare_custom_encoder_results_enforces_response_limit():
@@ -192,8 +167,18 @@ def test_custom_encoder_data_attaches_only_to_first_success_chunk():
     first = {"token_ids": [1], "index": 0}
     second = {"token_ids": [2], "index": 0}
 
-    sent = _attach_custom_encoder_data(first, response_data, already_sent=False)
-    sent = _attach_custom_encoder_data(second, response_data, already_sent=sent)
+    sent = _attach_custom_encoder_data(
+        first,
+        response_data,
+        requested=True,
+        already_sent=False,
+    )
+    sent = _attach_custom_encoder_data(
+        second,
+        response_data,
+        requested=True,
+        already_sent=sent,
+    )
 
     assert sent is True
     assert first["custom_encoder_data"] == response_data
@@ -206,8 +191,23 @@ def test_custom_encoder_data_is_not_attached_to_error_chunk():
     sent = _attach_custom_encoder_data(
         error,
         {"items": [{"score": 0.75}]},
+        requested=True,
         already_sent=False,
     )
 
     assert sent is False
     assert "custom_encoder_data" not in error
+
+
+def test_custom_encoder_data_is_not_attached_without_opt_in() -> None:
+    chunk = {"token_ids": [1], "index": 0}
+
+    sent = _attach_custom_encoder_data(
+        chunk,
+        {"items": [{"score": 0.75}]},
+        requested=False,
+        already_sent=False,
+    )
+
+    assert sent is False
+    assert "custom_encoder_data" not in chunk

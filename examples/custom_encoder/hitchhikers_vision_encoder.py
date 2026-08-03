@@ -94,7 +94,8 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
 
     A test/example backend, not a production vision encoder: it loads the LM's
     ``embed_tokens`` weight and returns the embeddings of ``DYN_CUSTOM_PHRASE``
-    so the spliced prompt reads as a coherent sentence.
+    so the spliced prompt reads as a coherent sentence. Its optional response
+    metadata reports the number of phrase tokens embedded for each image.
     """
 
     # Eager: no graph ladder. Count-based budget (cost == 1 per image). The URL is
@@ -139,4 +140,10 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
             len(ids),
             tuple(phrase_embeds.shape),
         )
-        return [EncoderResult(artifact=phrase_embeds.clone()) for _ in items]
+        return [
+            EncoderResult(
+                artifact=phrase_embeds.clone(),
+                response_data={"phrase_token_count": len(ids)},
+            )
+            for _ in items
+        ]

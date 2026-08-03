@@ -94,8 +94,9 @@ class EncoderResult(Generic[ArtifactT]):
     """One decoder artifact plus optional JSON metadata for the response.
 
     ``artifact`` is interpreted only by the decoder-selected adapter.
-    ``response_data`` must be a JSON-serializable object when present. Dynamo
-    preserves input order in the internal ``items`` payload, including ``null``
+    ``response_data`` must be a JSON-serializable object when present. When the
+    request selects ``custom_encoder`` through ``nvext.extra_fields``, Dynamo
+    preserves input order in the response ``items`` payload, including ``null``
     entries, and omits the payload when every entry is ``None``. The combined
     per-request payload is limited to 64 KiB.
     """

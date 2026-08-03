@@ -119,8 +119,6 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _CUSTOM_ENCODER_RESPONSE_MAX_BYTES = 64 * 1024
-_JSON_INTEGER_MIN = -(1 << 63)
-_JSON_INTEGER_MAX = (1 << 64) - 1
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -675,11 +673,13 @@ def _prepare_custom_encoder_results(
         artifacts.append(result.artifact)
         response_items.append(response_data)
 
-    if not any(item is not None for item in response_items):
+    if all(item is None for item in response_items):
         return artifacts, None
 
     payload = {"items": response_items}
-    _validate_custom_encoder_json_integers(payload)
+    # For simplicity and performance, we deliberately do not validate Python's
+    # arbitrary-size integers against serde_json's i64/u64 range here; that niche
+    # edge case may still fail later at the Python-to-Rust response boundary.
     try:
         serialized = json.dumps(
             payload,
@@ -699,36 +699,16 @@ def _prepare_custom_encoder_results(
     return artifacts, json.loads(serialized)
 
 
-def _validate_custom_encoder_json_integers(value: Any) -> None:
-    """Reject integers that serde_json cannot represent across Pythonize."""
-
-    if isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        if not _JSON_INTEGER_MIN <= value <= _JSON_INTEGER_MAX:
-            raise ValueError(
-                "CustomEncoder response_data integers must fit serde_json's "
-                "i64/u64 range"
-            )
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            _validate_custom_encoder_json_integers(item)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _validate_custom_encoder_json_integers(item)
-
-
 def _attach_custom_encoder_data(
     chunk: Dict[str, Any],
     response_data: dict[str, Any] | None,
     *,
+    requested: bool,
     already_sent: bool,
 ) -> bool:
-    """Attach metadata once, to the first non-error generation chunk."""
+    """Attach requested metadata once, to the first non-error generation chunk."""
 
-    if already_sent or response_data is None:
+    if not requested or already_sent or response_data is None:
         return already_sent
     finish_reason = chunk.get("finish_reason")
     if isinstance(finish_reason, str) and finish_reason.startswith("error"):
@@ -3374,6 +3354,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                want_custom_encoder_data = _nvext_extra_field_requested(
+                    request, "custom_encoder"
+                )
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the
                 # preprocessor produced from messages (MITO). We echo them
@@ -3416,6 +3399,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         custom_encoder_data_sent = _attach_custom_encoder_data(
                             tok,
                             custom_encoder_data,
+                            requested=want_custom_encoder_data,
                             already_sent=custom_encoder_data_sent,
                         )
                         yield tok
