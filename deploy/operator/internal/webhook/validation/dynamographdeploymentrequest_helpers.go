@@ -32,6 +32,7 @@ func isImmutableDGDRPhase(phase nvidiacomv1beta1.DGDRPhase) bool {
 	switch phase {
 	case nvidiacomv1beta1.DGDRPhaseProfiling,
 		nvidiacomv1beta1.DGDRPhaseDeploying,
+		nvidiacomv1beta1.DGDRPhaseReady,
 		nvidiacomv1beta1.DGDRPhaseDeployed:
 		return true
 	default:

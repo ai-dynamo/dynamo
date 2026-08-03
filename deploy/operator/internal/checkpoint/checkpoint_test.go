@@ -659,13 +659,18 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, InjectCheckpointIntoPodSpecWithStorageConfig(
+		restore, err := ResolvePodSpecRestore(
 			context.Background(),
 			reader,
 			testNamespace,
-			podSpec,
 			info,
 			storageConfig,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, restore)
+		require.NoError(t, InjectResolvedCheckpointIntoPodSpec(
+			podSpec,
+			restore,
 			snapshotprotocol.DefaultSeccompLocalhostProfile,
 		))
 

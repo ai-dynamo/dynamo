@@ -403,6 +403,9 @@ def _prepare_planner_replay(
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
     from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
+    from dynamo.planner.offline.trace_data import (
+        extract_traffic_observations_from_trace,
+    )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
@@ -424,9 +427,17 @@ def _prepare_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
+    warmup_observations = None
+    if planner_config.load_predictor_warmup_trace is not None:
+        warmup_observations = extract_traffic_observations_from_trace(
+            planner_config.load_predictor_warmup_trace,
+            planner_config.throughput_adjustment_interval_seconds,
+        )
+
     adapter = create_replay_planner_adapter(
         planner_config=planner_config,
         capabilities=capabilities,
+        warmup_observations=warmup_observations,
     )
 
     # Bootstrap regression models from mocker's perf model.
@@ -853,8 +864,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
-        if using_trace_file and args.trace_format != "mooncake":
-            parser.error("--planner-config only supports --trace-format=mooncake")
+        if using_trace_file and args.trace_format not in ("mooncake", "dynamo"):
+            parser.error(
+                "--planner-config only supports --trace-format=mooncake or dynamo"
+            )
 
         replay_options = {
             "extra_engine_args": extra_engine_args,

@@ -2397,6 +2397,11 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                     "avg_osl": traffic.avg_osl,
                     "avg_ttft_ms": traffic.avg_ttft_ms,
                     "avg_itl_ms": traffic.avg_itl_ms,
+                    // Native denominators keep completion-derived shape and
+                    // latency averages exact even though num_req is offered load.
+                    "shape_count": traffic.shape_count,
+                    "ttft_count": traffic.ttft_count,
+                    "itl_count": traffic.itl_count,
                     "avg_accept_length": traffic.avg_accept_length,
                     "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
                     // Denominators behind the two ratio averages, so the Python

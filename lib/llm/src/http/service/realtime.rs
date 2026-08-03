@@ -16,8 +16,10 @@
 //! - The handler sends a `session.created` server event before any
 //!   engine events flow.
 //! - The handler loops over inbound client frames in
-//!   [`select_engine`] until a `session.update` arrives with a usable
-//!   `session.model` and [`ModelManager::get_realtime_engine`] returns Ok.
+//!   [`select_engine`] until a `session.update` arrives with a usable model
+//!   (`session.model` for realtime sessions or
+//!   `session.audio.input.transcription.model` for transcription sessions)
+//!   and [`ModelManager::get_realtime_engine`] returns Ok.
 //! - Non-conforming frames (wrong event type, missing model, unknown / unavailable
 //!   model, malformed JSON, binary frames) emit a spec-shaped
 //!   `RealtimeServerEvent::Error` while the loop continues so a well-behaved client
@@ -230,22 +232,21 @@ async fn handle_socket(
             }
         };
         match msg {
-            Message::Text(text) => {
-                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
-                    Ok(event) => {
-                        if req_tx.send(event).await.is_err() {
-                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                        *close_reason.lock() =
-                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
+            Message::Text(text) => match serde_json::from_str::<RealtimeClientEvent>(text.as_str())
+            {
+                Ok(event) => {
+                    if req_tx.send(event).await.is_err() {
+                        tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
                         break;
                     }
                 }
-            }
+                Err(err) => {
+                    tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
+                    *close_reason.lock() =
+                        Some(close_message(close_code::INVALID, "malformed JSON frame"));
+                    break;
+                }
+            },
             Message::Binary(_) => {
                 tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
                 *close_reason.lock() = Some(close_message(
@@ -432,30 +433,27 @@ where
         };
 
         // Extract model name from session update.
-        let model_name = match &session_update.session {
-            Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
-            Session::RealtimeTranscriptionSession(_) => {
-                // Transcription sessions need their own engine wiring (audio →
-                // text via /audio/transcriptions) that this slice doesn't
-                // implement. Surface that directly instead of letting the
-                // empty `model` fall through to the generic "session.model
-                // required" error from the realtime path below.
-                send_error_event(
-                    ws_tx,
-                    "unsupported_session_type",
-                    "session.type 'transcription' is not yet supported (only 'realtime' is supported)",
-                    Some("session.type"),
-                )
-                .await;
-                continue;
-            }
+        let (model_name, model_param) = match &session_update.session {
+            Session::RealtimeSession(s) => (
+                s.model.as_deref().filter(|m| !m.is_empty()),
+                "session.model",
+            ),
+            Session::RealtimeTranscriptionSession(s) => (
+                s.audio
+                    .input
+                    .transcription
+                    .as_ref()
+                    .and_then(|t| t.model.as_deref())
+                    .filter(|m| !m.is_empty()),
+                "session.audio.input.transcription.model",
+            ),
         };
         let Some(model_name) = model_name else {
             send_error_event(
                 ws_tx,
                 "invalid_request",
-                "session.model required",
-                Some("session.model"),
+                &format!("{model_param} required"),
+                Some(model_param),
             )
             .await;
             continue;
@@ -467,7 +465,7 @@ where
                     ws_tx,
                     "model_not_found",
                     &format!("unknown model: {model_name}"),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;
@@ -477,7 +475,7 @@ where
                     ws_tx,
                     "model_unavailable",
                     &format!("model unavailable: {model_name}"),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;
@@ -488,7 +486,7 @@ where
                     ws_tx,
                     "server_error",
                     &SanitizedError::Internal.to_string(),
-                    Some("session.model"),
+                    Some(model_param),
                 )
                 .await;
                 continue;
