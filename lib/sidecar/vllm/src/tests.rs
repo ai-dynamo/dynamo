@@ -926,6 +926,24 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 }
 
 #[tokio::test]
+async fn lora_routing_is_forwarded_to_native_grpc() {
+    let server = FakeServer::start(FakeInference::default()).await;
+    let engine = engine(&server.endpoint, DisaggregationMode::Aggregated, 1);
+    engine.start(0).await.expect("start");
+
+    let mut value = serde_json::to_value(request()).expect("serialize request");
+    value["routing"] = json!({"lora_name": "math-r8"});
+    let request = serde_json::from_value(value).expect("deserialize request");
+    collect(&engine, request).await;
+
+    let requests = server.service.requests.lock().await;
+    assert_eq!(
+        requests.first().expect("recorded request").lora_name,
+        "math-r8"
+    );
+}
+
+#[tokio::test]
 async fn grpc_request_errors_are_propagated() {
     let service = FakeInference::default();
     service.reject.store(true, Ordering::SeqCst);
@@ -1189,11 +1207,9 @@ async fn unsupported_features_fail_before_rpc_submission() {
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
 
-    for routing in [json!({"lora_name": "adapter"}), json!({"dp_rank": 1})] {
-        let mut value = serde_json::to_value(request()).expect("serialize request");
-        value["routing"] = routing;
-        requests.push(serde_json::from_value(value).expect("deserialize request"));
-    }
+    let mut value = serde_json::to_value(request()).expect("serialize request");
+    value["routing"] = json!({"dp_rank": 1});
+    requests.push(serde_json::from_value(value).expect("deserialize request"));
 
     for unsupported in requests {
         let context = dynamo_backend_common::testing::mock_context();
