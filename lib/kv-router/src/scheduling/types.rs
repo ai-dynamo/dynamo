@@ -78,6 +78,34 @@ pub struct SchedulingResponse {
     pub potential_decode_blocks: usize,
 }
 
+#[derive(Debug)]
+pub struct AdvisorySchedulingResponse {
+    pub response: SchedulingResponse,
+    pub selected_worker_load: AdvisoryWorkerLoad,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AdvisoryWorkerLoad {
+    pub active_prefill_tokens: usize,
+    pub prefill_token_capacity: usize,
+    pub total_kv_blocks: Option<usize>,
+}
+
+impl AdvisoryWorkerLoad {
+    pub fn prefill_load_exceeds(&self, threshold: f64) -> bool {
+        self.active_prefill_tokens as f64 > threshold * self.prefill_token_capacity as f64
+    }
+
+    pub fn decode_load_exceeds(
+        &self,
+        potential_decode_blocks: u64,
+        threshold: f64,
+    ) -> Option<bool> {
+        let total_kv_blocks = self.total_kv_blocks?;
+        Some(potential_decode_blocks as f64 > threshold * total_kv_blocks as f64)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ScheduleMode {
     QueryOnly {
@@ -290,9 +318,13 @@ impl SchedulingRequest {
         worker: WorkerWithDpRank,
         block_size: u32,
     ) -> usize {
+        let request_blocks = self.request_blocks(block_size) as usize;
+        let tracked_request_blocks = self.token_seq.as_ref().map_or(0, Vec::len);
+        let untracked_request_blocks = request_blocks.saturating_sub(tracked_request_blocks);
+
         self.worker_load_for(worker)
             .potential_decode_blocks()
-            .saturating_add(self.request_blocks(block_size) as usize)
+            .saturating_add(untracked_request_blocks)
     }
 
     pub(crate) fn response_is_closed(&self) -> bool {
@@ -309,5 +341,82 @@ impl SchedulingRequest {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with_decode_load(
+        isl_tokens: usize,
+        token_seq_blocks: Option<usize>,
+        active_decode_blocks: usize,
+        additional_active_blocks: usize,
+        worker: WorkerWithDpRank,
+    ) -> SchedulingRequest {
+        let token_seq = token_seq_blocks.map(|blocks| (0..blocks as SequenceHash).collect());
+        let mut worker_loads = FxHashMap::default();
+        worker_loads.insert(
+            worker,
+            WorkerLoadProjection {
+                active_decode_blocks,
+                additional_active_blocks,
+                ..Default::default()
+            },
+        );
+
+        SchedulingRequest {
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
+            token_seq,
+            isl_tokens,
+            lora_name: None,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+            router_config_override: None,
+            track_prefill_tokens: false,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_id: None,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            shared_cache_hits: None,
+            worker_loads,
+            resp_tx: None,
+        }
+    }
+
+    #[test]
+    fn potential_decode_blocks_after_admission_counts_only_untracked_request_blocks() {
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        for (name, isl_tokens, token_seq_blocks, additional_active_blocks, expected) in [
+            ("untracked", 32, None, 0, 102),
+            ("tracked_no_overlap", 32, Some(2), 2, 102),
+            ("tracked_full_active_overlap", 32, Some(2), 0, 100),
+            ("tracked_partial_tail", 33, Some(2), 2, 103),
+        ] {
+            let request = request_with_decode_load(
+                isl_tokens,
+                token_seq_blocks,
+                100,
+                additional_active_blocks,
+                worker,
+            );
+
+            assert_eq!(
+                request.potential_decode_blocks_after_admission(worker, 16),
+                expected,
+                "{name}"
+            );
+        }
     }
 }
