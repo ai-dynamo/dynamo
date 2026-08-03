@@ -5,12 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored vLLM protocol
 
-- Source: `rust/proto/vllm_grpc.proto`
-- Release: `v0.25.1`
-- Commit: `752a3a504485790a2e8491cacbb35c137339ad34`
-- SHA-256: `7cccd0e1b2e54f189550e1090cc80321fc2bbd188c98a4e22701b28fdeb177b6`
+- Sources: `rust/proto/inference.proto` and `rust/proto/control.proto`
+- Commit: `a0d13bb5e70487ea5cb59ca43444ac14c3aaddef`
+- `inference.proto` SHA-256: `09fca71821b9c8a4f1a7196960fc301fca7cd967847cb88c59b164f26167faca`
+- `control.proto` SHA-256: `57917ab1ac0be8f5216b041167903d650be408bcb8b0b8cc4c8a78e591c1cc5c`
 
-The file is copied without modification. Update the revision and checksum when
-updating the protocol. `dynamo-vllm-sidecar` generates and temporarily exports
-these types for `dynamo-vllm-mocker-server`; both consumers will move to the
-upstream package once vLLM publishes it.
+The files are copied without modification. Update the revision and checksums when updating the protocol. `dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`; both consumers will move to the upstream package once vLLM publishes it.

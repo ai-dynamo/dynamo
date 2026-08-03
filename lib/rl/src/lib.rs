@@ -12,7 +12,7 @@
 //!
 //! This crate exposes a read-only frontend route. The frontend discovers live
 //! `rl` endpoint instances from Dynamo discovery, then asks each worker for its
-//! available RL admin routes with `{"method": "routes"}` over the request
+//! available Dynamo system routes with `{"method": "routes"}` over the request
 //! plane. It does not expose a frontend fan-out method endpoint.
 
 use std::{
@@ -40,6 +40,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Global cap on concurrent per-worker probes (across all in-flight discovery
 /// requests), so a large fleet or many concurrent callers can't fan out without bound.
 const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
+pub const RL_WORKERS_PROTOCOL_VERSION: u32 = 1;
 
 type ModelKey = (String, String, u64);
 
@@ -104,7 +105,14 @@ pub struct RlWorkerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    pub system_routes: Vec<String>,
+    /// Deprecated alias of `system_routes`, emitted for protocol-v1 consumers
+    /// predating the rename. Always identical to `system_routes`; remove in v2.
     pub routes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -112,6 +120,7 @@ pub struct RlWorkerInfo {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RlWorkersResponse {
+    pub protocol_version: u32,
     pub namespace: String,
     pub workers: Vec<RlWorkerInfo>,
 }
@@ -195,6 +204,7 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
             namespace: state.config.namespace.clone(),
             workers,
         })
@@ -229,8 +239,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .list(DiscoveryQuery::NamespacedModels {
             namespace: config.namespace.clone(),
         })
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let models = model_map(model_instances);
     let rl_endpoints = endpoint_instances
@@ -315,12 +324,33 @@ async fn describe_worker(
         call_worker_routes(state, &endpoint, timeout).await
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
-        Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+        Ok(Ok(routes)) => {
+            let model = resolve_worker_model(model, routes.model);
+            worker_info(
+                endpoint,
+                model,
+                routes.routes,
+                routes.system_url,
+                routes.admin_base_url,
+                routes.world_size,
+                None,
+            )
+        }
+        Ok(Err(err)) => worker_info(
+            endpoint,
+            model,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(err.to_string()),
+        ),
         Err(_) => worker_info(
             endpoint,
             model,
             Vec::new(),
+            None,
+            None,
             None,
             Some(format!(
                 "worker discovery timed out after {}s",
@@ -334,6 +364,9 @@ async fn describe_worker(
 struct WorkerRoutes {
     routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
+    model: Option<String>,
 }
 
 async fn call_worker_routes(
@@ -440,18 +473,59 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
         .filter(|url| !url.is_empty())
         .map(ToString::to_string);
 
-    Ok(WorkerRoutes { routes, system_url })
+    let admin_base_url = value
+        .get("admin_base_url")
+        .and_then(|url| url.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string);
+    let world_size = match value.get("world_size") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|size| u32::try_from(size).ok())
+                .filter(|size| *size > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("worker routes response has invalid 'world_size'")
+                })?,
+        ),
+    };
+    let model = match value.get("model") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(model)) if !model.trim().is_empty() => {
+            Some(model.trim().to_string())
+        }
+        Some(_) => anyhow::bail!("worker routes response has invalid 'model'"),
+    };
+
+    Ok(WorkerRoutes {
+        routes,
+        system_url,
+        admin_base_url,
+        world_size,
+        model,
+    })
+}
+
+fn resolve_worker_model(
+    discovered_model: Option<String>,
+    explicit_model: Option<String>,
+) -> Option<String> {
+    explicit_model.or(discovered_model)
 }
 
 fn worker_info(
     endpoint: Instance,
     model: Option<String>,
-    mut routes: Vec<String>,
+    mut system_routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
     error: Option<String>,
 ) -> RlWorkerInfo {
-    routes.sort();
-    routes.dedup();
+    system_routes.sort();
+    system_routes.dedup();
 
     RlWorkerInfo {
         request_plane_url: request_plane_url(&endpoint),
@@ -461,8 +535,11 @@ fn worker_info(
         instance_id: endpoint.instance_id,
         transport: endpoint.transport,
         system_url,
+        admin_base_url,
+        world_size,
         model,
-        routes,
+        routes: system_routes.clone(),
+        system_routes,
         error,
     }
 }
@@ -514,6 +591,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn worker_response_names_dynamo_capabilities_system_routes() {
+        let worker = RlWorkerInfo {
+            namespace: "dynamo".to_string(),
+            component: "backend".to_string(),
+            endpoint: "rl".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+            request_plane_url: "dyn://dynamo.backend.rl".to_string(),
+            system_url: Some("http://worker:8181".to_string()),
+            admin_base_url: Some("http://worker:8120".to_string()),
+            world_size: Some(2),
+            model: Some("model".to_string()),
+            system_routes: vec!["update/load_lora".to_string()],
+            routes: vec!["update/load_lora".to_string()],
+            error: None,
+        };
+
+        let value = serde_json::to_value(worker).unwrap();
+        assert_eq!(value["system_routes"], json!(["update/load_lora"]));
+        // `routes` is retained as a deprecated alias so protocol-v1 consumers
+        // predating the rename keep working; it must mirror `system_routes`.
+        assert_eq!(value["routes"], value["system_routes"]);
+    }
+
+    #[test]
+    fn workers_response_advertises_protocol_version() {
+        let response = RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
+            namespace: "dynamo".to_string(),
+            workers: Vec::new(),
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["protocol_version"], json!(1));
+    }
+
     fn model_instance(
         namespace: &str,
         component: &str,
@@ -537,12 +650,56 @@ mod tests {
         let parsed = parse_worker_routes(json!({
             "routes": ["pause_generation", "resume_generation"],
             "system_url": "  http://worker:8080  ",
+            "admin_base_url": "  http://worker:8120  ",
+            "world_size": 2,
+            "model": "  Qwen/Qwen3-0.6B  ",
         }))
         .expect("valid payload");
         let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
         assert_eq!(routes, ["pause_generation", "resume_generation"]);
         // system_url is trimmed.
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
+        assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
+        assert_eq!(parsed.world_size, Some(2));
+        assert_eq!(parsed.model.as_deref(), Some("Qwen/Qwen3-0.6B"));
+    }
+
+    #[test]
+    fn explicit_worker_model_wins_over_served_model_alias() {
+        assert_eq!(
+            resolve_worker_model(
+                Some("prime-thunderagent-backend".to_string()),
+                Some("Qwen/Qwen3-0.6B".to_string()),
+            )
+            .as_deref(),
+            Some("Qwen/Qwen3-0.6B")
+        );
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_model_metadata() {
+        for model in [serde_json::json!("   "), serde_json::json!(42)] {
+            let error = parse_worker_routes(serde_json::json!({
+                "status": "ok",
+                "routes": [],
+                "model": model,
+            }))
+            .expect_err("invalid model metadata must be rejected");
+            assert!(error.to_string().contains("invalid 'model'"));
+        }
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_world_size() {
+        for world_size in [json!(0), json!(-1), json!("2")] {
+            let err = parse_worker_routes(json!({
+                "routes": [],
+                "admin_base_url": "http://worker:8120",
+                "world_size": world_size,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains("world_size"));
+        }
     }
 
     #[test]

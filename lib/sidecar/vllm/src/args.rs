@@ -16,6 +16,14 @@ pub(crate) struct Args {
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
 
+    /// Direct HTTP control endpoint of the same vLLM engine.
+    #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
+    pub admin_endpoint: Option<String>,
+
+    /// Engine-advertised model identity published through RL discovery.
+    #[arg(long, env = "DYN_RL_DISCOVERY_MODEL_NAME")]
+    pub rl_discovery_model_name: Option<String>,
+
     /// Hugging Face model ID or local path used by Dynamo for model-card
     /// registration, tokenization, and chat templates. The released vLLM gRPC
     /// API does not expose this metadata, so it cannot be inferred from the

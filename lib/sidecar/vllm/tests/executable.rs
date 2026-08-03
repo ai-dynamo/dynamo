@@ -18,8 +18,10 @@ fn executable_exposes_native_grpc_configuration() {
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
     for flag in [
         "--vllm-endpoint",
+        "--admin-endpoint",
         "--grpc-connections",
         "--model-path",
+        "--rl-discovery-model-name",
         "--disaggregation-mode",
         "--grpc-connect-attempt-timeout-secs",
         "--grpc-retry-interval-secs",

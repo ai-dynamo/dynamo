@@ -1695,6 +1695,15 @@ impl ResponseMetricCollector {
         self.osl = osl;
     }
 
+    /// Seed the known input sequence length for the request summary span.
+    ///
+    /// This deliberately does not publish the input sequence length histogram.
+    /// That histogram remains tied to the first output token so failed or
+    /// cancelled requests do not skew successful-response distributions.
+    pub fn set_input_sequence_length(&mut self, isl: usize) {
+        self.isl = isl;
+    }
+
     /// Check if this will be the first token (before calling observe_response)
     pub fn is_first_token(&self) -> bool {
         self.is_first_token

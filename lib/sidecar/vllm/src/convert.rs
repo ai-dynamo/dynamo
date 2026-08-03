@@ -32,6 +32,10 @@ pub(crate) fn build_generate_request(
         request.stop_conditions.min_tokens.unwrap_or(0)
     };
     let mut routing = request.routing;
+    let lora_name = routing
+        .as_mut()
+        .and_then(|routing| routing.lora_name.take())
+        .unwrap_or_default();
     let priority = routing
         .as_ref()
         .and_then(|routing| routing.priority)
@@ -55,17 +59,21 @@ pub(crate) fn build_generate_request(
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
-            top_p: sampling.top_p.unwrap_or(0.0),
-            min_p: sampling.min_p.unwrap_or(0.0),
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
             seed: sampling.seed,
         }),
         decoding: Some(pb::DecodingParameters {
-            presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
-            frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
-            repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
+            presence_penalty: sampling.presence_penalty,
+            frequency_penalty: sampling.frequency_penalty,
+            repetition_penalty: sampling.repetition_penalty,
             logit_bias: Default::default(),
             allowed_token_ids: Vec::new(),
             structured_output: structured_output(sampling.guided_decoding)?,
+            structured_output_disable_any_whitespace: false,
+            structured_output_disable_additional_properties: false,
+            structured_output_whitespace_pattern: None,
+            bad_words: Vec::new(),
         }),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens,
@@ -77,6 +85,7 @@ pub(crate) fn build_generate_request(
             stop_strings: stop_conditions.stop.unwrap_or_default(),
             include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
+            thinking_token_budget: None,
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some(),
@@ -90,6 +99,11 @@ pub(crate) fn build_generate_request(
         kv: Some(kv),
         truncate_prompt_tokens: 0,
         priority,
+        media: Vec::new(),
+        lora_name,
+        vllm_xargs_json: None,
+        mm_features: Vec::new(),
+        routed_experts_prompt_start: 0,
     })
 }
 
@@ -104,10 +118,10 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     })
 }
 
-fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
+fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
     match top_k {
-        None | Some(-1) | Some(0) => Ok(0),
-        Some(value) if value > 0 => Ok(value as u32),
+        None | Some(-1) | Some(0) => Ok(top_k),
+        Some(value) if value > 0 => Ok(Some(value)),
         Some(value) => Err(client::invalid_argument(format!(
             "top_k must be -1, 0, or positive; got {value}"
         ))),
@@ -179,6 +193,7 @@ fn build_kv_parameters(
             return Err(client::invalid_argument("extra_args must be a JSON object"));
         }
     };
+    validate_and_remove_vllm_tito(extra.as_mut(), cache_salt.as_deref())?;
     if let Some(extra) = extra.as_ref() {
         for key in extra.keys() {
             if !matches!(
@@ -272,6 +287,140 @@ fn stringify_remote_port(params: &mut serde_json::Value) {
     }
 }
 
+fn validate_and_remove_vllm_tito(
+    extra: Option<&mut serde_json::Map<String, serde_json::Value>>,
+    canonical_cache_salt: Option<&str>,
+) -> Result<(), DynamoError> {
+    let Some(envelope) = extra.and_then(|extra| extra.remove("vllm_tito")) else {
+        return Ok(());
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+
+    for key in envelope.keys() {
+        if !matches!(
+            key.as_str(),
+            "request_id"
+                | "sampling_params"
+                | "model"
+                | "stream"
+                | "stream_options"
+                | "cache_salt"
+                | "priority"
+                | "kv_transfer_params"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{key} is not supported by vLLM gRPC v0.25.1"
+            )));
+        }
+    }
+
+    if envelope
+        .get("stream")
+        .is_some_and(|stream| stream != &serde_json::Value::Bool(false))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream must be false",
+        ));
+    }
+    if envelope
+        .get("stream_options")
+        .is_some_and(|options| !options.is_null())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.stream_options is not supported by vLLM gRPC v0.25.1",
+        ));
+    }
+
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    for key in sampling.keys() {
+        if !matches!(
+            key.as_str(),
+            "temperature"
+                | "top_p"
+                | "top_k"
+                | "min_p"
+                | "seed"
+                | "max_tokens"
+                | "min_tokens"
+                | "presence_penalty"
+                | "frequency_penalty"
+                | "repetition_penalty"
+                | "stop_token_ids"
+                | "ignore_eos"
+                | "logprobs"
+                | "prompt_logprobs"
+                | "cache_salt"
+                | "skip_reading_prefix_cache"
+                | "skip_special_tokens"
+                | "return_token_ids"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC v0.25.1"
+            )));
+        }
+    }
+    if sampling
+        .get("skip_special_tokens")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
+        ));
+    }
+    if sampling
+        .get("return_token_ids")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
+        ));
+    }
+    validate_compat_cache_salt(
+        sampling.get("cache_salt"),
+        canonical_cache_salt,
+        "sampling_params.cache_salt",
+    )?;
+    validate_compat_cache_salt(
+        envelope.get("cache_salt"),
+        canonical_cache_salt,
+        "cache_salt",
+    )?;
+
+    Ok(())
+}
+
+fn validate_compat_cache_salt(
+    value: Option<&serde_json::Value>,
+    canonical: Option<&str>,
+    path: &str,
+) -> Result<(), DynamoError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must be a string"
+        )));
+    };
+    if Some(value) != canonical {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.{path} must match the canonical cache_salt"
+        )));
+    }
+    Ok(())
+}
+
 fn bool_extra(
     extra: Option<&serde_json::Map<String, serde_json::Value>>,
     key: &str,
@@ -309,16 +458,6 @@ fn validate_request(
     if mode.is_encode() {
         return Err(client::invalid_argument(
             "encode mode is not supported by the vLLM sidecar",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.lora_name.as_deref())
-        .is_some_and(|name| !name.is_empty())
-    {
-        return Err(client::invalid_argument(
-            "LoRA request selection is not supported by vLLM gRPC v0.25.1",
         ));
     }
     if request

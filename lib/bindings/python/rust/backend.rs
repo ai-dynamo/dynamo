@@ -460,6 +460,7 @@ impl WorkerConfig {
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -1568,6 +1569,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,
+            image_token_id: item.getattr("image_token_id")?.extract()?,
         }),
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a
