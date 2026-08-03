@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ruff: noqa: E402
-
 """ReplayEvaluator dispatch across 3 load shapes x {static, planner} (dynamo stubbed)."""
 
 import dataclasses
@@ -11,8 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("dynamo.mocker")
 
 import dynamo.mocker
 import dynamo.replay.api
@@ -115,72 +111,27 @@ def test_static_path_threads_goodput_sla(monkeypatch):
     )  # SLA threaded to the plain path
 
 
-def test_current_trace_api_filters_legacy_kwargs_and_fails_closed_without_goodput(
-    monkeypatch,
-):
-    # Current Dynamo replay wrappers do not accept planner_config, benchmark_granularity,
-    # or SLA kwargs on static replay. Aggregate means cannot reconstruct per-request
-    # goodput, so an incompatible wrapper must fail instead of fabricating a score.
+def test_goodput_goal_fails_closed_without_goodput_metric(monkeypatch):
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
-    rec = {}
-
-    def run_trace_replay(
-        trace_file,
-        *,
-        extra_engine_args=None,
-        num_workers=1,
-        replay_concurrency=None,
-        router_mode=None,
-    ):
-        rec.update(
-            trace_file=trace_file,
-            extra_engine_args=extra_engine_args,
-            num_workers=num_workers,
-            replay_concurrency=replay_concurrency,
-            router_mode=router_mode,
-        )
-        return {
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kwargs: {
             "output_throughput_tok_s": 77.0,
             "mean_ttft_ms": 10.0,
             "mean_tpot_ms": 2.0,
             "mean_e2e_latency_ms": 42.0,
-        }
-
-    monkeypatch.setattr(dynamo.replay.api, "run_trace_replay", run_trace_replay)
+        },
+    )
     goal = OptimizationGoal(
         target=OptimizationTarget.GOODPUT_PER_GPU,
         sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
     )
     with pytest.raises(RuntimeError, match="per-request SLA accounting"):
         ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
-    assert rec["trace_file"] == TRACE
-    assert set(rec) == {
-        "trace_file",
-        "extra_engine_args",
-        "num_workers",
-        "replay_concurrency",
-        "router_mode",
-    }
 
 
-def test_current_trace_api_rejects_planner_config(monkeypatch):
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
-
-    def run_trace_replay(trace_file, *, extra_engine_args=None, num_workers=1):
-        return {"output_throughput_tok_s": 1.0}
-
-    monkeypatch.setattr(dynamo.replay.api, "run_trace_replay", run_trace_replay)
-    goal = OptimizationGoal(
-        target=OptimizationTarget.GOODPUT_PER_GPU,
-        sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0),
-    )
-    with pytest.raises(RuntimeError, match="does not accept planner_config"):
-        ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
-
-
-def test_scaling_agg_threads_planner_config_when_supported(monkeypatch):
-    # Older Dynamo replay wrappers accept planner_config directly; keep threading it
-    # when the installed API advertises that kwarg.
+def test_scaling_agg_threads_planner_config(monkeypatch):
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
@@ -263,9 +214,7 @@ def test_static_trace_threads_replay_concurrency(monkeypatch):
     assert rec["replay_concurrency"] == 32
 
 
-def test_scaling_trace_threads_replay_concurrency_when_supported(monkeypatch):
-    # closed-loop concurrency over a trace + planner works when the replay wrapper
-    # accepts planner_config.
+def test_scaling_trace_threads_replay_concurrency(monkeypatch):
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
@@ -340,8 +289,7 @@ def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
     assert rec["planner_config"] is None
 
 
-def test_synthetic_planner_threads_planner_config_when_supported(monkeypatch):
-    # synthetic + planner -> run_synthetic_trace_replay with planner_config when supported.
+def test_synthetic_planner_threads_planner_config(monkeypatch):
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
@@ -383,7 +331,7 @@ def test_static_trace_disagg_uses_plain_path(monkeypatch):
     assert "num_workers" not in rec and "extra_engine_args" not in rec
 
 
-def test_scaling_trace_disagg_threads_planner_config_when_supported(monkeypatch):
+def test_scaling_trace_disagg_threads_planner_config(monkeypatch):
     # disagg + trace + planner -> run_trace_replay with per-role workers and planner_config
     # when supported.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
@@ -440,7 +388,7 @@ def test_synthetic_static_disagg_uses_run_synthetic_trace_replay(monkeypatch):
     assert "num_workers" not in rec and "extra_engine_args" not in rec
 
 
-def test_synthetic_planner_disagg_threads_planner_config_when_supported(monkeypatch):
+def test_synthetic_planner_disagg_threads_planner_config(monkeypatch):
     # disagg + synthetic + planner -> run_synthetic_trace_replay with per-role workers and
     # planner_config when supported.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)

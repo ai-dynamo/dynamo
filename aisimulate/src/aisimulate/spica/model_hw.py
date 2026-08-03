@@ -8,7 +8,7 @@ It directly reuses AIConfigurator:
 
 - ``check_is_moe``                  -> is_moe
 - ``_estimate_model_weight_bytes``  -> model weight size (-> wideEP heuristic)
-- ``_get_system_config``            -> the SKU's VRAM / GPUs-per-node
+- ``load_system_spec``              -> the SKU's VRAM / GPUs-per-node
 
 Validity is **KV-cache based**: :func:`parallel_configs_for` enumerates shapes
 from 1 GPU/worker and keeps a shape iff its estimated KV capacity exceeds the
@@ -19,20 +19,12 @@ replaces the old BF16 min-GPU weight floor entirely.
 
 from __future__ import annotations
 
-import os
-import warnings
 from dataclasses import dataclass
-from typing import Any
 
-from aiconfigurator.generator.naive import (
-    _estimate_model_weight_bytes,
-    _get_system_config,
-)
-from aiconfigurator.sdk import perf_database
-from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
-
-from dynamo._internal.aic import AicMemoryEstimatorUnavailableError
+from aiconfigurator.generator.naive import _estimate_model_weight_bytes
+from aiconfigurator_core.sdk import perf_database
+from aiconfigurator_core.sdk.models import check_is_moe
+from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
 
 from .kv_estimate import (
     DEFAULT_MAX_BATCH_SIZE,
@@ -54,39 +46,6 @@ _GQA_MOE_ARCHITECTURES = frozenset({"Qwen3MoeForCausalLM"})
 
 class NoViableParallelConfig(ValueError):
     """No parallel config can hold the model+sequence within the GPU budget."""
-
-
-def _aic_model_system_facts(
-    model_name: str, hardware_sku: str
-) -> tuple[dict[str, Any], int]:
-    """Isolate the AIConfigurator 0.9 private-helper compatibility boundary.
-
-    AIConfigurator 0.9 has no public equivalents for its normalized system config
-    and weight estimator. Keeping both calls here makes that dependency explicit and
-    gives the pinned integration contract one focused test boundary.
-    """
-    return _get_system_config(hardware_sku), _estimate_model_weight_bytes(model_name)
-
-
-def _validate_hardware_sku(hardware_sku: str) -> None:
-    """Raise if ``hardware_sku`` has no system YAML on AIC's systems path.
-
-    ``_get_system_config`` silently falls back to default VRAM / GPUs-per-node
-    when the SKU file is missing, so an unknown/typo SKU would otherwise resolve
-    to a wrong-but-plausible spec. Fail loudly instead.
-    """
-    available = []
-    for systems_root in perf_database.get_systems_paths():
-        if os.path.isfile(os.path.join(systems_root, f"{hardware_sku}.yaml")):
-            return
-        if os.path.isdir(systems_root):
-            available.extend(
-                sorted(f[:-5] for f in os.listdir(systems_root) if f.endswith(".yaml"))
-            )
-    raise ValueError(
-        f"unknown hardware_sku {hardware_sku!r}: no system config found on the AIConfigurator "
-        f"systems path. Available SKUs: {', '.join(sorted(set(available)))}"
-    )
 
 
 @dataclass(frozen=True)
@@ -117,10 +76,15 @@ def resolve_model_hardware(
     mla = is_moe and not allow_pure_tp
     max_context = model_config.get("context")
 
-    _validate_hardware_sku(hardware_sku)
-    sys_cfg, weight_bytes = _aic_model_system_facts(model_name, hardware_sku)
-    vram_per_gpu = sys_cfg["vram_per_gpu"]
-    gpus_per_node = sys_cfg["gpus_per_node"]
+    system_spec = perf_database.load_system_spec(hardware_sku)
+    if not system_spec:
+        raise ValueError(
+            f"unknown hardware_sku {hardware_sku!r}: no system config found on "
+            "AIConfigurator Core's systems path"
+        )
+    vram_per_gpu = int(system_spec["gpu"]["mem_capacity"])
+    gpus_per_node = int(system_spec["node"]["num_gpus_per_node"])
+    weight_bytes = _estimate_model_weight_bytes(model_name)
 
     # Large MoE (a node can't hold ~2x the weights) auto-enables multi-node wideEP.
     enable_wideep = is_moe and gpus_per_node * vram_per_gpu < 2 * weight_bytes
@@ -203,28 +167,16 @@ def parallel_configs_for(
         shapes = [c.shape for c in configs]
     else:
         shapes = [c.prefill.shape for c in configs] + [c.decode.shape for c in configs]
-    try:
-        feasible = feasible_shape_tokens(
-            shapes,
-            model_name=model_name,
-            hardware_sku=hardware_sku,
-            backend=backend,
-            max_seq_len=seq_len,
-            max_num_tokens=max_num_tokens,
-            max_batch_size=max_batch_size,
-            memory_fraction=memory_fraction,
-        )
-    except AicMemoryEstimatorUnavailableError as exc:
-        warnings.warn(
-            "[EXPERIMENTAL] Spica cannot apply KV-capacity filtering because "
-            f"the AIC memory estimator is unavailable: {exc}. Continuing with "
-            "the enumerated GPU-budget-compatible configurations. Trace and "
-            "fixed-concurrency workloads remain available; kv_load_ratio requires "
-            "a compatible estimator and will fail closed.",
-            UserWarning,
-            stacklevel=2,
-        )
-        return configs
+    feasible = feasible_shape_tokens(
+        shapes,
+        model_name=model_name,
+        hardware_sku=hardware_sku,
+        backend=backend,
+        max_seq_len=seq_len,
+        max_num_tokens=max_num_tokens,
+        max_batch_size=max_batch_size,
+        memory_fraction=memory_fraction,
+    )
     if deployment_mode == "agg":
         kept = [c for c in configs if c.shape in feasible]
     else:
