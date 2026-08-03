@@ -476,7 +476,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
                  template rendering may fail if it calls .items() on a string"
             );
             return minijinja::value::Value::from_serialize(
-                &serde_json::to_value(&self.inner.inner.messages).unwrap(),
+                serde_json::to_value(&self.inner.inner.messages).unwrap(),
             );
         }
         minijinja::value::Value::from_serialize(&messages_json)

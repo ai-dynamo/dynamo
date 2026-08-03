@@ -66,9 +66,6 @@ fn parse_args_object(
         // verify that serde_json's f64 representation matches the original.
         // We do this by re-serializing the cooked number and comparing.
         let cooked_str = cooked.to_string();
-        // Find the raw token for this key in the source JSON.
-        // Strategy: locate `"<key>":` then extract the subsequent JSON token.
-        let key_pat = format!("\"{}\":", serde_json::to_string(&serde_json::Value::String(k.clone())).unwrap().trim_matches('"').replace('\\', "\\\\").replace('"', "\\\""));
         if let Some(raw_token) = extract_value_token(s, &k) {
             let raw_trimmed = raw_token.trim();
             if raw_trimmed != cooked_str.as_str() {
@@ -78,7 +75,6 @@ fn parse_args_object(
                 continue;
             }
         }
-        let _ = key_pat; // silence unused warning
         out.insert(k, cooked);
     }
     Ok(Some(out))
@@ -121,7 +117,11 @@ fn token_end(s: &str) -> Option<usize> {
         }
         '{' | '[' => {
             // Skip balanced braces/brackets — good enough for flat objects.
-            let (open, close) = if first == '{' { (b'{', b'}') } else { (b'[', b']') };
+            let (open, close) = if first == '{' {
+                (b'{', b'}')
+            } else {
+                (b'[', b']')
+            };
             let mut depth = 0i32;
             let mut in_str = false;
             let mut escape = false;
