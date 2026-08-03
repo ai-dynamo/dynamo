@@ -37,6 +37,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError
@@ -659,7 +660,7 @@ class VllmProcessor:
         sampling_fields = (
             set(getattr(SamplingParams, "__annotations__", ()))
             & set(type(request_for_sampling).model_fields)
-        ) - {"max_tokens", "logprobs", "output_kind"}
+        ) - {"max_tokens", "logprobs", "output_kind", "thinking_token_budget"}
         for k in sorted(sampling_fields):
             v = getattr(request_for_sampling, k, None)
             if v is not None:
@@ -668,11 +669,10 @@ class VllmProcessor:
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
         # cause process_inputs._validate_params to reject the request. Pluck
-        # the value out of nvext and pass it directly into dynamo_preproc
-        # below.
-        nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
-            "max_thinking_tokens"
-        )
+        # the value out of the request and pass it directly into dynamo_preproc
+        # below. Prefer the OpenAI-compatible root-level field, fall back to the
+        # legacy nvext passthrough.
+        thinking_token_budget = resolve_thinking_token_budget(request)
 
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             # render_messages_async returns a raw prompt. Convert it to a typed
@@ -719,7 +719,7 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
-                "max_thinking_tokens": nvext_max_thinking_tokens,
+                "max_thinking_tokens": thinking_token_budget,
             },
             "sampling_options": {
                 "n": sp.n,

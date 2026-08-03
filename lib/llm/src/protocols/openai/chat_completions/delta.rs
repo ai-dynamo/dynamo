@@ -371,6 +371,7 @@ mod tests {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -680,6 +681,7 @@ mod tests {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         }
     }
 
