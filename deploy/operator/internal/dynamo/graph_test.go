@@ -4786,7 +4786,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeWorker,
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
-						Args: []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+						Args: []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 					},
 				},
 			},
@@ -4794,7 +4794,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleMain,
 			numberOfNodes:     1,
 			expectError:       false,
-			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--is-prefill-worker"},
+			expectContains:    []string{"python3", "-m", "dynamo.vllm", "--disaggregation-mode", "prefill"},
 			expectNotContains: []string{"ray start"},
 		},
 	}

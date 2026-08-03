@@ -525,15 +525,11 @@ async fn realtime_websocket_session_update_missing_model_emits_error() {
     let _ = handle.await;
 }
 
-/// `session.update` with `session.type = "transcription"` is the OpenAI Realtime
-/// transcription mode, which this slice doesn't yet wire up to an engine.
-/// Surface a specific `unsupported_session_type` error instead of letting the
-/// `Session::RealtimeTranscriptionSession` arm fall through to the generic
-/// "session.model required" path (which would be misleading — the issue isn't
-/// a missing field, it's an unsupported session subtype). The connection stays
-/// open so the client can recover by sending a `realtime` session.
+/// A transcription session routes through the same bidirectional realtime
+/// request plane, using its nested transcription model as the discovery key.
+/// `turn_detection: null` exercises local-VAD wire compatibility.
 #[tokio::test]
-async fn realtime_websocket_transcription_session_emits_unsupported_error() {
+async fn realtime_websocket_transcription_session_selects_realtime_engine() {
     let (port, token, handle) = spawn_test_service(true, true).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -543,25 +539,15 @@ async fn realtime_websocket_transcription_session_emits_unsupported_error() {
 
     expect_text_event(&mut ws, "session.created").await;
 
-    // Minimum valid `RealtimeTranscriptionSession` JSON: requires
-    // `audio.input.format` (unit-variant `audio/pcmu` is shortest) and
-    // `audio.input.turn_detection`. `server_vad` carries three required
-    // numeric fields. The handler rejects the session subtype before any of
-    // these values matter — they exist only to get serde past
-    // deserialization.
     let body = serde_json::json!({
         "type": "session.update",
         "session": {
             "type": "transcription",
             "audio": {
                 "input": {
-                    "format": { "type": "audio/pcmu" },
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
-                        "threshold": 0.5
-                    }
+                    "format": { "type": "audio/pcm", "rate": 24000 },
+                    "transcription": { "model": ECHO_MODEL, "language": "en" },
+                    "turn_detection": null
                 }
             }
         }
@@ -570,11 +556,16 @@ async fn realtime_websocket_transcription_session_emits_unsupported_error() {
         .await
         .expect("send");
 
-    let event = expect_error_event_no_close(&mut ws).await;
+    let event = expect_text_event(&mut ws, "session.updated").await;
     assert_eq!(
-        event.pointer("/error/code").and_then(|s| s.as_str()),
-        Some("unsupported_session_type"),
-        "error event should report unsupported_session_type for transcription: {event}"
+        event.pointer("/session/type").and_then(|s| s.as_str()),
+        Some("transcription")
+    );
+    assert_eq!(
+        event
+            .pointer("/session/audio/input/transcription/model")
+            .and_then(|s| s.as_str()),
+        Some(ECHO_MODEL)
     );
 
     let _ = ws.close(None).await;

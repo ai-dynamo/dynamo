@@ -24,6 +24,7 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    image_token_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -600,7 +601,8 @@ trtllm_configs = {
             multimodal_payload_default(
                 text="Describe what you see in this image.",
                 expected_response=["mountain", "rock", "trees", "road"],
-            )
+            ),
+            image_token_metrics_payload(),
         ],
         env={
             "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
@@ -788,6 +790,8 @@ def test_aggregated_health_check_priority(
         delayed_start=base.delayed_start,
         timeout=base.timeout,
         health_check_workers=True,
+        # This test allocates a single system port (num_system_ports=[1]).
+        health_check_worker_count=1,
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",

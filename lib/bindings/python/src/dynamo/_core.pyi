@@ -867,6 +867,7 @@ class ModelRuntimeConfig:
     data_parallel_start_rank: int
     data_parallel_size: int
     enable_local_indexer: bool
+    kv_event_publishing_enabled: bool | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -1717,164 +1718,6 @@ class AicPerfConfig:
     ) -> None:
         ...
 
-class AicEngineConfig:
-    """AIC model/backend identity used by native forward-pass estimates."""
-
-    def __init__(
-        self,
-        model_name: str,
-        backend: str,
-        system_name: str = "h200_sxm",
-        backend_version: Optional[str] = None,
-        tp_size: int = 1,
-        pp_size: int = 1,
-        moe_tp_size: Optional[int] = None,
-        moe_ep_size: Optional[int] = None,
-        attention_dp_size: Optional[int] = None,
-        model_arch: Optional[str] = None,
-        weight_dtype: Optional[str] = None,
-        moe_dtype: Optional[str] = None,
-        activation_dtype: Optional[str] = None,
-        kv_cache_dtype: Optional[str] = None,
-        kv_block_size: Optional[int] = None,
-        extra: Optional[dict[str, str]] = None,
-    ) -> None:
-        ...
-
-class EnginePerfLimits:
-    """Engine limits used by engine-level helper queries and default correction bounds."""
-
-    max_num_batched_tokens: int
-    max_num_seqs: int
-    max_kv_tokens: int
-
-    def __init__(
-        self,
-        max_num_batched_tokens: int = 8192,
-        max_num_seqs: int = 512,
-        max_kv_tokens: int = 2000000,
-    ) -> None:
-        ...
-
-class RustEnginePerfOptions:
-    """Online tuning options for RustEnginePerfModel."""
-
-    def __init__(
-        self,
-        max_observations: int = 64,
-        min_observations: int = 5,
-        bucket_count: int = 16,
-        max_num_tokens: int = 8192,
-        max_batch_size: int = 512,
-        max_kv_tokens: int = 2000000,
-    ) -> None:
-        ...
-
-class OptimizationTarget:
-    Throughput: "OptimizationTarget"
-    Latency: "OptimizationTarget"
-
-class EngineCapacityRequest:
-    """Request shape and SLA policy for find_engine_capacity_rps."""
-
-    def __init__(
-        self,
-        isl: int,
-        osl: int,
-        ttft_sla_ms: Optional[float] = None,
-        itl_sla_ms: Optional[float] = None,
-        e2e_latency_sla_ms: Optional[float] = None,
-        kv_hit_rate: Optional[float] = None,
-        optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
-    ) -> None:
-        ...
-
-class EngineCapacity:
-    """Per-engine capacity result."""
-
-    rps: float
-    ttft_ms: Optional[float]
-    itl_ms: Optional[float]
-    e2e_latency_ms: Optional[float]
-    eligible: bool
-
-class RustEnginePerfModel:
-    """Engine-level performance model backed by AIC forward-pass modeling."""
-
-    @staticmethod
-    def best_available(
-        *,
-        engine_args: Optional["MockEngineArgs"] = None,
-        aic_config: Optional[AicEngineConfig] = None,
-        worker_type: Optional[str] = None,
-        limits: Optional[EnginePerfLimits] = None,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build from all available inputs; explicit AIC config is preferred, then engine args, then regression-only."""
-        ...
-
-    @staticmethod
-    def from_regression(
-        *,
-        worker_type: str,
-        limits: EnginePerfLimits,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build a regression-only model that learns from observed FPM wall times."""
-        ...
-
-    @staticmethod
-    def from_native(
-        *,
-        aic_config: AicEngineConfig,
-        worker_type: str,
-        limits: EnginePerfLimits,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build a strict native AIC model; unsupported AIC configs raise an error."""
-        ...
-
-    def estimate_forward_pass_time(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate one scheduled forward-pass iteration in seconds from current-version FPMs."""
-        ...
-
-    def tune_with_fpms(self, iterations: Any) -> None:
-        """Tune with current-version observed FPMs: outer list is iterations, inner list is attention-DP ranks."""
-        ...
-
-    def diagnostics(self) -> str:
-        """Return AIC diagnostics as a JSON string."""
-        ...
-
-    def get_min_correction_factor(self) -> Optional[float]:
-        """Return the minimum ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_max_correction_factor(self) -> Optional[float]:
-        """Return the maximum ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_avg_correction_factor(self) -> Optional[float]:
-        """Return the average ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_queued_prefill_time(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate queued prefill drain time; adjust queued tokens outside the shim for KV reuse."""
-        ...
-
-    def get_scheduled_decode_itl(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate scheduled decode ITL in seconds; aggregated workers include scheduled or learned average prefill load."""
-        ...
-
-    def find_engine_capacity_rps(
-        self, request: EngineCapacityRequest
-    ) -> Optional[EngineCapacity]:
-        """Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed."""
-        ...
-
 class KvRouterConfig:
     """Values for KV router"""
 
@@ -1904,6 +1747,7 @@ class KvRouterConfig:
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
+        decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
@@ -1916,6 +1760,7 @@ class KvRouterConfig:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
             overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit and can make adjusted prefill cost negative.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1989,6 +1834,10 @@ class KvRouterConfig:
     def prefill_load_scale(self) -> float: ...
     @prefill_load_scale.setter
     def prefill_load_scale(self, value: float) -> None: ...
+    @property
+    def decode_active_request_weight(self) -> float: ...
+    @decode_active_request_weight.setter
+    def decode_active_request_weight(self, value: float) -> None: ...
 
     def with_overrides(
         self,
@@ -1997,6 +1846,7 @@ class KvRouterConfig:
         overlap_score_credit: Optional[float] = None,
         overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        decode_active_request_weight: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
@@ -2087,6 +1937,7 @@ class MockEngineArgs:
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
+        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -2119,6 +1970,9 @@ class MockEngineArgs:
 
     @enable_prefix_caching.setter
     def enable_prefix_caching(self, value: bool) -> None: ...
+
+    @property
+    def g1_backend(self) -> str: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...
@@ -2572,6 +2426,7 @@ def run_mocker_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2585,6 +2440,10 @@ def run_mocker_trace_replay(
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only). When any is set, the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests; with none set, goodput is omitted.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
 
@@ -2615,106 +2474,19 @@ def run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    scaling_policy: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys
     classifying SLA-satisfying requests.
+
+    ``scaling_policy`` is an optional offline callback implementing
+    ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
+    policy in online mode raises ``ValueError``.
     """
     ...
-
-class PlannerReplayBridge:
-    """Drives an offline replay to completion with a Python planner. The Rust
-    simulation owns the drive loop and calls back into ``planner`` once per
-    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
-    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
-
-    def __init__(
-        self,
-        trace_file: str | os.PathLike[str],
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> None: ...
-
-    @staticmethod
-    def create_disagg(
-        trace_file: str | os.PathLike[str],
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        arrival_speedup_ratio: float = 1.0,
-        trace_block_size: int = 512,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-        replay_concurrency: Optional[int] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        extra_engine_args: MockEngineArgs,
-        num_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    @staticmethod
-    def from_synthetic_disagg(
-        input_tokens: int,
-        output_tokens: int,
-        request_count: int,
-        prefill_engine_args: MockEngineArgs,
-        decode_engine_args: MockEngineArgs,
-        num_prefill_workers: int,
-        num_decode_workers: int,
-        router_mode: str = "round_robin",
-        router_config: Optional[KvRouterConfig] = None,
-        model_name: Optional[str] = None,
-        replay_concurrency: Optional[int] = None,
-        arrival_speedup_ratio: float = 1.0,
-        request_rate: Optional[float] = None,
-        arrival_interval_ms: Optional[float] = None,
-        arrival_seed: int = 42,
-        turns_per_session: int = 1,
-        shared_prefix_ratio: float = 0.0,
-        num_prefix_groups: int = 0,
-        inter_turn_delay_ms: float = 0.0,
-        sla_ttft_ms: Optional[float] = None,
-        sla_itl_ms: Optional[float] = None,
-        sla_e2e_ms: Optional[float] = None,
-    ) -> "PlannerReplayBridge": ...
-
-    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
@@ -3516,6 +3288,7 @@ class backend:
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
+            default_thinking_mode: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

@@ -440,7 +440,7 @@ impl StorageTier {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
             "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
-            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "CPU_TIER2" | "DISK" | "NVME" | "STORAGE" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
         }
@@ -637,6 +637,10 @@ pub struct WorkerSelectionResult {
 
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
+
+    /// Selected worker's projected decode load after adding this request's
+    /// prompt blocks, in scheduler-tracked block units.
+    pub potential_decode_blocks: usize,
 }
 
 /// Active load metrics for a worker, used for overload detection.
