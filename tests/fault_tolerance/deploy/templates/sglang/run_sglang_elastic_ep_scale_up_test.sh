@@ -14,7 +14,7 @@
 #   1. Launches a SGLang JOINING GROUP inside the worker pod on the idle GPUs
 #      (--elastic-ep-join-mode scale --elastic-ep-join-rank-offset <current_ep>).
 #      NOTE: the Dynamo operator does not launch joiners yet, so the script does
-#      it manually via `kubectl exec` (tracked gap; see the Linear issue).
+#      it manually via `kubectl exec` (tracked as a follow-up).
 #   2. POSTs /engine/control/scale_elastic_ep {"new_ep_size": <target>} to the
 #      leader system port (9090).
 #   3. Polls /engine/control/is_scaling_elastic_ep until scale_phase reaches
@@ -74,7 +74,10 @@ echo "Leader/primary pod: $INITIAL_WORKER"
 
 # ── Wait for the leader to be Ready ───────────────────────────────────────────
 echo "=== Waiting for leader pod to be Ready ==="
-kubectl wait pod/"$(worker_pod)" -n "$NS" --for=condition=Ready --timeout=1200s
+if ! kubectl wait pod/"$(worker_pod)" -n "$NS" --for=condition=Ready --timeout=1200s; then
+  echo "ERROR: leader pod did not become Ready within 1200s" >&2
+  exit 1
+fi
 echo "Ready at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # ── Port-forwards ─────────────────────────────────────────────────────────────
@@ -192,16 +195,22 @@ scale_up() {
   # Poll until SGLang reports the scale finished (scale_phase == serving_expanded).
   echo "--- polling /engine/control/is_scaling_elastic_ep ---"
   local deadline=$((SECONDS + 300))
+  local scale_confirmed=0
   while [ $SECONDS -lt $deadline ]; do
     STATE=$(curl -s -m 10 http://localhost:8001/engine/control/is_scaling_elastic_ep)
     PHASE=$(echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('scale_phase',''))" 2>/dev/null)
     SCALING=$(echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('is_scaling_elastic_ep',''))" 2>/dev/null)
     if [ "$SCALING" = "False" ] && [ "$PHASE" = "serving_expanded" ]; then
       echo "scale complete: $STATE"
+      scale_confirmed=1
       break
     fi
     sleep 3
   done
+  if [ "$scale_confirmed" != "1" ]; then
+    echo "ERROR: scale-up to ep=$to_ep did not reach serving_expanded within 300s (last state: $STATE)" >&2
+    exit 1
+  fi
 
   snapshot "after ep=$to_ep"
   infer "ep=$to_ep"

@@ -128,7 +128,7 @@ spec:
             - "4"
             - --max-ep-size
             - "8"
-            # Stable rendezvous address the joining group dials with
-            # --dist-init-addr on scale-up.
+            # Stable rendezvous address the joining group dials on scale-up.
+            # Sourced from SGLANG_ELASTIC_SCALE_DIST_INIT (single source of truth).
             - --dist-init-addr
-            - "127.0.0.1:24555"
+            - "$(SGLANG_ELASTIC_SCALE_DIST_INIT)"

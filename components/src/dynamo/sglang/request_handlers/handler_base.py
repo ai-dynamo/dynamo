@@ -870,10 +870,20 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         """
         if self.engine is None:
             return False
-        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
-        return tokenizer_manager is not None and hasattr(
-            tokenizer_manager, "scale_elastic_ep"
-        )
+        return hasattr(self.engine.tokenizer_manager, "scale_elastic_ep")
+
+    def _require_elastic_ep_backend(self) -> Optional[dict]:
+        """Return an error dict if elastic EP is not enabled, else ``None``.
+
+        Shared by ``scale_elastic_ep`` and ``is_scaling_elastic_ep``: both are
+        no-ops unless the worker was launched with ``--elastic-ep-backend``.
+        """
+        if self.engine.tokenizer_manager.server_args.elastic_ep_backend is None:
+            return {
+                "status": "error",
+                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
+            }
+        return None
 
     async def scale_elastic_ep(self, body: dict) -> dict:
         """Scale up the expert-parallel group to ``new_ep_size`` ranks.
@@ -903,12 +913,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         if new_ep_size <= 0:
             return err("new_ep_size must be a positive integer")
 
-        tokenizer_manager = self.engine.tokenizer_manager
-        if getattr(tokenizer_manager.server_args, "elastic_ep_backend", None) is None:
-            return err("elastic EP is not enabled (set --elastic-ep-backend)")
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
 
         from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
 
+        tokenizer_manager = self.engine.tokenizer_manager
         async with self._scale_ep_lock:
             try:
                 result = await tokenizer_manager.scale_elastic_ep(
@@ -918,21 +929,19 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 logger.error("[ElasticEP] Scaling failed: %s", e)
                 return err(str(e))
 
-        if not getattr(result, "success", False):
+        if not result.success:
             return {
                 "status": "error",
-                "message": getattr(result, "message", None)
-                or "scale_elastic_ep failed",
-                "old_ep_size": getattr(result, "old_ep_size", None),
-                "new_ep_size": getattr(result, "new_ep_size", None),
-                "pending_ep_size": getattr(result, "pending_ep_size", None),
+                "message": result.message or "scale_elastic_ep failed",
+                "old_ep_size": result.old_ep_size,
+                "new_ep_size": result.new_ep_size,
+                "pending_ep_size": result.pending_ep_size,
             }
         return {
             "status": "ok",
-            "message": getattr(result, "message", None)
-            or f"Scaled to ep_size={new_ep_size}",
-            "old_ep_size": getattr(result, "old_ep_size", None),
-            "new_ep_size": getattr(result, "new_ep_size", new_ep_size),
+            "message": result.message or f"Scaled to ep_size={new_ep_size}",
+            "old_ep_size": result.old_ep_size,
+            "new_ep_size": result.new_ep_size,
         }
 
     async def is_scaling_elastic_ep(self, body: dict) -> dict:
@@ -941,13 +950,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         Lets a caller poll for scale-up completion (``scale_phase`` reaches
         ``serving_expanded``).
         """
-        tokenizer_manager = self.engine.tokenizer_manager
-        if getattr(tokenizer_manager.server_args, "elastic_ep_backend", None) is None:
-            return {
-                "status": "error",
-                "message": "elastic EP is not enabled (set --elastic-ep-backend)",
-            }
-        return dict(tokenizer_manager.get_elastic_ep_state())
+        backend_error = self._require_elastic_ep_backend()
+        if backend_error:
+            return backend_error
+        return dict(self.engine.tokenizer_manager.get_elastic_ep_state())
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
