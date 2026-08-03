@@ -5,7 +5,6 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
@@ -45,18 +44,28 @@ fn app() -> Router {
 }
 
 struct HighestWorkerSelector {
-    calls: Cell<usize>,
+    calls: Arc<AtomicUsize>,
+    invalid_first: bool,
 }
 
 impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
     fn select_worker(
         &self,
         workers: &HashMap<WorkerId, SelectionWorkerConfig>,
-        request: &SchedulingRequest,
+        _request: &SchedulingRequest,
         eligibility: RoutingEligibility<'_>,
-        block_size: u32,
+        _block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        self.calls.set(self.calls.get() + 1);
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.invalid_first && call == 0 {
+            return Ok(WorkerSelectionResult {
+                worker: WorkerWithDpRank::from_worker_id(WorkerId::MAX),
+                required_blocks: u64::MAX,
+                effective_overlap_blocks: f64::NAN,
+                cached_tokens: usize::MAX,
+                potential_decode_blocks: usize::MAX,
+            });
+        }
         let mut selected = None;
         eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
             selected = selected.max(Some(worker));
@@ -64,11 +73,10 @@ impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
         let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
         Ok(WorkerSelectionResult {
             worker,
-            required_blocks: request.request_blocks(block_size),
-            effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-            cached_tokens: request.effective_cached_tokens_for(worker),
-            potential_decode_blocks: request
-                .potential_decode_blocks_after_admission(worker, block_size),
+            required_blocks: u64::MAX,
+            effective_overlap_blocks: f64::NAN,
+            cached_tokens: usize::MAX,
+            potential_decode_blocks: usize::MAX,
         })
     }
 }
@@ -165,16 +173,27 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
     post(app, "/workers", &body.to_string()).await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
+    let active_factories = Arc::new(AtomicUsize::new(0));
+    let max_active_factories = Arc::new(AtomicUsize::new(0));
+    let selector_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&factory_calls);
+    let active = Arc::clone(&active_factories);
+    let max_active = Arc::clone(&max_active_factories);
+    let selections = Arc::clone(&selector_calls);
     let service = SelectionServiceBuilder::new(test_config())
         .indexer_threads(1)
         .worker_selector_factory(Box::new(move || {
             calls.fetch_add(1, Ordering::Relaxed);
+            let active_now = active.fetch_add(1, Ordering::Relaxed) + 1;
+            max_active.fetch_max(active_now, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(50));
+            active.fetch_sub(1, Ordering::Relaxed);
             Box::new(HighestWorkerSelector {
-                calls: Cell::new(0),
+                calls: Arc::clone(&selections),
+                invalid_first: false,
             }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
         }))
         .build()
@@ -184,15 +203,31 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
         service: Arc::new(service),
     }));
 
+    let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
+    let other_app = app.clone();
+    let other_registration = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "worker_id": 3,
+            "model_name": "other-model",
+            "endpoint": "http://worker-3:8000",
+            "block_size": 4
+        });
+        post(other_app, "/workers", &body.to_string()).await
+    });
     assert_eq!(
-        register_worker_id(app.clone(), 1, None).await.status(),
+        model_registration.await.unwrap().status(),
         StatusCode::CREATED
     );
+    assert_eq!(
+        other_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(max_active_factories.load(Ordering::Relaxed), 2);
     assert_eq!(
         register_worker_id(app.clone(), 2, None).await.status(),
         StatusCode::CREATED
     );
-    assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
 
     let reserved = post(
         app.clone(),
@@ -201,7 +236,10 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
     )
     .await;
     assert_eq!(reserved.status(), StatusCode::OK);
-    assert_eq!(response_json(reserved).await["worker_id"], 2);
+    let reserved = response_json(reserved).await;
+    assert_eq!(reserved["worker_id"], 2);
+    assert_eq!(reserved["effective_prefill_tokens"], 4);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 1);
 
     let loads = app
         .clone()
@@ -222,19 +260,39 @@ async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
         .unwrap();
     assert_eq!(selected["active_requests"], 1);
 
-    let other_partition = serde_json::json!({
-        "worker_id": 3,
-        "model_name": "other-model",
-        "endpoint": "http://worker-3:8000",
-        "block_size": 4
-    });
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn invalid_custom_selection_does_not_stop_partition() {
+    let selector_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&selector_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            Box::new(HighestWorkerSelector {
+                calls: Arc::clone(&calls),
+                invalid_first: true,
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
     assert_eq!(
-        post(app, "/workers", &other_partition.to_string())
-            .await
-            .status(),
+        register_worker(app.clone(), None).await.status(),
         StatusCode::CREATED
     );
-    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+
+    let body = r#"{"model_name":"model","token_ids":[1,2,3,4]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", body).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(post(app, "/select", body).await.status(), StatusCode::OK);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 2);
 }
 
 #[test]

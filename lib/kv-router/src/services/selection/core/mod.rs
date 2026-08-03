@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dynamo_tokens::SequenceHash;
+use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -73,7 +74,24 @@ impl WorkerSelector<SelectionWorkerConfig> for SelectionWorkerSelector {
                 selector.select_worker(workers, request, eligibility, block_size)
             }
             Self::Custom(selector) => {
-                selector.select_worker(workers, request, eligibility, block_size)
+                let worker = selector
+                    .select_worker(workers, request, eligibility, block_size)?
+                    .worker;
+                if eligibility
+                    .pinned_worker()
+                    .is_some_and(|pinned| pinned != worker)
+                    || eligibility.validate_worker_rank(workers, worker).is_err()
+                {
+                    return Err(KvSchedulerError::NoEndpoints);
+                }
+                Ok(crate::protocols::WorkerSelectionResult {
+                    worker,
+                    required_blocks: request.request_blocks(block_size),
+                    effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+                    cached_tokens: request.effective_cached_tokens_for(worker),
+                    potential_decode_blocks: request
+                        .potential_decode_blocks_after_admission(worker, block_size),
+                })
             }
         }
     }
@@ -144,7 +162,7 @@ pub struct SelectionServiceConfig {
 
 pub struct SelectionCore {
     catalog: WorkerCatalog,
-    entries: RwLock<HashMap<RoutingPartitionId, Arc<SelectionEntry>>>,
+    entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
@@ -157,6 +175,21 @@ pub struct SelectionCore {
 }
 
 impl SelectionCore {
+    fn entry(&self, key: &RoutingPartitionId) -> Option<Arc<SelectionEntry>> {
+        self.entries
+            .read()
+            .get(key)
+            .and_then(|entry| entry.get().cloned())
+    }
+
+    fn initialized_entries(&self) -> Vec<Arc<SelectionEntry>> {
+        self.entries
+            .read()
+            .values()
+            .filter_map(|entry| entry.get().cloned())
+            .collect()
+    }
+
     /// Create an intentionally local selector without replica synchronization
     /// or startup recovery.
     ///
@@ -299,7 +332,7 @@ impl SelectionCore {
             return;
         }
 
-        let Some(entry) = self.entries.read().get(&key).cloned() else {
+        let Some(entry) = self.entry(&key) else {
             tracing::trace!(%key, "Dropping replica event for unknown selector entry");
             return;
         };
@@ -473,103 +506,95 @@ impl SelectionCore {
         let is_eagle = record.is_eagle.unwrap_or(false);
         let key = record.key();
 
-        if let Some(entry) = self.entries.read().get(&key).cloned() {
-            if entry.block_size != block_size {
-                return Err(SelectionError::Conflict(format!(
-                    "block_size mismatch for {key}: existing={} requested={block_size}",
-                    entry.block_size
-                )));
-            }
-            if entry.is_eagle != is_eagle {
-                return Err(SelectionError::Conflict(format!(
-                    "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
-                    entry.is_eagle
-                )));
-            }
-            return Ok(entry);
-        }
-
-        let mut entries = self.entries.write();
-        if let Some(entry) = entries.get(&key).cloned() {
-            if entry.block_size != block_size {
-                return Err(SelectionError::Conflict(format!(
-                    "block_size mismatch for {key}: existing={} requested={block_size}",
-                    entry.block_size
-                )));
-            }
-            if entry.is_eagle != is_eagle {
-                return Err(SelectionError::Conflict(format!(
-                    "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
-                    entry.is_eagle
-                )));
-            }
-            return Ok(entry);
-        }
-
-        let (workers_tx, workers_rx) = watch::channel(HashMap::new());
-        let scoped_replica_sync =
-            setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
-        let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
-            scoped_replica_sync.publisher,
-            block_size as usize,
-            HashMap::new(),
-            scoped_replica_sync.enabled,
-            scoped_replica_sync.process_id,
-            WORKER_TYPE,
-            ReplicaWorkerPolicy::RequireRegistered,
-        ));
-        let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
-            slots.start_replica_sync(subscriber, self.cancel_token.child_token());
-            replica_tx
+        let entry_cell = { self.entries.read().get(&key).cloned() };
+        let entry_cell = entry_cell.unwrap_or_else(|| {
+            self.entries
+                .write()
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         });
-        slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
-
-        let indexer = self
-            .indexer_registry
-            .get_or_create_indexer(key.clone(), block_size);
-        let overlap_refresh = Arc::new(TieredOverlapRefresher::new(
-            indexer.clone(),
-            self.kv_router_config.clone(),
-            block_size,
-        ));
-        let selector = self.worker_selector_factory.as_ref().map_or_else(
-            || {
-                SelectionWorkerSelector::Default(DefaultWorkerSelector::new(
-                    Some(self.kv_router_config.clone()),
+        let entry = entry_cell
+            .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
+                let (workers_tx, workers_rx) = watch::channel(HashMap::new());
+                let scoped_replica_sync =
+                    setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
+                let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+                    scoped_replica_sync.publisher,
+                    block_size as usize,
+                    HashMap::new(),
+                    scoped_replica_sync.enabled,
+                    scoped_replica_sync.process_id,
                     WORKER_TYPE,
-                ))
-            },
-            |factory| SelectionWorkerSelector::Custom(factory()),
-        );
-        let profile = self
-            .kv_router_config
-            .policy_profile(Some(&key.model_name))
-            .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
-        let scheduler = LocalScheduler::new_with_policy_profile(
-            slots,
-            workers_rx,
-            profile,
-            block_size,
-            selector,
-            None,
-            Some(overlap_refresh),
-            None,
-            self.kv_router_config.router_queue_recheck_interval(),
-            self.kv_router_config.router_track_prefill_tokens,
-            self.cancel_token.child_token(),
-            WORKER_TYPE,
-            true,
-        )?;
-        let entry = Arc::new(SelectionEntry {
-            key: key.clone(),
-            block_size,
-            is_eagle,
-            indexer,
-            workers_tx,
-            scheduler,
-            replica_tx,
-        });
-        entries.insert(key, entry.clone());
+                    ReplicaWorkerPolicy::RequireRegistered,
+                ));
+                let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
+                    slots.start_replica_sync(subscriber, self.cancel_token.child_token());
+                    replica_tx
+                });
+                slots.start_periodic_force_expiry_across_all_workers(
+                    self.cancel_token.child_token(),
+                );
+
+                let indexer = self
+                    .indexer_registry
+                    .get_or_create_indexer(key.clone(), block_size);
+                let overlap_refresh = Arc::new(TieredOverlapRefresher::new(
+                    indexer.clone(),
+                    self.kv_router_config.clone(),
+                    block_size,
+                ));
+                let selector = self.worker_selector_factory.as_ref().map_or_else(
+                    || {
+                        SelectionWorkerSelector::Default(DefaultWorkerSelector::new(
+                            Some(self.kv_router_config.clone()),
+                            WORKER_TYPE,
+                        ))
+                    },
+                    |factory| SelectionWorkerSelector::Custom(factory()),
+                );
+                let profile = self
+                    .kv_router_config
+                    .policy_profile(Some(&key.model_name))
+                    .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+                let scheduler = LocalScheduler::new_with_policy_profile(
+                    slots,
+                    workers_rx,
+                    profile,
+                    block_size,
+                    selector,
+                    None,
+                    Some(overlap_refresh),
+                    None,
+                    self.kv_router_config.router_queue_recheck_interval(),
+                    self.kv_router_config.router_track_prefill_tokens,
+                    self.cancel_token.child_token(),
+                    WORKER_TYPE,
+                    true,
+                )?;
+                Ok(Arc::new(SelectionEntry {
+                    key: key.clone(),
+                    block_size,
+                    is_eagle,
+                    indexer,
+                    workers_tx,
+                    scheduler,
+                    replica_tx,
+                }))
+            })?
+            .clone();
+        if entry.block_size != block_size {
+            return Err(SelectionError::Conflict(format!(
+                "block_size mismatch for {key}: existing={} requested={block_size}",
+                entry.block_size
+            )));
+        }
+        if entry.is_eagle != is_eagle {
+            return Err(SelectionError::Conflict(format!(
+                "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
+                entry.is_eagle
+            )));
+        }
         Ok(entry)
     }
 
@@ -642,7 +667,7 @@ impl SelectionCore {
     }
 
     fn publish_scheduler_config(&self, key: &RoutingPartitionId) -> Result<(), SelectionError> {
-        let Some(entry) = self.entries.read().get(key).cloned() else {
+        let Some(entry) = self.entry(key) else {
             return Ok(());
         };
         let workers = self.catalog.scheduler_configs_for_key(key);
@@ -658,7 +683,7 @@ impl SelectionCore {
             ));
         }
 
-        let Some(entry) = self.entries.read().get(key).cloned() else {
+        let Some(entry) = self.entry(key) else {
             return Err(SelectionError::NotReady(format!(
                 "no schedulable workers for {key}"
             )));
@@ -1075,7 +1100,7 @@ impl SelectionCore {
     }
 
     pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        let entries = self.initialized_entries();
         for entry in entries {
             match entry.scheduler.mark_prefill_completed(selection_id).await {
                 Ok(()) => return Ok(()),
@@ -1089,7 +1114,7 @@ impl SelectionCore {
     }
 
     pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        let entries = self.initialized_entries();
         for entry in entries {
             match entry.scheduler.free(selection_id).await {
                 Ok(()) => return Ok(()),
@@ -1115,7 +1140,7 @@ impl SelectionCore {
             ));
         }
 
-        let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
+        let entries = self.initialized_entries();
         for entry in entries {
             match entry
                 .scheduler
@@ -1136,7 +1161,7 @@ impl SelectionCore {
         model_name: Option<&str>,
         routing_group: Option<&str>,
     ) -> Vec<ModelLoadResponse> {
-        let entries: Vec<_> = self.entries.read().values().cloned().collect();
+        let entries = self.initialized_entries();
         let mut loads = Vec::new();
         for entry in entries {
             if model_name.is_some_and(|model_name| entry.key.model_name != model_name)
@@ -1615,7 +1640,7 @@ mod tests {
             core.upsert_worker(request).await.expect("worker upsert");
         }
         let key = RoutingPartitionId::new("model", "default");
-        let entry = core.entries.read().get(&key).cloned().expect("entry");
+        let entry = core.entry(&key).expect("entry");
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
