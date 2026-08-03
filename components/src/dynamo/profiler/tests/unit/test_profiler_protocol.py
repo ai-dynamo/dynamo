@@ -853,13 +853,14 @@ def test_update_model_from_pvc_absolute_path_inside_mount_is_not_doubled(
         pvc_path=model_path,
     )
 
-    services = result["spec"]["services"]
-    for svc_name, svc in services.items():
-        args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
+    components = _components_by_name(result)
+    worker_components = _worker_components(result)
+    assert worker_components, "Expected at least one worker component"
+    components_to_check = [components["Frontend"], *worker_components]
+    for component in components_to_check:
+        args = _main_container(component).get("args", [])
         flat_args = " ".join(args) if args else ""
         assert f"{pvc_mount_path}{pvc_mount_path}" not in flat_args
-        if svc_name in BaseConfigModifier._NON_WORKER_SERVICES:
-            continue
         assert model_path in flat_args
 
 
