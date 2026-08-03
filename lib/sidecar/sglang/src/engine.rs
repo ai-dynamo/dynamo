@@ -35,14 +35,6 @@ pub struct SglangSidecarEngine {
     bootstrap_port: Option<u16>,
     pool: OnceCell<Pool>,
     cancel: CancellationToken,
-    /// When true, `start` surfaces this engine's gRPC endpoint + backend name in
-    /// `EngineConfig.runtime_data` so the `--direct` registrar advertises a
-    /// `TransportType::Grpc` instance for direct frontend→gRPC dispatch.
-    is_direct: bool,
-    /// Address the frontend dials, when it differs from the local
-    /// `--sglang-endpoint` the sidecar connects to (multi-node). `None`
-    /// advertises the local endpoint.
-    advertise_grpc_endpoint: Option<String>,
 }
 
 impl SglangSidecarEngine {
@@ -61,28 +53,31 @@ impl SglangSidecarEngine {
             bootstrap_port,
             pool: OnceCell::new(),
             cancel: CancellationToken::new(),
-            is_direct: false,
-            advertise_grpc_endpoint: None,
         }
     }
 
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = match argv {
-            Some(args) => <Args as clap::Parser>::try_parse_from(args)
-                .map_err(|err| client::invalid_arg(err.to_string()))?,
-            None => <Args as clap::Parser>::parse(),
-        };
+        Self::from_parsed(Self::parse(argv)?)
+    }
 
+    /// Parse CLI args. Process argv (`None`) lets clap handle `--help` /
+    /// `--version`; an explicit argv maps parse errors to `InvalidArgument`.
+    pub(crate) fn parse(argv: Option<Vec<String>>) -> Result<Args, DynamoError> {
+        match argv {
+            Some(args) => <Args as clap::Parser>::try_parse_from(args)
+                .map_err(|err| client::invalid_arg(err.to_string())),
+            None => Ok(<Args as clap::Parser>::parse()),
+        }
+    }
+
+    /// Request-plane construction: bootstrap SGLang's gRPC discovery to resolve
+    /// the disaggregation role, then build the engine + `WorkerConfig`. The
+    /// `--direct` path skips this (see `direct_backend`).
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
         let transport = args.transport();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
-        if args.direct && disaggregation_mode != DisaggregationMode::Aggregated {
-            return Err(client::invalid_arg(format!(
-                "--direct supports aggregated serving only; SGLang reports {disaggregation_mode:?}. \
-                 The direct Generate response contract carries no disaggregation handoff"
-            )));
-        }
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(args.bootstrap_host.as_deref(), &endpoint, &discovery)?
         } else {
@@ -113,21 +108,16 @@ impl SglangSidecarEngine {
             model_input: ModelInput::Tokens,
             reasoning_parser: discovery_string(&discovery.server_info, "reasoning_parser"),
             tool_call_parser: discovery_string(&discovery.server_info, "tool_call_parser"),
-            is_direct: args.direct,
             ..Default::default()
         };
 
-        let mut engine = Self::new(
+        let engine = Self::new(
             endpoint,
             transport,
             disaggregation_mode,
             bootstrap_host,
             bootstrap_port,
         );
-        // Mirror the single config flag so `start()` can surface the direct-gRPC
-        // facts without threading WorkerConfig into the engine.
-        engine.is_direct = config.is_direct;
-        engine.advertise_grpc_endpoint = args.advertise_grpc_endpoint;
         Ok((engine, config))
     }
 
@@ -180,31 +170,12 @@ impl LLMEngine for SglangSidecarEngine {
             )));
         }
 
-        let mut config = build_engine_config(
+        let config = build_engine_config(
             &discovery,
             self.disaggregation_mode,
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
-        if self.is_direct {
-            // Advertise the backend name (frontend selects the sglang gRPC
-            // dispatcher) and the address the frontend dials — the
-            // --advertise-grpc-endpoint override for multi-node, else the local
-            // SGLang endpoint the sidecar connects to. Both are normalized to a
-            // scheme-qualified URI so the dispatcher's tonic connect accepts them.
-            let advertised = match &self.advertise_grpc_endpoint {
-                Some(addr) => normalize_endpoint(addr).map_err(client::invalid_arg)?,
-                None => self.endpoint.clone(),
-            };
-            config.runtime_data.insert(
-                dynamo_llm::discovery::DIRECT_BACKEND_KEY.to_string(),
-                Value::String(crate::direct::SGLANG_BACKEND.to_string()),
-            );
-            config.runtime_data.insert(
-                dynamo_backend_common::DIRECT_GRPC_ENDPOINT_KEY.to_string(),
-                Value::String(advertised),
-            );
-        }
         let connection_count = pool.len();
         self.pool
             .set(pool)
@@ -431,20 +402,6 @@ impl LLMEngine for SglangSidecarEngine {
         }
     }
 
-    async fn health_check(&self) -> Result<(), DynamoError> {
-        let mut client = self
-            .pool
-            .get()
-            .map(Pool::control_client)
-            .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
-        let deadline = Instant::now() + self.transport.connect_timeout;
-        if client::health_check(&mut client, deadline).await? {
-            Ok(())
-        } else {
-            Err(client::engine_shutdown("SGLang reported unhealthy"))
-        }
-    }
-
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
@@ -467,7 +424,7 @@ fn bootstrap_discover(
     })
 }
 
-fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
+pub(crate) fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
     match discovery
         .server_info
         .get("disaggregation_mode")
@@ -483,7 +440,15 @@ fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoErr
     }
 }
 
-fn discovery_string(value: &Value, key: &str) -> Option<String> {
+fn component_for_mode(mode: DisaggregationMode) -> &'static str {
+    if mode.is_prefill() {
+        "prefill"
+    } else {
+        "backend"
+    }
+}
+
+pub(crate) fn discovery_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(Value::as_str)

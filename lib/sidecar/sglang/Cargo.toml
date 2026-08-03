@@ -22,6 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-direct-register = { path = "../register" }
 dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 
