@@ -166,10 +166,7 @@ def _suppressed_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     if not isinstance(stop_conditions, dict):
         return set()
 
-    values = [
-        *(stop_conditions.get("stop_token_ids") or []),
-        *(stop_conditions.get("stop_token_ids_hidden") or []),
-    ]
+    values = stop_conditions.get("stop_token_ids_hidden") or []
     return {
         token_id
         for token_id in values
@@ -191,13 +188,24 @@ def _stop_strings(request: Dict[str, Any]) -> set[str]:
     return set()
 
 
+def _trailing_stop_prefix_len(text: str, stop_strings: set[str]) -> int:
+    if not text or not stop_strings:
+        return 0
+    max_len = min(len(text), max(len(stop) for stop in stop_strings))
+    for suffix_len in range(max_len, 0, -1):
+        suffix = text[-suffix_len:]
+        if any(stop.startswith(suffix) for stop in stop_strings):
+            return suffix_len
+    return 0
+
+
 def _remove_suppressed_stop_tokens(
     output_ids: list[int],
     matched: Any,
     suppressed_stop_token_ids: set[int] | None,
-) -> list[int]:
+) -> tuple[list[int], int]:
     if not output_ids or not suppressed_stop_token_ids:
-        return output_ids
+        return output_ids, 0
 
     if isinstance(matched, int) and not isinstance(matched, bool):
         matched_ids = [matched]
@@ -206,7 +214,7 @@ def _remove_suppressed_stop_tokens(
     ):
         matched_ids = matched
     else:
-        return output_ids
+        return output_ids, 0
 
     if (
         matched_ids
@@ -214,9 +222,22 @@ def _remove_suppressed_stop_tokens(
         and len(output_ids) >= len(matched_ids)
         and output_ids[-len(matched_ids) :] == matched_ids
     ):
-        return output_ids[: -len(matched_ids)]
+        return output_ids[: -len(matched_ids)], len(matched_ids)
 
-    return output_ids
+    return output_ids, 0
+
+
+def _split_trailing_suppressed_stop_tokens(
+    output_ids: list[int],
+    suppressed_stop_token_ids: set[int] | None,
+) -> tuple[list[int], list[int]]:
+    if not output_ids or not suppressed_stop_token_ids:
+        return output_ids, []
+
+    split_at = len(output_ids)
+    while split_at > 0 and output_ids[split_at - 1] in suppressed_stop_token_ids:
+        split_at -= 1
+    return output_ids[:split_at], output_ids[split_at:]
 
 
 def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -756,6 +777,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
+        pending_stop_tokens_per_choice: dict[int, list[int]] = {}
+        pending_log_probs_per_choice: dict[int, list[Any]] = {}
+        pending_top_logprobs_per_choice: dict[int, list[Any]] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -787,7 +811,59 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         out["stop_reason"] = stop_reason
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
-                output_ids = list(res.get("output_ids", []))
+                raw_output_ids = list(res.get("output_ids", []))
+                if raw_output_ids and not first_output_seen:
+                    first_output_seen = True
+                    context.notify_first_token()
+                log_probs = None
+                top_logprobs = None
+                if metadata_uploader is None:
+                    # Extract logprobs for new tokens if available.
+                    log_probs, top_logprobs = self._extract_logprobs(
+                        meta_info,
+                        num_output_tokens_in_chunk=len(raw_output_ids),
+                        return_tokens_as_token_ids=return_tokens_as_token_ids,
+                    )
+
+                output_ids = pending_stop_tokens_per_choice.pop(output_idx, [])
+                output_ids.extend(raw_output_ids)
+                if log_probs is not None:
+                    log_probs = pending_log_probs_per_choice.pop(output_idx, []) + list(
+                        log_probs
+                    )
+                if top_logprobs is not None:
+                    top_logprobs = pending_top_logprobs_per_choice.pop(
+                        output_idx, []
+                    ) + list(top_logprobs)
+
+                matched = finish_reason.get("matched") if finish_reason else None
+                output_ids, removed_count = _remove_suppressed_stop_tokens(
+                    output_ids, matched, suppressed_stop_token_ids
+                )
+                if removed_count:
+                    if log_probs is not None:
+                        log_probs = log_probs[:-removed_count]
+                    if top_logprobs is not None:
+                        top_logprobs = top_logprobs[:-removed_count]
+                elif not finish_reason:
+                    output_ids, pending_stop_tokens = (
+                        _split_trailing_suppressed_stop_tokens(
+                            output_ids, suppressed_stop_token_ids
+                        )
+                    )
+                    if pending_stop_tokens:
+                        pending_stop_tokens_per_choice[output_idx] = pending_stop_tokens
+                        if log_probs is not None:
+                            pending_log_probs_per_choice[output_idx] = log_probs[
+                                -len(pending_stop_tokens) :
+                            ]
+                            log_probs = log_probs[: -len(pending_stop_tokens)]
+                        if top_logprobs is not None:
+                            pending_top_logprobs_per_choice[output_idx] = top_logprobs[
+                                -len(pending_stop_tokens) :
+                            ]
+                            top_logprobs = top_logprobs[: -len(pending_stop_tokens)]
+
                 # Empty, non-final chunks can happen during scheduler idle ticks.
                 # Keep waiting for the next chunk unless cancellation was requested.
                 if not output_ids and not finish_reason:
@@ -795,28 +871,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         break
                     continue
 
-                matched = finish_reason.get("matched") if finish_reason else None
-                output_ids = _remove_suppressed_stop_tokens(
-                    output_ids, matched, suppressed_stop_token_ids
-                )
-
-                if output_ids and not first_output_seen:
-                    first_output_seen = True
-                    context.notify_first_token()
-
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
-                if metadata_uploader is None:
-                    # Extract logprobs for new tokens if available
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        meta_info,
-                        num_output_tokens_in_chunk=len(output_ids),
-                        return_tokens_as_token_ids=return_tokens_as_token_ids,
-                    )
-                    if log_probs is not None:
-                        out["log_probs"] = log_probs
-                    if top_logprobs is not None:
-                        out["top_logprobs"] = top_logprobs
+
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
 
                 engine_data: dict[str, Any] = dict(res.get("engine_data") or {})
                 routed_experts = meta_info.get("routed_experts")
@@ -925,6 +986,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     and text.endswith(matched)
                 ):
                     visible_text_len = len(text) - len(matched)
+                elif not finish_reason:
+                    visible_text_len -= _trailing_stop_prefix_len(
+                        text, stop_strings
+                    )
 
                 delta = text[count:visible_text_len] if visible_text_len > count else ""
                 if res.get("output_ids") and not first_output_seen:
