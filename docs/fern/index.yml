@@ -222,6 +222,8 @@ navigation:
         contents:
           - page: Observability
             path: pages/kubernetes/operations/observability.mdx
+          - page: Performance Analysis
+            path: pages/kubernetes/operations/performance-analysis.md
           - page: Benchmarking with AIPerf
             path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
