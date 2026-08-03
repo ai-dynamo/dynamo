@@ -734,6 +734,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::config::RouterConfigOverride;
     use crate::protocols::{SharedCacheHits, WorkerConfigLike};
     use crate::scheduling::{OverlapSignals, ScheduleMode};
 
@@ -1064,6 +1065,88 @@ mod tests {
                     .collect::<Vec<_>>(),
                 expected_prefix,
             );
+        }
+    }
+
+    #[test]
+    fn per_request_overrides_change_selection() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let warm_worker = WorkerWithDpRank::from_worker_id(0);
+        let cold_worker = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (warm_worker.worker_id, SimpleWorkerConfig::default()),
+            (cold_worker.worker_id, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(4);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm_worker, 2);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(warm_worker, 2);
+        request.worker_loads.insert(
+            warm_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 1,
+                ..Default::default()
+            },
+        );
+        #[allow(clippy::single_range_in_vec_init)]
+        let shared_cache_hits = SharedCacheHits::from_ranges(vec![0..4]);
+        request.shared_cache_hits = Some(shared_cache_hits);
+
+        let config = KvRouterConfig {
+            overlap_score_credit: 1.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let select = |request: &SchedulingRequest| {
+            DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42)
+                .select_worker(&workers, request, request.eligibility(), 1)
+                .unwrap()
+                .worker
+        };
+
+        assert_eq!(select(&request), warm_worker);
+
+        for (name, config_override) in [
+            (
+                "overlap_score_credit",
+                RouterConfigOverride {
+                    overlap_score_credit: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "prefill_load_scale",
+                RouterConfigOverride {
+                    prefill_load_scale: Some(0.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shared_cache_multiplier",
+                RouterConfigOverride {
+                    shared_cache_multiplier: Some(1.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "router_temperature",
+                RouterConfigOverride {
+                    router_temperature: Some(1.0),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            request.router_config_override = Some(config_override);
+            assert_eq!(select(&request), cold_worker, "{name} override was ignored");
         }
     }
 
