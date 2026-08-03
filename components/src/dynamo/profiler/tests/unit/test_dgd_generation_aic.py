@@ -25,6 +25,7 @@ try:
         FeaturesSpec,
         MockerSpec,
     )
+    from dynamo.profiler.utils.profile_common import needs_profile_data
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
 
@@ -39,6 +40,7 @@ def _dgdr(
     planner: PlannerConfig | None = None,
     model: str = "Qwen/Qwen3-32B",
     mocker_enabled: bool = False,
+    search_strategy: str = "rapid",
 ) -> DynamoGraphDeploymentRequestSpec:
     features = None
     if planner is not None or mocker_enabled:
@@ -46,7 +48,11 @@ def _dgdr(
             planner=planner,
             mocker=MockerSpec(enabled=True) if mocker_enabled else None,
         )
-    return DynamoGraphDeploymentRequestSpec(model=model, features=features)
+    return DynamoGraphDeploymentRequestSpec(
+        model=model,
+        features=features,
+        searchStrategy=search_strategy,
+    )
 
 
 class TestBuildAICInterpolationSpec:
@@ -199,6 +205,46 @@ class TestBuildAICInterpolationSpec:
         )
         assert isinstance(spec, AICInterpolationSpec)
         assert spec.backend == "trtllm"
+
+    def test_mocker_only_rapid_produces_spec(self):
+        """Mocker-only rapid requests use the DGDR search strategy."""
+        dgdr = _dgdr(mocker_enabled=True)
+        pick = PickedParallelConfig(tp=1, dp=8, moe_ep=8)
+
+        spec = build_aic_interpolation_spec(
+            dgdr,
+            best_prefill_pick=pick,
+            best_decode_pick=pick,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            resolved_backend="trtllm",
+            system="h200_sxm",
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+        )
+
+        assert isinstance(spec, AICInterpolationSpec)
+
+    def test_mocker_only_thorough_returns_none(self):
+        """Mocker-only thorough requests consume generated NPZ data."""
+        dgdr = _dgdr(mocker_enabled=True, search_strategy="thorough")
+        pick = PickedParallelConfig(tp=1, dp=8, moe_ep=8)
+
+        spec = build_aic_interpolation_spec(
+            dgdr,
+            best_prefill_pick=pick,
+            best_decode_pick=pick,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            resolved_backend="trtllm",
+            system="h200_sxm",
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+        )
+
+        assert spec is None
 
 
 class TestInjectMockerAicArgs:
@@ -361,10 +407,18 @@ class TestBuildPlannerConfigEmbedsAicSpec:
 
 
 class TestNeedsProfileDataRapid:
+    def test_mocker_only_rapid_returns_false(self):
+        """Mocker-only rapid uses AIC directly instead of profile files."""
+        dgdr = _dgdr(mocker_enabled=True)
+        assert needs_profile_data(dgdr) is False
+
+    def test_mocker_only_thorough_returns_true(self):
+        """Mocker-only thorough still consumes generated profile files."""
+        dgdr = _dgdr(mocker_enabled=True, search_strategy="thorough")
+        assert needs_profile_data(dgdr) is True
+
     def test_rapid_planner_only_returns_false(self):
         """Planner-only rapid: no files needed; planner will use aic_spec."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -376,8 +430,6 @@ class TestNeedsProfileDataRapid:
 
     def test_thorough_planner_returns_true(self):
         """Thorough still needs files."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -389,8 +441,6 @@ class TestNeedsProfileDataRapid:
 
     def test_none_planner_only_returns_false(self):
         """Planner-only none mode can warm from native AIC or live FPMs."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -402,8 +452,6 @@ class TestNeedsProfileDataRapid:
 
     def test_mocker_rapid_returns_false(self):
         """Mocker + rapid: mocker pulls AIC perf data at runtime; no NPZ files."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -415,8 +463,6 @@ class TestNeedsProfileDataRapid:
 
     def test_mocker_thorough_returns_true(self):
         """Mocker + thorough: mocker consumes real-GPU NPZ."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
