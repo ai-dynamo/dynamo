@@ -47,8 +47,8 @@ use crate::args::{TransportConfig, normalize_endpoint};
 use crate::client::{self, Pool};
 use crate::proto as pb;
 use crate::protocol::{
-    build_generate_request, engine_data_from_meta, extract_logprobs, meta_u32, output_ids_to_u32,
-    terminal_from_meta,
+    build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
+    meta_u32, output_ids_to_u32, terminal_from_meta,
 };
 
 /// `direct_backend` name this crate registers and handles. The engine writes it
@@ -212,6 +212,21 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        // For the prefill role, echo the bootstrap handoff we sent SGLang back on
+        // the terminal output, exactly as the request-plane engine path does. The
+        // decode hop is driven by the frontend's pre-stamped `bootstrap_info`, but
+        // the frontend's background prefill task still inspects the prefill
+        // output's `disaggregated_params`; without it, it logs
+        // `NoDisaggregatedParams` on every request.
+        let is_prefill = self.mode.is_prefill();
+        let prefill_handoff = if is_prefill {
+            proto
+                .disaggregated_params
+                .as_ref()
+                .map(disaggregated_params_to_json)
+        } else {
+            None
+        };
 
         let mut stream = grpc_client
             .generate(proto)
@@ -307,6 +322,31 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Grpc
                             }
                         };
                         logprob_offset = next_offset;
+
+                        // Prefill role: suppress intermediate tokens and emit a
+                        // single terminal carrying the bootstrap handoff, mirroring
+                        // the request-plane engine path. The frontend drains this
+                        // stream in the background; only the decode hop reaches the
+                        // client.
+                        if is_prefill {
+                            if response.finished {
+                                let mut terminal = match terminal_from_meta(
+                                    &response.meta_info,
+                                    observed_prompt_tokens,
+                                    0,
+                                ) {
+                                    Ok(terminal) => terminal,
+                                    Err(error) => {
+                                        yield Annotated::from_err(error);
+                                        break;
+                                    }
+                                };
+                                terminal.disaggregated_params = prefill_handoff.clone();
+                                yield Annotated::from_data(terminal);
+                                break;
+                            }
+                            continue;
+                        }
 
                         generated = generated.saturating_add(token_ids.len() as u32);
                         if response.finished {
