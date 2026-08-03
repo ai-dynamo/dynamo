@@ -126,7 +126,8 @@ export NAMESPACE=voice-agent
 export DYNAMO_RUNTIME_VERSION="$(
   python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
 )"
-export DYNAMO_IMAGE="<registry-host>/<project>/dynamo-riva:${DYNAMO_RUNTIME_VERSION}-riva"
+export LOCAL_DYNAMO_BASE_IMAGE="dynamo-vllm-runtime-local:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_DYNAMO_IMAGE="<registry-host>/<project>/dynamo-riva-custom:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_REGISTRY=<registry-host>
 export DYNAMO_REGISTRY_USER=<username>
 export DYNAMO_REGISTRY_PASSWORD=<password>
@@ -135,7 +136,7 @@ export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
 
-The semantic image tag lets the Dynamo operator derive the runtime
+The custom image's semantic tag lets the Dynamo operator derive the runtime
 compatibility version directly from each component's main image.
 
 ### 1. Build and push the image
@@ -146,11 +147,11 @@ adapters:
 
 ```bash
 container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo-riva-base:dev -f container/rendered.Dockerfile .
+docker build -t "${LOCAL_DYNAMO_BASE_IMAGE}" -f container/rendered.Dockerfile .
 
-BASE_IMAGE=dynamo-riva-base:dev TAG="${DYNAMO_IMAGE}" \
+BASE_IMAGE="${LOCAL_DYNAMO_BASE_IMAGE}" TAG="${CUSTOM_DYNAMO_IMAGE}" \
   ./examples/riva_cascaded_pipeline/container/build.sh
-docker push "${DYNAMO_IMAGE}"
+docker push "${CUSTOM_DYNAMO_IMAGE}"
 ```
 
 When the same revision is available in a published runtime image, that image
@@ -213,7 +214,7 @@ EOF
 Render the image environment variable while applying the tracked manifest:
 
 ```bash
-envsubst '${DYNAMO_IMAGE}' \
+envsubst '${CUSTOM_DYNAMO_IMAGE}' \
   < examples/riva_cascaded_pipeline/deploy/agg.yaml \
   | kubectl apply --namespace "${NAMESPACE}" -f -
 ```
