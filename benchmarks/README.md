@@ -15,48 +15,49 @@
 
 # Benchmarks
 
-This directory contains benchmarking tools and scripts for Dynamo deployments. Benchmarking uses [AIPerf](https://github.com/ai-dynamo/aiperf) directly — a comprehensive tool for measuring generative AI inference performance.
+Harnesses, workload generators, and trace converters for measuring Dynamo.
 
-## Quick Start
+**Not sure which one you need?** Start at Performance Analysis — the
+[development-host guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/cli/operations/performance-analysis.md)
+or the [Kubernetes guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/operations/performance-analysis.md) —
+which routes a performance question to the tool that answers it. For the protocol that
+applies whichever tool you pick, see
+[Performance Analysis Method](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/concepts/performance-analysis-method.md).
 
-### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then:
+To send load at an endpoint, see the AIPerf benchmarking guides in the same Operations sections.
 
-```bash
-# Port-forward your deployment to http://localhost:8000
-kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
+## Harnesses
 
-# Run a single benchmark
-aiperf profile \
-    --model <your-model> \
-    --url http://localhost:8000 \
-    --endpoint-type chat \
-    --streaming \
-    --concurrency 10 \
-    --request-count 100
+| Directory | Entry point | Use it for |
+| --- | --- | --- |
+| [`frontend/`](frontend/README.md) | `scripts/sweep_runner.py`, `scripts/run_perf.sh` | Frontend and router sweeps against mock workers, locally or on Kubernetes, with profiling captures alongside the load |
+| `incluster/` | `benchmark_job.yaml` | AIPerf as a Kubernetes Job against a deployment |
+| [`router/`](router/README.md) | `prefix_ratio_benchmark.py`, `real_data_benchmark.py`, `agent_benchmark.py` | KV router behavior under varying prefix reuse and replayed traces |
+| [`mocker/`](mocker/README.md) | `bench_aic_concurrency.py` | The mocker's own latency-prediction path |
+| `multimodal/` | `sweep/`, `jsonl/`, `http/` | Multimodal and encode/prefill/decode benchmarking, plus multimodal request datasets |
+| `omni/` | `image/` | Text-to-image generation benchmarks |
 
-# Run a concurrency sweep for Pareto analysis
-for c in 1 2 5 10 50 100; do
-    aiperf profile \
-        --model <your-model> \
-        --url http://localhost:8000 \
-        --endpoint-type chat \
-        --streaming \
-        --concurrency $c \
-        --request-count $(( c * 3 > 10 ? c * 3 : 10 )) \
-        --artifact-dir "artifacts/my-benchmark/c$c"
-done
+## Workload generators and trace converters
 
-# Generate comparison plots
-aiperf plot artifacts/my-benchmark
-```
+All produce Mooncake-format JSONL that AIPerf and the replay tools consume.
 
-## Directory Contents
+| Directory | Entry point | Use it for |
+| --- | --- | --- |
+| [`prefix_data_generator/`](prefix_data_generator/README.md) | `datagen` console script | Analyzing and synthesizing prefix-structured data, when KV reuse is what you are testing |
+| [`sin_load_generator/`](sin_load_generator/README.md) | `sin_synth.py` | Time-varying request rate and input/output length ratio |
+| [`burstgpt_loadgen/`](burstgpt_loadgen/README.md) | `convert.py` | Converting BurstGPT traces. Does not model KV reuse |
+| [`nat_trace/`](nat_trace/README.md) | `convert.py`, `convert_telemetry.py` | Converting NeMo Agent Toolkit profiler traces, preserving session and hash identity |
 
-- **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
-- **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
-- **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
+## Analysis
 
-## Comprehensive Guide
+| Directory | Entry point | Use it for |
+| --- | --- | --- |
+| [`request_trace/`](request_trace/README.md) | `convert_to_perfetto.py` | Turning request traces into a Perfetto timeline with per-request prefill and decode stages |
 
-For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md).
+## Conventions
+
+Install the packaged pieces with `uv pip install -e ./benchmarks`, which provides `datagen`
+and pins the AIPerf version this tree is tested against.
+
+A new harness is not finished until it appears in the table above and in the routing table
+on the Performance Analysis pages. A tool nobody can find does not get used.
