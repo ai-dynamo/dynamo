@@ -128,6 +128,13 @@ pub struct SelectionCore {
 }
 
 impl SelectionCore {
+    pub(super) fn queueing_enabled(
+        &self,
+        model_name: &str,
+    ) -> Result<bool, crate::scheduling::RouterPolicyConfigError> {
+        self.kv_router_config.queueing_enabled(Some(model_name))
+    }
+
     /// Create an intentionally local selector without replica synchronization
     /// or startup recovery.
     ///
