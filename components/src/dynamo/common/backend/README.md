@@ -523,6 +523,19 @@ Lifecycle and runtime:
   unquantized Qwen3-30B-A3B replica needs about 57 GiB for weights at TP=1,
   while CI's four-GPU runner has only 24 GiB per GPU; the test requires at
   least 80 GiB per GPU for weights and runtime headroom.
+- **Elastic EP scaling (SGLang)** — `scale_elastic_ep` control mirroring the
+  vLLM shape (positive-integer validation, single-flight lock), but driving
+  SGLang's native `tokenizer_manager.scale_elastic_ep`. Served at
+  `/engine/control/scale_elastic_ep` on the leader system port, with
+  `/engine/control/is_scaling_elastic_ep` to poll for completion. The request
+  field is `new_ep_size` (EP ranks), not vLLM's `new_data_parallel_size`, and
+  **scale-up only**: SGLang integrates a separately-launched joining group
+  (`--elastic-ep-join-mode scale`) and redistributes experts (ePLB), but rejects
+  a target below the current EP size. Capability-gated on
+  `tokenizer_manager.scale_elastic_ep` (SGLang >= 0.5.16; the pinned 0.5.14 does
+  not expose the route) and requires an elastic-EP weight-transfer backend
+  (`--elastic-ep-backend mooncake`, RDMA). Templates and a scale-up regression
+  script live under `tests/fault_tolerance/deploy/templates/sglang/`.
 - **Headless multi-node (vLLM)** — `--headless` secondary nodes run
   vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
   bypassing DistributedRuntime; `dynamo.vllm.main` routes them to
