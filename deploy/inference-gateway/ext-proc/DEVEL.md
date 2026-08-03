@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo EPP Development
 
-This directory contains the native Rust Envoy `ext_proc` Endpoint Picker Plugin (EPP) for Gateway
+This directory contains the native Rust Envoy `ext_proc` Endpoint Picker (EPP) for Gateway
 API Inference Extension (GAIE). It builds a single Rust binary, `dynamo-ext-proc`, packages it as
 `/epp` in the container image, and implements the upstream
 [Lightweight Endpoint Picker (LW-EPP)](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)
