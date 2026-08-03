@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Kubernetes Recipe Deployment Workflow
 
 Use this reference after another agent has already selected a Dynamo `deploy.yaml` or DGD manifest.

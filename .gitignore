@@ -141,7 +141,10 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
-/.codex
+/.codex/*
+!/.codex/config.toml
+!/.codex/agents/
+!/.codex/agents/*.toml
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -177,3 +180,13 @@ fern/components/install-selector-data.ts
 
 # Local git worktrees
 .worktrees/
+
+
+runs/
+sanitized*
+.agents/skills/dynamo-inter*
+.agents/skills/dynamo-rout*
+validate_skills/
+tests/test_recipe_tool_inventory.py
+.agent/skills/explore-dynamo-recipes/
+.agent/skills/learn-from-experience/

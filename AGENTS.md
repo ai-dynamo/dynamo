@@ -47,10 +47,17 @@ to it — edit only the canonical copy. Reach for the right group first:
 
 **For deploying and operating Dynamo:**
 
-- `dynamo-recipe-runner` — select, patch, and deploy Kubernetes recipes
+- `synthesize-user-workload` — interview the user, capture their DGD, and create the canonical workload contract
+- `consult-perf-knowledge` — select one evidence-backed optimization proposal and write its reasoning record
+- `create-optimization-hypothesis` — materialize a performance consultation as a challenger-ready DGD draft
+- `perform-adversarial-review` — challenge a generated DGD candidate before it consumes GPU time
+- `deploy-dynamo-recipe` — deploy one assigned Kubernetes DGD and verify it with an API smoke test
+- `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
+- `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
+- `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
-- `dynamo-troubleshoot` — diagnose failed or unhealthy deployments
+- `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
 
 **Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
 `description` is third person, states what the skill does and when to use it, and is at
@@ -59,6 +66,16 @@ and `tags`. List the skill in this section — the index must match `.agents/ski
 exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
 `validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
 a maintainer comments `/nvskills-ci` on the PR.
+
+## Optimization Role Dispatch
+
+When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
+specialized role. It must invoke `synthesize-user-workload` and produce a validated
+`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the DGD the
+user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
+`hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
+`recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
+exploration or selection step before the baseline deployment.
 
 ## Ecosystem
 
