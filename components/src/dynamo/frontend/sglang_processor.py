@@ -78,6 +78,36 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
     return []
 
 
+def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
+    agent_hints = nvext.get("agent_hints")
+    if not isinstance(agent_hints, dict):
+        return None
+
+    routing: dict[str, Any] = {}
+    priority = agent_hints.get("priority")
+    if isinstance(priority, int) and not isinstance(priority, bool):
+        routing["priority"] = priority
+        routing["priority_jump"] = float(max(priority, 0))
+    else:
+        latency_sensitivity = agent_hints.get("latency_sensitivity")
+        if isinstance(latency_sensitivity, (int, float)) and not isinstance(
+            latency_sensitivity, bool
+        ):
+            routing["priority_jump"] = float(latency_sensitivity)
+
+    strict_priority = agent_hints.get("strict_priority")
+    if isinstance(strict_priority, int) and not isinstance(strict_priority, bool):
+        routing["strict_priority"] = strict_priority
+
+    expected_output_tokens = agent_hints.get("osl")
+    if isinstance(expected_output_tokens, int) and not isinstance(
+        expected_output_tokens, bool
+    ):
+        routing["expected_output_tokens"] = expected_output_tokens
+
+    return routing or None
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -330,6 +360,17 @@ def _build_dynamo_preproc(
     elif top_logprobs not in (None, 0):
         logprobs_val = top_logprobs
 
+    nvext = request.get("nvext") or {}
+    routing = request.get("routing")
+    nvext_routing = (
+        _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
+    )
+    if isinstance(routing, dict):
+        if nvext_routing:
+            routing = {**nvext_routing, **routing}
+    else:
+        routing = nvext_routing
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -366,7 +407,7 @@ def _build_dynamo_preproc(
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
         "annotations": [],
-        "routing": request.get("routing"),
+        "routing": routing,
     }
 
     try:
@@ -378,7 +419,6 @@ def _build_dynamo_preproc(
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
-    nvext = request.get("nvext") or {}
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
     }
