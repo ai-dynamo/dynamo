@@ -369,6 +369,13 @@ navigation:
             path: pages/use-cases/agents/agent-simulation.mdx
           - page: ThunderAgent Program Scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
+      - section: Reinforcement Learning
+        collapsed: true
+        icon: brain
+        slug: reinforcement-learning
+        contents:
+          - page: Overview
+            path: pages/use-cases/reinforcement-learning/overview.md
       - section: Multimodal Serving
         collapsed: true
         icon: photo-film
@@ -411,13 +418,6 @@ navigation:
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: pages/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
-      - section: Reinforcement Learning
-        collapsed: true
-        icon: brain
-        slug: reinforcement-learning
-        contents:
-          - page: Overview
-            path: pages/use-cases/reinforcement-learning/overview.md
       - section: Tool Calling & Reasoning
         collapsed: true
         icon: screwdriver-wrench
