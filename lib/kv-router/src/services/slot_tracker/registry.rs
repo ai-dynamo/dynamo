@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::protocols::{PrefillLoadHint, WorkerId, WorkerWithDpRank};
 use crate::scheduling::PotentialLoad;
 use crate::sequences::topology::{WorkerDpRange, WorkerTopologyError};
@@ -23,25 +24,6 @@ use crate::sequences::{
 use crate::services::common::replica_sync::{
     ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
 };
-
-fn default_routing_group() -> String {
-    "default".to_string()
-}
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct TrackerKey {
-    pub model_name: String,
-    pub routing_group: String,
-}
-
-impl TrackerKey {
-    pub fn new(model_name: String, routing_group: Option<String>) -> Self {
-        Self {
-            model_name,
-            routing_group: routing_group.unwrap_or_else(default_routing_group),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkerInfo {
@@ -117,18 +99,13 @@ struct TrackerEntry {
 
 impl TrackerEntry {
     fn new(
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         block_size: u32,
         root_cancel_token: &CancellationToken,
         replica_config: Option<&ReplicaSyncConfig>,
     ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let scoped_replica_sync = setup_scoped_replica_sync(
-            replica_config,
-            &key.model_name,
-            &key.routing_group,
-            block_size,
-        );
+        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size);
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -154,7 +131,7 @@ impl TrackerEntry {
 }
 
 pub struct SlotTrackerRegistry {
-    trackers: DashMap<TrackerKey, Arc<TrackerEntry>>,
+    trackers: DashMap<RoutingPartitionId, Arc<TrackerEntry>>,
     root_cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
 }
@@ -181,7 +158,7 @@ impl SlotTrackerRegistry {
 
     pub fn register(
         &self,
-        key: TrackerKey,
+        key: RoutingPartitionId,
         worker_id: WorkerId,
         block_size: u32,
         dp_start: u32,
@@ -227,7 +204,11 @@ impl SlotTrackerRegistry {
         }
     }
 
-    pub fn unregister(&self, key: &TrackerKey, worker_id: WorkerId) -> Result<(), RegistryError> {
+    pub fn unregister(
+        &self,
+        key: &RoutingPartitionId,
+        worker_id: WorkerId,
+    ) -> Result<(), RegistryError> {
         loop {
             let Some(entry) = self
                 .trackers
@@ -296,7 +277,7 @@ impl SlotTrackerRegistry {
 
     pub fn add_request(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: String,
         worker: WorkerWithDpRank,
         sequence_hashes: Vec<SequenceHash>,
@@ -324,7 +305,7 @@ impl SlotTrackerRegistry {
 
     pub fn mark_prefill_completed(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
@@ -334,11 +315,29 @@ impl SlotTrackerRegistry {
         Ok(())
     }
 
-    pub fn free(&self, key: &TrackerKey, request_id: &str) -> Result<(), ServiceError> {
+    /// Release `request_id`'s booking.
+    ///
+    /// When `worker` is `Some`, only that worker's booking is released and an
+    /// ownership mismatch is a no-op. A superseded attempt must pass the worker
+    /// it booked: after a same-id rebind, an untargeted free resolves the *current*
+    /// owner and would release the replacement's booking.
+    ///
+    /// `None` preserves the original untargeted behavior for callers that do not
+    /// track which worker they booked.
+    pub fn free(
+        &self,
+        key: &RoutingPartitionId,
+        request_id: &str,
+        worker: Option<WorkerWithDpRank>,
+    ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        entry
-            .tracker
-            .free(&request_id.to_string(), Instant::now())?;
+        let request_id = request_id.to_string();
+        match worker {
+            Some(worker) => entry
+                .tracker
+                .free_if_worker(&request_id, worker, Instant::now())?,
+            None => entry.tracker.free(&request_id, Instant::now())?,
+        }
         Ok(())
     }
 
@@ -383,7 +382,7 @@ impl SlotTrackerRegistry {
 
     pub fn potential_loads(
         &self,
-        key: &TrackerKey,
+        key: &RoutingPartitionId,
         sequence_hashes: &[SequenceHash],
         new_isl_tokens: usize,
     ) -> Result<Vec<PotentialLoad>, RegistryError> {
@@ -407,15 +406,15 @@ impl SlotTrackerRegistry {
     }
 
     pub(crate) fn dispatch_replica_event(&self, envelope: ScopedReplicaEvent) {
+        let (key, block_size, event) = envelope.into_parts();
         if self
             .replica_config
             .as_ref()
-            .is_some_and(|config| config.is_self_event(&envelope.event))
+            .is_some_and(|config| config.is_self_event(&event))
         {
             return;
         }
 
-        let key = TrackerKey::new(envelope.model_name, Some(envelope.routing_group));
         let Some(entry) = self
             .trackers
             .get(&key)
@@ -428,12 +427,12 @@ impl SlotTrackerRegistry {
             );
             return;
         };
-        if entry.block_size != envelope.block_size {
+        if entry.block_size != block_size {
             tracing::debug!(
                 model_name = %key.model_name,
                 routing_group = %key.routing_group,
                 expected_block_size = entry.block_size,
-                received_block_size = envelope.block_size,
+                received_block_size = block_size,
                 "Dropping replica event with mismatched block size"
             );
             return;
@@ -441,7 +440,7 @@ impl SlotTrackerRegistry {
         let Some(replica_tx) = &entry.replica_tx else {
             return;
         };
-        match replica_tx.try_send(envelope.event) {
+        match replica_tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(event)) => {
                 tracing::trace!(
@@ -461,7 +460,7 @@ impl SlotTrackerRegistry {
         }
     }
 
-    fn entry(&self, key: &TrackerKey) -> Result<Arc<TrackerEntry>, RegistryError> {
+    fn entry(&self, key: &RoutingPartitionId) -> Result<Arc<TrackerEntry>, RegistryError> {
         self.trackers
             .get(key)
             .map(|entry| Arc::clone(entry.value()))
@@ -471,7 +470,7 @@ impl SlotTrackerRegistry {
             })
     }
 
-    fn is_attached(&self, key: &TrackerKey, entry: &Arc<TrackerEntry>) -> bool {
+    fn is_attached(&self, key: &RoutingPartitionId, entry: &Arc<TrackerEntry>) -> bool {
         self.trackers
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current.value(), entry))
@@ -494,7 +493,7 @@ fn validate_block_size(block_size: u32) -> Result<(), RegistryError> {
     Ok(())
 }
 
-fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError {
+fn topology_error(key: &RoutingPartitionId, error: WorkerTopologyError) -> RegistryError {
     match error {
         WorkerTopologyError::InvalidDpSize { .. } => RegistryError::InvalidDpSize,
         WorkerTopologyError::InvalidDpRange {
@@ -514,7 +513,7 @@ fn topology_error(key: &TrackerKey, error: WorkerTopologyError) -> RegistryError
 }
 
 fn matches_filters(
-    key: &TrackerKey,
+    key: &RoutingPartitionId,
     model_name: Option<&str>,
     routing_group: Option<&str>,
 ) -> bool {
@@ -531,8 +530,8 @@ mod tests {
         SlotTrackerRegistry::new(CancellationToken::new())
     }
 
-    fn key(routing_group: &str) -> TrackerKey {
-        TrackerKey::new("model".to_string(), Some(routing_group.to_string()))
+    fn key(routing_group: &str) -> RoutingPartitionId {
+        RoutingPartitionId::new("model", routing_group)
     }
 
     fn replica_event(
@@ -785,6 +784,22 @@ mod tests {
         // The booking moved rather than duplicating.
         assert_eq!(blocks_on(1), 0, "the stale booking on worker 1 is released");
         assert_eq!(blocks_on(2), booked, "the request is re-booked on worker 2");
+
+        // The lifecycle boundary: worker A's superseded attempt now issues its
+        // late `/free`. Targeted at A, it must leave B's booking alone. An
+        // untargeted free here would resolve the current owner and release B.
+        registry
+            .free(&key, "req-1", Some(worker_a))
+            .expect("a late free from a superseded attempt is a no-op");
+        assert_eq!(
+            blocks_on(2),
+            booked,
+            "worker A's late /free must not release worker B's booking"
+        );
+
+        // Targeted at the actual owner, it does release.
+        registry.free(&key, "req-1", Some(worker_b)).unwrap();
+        assert_eq!(blocks_on(2), 0, "the owner's free releases the booking");
     }
 
     #[tokio::test]
@@ -793,7 +808,7 @@ mod tests {
         let key = key("default");
         registry.register(key.clone(), 1, 16, 0, 1).unwrap();
 
-        registry.free(&key, "early-free").unwrap();
+        registry.free(&key, "early-free", None).unwrap();
         assert!(matches!(
             registry.mark_prefill_completed(&key, "early-complete"),
             Err(ServiceError::Sequence(
@@ -834,8 +849,8 @@ mod tests {
         ));
         registry.mark_prefill_completed(&key, "early-free").unwrap();
         registry.mark_prefill_completed(&key, "early-free").unwrap();
-        registry.free(&key, "early-free").unwrap();
-        registry.free(&key, "early-free").unwrap();
+        registry.free(&key, "early-free", None).unwrap();
+        registry.free(&key, "early-free", None).unwrap();
 
         registry
             .add_request(
@@ -847,7 +862,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(registry.list_loads(None, None)[0].active_prefill_tokens, 8);
-        registry.free(&key, "early-complete").unwrap();
+        registry.free(&key, "early-complete", None).unwrap();
 
         assert_eq!(registry.list_loads(None, None)[0].active_decode_blocks, 0);
     }

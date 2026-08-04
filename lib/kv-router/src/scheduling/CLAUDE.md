@@ -49,8 +49,6 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── admission_policy: Option<ScheduledAdmissionPolicy>
-├── deferred: FxHashMap<AdmissionId, PolicyQueueEntry>    # Held by admission policy
 ├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
 ├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
 │   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
@@ -68,24 +66,15 @@ PolicyClassQueue("agents")
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
-## Policy-class admission lifecycle
-
-- **Decide:** A lifecycle-tracked request (`TrackedWithLifecycle`) and its cleanup handle (`RequestLifecycleLease`) enter `SchedulerQueueActor`, the single task that owns admission and queue state. The admission policy can opt out (`Bypass`), allow the request to proceed (`Ready`), or hold it (`Defer`).
-- **Wait or choose a worker:** A ready request runs now if capacity is available; otherwise it waits. A deferred request waits until the policy releases it with `MakeReady`. Choosing an exact worker may move the request to a different queue, but the original policy still receives its status updates. Queue limits apply when new requests arrive, not when an existing request moves.
-- **Give the router cleanup ownership:** After the actor records which version of the request it owns, it activates the cleanup handle. Selection returns the chosen worker, a context-token counter that only moves forward, and the handle. The LLM router puts both into `RequestGuard` before sending the request to the backend, so dispatch failure or cancellation still releases scheduler state.
-- **Run and stream:** After the backend accepts the request, `RequestGuard` first records that fact on the cleanup handle, then notifies the actor through the bounded command queue. Response items update the current context-token count. `Stop`, `EoS`, and `Length` mark the request complete before the item reaches the caller; a normal stream close also completes, while cancellation and errors abort.
-- **Release resources:** When `RequestGuard` finishes or is dropped, its cleanup handle is added to the shared cleanup queue. One bounded wake can cover a batch of dropped requests. The actor drains all pending cleanup, releases worker capacity, and tells the policy whether each request completed or aborted. Do not replace this with an unbounded channel or a new task for every dropped request.
-
 ## Guardrails
 
-- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up; cancellation and admission state are keyed by request ID. **Migration re-dispatch is the single exception**, and it is explicit rather than implicit — see below.
+- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request has been cleaned up. **Migration re-dispatch is the single exception** — see below.
 - Migration re-dispatch rebinds a request ID rather than duplicating it:
   - same ID + same worker → conflict (`DuplicateRequest`; `409` at the public API)
   - same ID + *different* worker → state-changing rebind: the stale booking on the old worker is released and the ID is re-bound to the new one
   - Retrying an ambiguous `/add` against a different worker is therefore **not idempotent**. Callers that may retry must target the same worker or treat the call as state-changing.
-  - At the admission layer the rebind is not inferred. `ScheduleRequest::redispatch` — set only by the migration `RetryManager` via `PreprocessedRequest::migration_attempt` — authorizes retiring the in-flight admission. Without it a colliding ID is still rejected, so accidental ID reuse stays an error.
   - Correctness relies on **serialized re-dispatch**: at most one migration state machine per request ID, issuing one attempt at a time. Concurrent re-dispatches of the same ID are out of contract.
-- Cleanup must be conditional on the identity that acquired the resource. A cleanup armed for a specific worker uses `free_if_worker` (ownership mismatch = no-op), never `free`, which re-resolves the ID and would release a replacement attempt's booking. The same rule applies to replica `Free` events (honor `event_worker`) and admission cleanup (compare the ticket).
+- Cleanup must be conditional on the identity that acquired the booking. A cleanup armed for a specific worker uses `free_if_worker` (ownership mismatch = no-op), never `free`, which re-resolves the ID and would release a replacement attempt's booking. The same rule applies to replica `Free` events (honor `event_worker`) and to any future lifecycle layer.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery

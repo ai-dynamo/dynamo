@@ -7,7 +7,10 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
+use dynamo_kv_router::{
+    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
+    config::KvRouterConfig,
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
@@ -19,7 +22,7 @@ use dynamo_runtime::{
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouter},
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -37,11 +40,16 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
+            decode_router: None,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -57,6 +65,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
@@ -66,14 +75,27 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_disagg_prefill_busy_threshold
+                .or(c.router_queue_threshold)
+        });
+        let conditional_disagg_decode_busy_threshold = kv_router_config
+            .as_ref()
+            .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
             prefill_router,
+            decode_router,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,
@@ -160,11 +182,12 @@ impl PrefillRouter {
 
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(
+                .kv_chooser_for_with_worker_role(
                     &endpoint,
                     kv_cache_block_size,
                     kv_router_config,
                     prefill_load_estimator,
+                    Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
                     is_eagle,

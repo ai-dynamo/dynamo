@@ -225,7 +225,6 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
-            is_redispatch: false,
             resp_tx: None,
         }
     }

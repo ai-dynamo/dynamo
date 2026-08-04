@@ -199,10 +199,6 @@ where
     /// Latest worker span pointer seen on the active stream; stamped as
     /// `migration_link` on the next retry. Populated by `track_response`.
     last_worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
-    /// Number of dispatches issued for this request id so far. Stamped onto the
-    /// request as `migration_attempt` before each dispatch, so the first attempt
-    /// carries 0 and every re-dispatch a strictly larger value.
-    dispatch_count: u32,
 }
 
 impl<Resp> RetryManager<Resp>
@@ -261,7 +257,6 @@ where
             model_name,
             metrics,
             last_worker_link: None,
-            dispatch_count: 0,
         };
         slf.new_stream().await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -308,10 +303,6 @@ where
             if let Some(link) = self.last_worker_link.as_ref() {
                 self.request.migration_link = Some(link.clone());
             }
-            // Each pass re-dispatches the same request id; the scheduler needs the
-            // attempt number to tell that from an accidental duplicate.
-            self.request.migration_attempt = self.dispatch_count;
-            self.dispatch_count += 1;
             let mut request = Context::with_id_and_metadata(
                 self.request.clone(),
                 self.context.id().to_string(),

@@ -469,10 +469,17 @@ async def init_omni_stage(
         raise ValueError("--stage-id is required for stage worker initialization")
     stage_id: int = config.stage_id
 
-    resolved_stage_configs_path, stage_configs = load_and_resolve_stage_configs(
+    (
+        resolved_stage_configs_path,
+        stage_configs,
+        _omni_lb_policy,
+    ) = load_and_resolve_stage_configs(
         config.model,
         config.stage_configs_path,
         kwargs={},
+        trust_remote_code=getattr(
+            getattr(config, "engine_args", None), "trust_remote_code", False
+        ),
     )
     connector_configs_path = _ensure_stage_connectors(
         resolved_stage_configs_path,

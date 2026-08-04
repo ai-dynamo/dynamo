@@ -241,6 +241,9 @@ pub mod frontend_service {
     /// Number of `audio_url` content parts per request (histogram)
     pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
 
+    /// Calculated image-placeholder token count per image-bearing request (histogram)
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):
@@ -589,7 +592,7 @@ pub mod routing_overhead {
     /// Time spent querying the shared KV cache (Mooncake)
     pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
 
-    /// Total shared cache query errors (timeouts, HTTP failures)
+    /// Total shared cache failures (query and subscriber failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 

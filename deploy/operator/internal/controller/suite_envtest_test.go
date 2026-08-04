@@ -1,3 +1,5 @@
+//go:build !clustertest
+
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

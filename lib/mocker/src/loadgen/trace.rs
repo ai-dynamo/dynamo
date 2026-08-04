@@ -139,13 +139,10 @@ fn validate_dynamo_trace_block_size(expected: Option<usize>, embedded: usize) ->
 
 fn single_turn_request_uuid(_request_ordinal: usize) -> Uuid {
     #[cfg(feature = "replay-bench")]
-    {
-        Uuid::from_u128(_request_ordinal as u128 + 1)
+    if crate::replay::canonical_replay_active() {
+        return Uuid::from_u128(_request_ordinal as u128 + 1);
     }
-    #[cfg(not(feature = "replay-bench"))]
-    {
-        Uuid::new_v4()
-    }
+    Uuid::new_v4()
 }
 
 pub(super) fn validate_synthesizable_prompt(
@@ -179,6 +176,18 @@ pub(super) fn synthesize_trace_tokens(
 ) -> Result<Vec<u32>> {
     validate_synthesizable_prompt(input_length, hash_ids, trace_block_size)?;
 
+    Ok(synthesize_validated_trace_tokens(
+        input_length,
+        hash_ids,
+        trace_block_size,
+    ))
+}
+
+pub(super) fn synthesize_validated_trace_tokens(
+    input_length: usize,
+    hash_ids: &[u32],
+    trace_block_size: usize,
+) -> Vec<u32> {
     let mut tokens = Vec::with_capacity(input_length);
     for &hash_id in hash_ids {
         let remaining = input_length - tokens.len();
@@ -191,15 +200,8 @@ pub(super) fn synthesize_trace_tokens(
         }
     }
 
-    if tokens.len() != input_length {
-        bail!(
-            "failed to synthesize {} tokens from {} hash_ids",
-            input_length,
-            hash_ids.len()
-        );
-    }
-
-    Ok(tokens)
+    debug_assert_eq!(tokens.len(), input_length);
+    tokens
 }
 
 fn trace_to_replay_hashes(
