@@ -41,6 +41,7 @@ configure_dynamo_logging(service_name="riva-asr")
 
 DEFAULT_LANGUAGE_CODE = "en-US"
 DEFAULT_RIVA_MODEL = ""
+DEFAULT_COMMIT_PADDING_MS = 0
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_MODEL_NAME = "nemotron-asr-streaming"
 
@@ -57,6 +58,12 @@ def _parse_args() -> argparse.Namespace:
         "--riva-model",
         default=DEFAULT_RIVA_MODEL,
         help="Riva model name (empty lets the NIM choose).",
+    )
+    parser.add_argument(
+        "--commit-padding-ms",
+        type=int,
+        default=DEFAULT_COMMIT_PADDING_MS,
+        help="Trailing PCM silence sent to Riva when a turn is committed.",
     )
     parser.add_argument(
         "--timeout-s",
@@ -91,6 +98,7 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
                 model_name=args.model_name,
                 riva_model=args.riva_model,
                 language_code=args.language_code,
+                commit_padding_ms=args.commit_padding_ms,
                 timeout_s=args.timeout_s,
             )
         }

@@ -20,7 +20,11 @@ from types import SimpleNamespace
 
 import pytest
 from riva.client import AudioEncoding
-from riva_nim.realtime_asr import RivaRealtimeTranscriptionHandler
+from riva_nim.realtime_asr import (
+    OPENAI_PCM_SAMPLE_RATE,
+    PCM16_BYTES_PER_SAMPLE,
+    RivaRealtimeTranscriptionHandler,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -80,12 +84,15 @@ async def _drive(handler, events):
     return [event async for event in handler.generate(request_stream(), _Context())]
 
 
-def _handler(service: _FakeAsrService) -> RivaRealtimeTranscriptionHandler:
+def _handler(
+    service: _FakeAsrService, *, commit_padding_ms: int = 0
+) -> RivaRealtimeTranscriptionHandler:
     return RivaRealtimeTranscriptionHandler(
         asr_service=service,
         model_name=MODEL,
         riva_model="",
         language_code="en-US",
+        commit_padding_ms=commit_padding_ms,
         timeout_s=1.0,
     )
 
@@ -118,6 +125,28 @@ async def test_streams_pcm_and_emits_canonical_transcription_events():
     assert config.encoding == AudioEncoding.LINEAR_PCM
     assert config.sample_rate_hertz == 24_000
     assert config.language_code == "en-US"
+
+
+async def test_appends_configured_silence_before_closing_riva_stream():
+    service = _FakeAsrService()
+    pcm = b"\x00\x01" * 320
+    padding_ms = 20
+
+    result = await _drive(
+        _handler(service, commit_padding_ms=padding_ms),
+        [
+            {"type": "session.update", "session": _session()},
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(pcm).decode(),
+            },
+            {"type": "input_audio_buffer.commit"},
+        ],
+    )
+
+    padding_bytes = OPENAI_PCM_SAMPLE_RATE * PCM16_BYTES_PER_SAMPLE * padding_ms // 1000
+    assert service.audio == pcm + bytes(padding_bytes)
+    assert result[-1]["transcript"] == "hello world"
 
 
 async def test_does_not_append_revised_interim_hypothesis():

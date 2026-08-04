@@ -43,6 +43,10 @@ spec:
               args:
                 - --riva-server
                 - localhost:50052
+                - --riva-startup-timeout-s
+                - "3600"
+                - --commit-padding-ms
+                - "1000"
                 - --model-name
                 - nemotron-asr-streaming
               resources:
@@ -150,6 +154,8 @@ spec:
               args:
                 - --riva-server
                 - localhost:50051
+                - --riva-startup-timeout-s
+                - "3600"
                 - --model-name
                 - nvidia/magpie-tts-multilingual
                 - --sample-rate-hz
