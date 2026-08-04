@@ -1964,6 +1964,23 @@ fn accumulate_reasoning_dispatch(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+fn apply_chat_completions_request_template(
+    request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
+    template: Option<&RequestTemplate>,
+) {
+    if let Some(template) = template {
+        if request.model.is_empty() {
+            request.model = template.model.clone();
+        }
+        if request.temperature.is_none() {
+            request.temperature = Some(template.temperature);
+        }
+        if request.max_completion_tokens.unwrap_or(0) == 0 {
+            request.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+}
+
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -1980,17 +1997,7 @@ async fn chat_completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // Apply template values first to resolve the model before creating metrics guards
-    if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
-        }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
-            request.inner.temperature = Some(template.temperature);
-        }
-        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
-            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
-        }
-    }
+    apply_chat_completions_request_template(&mut request.inner, template.as_ref());
     // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -3802,6 +3809,29 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn test_chat_completions_template_preserves_explicit_zero_temperature() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        assert_eq!(request.temperature, Some(0.0));
+        assert_eq!(request.model, "template-model");
+        assert_eq!(request.max_completion_tokens, Some(128));
+
+        request.temperature = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.temperature, Some(0.7));
+    }
 
     #[test]
     fn test_is_json_content_type() {
