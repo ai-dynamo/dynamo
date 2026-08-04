@@ -355,7 +355,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 
 	result := r.checkResourcesReadiness(resources)
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dgd, dcds); err != nil {
+		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dgd, dcds, selection); err != nil {
 			return ReconcileResult{}, err
 		}
 	}
@@ -443,10 +443,14 @@ func applyDisaggregatedSetCheckpointStartupPolicies(
 		}
 	}
 	for componentName := range selection.componentToRole {
-		if gateSelectedRoles {
-			dcds[componentName].Spec.Replicas = ptr.To(int32(0))
+		dcd := dcds[componentName]
+		if dcd == nil {
+			return false, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
-		selection.desiredReplicas[componentName] = desiredComponentReplicas(&dcds[componentName].Spec.DynamoComponentDeploymentSharedSpec)
+		if gateSelectedRoles {
+			dcd.Spec.Replicas = ptr.To(int32(0))
+		}
+		selection.desiredReplicas[componentName] = desiredComponentReplicas(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	}
 	return gateSelectedRoles, nil
 }
@@ -771,22 +775,49 @@ func (r *DynamoGraphDeploymentReconciler) deleteStaleDisaggregatedSetComponentSe
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	selection disaggregatedSetSelection,
 ) error {
-	for _, componentName := range sortedDCDKeys(dcds) {
-		serviceName := dynamo.NormalizeKubeResourceName(dcds[componentName].Name)
-		service := &corev1.Service{}
-		key := types.NamespacedName{Name: serviceName, Namespace: dgd.Namespace}
-		if err := r.Get(ctx, key, service); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("failed to get component service %s: %w", key, err)
+	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	desiredServiceNames := map[string]struct{}{}
+	for _, componentName := range sortedSelectionComponentNames(selection) {
+		dcd := dcds[componentName]
+		if dcd == nil {
+			return fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
+		svc, deleteRequested, err := renderer.generateService(ctx, dcd)
+		if err != nil {
+			return fmt.Errorf("failed to render desired component Service for %q: %w", componentName, err)
+		}
+		if deleteRequested || svc == nil {
+			continue
+		}
+		desiredServiceNames[svc.Name] = struct{}{}
+	}
+
+	serviceList := &corev1.ServiceList{}
+	if err := r.List(ctx, serviceList, client.InNamespace(dgd.Namespace), client.MatchingLabels{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	}); err != nil {
+		return fmt.Errorf("failed to list DisaggregatedSet component Services: %w", err)
+	}
+
+	for i := range serviceList.Items {
+		service := &serviceList.Items[i]
 		if !isControlledByBetaDGD(service, dgd) {
 			continue
 		}
+		componentName := service.Labels[consts.KubeLabelDynamoComponent]
+		if componentName == "" {
+			continue
+		}
+		if _, selected := selection.componentToRole[componentName]; !selected {
+			continue
+		}
+		if _, desired := desiredServiceNames[service.Name]; desired {
+			continue
+		}
 		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete stale component service %s: %w", key, err)
+			return fmt.Errorf("failed to delete stale component service %s/%s: %w", service.Namespace, service.Name, err)
 		}
 	}
 	return nil

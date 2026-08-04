@@ -124,17 +124,20 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 		desiredReplicas: map[string]int32{"prefill": 2, "decode": 2},
 	}
 
+	t.Log("stale observedGeneration keeps the DisaggregatedSet unready")
 	ready, reason, statuses := checkDisaggregatedSetReadiness(ds, selection)
 	require.False(t, ready)
 	require.Contains(t, reason, "observed generation")
 	require.Equal(t, int32(2), ptr.Deref(statuses["prefill"].ReadyReplicas, 0))
 
+	t.Log("lagging decode role readiness keeps the DisaggregatedSet unready")
 	ds.Object["status"].(map[string]any)["observedGeneration"] = int64(3)
 	ready, reason, statuses = checkDisaggregatedSetReadiness(ds, selection)
 	require.False(t, ready)
 	require.Contains(t, reason, "decode")
 	require.Equal(t, int32(1), ptr.Deref(statuses["decode"].ReadyReplicas, 0))
 
+	t.Log("all roles at desired ready replicas report ready")
 	ds.Object["status"].(map[string]any)["roleStatuses"] = []any{
 		map[string]any{"name": "prefill", "replicas": int64(2), "updatedReplicas": int64(2), "readyReplicas": int64(2)},
 		map[string]any{"name": "decode", "replicas": int64(2), "updatedReplicas": int64(2), "readyReplicas": int64(2)},
@@ -176,6 +179,7 @@ func TestDisaggregatedSetPredicatesObserveRoutingMetadata(t *testing.T) {
 }
 
 func TestWorkloadRoutingAnnotationsChanged(t *testing.T) {
+	t.Log("no change in routing annotations does not trigger update predicate")
 	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
@@ -187,6 +191,7 @@ func TestWorkloadRoutingAnnotationsChanged(t *testing.T) {
 	newDGD := oldDGD.DeepCopy()
 	require.False(t, workloadRoutingAnnotationsChanged(updateEvent(oldDGD, newDGD)))
 
+	t.Log("enabling DisaggregatedSet triggers update predicate")
 	newDGD = oldDGD.DeepCopy()
 	newDGD.Annotations[consts.KubeAnnotationEnableDisaggregatedSet] = consts.KubeLabelValueTrue
 	require.True(t, workloadRoutingAnnotationsChanged(updateEvent(oldDGD, newDGD)))
