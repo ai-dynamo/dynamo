@@ -107,6 +107,37 @@ class ScheduledRequestMetrics(
     # computed chunks for chunked prefill continuations.
     sum_prefill_kv_tokens: int = 0
 
+    # Population variance of per-request KV read tokens across prefill
+    # requests -- the second moment matching sum_prefill_kv_tokens, mirroring
+    # var_decode_kv_tokens on the decode side.
+    #
+    # Together with var_prefill_length (variance of the FULL prompt length
+    # s + p) this pins the intra-batch attention work of a heterogeneous
+    # prefill batch. Writing s for freshly computed tokens and p for KV read
+    # tokens, full-attention work is the trapezoid s*p + s^2/2 per request,
+    # and the excess over an equal-length batch with the same totals is
+    #
+    #     n * [Cov(s, p) + Var(s)/2] = (n/2) * [Var(s + p) - Var(p)]
+    #
+    # which is zero exactly when the batch is uniform. Consumers that only
+    # ever see equal-length batches read 0.0 here and are unaffected.
+    var_prefill_kv_tokens: float = 0.0
+
+    # Order statistics of the prefill batch, in the same units as
+    # sum_prefill_kv_tokens / var_prefill_length.
+    #
+    # Moments alone cannot decide which regime a batch is in when attention is
+    # sparse: with a top-k indexer, a request whose KV read already exceeds k
+    # behaves differently from one whose whole prompt still fits under k, and
+    # "every request is above" / "every request is below" are statements about
+    # the extremes, not the mean. These two scalars are the minimum needed to
+    # classify the batch without shipping per-request lengths.
+    #
+    # min over requests of the KV read tokens.
+    min_prefill_kv_tokens: int = 0
+    # max over requests of the FULL prompt length (KV read + freshly computed).
+    max_prefill_length: int = 0
+
     # Number of decode requests (generating output tokens).
     num_decode_requests: int = 0
 
