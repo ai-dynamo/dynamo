@@ -4,7 +4,8 @@
 use uuid::Uuid;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
-use super::super::runtime_utils::WorkerCompletionPayload;
+use super::super::events::WorkerCompletionPayload;
+use super::super::evidence::{KvIngestBoundary, WorkerPool};
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestPayload;
@@ -68,6 +69,15 @@ pub(in crate::replay) trait ReplayEngineObservation {
     fn stored_hashes(_events: &Self::Batch) -> Vec<u64> {
         Vec::new()
     }
+
+    fn record_ingestion(
+        _events: &Self::Batch,
+        _pool: WorkerPool,
+        _boundary: KvIngestBoundary,
+        _at_ms: f64,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 impl ReplayEngineObservation for NoEngineEvents {
@@ -111,9 +121,9 @@ pub(in crate::replay) struct ObservedOffloadEffects<Events: EngineEventBatch> {
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct ScheduledWorkerCompletion<Events: EngineEventBatch = ()> {
+pub(in crate::replay::offline) struct ScheduledWorkerCompletions<Events: EngineEventBatch = ()> {
     pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) payload: WorkerCompletionPayload<Events>,
+    pub(in crate::replay::offline) payloads: Vec<WorkerCompletionPayload<Events>>,
 }
 
 #[derive(Debug, Default)]
@@ -121,16 +131,40 @@ pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = (
     pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
     pub(in crate::replay::offline) pass_start_events: Events,
     pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
-    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion<Events>>,
+    pub(in crate::replay::offline) scheduled_completion: Option<ScheduledWorkerCompletions<Events>>,
     pub(in crate::replay::offline) progress: EngineProgress,
 }
 
 impl<Events: EngineEventBatch> EngineEffects<Events> {
+    pub(in crate::replay::offline) fn schedule_completion(
+        &mut self,
+        at_ms: f64,
+        payload: WorkerCompletionPayload<Events>,
+        capacity_hint: usize,
+    ) {
+        assert!(
+            capacity_hint > 0,
+            "scheduled completion capacity hint must be non-zero"
+        );
+        let scheduled =
+            self.scheduled_completion
+                .get_or_insert_with(|| ScheduledWorkerCompletions {
+                    at_ms,
+                    payloads: Vec::with_capacity(capacity_hint),
+                });
+        assert_eq!(
+            scheduled.at_ms.to_bits(),
+            at_ms.to_bits(),
+            "offline replay engine effects contain mismatched completion timestamps"
+        );
+        scheduled.payloads.push(payload);
+    }
+
     pub(in crate::replay::offline) fn is_empty(&self) -> bool {
         self.admissions.is_empty()
             && self.pass_start_events.is_empty()
             && self.immediate_completions.is_empty()
-            && self.scheduled_completions.is_empty()
+            && self.scheduled_completion.is_none()
             && !self.progress.made_progress
     }
 }
@@ -144,11 +178,19 @@ impl<Events: EngineEventBatch> EngineEffects<Events> {
 #[derive(Debug, Clone)]
 pub struct TrafficStats {
     pub duration_s: f64,
+    /// Requests offered to the replay runtime during the window. This matches
+    /// the live planner's `requests_started_total` demand signal.
     pub num_req: usize,
     pub avg_isl: f64,
     pub avg_osl: f64,
     pub avg_ttft_ms: f64,
     pub avg_itl_ms: f64,
+    /// Completed, non-rejected requests behind `avg_isl` and `avg_osl`.
+    pub shape_count: usize,
+    /// Completed requests behind `avg_ttft_ms`.
+    pub ttft_count: usize,
+    /// Completed requests behind `avg_itl_ms`.
+    pub itl_count: usize,
     /// Mean visible tokens produced per decode request-forward, including the
     /// base token. ``None`` means the window had no decode forwards.
     pub avg_accept_length: Option<f64>,
@@ -176,12 +218,13 @@ pub struct TrafficStats {
 /// `TrafficObservation` (num_req, avg ISL, avg OSL, avg latencies, avg
 /// KV hit rate over a window).
 ///
-/// Latency samples are tracked independently of request counts: a request
-/// only contributes to ``total_ttft_ms`` / ``ttft_count`` if a positive TTFT
-/// was recorded, and similarly for ITL.  This means ``avg_ttft_ms`` and
-/// ``avg_itl_ms`` reflect only requests that actually produced the sample,
-/// rather than silently underestimating when some requests lack latency
-/// data (e.g. requests that fail before emitting a token).
+/// Offered request counts are recorded at arrival, matching the live
+/// planner's `requests_started_total` signal. Shape and latency samples are
+/// recorded independently at completion: a completed, non-rejected request
+/// contributes to ISL/OSL, and only contributes to ``total_ttft_ms`` /
+/// ``ttft_count`` if a positive TTFT was recorded (similarly for ITL). This
+/// keeps demand independent of deployment capacity while preserving actual
+/// output lengths and completed-request latency semantics.
 ///
 /// KV hit-rate observations come from the router at admission time (not
 /// completion) and are recorded as per-request ratios, matching the real
@@ -191,9 +234,10 @@ pub struct TrafficStats {
 #[derive(Debug)]
 pub(in crate::replay::offline) struct TrafficAccumulator {
     window_start_ms: f64,
-    num_req: usize,
+    offered_count: usize,
     total_isl: usize,
     total_osl: usize,
+    shape_count: usize,
     total_ttft_ms: f64,
     total_itl_ms: f64,
     ttft_count: usize,
@@ -213,9 +257,10 @@ impl TrafficAccumulator {
     pub(in crate::replay::offline) fn new() -> Self {
         Self {
             window_start_ms: 0.0,
-            num_req: 0,
+            offered_count: 0,
             total_isl: 0,
             total_osl: 0,
+            shape_count: 0,
             total_ttft_ms: 0.0,
             total_itl_ms: 0.0,
             ttft_count: 0,
@@ -227,16 +272,21 @@ impl TrafficAccumulator {
         }
     }
 
-    /// Record one completed request with optional latency data.
-    pub(in crate::replay::offline) fn on_request(
+    /// Record one request offered to the replay runtime.
+    pub(in crate::replay::offline) fn on_arrival(&mut self) {
+        self.offered_count += 1;
+    }
+
+    /// Record one completed, non-rejected request with optional latency data.
+    pub(in crate::replay::offline) fn on_completion(
         &mut self,
         input_tokens: usize,
         output_tokens: usize,
         latencies: Option<(f64, f64)>,
     ) {
-        self.num_req += 1;
         self.total_isl += input_tokens;
         self.total_osl += output_tokens;
+        self.shape_count += 1;
         if let Some((ttft_ms, mean_itl_ms)) = latencies {
             if ttft_ms > 0.0 {
                 self.total_ttft_ms += ttft_ms;
@@ -288,14 +338,14 @@ impl TrafficAccumulator {
     /// Drain the accumulator at the given simulated time, resetting counters.
     pub(in crate::replay::offline) fn drain(&mut self, now_ms: f64) -> TrafficStats {
         let duration_s = (now_ms - self.window_start_ms) / 1000.0;
-        let num_req = self.num_req;
-        let avg_isl = if num_req > 0 {
-            self.total_isl as f64 / num_req as f64
+        let num_req = self.offered_count;
+        let avg_isl = if self.shape_count > 0 {
+            self.total_isl as f64 / self.shape_count as f64
         } else {
             0.0
         };
-        let avg_osl = if num_req > 0 {
-            self.total_osl as f64 / num_req as f64
+        let avg_osl = if self.shape_count > 0 {
+            self.total_osl as f64 / self.shape_count as f64
         } else {
             0.0
         };
@@ -321,12 +371,16 @@ impl TrafficAccumulator {
         };
         // Capture the sample counts before the reset so a consumer that merges
         // several drained windows can reconstruct exact count-weighted means.
+        let shape_count = self.shape_count;
+        let ttft_count = self.ttft_count;
+        let itl_count = self.itl_count;
         let hit_rate_count = self.hit_rate_count;
         let accept_length_forward_count = self.accept_length_forward_count;
         self.window_start_ms = now_ms;
-        self.num_req = 0;
+        self.offered_count = 0;
         self.total_isl = 0;
         self.total_osl = 0;
+        self.shape_count = 0;
         self.total_ttft_ms = 0.0;
         self.total_itl_ms = 0.0;
         self.ttft_count = 0;
@@ -342,6 +396,9 @@ impl TrafficAccumulator {
             avg_osl,
             avg_ttft_ms,
             avg_itl_ms,
+            shape_count,
+            ttft_count,
+            itl_count,
             avg_accept_length,
             avg_kv_hit_rate,
             hit_rate_count,
@@ -367,9 +424,11 @@ mod tests {
     #[test]
     fn traffic_accumulator_drain_with_no_admissions_reports_zero_hit_rate() {
         let mut acc = TrafficAccumulator::new();
-        acc.on_request(100, 50, None);
+        acc.on_arrival();
+        acc.on_completion(100, 50, None);
         let stats = acc.drain(1_000.0);
         assert_eq!(stats.num_req, 1);
+        assert_eq!(stats.shape_count, 1);
         assert!((stats.avg_isl - 100.0).abs() < 1e-9);
         assert!((stats.avg_osl - 50.0).abs() < 1e-9);
         assert_eq!(stats.avg_kv_hit_rate, 0.0);
@@ -382,8 +441,10 @@ mod tests {
         // Small request: mostly hit. Big request: no hit.
         acc.on_admission(3, 4); // per-request ratio: 0.75
         acc.on_admission(0, 12); // per-request ratio: 0.0
-        acc.on_request(256, 32, None);
-        acc.on_request(768, 32, None);
+        acc.on_arrival();
+        acc.on_arrival();
+        acc.on_completion(256, 32, None);
+        acc.on_completion(768, 32, None);
         let stats = acc.drain(1_000.0);
         assert_eq!(stats.num_req, 2);
         // Per-request mean matches the real router's Prometheus histogram:
@@ -424,7 +485,8 @@ mod tests {
     fn traffic_accumulator_resets_counters_on_drain() {
         let mut acc = TrafficAccumulator::new();
         acc.on_admission(5, 10);
-        acc.on_request(100, 50, None);
+        acc.on_arrival();
+        acc.on_completion(100, 50, None);
         let _ = acc.drain(1_000.0);
         // Second drain on the same accumulator should see no state carried over.
         let stats = acc.drain(2_000.0);
@@ -439,9 +501,32 @@ mod tests {
     #[test]
     fn traffic_accumulator_retains_zero_millisecond_itl_samples() {
         let mut acc = TrafficAccumulator::new();
-        acc.on_request(10, 3, Some((1.0, 0.0)));
-        acc.on_request(10, 3, Some((1.0, 10.0)));
+        acc.on_arrival();
+        acc.on_arrival();
+        acc.on_completion(10, 3, Some((1.0, 0.0)));
+        acc.on_completion(10, 3, Some((1.0, 10.0)));
         let stats = acc.drain(1_000.0);
         assert_eq!(stats.avg_itl_ms, 5.0);
+    }
+
+    #[test]
+    fn traffic_accumulator_reports_offered_demand_before_completion() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_arrival();
+
+        let offered = acc.drain(1_000.0);
+        assert_eq!(offered.num_req, 1);
+        assert_eq!(offered.shape_count, 0);
+        assert_eq!(offered.avg_isl, 0.0);
+        assert_eq!(offered.avg_osl, 0.0);
+
+        acc.on_completion(100, 50, Some((2_000.0, 20.0)));
+        let completed = acc.drain(2_000.0);
+        assert_eq!(completed.num_req, 0);
+        assert_eq!(completed.shape_count, 1);
+        assert_eq!(completed.avg_isl, 100.0);
+        assert_eq!(completed.avg_osl, 50.0);
+        assert_eq!(completed.ttft_count, 1);
+        assert_eq!(completed.itl_count, 1);
     }
 }

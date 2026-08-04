@@ -16,6 +16,7 @@ from typing import (
     Set,
     Tuple,
     TypedDict,
+    overload,
 )
 
 from typing_extensions import NotRequired
@@ -1718,164 +1719,6 @@ class AicPerfConfig:
     ) -> None:
         ...
 
-class AicEngineConfig:
-    """AIC model/backend identity used by native forward-pass estimates."""
-
-    def __init__(
-        self,
-        model_name: str,
-        backend: str,
-        system_name: str = "h200_sxm",
-        backend_version: Optional[str] = None,
-        tp_size: int = 1,
-        pp_size: int = 1,
-        moe_tp_size: Optional[int] = None,
-        moe_ep_size: Optional[int] = None,
-        attention_dp_size: Optional[int] = None,
-        model_arch: Optional[str] = None,
-        weight_dtype: Optional[str] = None,
-        moe_dtype: Optional[str] = None,
-        activation_dtype: Optional[str] = None,
-        kv_cache_dtype: Optional[str] = None,
-        kv_block_size: Optional[int] = None,
-        extra: Optional[dict[str, str]] = None,
-    ) -> None:
-        ...
-
-class EnginePerfLimits:
-    """Engine limits used by engine-level helper queries and default correction bounds."""
-
-    max_num_batched_tokens: int
-    max_num_seqs: int
-    max_kv_tokens: int
-
-    def __init__(
-        self,
-        max_num_batched_tokens: int = 8192,
-        max_num_seqs: int = 512,
-        max_kv_tokens: int = 2000000,
-    ) -> None:
-        ...
-
-class RustEnginePerfOptions:
-    """Online tuning options for RustEnginePerfModel."""
-
-    def __init__(
-        self,
-        max_observations: int = 64,
-        min_observations: int = 5,
-        bucket_count: int = 16,
-        max_num_tokens: int = 8192,
-        max_batch_size: int = 512,
-        max_kv_tokens: int = 2000000,
-    ) -> None:
-        ...
-
-class OptimizationTarget:
-    Throughput: "OptimizationTarget"
-    Latency: "OptimizationTarget"
-
-class EngineCapacityRequest:
-    """Request shape and SLA policy for find_engine_capacity_rps."""
-
-    def __init__(
-        self,
-        isl: int,
-        osl: int,
-        ttft_sla_ms: Optional[float] = None,
-        itl_sla_ms: Optional[float] = None,
-        e2e_latency_sla_ms: Optional[float] = None,
-        kv_hit_rate: Optional[float] = None,
-        optimization_target: OptimizationTarget = OptimizationTarget.Throughput,
-    ) -> None:
-        ...
-
-class EngineCapacity:
-    """Per-engine capacity result."""
-
-    rps: float
-    ttft_ms: Optional[float]
-    itl_ms: Optional[float]
-    e2e_latency_ms: Optional[float]
-    eligible: bool
-
-class RustEnginePerfModel:
-    """Engine-level performance model backed by AIC forward-pass modeling."""
-
-    @staticmethod
-    def best_available(
-        *,
-        engine_args: Optional["MockEngineArgs"] = None,
-        aic_config: Optional[AicEngineConfig] = None,
-        worker_type: Optional[str] = None,
-        limits: Optional[EnginePerfLimits] = None,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build from all available inputs; explicit AIC config is preferred, then engine args, then regression-only."""
-        ...
-
-    @staticmethod
-    def from_regression(
-        *,
-        worker_type: str,
-        limits: EnginePerfLimits,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build a regression-only model that learns from observed FPM wall times."""
-        ...
-
-    @staticmethod
-    def from_native(
-        *,
-        aic_config: AicEngineConfig,
-        worker_type: str,
-        limits: EnginePerfLimits,
-        options: Optional[RustEnginePerfOptions] = None,
-        bootstrap_fpms: Optional[Any] = None,
-    ) -> "RustEnginePerfModel":
-        """Build a strict native AIC model; unsupported AIC configs raise an error."""
-        ...
-
-    def estimate_forward_pass_time(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate one scheduled forward-pass iteration in seconds from current-version FPMs."""
-        ...
-
-    def tune_with_fpms(self, iterations: Any) -> None:
-        """Tune with current-version observed FPMs: outer list is iterations, inner list is attention-DP ranks."""
-        ...
-
-    def diagnostics(self) -> str:
-        """Return AIC diagnostics as a JSON string."""
-        ...
-
-    def get_min_correction_factor(self) -> Optional[float]:
-        """Return the minimum ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_max_correction_factor(self) -> Optional[float]:
-        """Return the maximum ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_avg_correction_factor(self) -> Optional[float]:
-        """Return the average ready native correction factor, or None if no factor is ready."""
-        ...
-
-    def get_queued_prefill_time(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate queued prefill drain time; adjust queued tokens outside the shim for KV reuse."""
-        ...
-
-    def get_scheduled_decode_itl(self, metrics_by_rank: Any) -> Optional[float]:
-        """Estimate scheduled decode ITL in seconds; aggregated workers include scheduled or learned average prefill load."""
-        ...
-
-    def find_engine_capacity_rps(
-        self, request: EngineCapacityRequest
-    ) -> Optional[EngineCapacity]:
-        """Search sustainable per-engine RPS; inspect eligible to see whether eligible SLA metrics passed."""
-        ...
-
 class KvRouterConfig:
     """Values for KV router"""
 
@@ -2552,6 +2395,33 @@ async def run_input(
     """
     ...
 
+class _OfflineReplayResult:
+    @property
+    def summary(self) -> Dict[str, Any]: ...
+    @property
+    def per_request(self) -> Optional[List[Dict[str, Any]]]: ...
+    @property
+    def coverage(self) -> Dict[str, Any]: ...
+    @property
+    def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
+
+@overload
+def run_mocker_trace_replay(
+    trace_files: Sequence[str | os.PathLike[str]],
+    *args: Any,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Any,
+) -> _OfflineReplayResult: ...
+
+@overload
+def run_mocker_trace_replay(
+    trace_files: Sequence[str | os.PathLike[str]],
+    *args: Any,
+    replay_mode: Literal["online"],
+    **kwargs: Any,
+) -> Dict[str, Any]: ...
+
+@overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,
@@ -2584,13 +2454,18 @@ def run_mocker_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
-) -> Dict[str, Any]:
+) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
     Supports aggregated or disaggregated engine configurations.
 
-    When ``report_jsonl_path`` is provided (offline disagg replay only), one
+    Offline replay returns an internal native result consumed by
+    ``dynamo.replay``; online replay retains the summary dictionary.
+
+    When ``report_jsonl_path`` is provided, one
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
@@ -2605,6 +2480,27 @@ def run_mocker_trace_replay(
     """
     ...
 
+@overload
+def run_mocker_synthetic_trace_replay(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    *args: Any,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Any,
+) -> _OfflineReplayResult: ...
+
+@overload
+def run_mocker_synthetic_trace_replay(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    *args: Any,
+    replay_mode: Literal["online"],
+    **kwargs: Any,
+) -> Dict[str, Any]: ...
+
+@overload
 def run_mocker_synthetic_trace_replay(
     input_tokens: int,
     output_tokens: int,
@@ -2632,9 +2528,14 @@ def run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
-) -> Dict[str, Any]:
+) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
+
+    Offline replay returns an internal native result consumed by
+    ``dynamo.replay``; online replay retains the summary dictionary.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys
@@ -3446,6 +3347,7 @@ class backend:
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
+            default_thinking_mode: Optional[str] = None,
         ) -> None: ...
 
     class Worker:

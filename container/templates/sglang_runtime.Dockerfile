@@ -13,16 +13,6 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
-{% if device != "xpu" %}
-# SGLang 0.5.15 JIT-compiles its native HiCache hash extension, which includes
-# OpenSSL headers and links libcrypto.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libssl-dev
-{% endif %}
-
 ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
@@ -142,12 +132,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 {% if context.sglang.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# SGLang runtime dependency stack.
+# SGLang runtime dependency stack. google-crc32c is imported eagerly by the MX
+# sglang loader (>=0.5.0) and is not in the SGLang base image, so install it
+# alongside; the import check below fails the build on any future --no-deps gap.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
     export PIP_CACHE_DIR=/root/.cache/pip; \
     pip install --break-system-packages --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    pip install --break-system-packages "google-crc32c>=1.5.0"; \
+    python3 -c "import modelexpress.engines.sglang"
 {% endif %}
 {% endif %}
 {% endif %}

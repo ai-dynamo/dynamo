@@ -82,6 +82,7 @@ class TestVllmKvEventsApi:
         9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
         10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
         11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
+        12. locality (per-tier storage locality; optional for older vLLM)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -208,6 +209,8 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
         if _has_kv_cache_spec_sliding_window(BlockStored):
             event_kwargs["kv_cache_spec_sliding_window"] = 128
+        if _has_locality(BlockStored):
+            event_kwargs["locality"] = "LOCAL"
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
@@ -229,6 +232,8 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_kind"] == "full_attention"
         if _has_kv_cache_spec_sliding_window(BlockStored):
             assert decoded["kv_cache_spec_sliding_window"] == 128
+        if _has_locality(BlockStored):
+            assert decoded["locality"] == "LOCAL"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -281,6 +286,8 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_kind"] = "full_attention"
         if _has_kv_cache_spec_sliding_window(BlockRemoved):
             event_kwargs["kv_cache_spec_sliding_window"] = 128
+        if _has_locality(BlockRemoved):
+            event_kwargs["locality"] = "REMOTE"
         event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -296,3 +303,5 @@ class TestVllmKvEventsApi:
             assert (
                 decoded["kv_cache_spec_sliding_window"] == 128
             ), "kv_cache_spec_sliding_window has wrong value"
+        if _has_locality(BlockRemoved):
+            assert decoded["locality"] == "REMOTE"

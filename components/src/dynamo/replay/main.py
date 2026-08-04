@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
-import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -15,13 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, cast
 
+import msgspec
+
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
-    AicMemoryEstimatorUnavailableError,
     _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
 )
@@ -35,15 +36,12 @@ from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
-logger = logging.getLogger(__name__)
-
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
 _DEFAULT_AIC_SYSTEM = "h200_sxm"
-_DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 _DEFAULT_VLLM_BLOCK_SIZE = 64
 
@@ -146,53 +144,42 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    try:
-        per_rank_blocks = estimate_num_gpu_blocks(
-            backend_name=aic_backend,
-            system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
-            model_path=aic_model_path,
-            tp_size=cast(int, tp_size if tp_size is not None else 1),
-            block_size=_resolve_block_size_for_capacity(raw),
-            max_num_batched_tokens=cast(
-                int,
-                max_num_batched_tokens
-                if max_num_batched_tokens is not None
-                else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            ),
-            gpu_memory_utilization=cast(
-                float,
-                gpu_memory_utilization
-                if gpu_memory_utilization is not None
-                else DEFAULT_GPU_MEMORY_UTILIZATION,
-            ),
-            mem_fraction_static=cast(
-                float,
-                mem_fraction_static
-                if mem_fraction_static is not None
-                else DEFAULT_MEM_FRACTION_STATIC,
-            ),
-            # None -> aic.py applies the TRT-LLM default (0.9).
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
-            backend_version=raw.get("aic_backend_version"),
-            moe_tp_size=raw.get("aic_moe_tp_size"),
-            moe_ep_size=raw.get("aic_moe_ep_size"),
-            attention_dp_size=raw.get("aic_attention_dp_size"),
-            gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
-            moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
-            fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
-            kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
-            comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
-        )
-    except AicMemoryEstimatorUnavailableError as exc:
-        logger.warning(
-            "AIC KV-cache capacity estimation is unavailable during replay: %s. "
-            "Falling back to default num_gpu_blocks=%d; upgrade aiconfigurator "
-            "or set num_gpu_blocks explicitly.",
-            exc,
-            _DEFAULT_NUM_GPU_BLOCKS,
-        )
-        raw["num_gpu_blocks"] = _DEFAULT_NUM_GPU_BLOCKS
-        return
+    per_rank_blocks = estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=cast(int, tp_size if tp_size is not None else 1),
+        block_size=_resolve_block_size_for_capacity(raw),
+        max_num_batched_tokens=cast(
+            int,
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        ),
+        gpu_memory_utilization=cast(
+            float,
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION,
+        ),
+        mem_fraction_static=cast(
+            float,
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC,
+        ),
+        # None -> aic.py applies the TRT-LLM default.
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        backend_version=raw.get("aic_backend_version"),
+        moe_tp_size=raw.get("aic_moe_tp_size"),
+        moe_ep_size=raw.get("aic_moe_ep_size"),
+        attention_dp_size=raw.get("aic_attention_dp_size"),
+        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
+        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
+        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
+        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
+        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
+    )
     # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
     # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
     # independent per-rank schedulers and KV pools. Keep the per-rank count; engine-wide
@@ -399,12 +386,25 @@ def _generate_aic_decode_fpms(
     return decode_fpms
 
 
+def _aic_fpm_digest(
+    prefill_fpms: list[ForwardPassMetrics],
+    decode_fpms: list[ForwardPassMetrics],
+) -> str:
+    payload = {
+        "prefill": [msgspec.to_builtins(fpm) for fpm in prefill_fpms],
+        "decode": [msgspec.to_builtins(fpm) for fpm in decode_fpms],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _prepare_planner_replay(
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
@@ -419,6 +419,9 @@ def _prepare_planner_replay(
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
     from dynamo.planner.offline.replay_adapter import create_replay_planner_adapter
+    from dynamo.planner.offline.trace_data import (
+        extract_traffic_observations_from_trace,
+    )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
     planner_config.advisory = True
@@ -440,10 +443,21 @@ def _prepare_planner_replay(
             f"planner-in-the-loop replay supports mode='agg' or 'disagg', got '{planner_config.mode}'"
         )
 
+    warmup_observations = None
+    if planner_config.load_predictor_warmup_trace is not None:
+        warmup_observations = extract_traffic_observations_from_trace(
+            planner_config.load_predictor_warmup_trace,
+            planner_config.throughput_adjustment_interval_seconds,
+        )
+
     adapter = create_replay_planner_adapter(
         planner_config=planner_config,
         capabilities=capabilities,
+        benchmark_granularity=benchmark_granularity,
+        warmup_observations=warmup_observations,
+        capture_details=capture_details,
     )
+    adapter.set_bootstrap_metadata({"status": "not_required"})
 
     # Bootstrap regression models from mocker's perf model.
     # AIC provides accurate batch-size-aware timing that works with the
@@ -475,6 +489,12 @@ def _prepare_planner_replay(
             or ref_args.aic_system is None
             or ref_args.aic_model_path is None
         ):
+            adapter.set_bootstrap_metadata(
+                {
+                    "status": "not_configured_load_only",
+                    "benchmark_granularity": benchmark_granularity,
+                }
+            )
             sys.stderr.write(
                 "Note: throughput-based scaling regression requires AIC perf model "
                 "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
@@ -534,6 +554,12 @@ def _prepare_planner_replay(
                     f"Warning: AIC session creation failed ({e}); "
                     "throughput regression will not be bootstrapped.\n"
                 )
+                adapter.set_bootstrap_metadata(
+                    {
+                        "status": "session_failed_load_only",
+                        "benchmark_granularity": benchmark_granularity,
+                    }
+                )
                 aic_session = None
 
             # Generate benchmark FPMs and load into regression.  Disagg
@@ -557,6 +583,13 @@ def _prepare_planner_replay(
                     )
                     prefill_fpms, decode_fpms = [], []
 
+                bootstrap_metadata = {
+                    "status": "installed",
+                    "benchmark_granularity": benchmark_granularity,
+                    "prefill_fpm_count": len(prefill_fpms),
+                    "decode_fpm_count": len(decode_fpms),
+                    "fpm_sha256": _aic_fpm_digest(prefill_fpms, decode_fpms),
+                }
                 if planner_config.mode == "agg":
                     # Agg regression fits on (sum_prefill_tokens, sum_decode_kv_tokens);
                     # combine prefill-only and decode-only points so both features
@@ -565,6 +598,7 @@ def _prepare_planner_replay(
                     if agg_fpms:
                         adapter.install_benchmark_fpms(agg_fpms=agg_fpms)
                     else:
+                        bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             "Warning: AIC produced no agg benchmark FPMs\n"
                         )
@@ -574,10 +608,12 @@ def _prepare_planner_replay(
                             prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
                         )
                     else:
+                        bootstrap_metadata["status"] = "empty"
                         sys.stderr.write(
                             f"Warning: AIC produced empty benchmark FPMs "
                             f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
                         )
+                adapter.set_bootstrap_metadata(bootstrap_metadata)
 
     return adapter
 
@@ -589,6 +625,7 @@ def _planner_replay_adapter(
     decode_engine_args: MockEngineArgs | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
+    capture_details: bool = True,
 ):
     """Own planner preparation, replay execution, and cleanup as one scope."""
     adapter = _prepare_planner_replay(
@@ -597,9 +634,24 @@ def _planner_replay_adapter(
         decode_engine_args=decode_engine_args,
         planner_config_arg=planner_config_arg,
         benchmark_granularity=benchmark_granularity,
+        capture_details=capture_details,
     )
     with adapter:
         yield adapter
+
+
+def _write_per_request_jsonl(
+    output_path: str | Path,
+    records: list[dict] | None,
+) -> None:
+    if records is None:
+        raise ValueError("per-request capture was not enabled")
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as output:
+        for record in records:
+            output.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+            output.write("\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -738,9 +790,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
     )
     parser.add_argument(
-        "--report-jsonl",
+        "--per-request-jsonl",
         default=None,
-        help="optional path to emit one JSON object per request for trace-file replay. "
+        help="optional path to emit one JSON object per captured request. "
         "Useful for per-request analysis (TTFT vs ISL scatter, ITL trace per request, "
         "worker-residency analysis). Each line carries arrival/admit/token timestamps, "
         "input/output lengths, full ITL series, and available prefill/decode worker indices "
@@ -839,11 +891,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
-    if args.report_jsonl is not None:
-        if args.planner_config is not None:
-            parser.error("--report-jsonl is not supported with --planner-config")
-        if not using_trace_file:
-            parser.error("--report-jsonl currently only supports trace-file replay")
+    if (
+        args.per_request_jsonl is not None
+        and args.replay_mode == "online"
+        and not using_trace_file
+    ):
+        parser.error(
+            "--per-request-jsonl with online replay currently only supports trace files"
+        )
     if args.max_sim_time_seconds is not None:
         if args.planner_config is not None:
             parser.error(
@@ -865,75 +920,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    # Planner-in-the-loop mode
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
-        if using_trace_file and args.trace_format != "mooncake":
-            parser.error("--planner-config only supports --trace-format=mooncake")
+        if using_trace_file and args.trace_format not in ("mooncake", "dynamo"):
+            parser.error(
+                "--planner-config only supports --trace-format=mooncake or dynamo"
+            )
 
-        replay_options = {
-            "extra_engine_args": extra_engine_args,
-            "prefill_engine_args": prefill_engine_args,
-            "decode_engine_args": decode_engine_args,
-            "router_config": router_config,
-            "aic_perf_config": aic_perf_config,
-            "num_workers": args.num_workers,
-            "num_prefill_workers": args.num_prefill_workers,
-            "num_decode_workers": args.num_decode_workers,
-            "replay_concurrency": args.replay_concurrency,
-            "replay_mode": args.replay_mode,
-            "router_mode": args.router_mode,
-            "arrival_speedup_ratio": args.arrival_speedup_ratio,
-            "model_name": args.model_name,
-            "sla_ttft_ms": args.sla_ttft_ms,
-            "sla_itl_ms": args.sla_itl_ms,
-            "sla_e2e_ms": args.sla_e2e_ms,
-            "planner_config": args.planner_config,
-            "benchmark_granularity": args.benchmark_granularity,
-        }
-        if using_trace_file:
-            planner_report = run_trace_replay(
-                args.trace_files,
-                trace_block_size=args.trace_block_size,
-                trace_format=args.trace_format,
-                trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
-                trace_num_prefix_groups=args.trace_num_prefix_groups,
-                **replay_options,
-            )
-        else:
-            planner_report = run_synthetic_trace_replay(
-                input_tokens=args.input_tokens,
-                output_tokens=args.output_tokens,
-                request_count=args.request_count,
-                request_rate=args.request_rate,
-                arrival_interval_ms=args.arrival_interval_ms,
-                arrival_seed=args.arrival_seed,
-                turns_per_session=args.turns_per_session,
-                shared_prefix_ratio=args.shared_prefix_ratio,
-                num_prefix_groups=args.num_prefix_groups,
-                inter_turn_delay_ms=args.inter_turn_delay_ms,
-                **replay_options,
-            )
-        report = planner_report.trace_report
-        if planner_report.scaling_events:
-            sys.stdout.write("\nScaling events:\n")
-            for event in planner_report.scaling_events:
-                sys.stdout.write(
-                    f"  t={event.at_s:.1f}s [{event.component}]: "
-                    f"{event.from_count} -> {event.to_count} workers"
-                    f" ({event.reason})\n"
-                )
-        report_path = write_report_json(report, args.report_json)
-        sys.stdout.write(format_report_table(report))
-        sys.stdout.write("\n")
-        sys.stdout.write(f"Saved full report to: {report_path}\n")
-        sys.stdout.write(f"Planner ticks: {planner_report.total_ticks}\n")
-        if planner_report.html_report_path:
-            sys.stdout.write(
-                f"Planner diagnostics report: {planner_report.html_report_path}\n"
-            )
-        return 0
+    capture_per_request = (
+        args.replay_mode == "offline" and args.per_request_jsonl is not None
+    )
+    replay_options = {
+        "extra_engine_args": extra_engine_args,
+        "prefill_engine_args": prefill_engine_args,
+        "decode_engine_args": decode_engine_args,
+        "router_config": router_config,
+        "aic_perf_config": aic_perf_config,
+        "num_workers": args.num_workers,
+        "num_prefill_workers": args.num_prefill_workers,
+        "num_decode_workers": args.num_decode_workers,
+        "replay_concurrency": args.replay_concurrency,
+        "replay_mode": args.replay_mode,
+        "router_mode": args.router_mode,
+        "arrival_speedup_ratio": args.arrival_speedup_ratio,
+        "model_name": args.model_name,
+        "sla_ttft_ms": args.sla_ttft_ms,
+        "sla_itl_ms": args.sla_itl_ms,
+        "sla_e2e_ms": args.sla_e2e_ms,
+        "planner_config": args.planner_config,
+        "benchmark_granularity": args.benchmark_granularity,
+        "capture_per_request": capture_per_request,
+    }
 
     if using_trace_file:
         max_sim_time_ms = (
@@ -943,46 +961,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         report = run_trace_replay(
             args.trace_files,
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            router_config=router_config,
-            aic_perf_config=aic_perf_config,
-            num_workers=args.num_workers,
-            num_prefill_workers=args.num_prefill_workers,
-            num_decode_workers=args.num_decode_workers,
-            replay_concurrency=args.replay_concurrency,
-            replay_mode=args.replay_mode,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
             trace_block_size=args.trace_block_size,
             trace_format=args.trace_format,
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
-            report_jsonl_path=args.report_jsonl,
+            report_jsonl_path=args.per_request_jsonl,
             max_sim_time_ms=max_sim_time_ms,
-            model_name=args.model_name,
-            sla_ttft_ms=args.sla_ttft_ms,
-            sla_itl_ms=args.sla_itl_ms,
-            sla_e2e_ms=args.sla_e2e_ms,
+            **replay_options,
         )
     else:
         report = run_synthetic_trace_replay(
             args.input_tokens,
             args.output_tokens,
             args.request_count,
-            extra_engine_args=extra_engine_args,
-            prefill_engine_args=prefill_engine_args,
-            decode_engine_args=decode_engine_args,
-            router_config=router_config,
-            aic_perf_config=aic_perf_config,
-            num_workers=args.num_workers,
-            num_prefill_workers=args.num_prefill_workers,
-            num_decode_workers=args.num_decode_workers,
-            replay_concurrency=args.replay_concurrency,
-            replay_mode=args.replay_mode,
-            router_mode=args.router_mode,
-            arrival_speedup_ratio=args.arrival_speedup_ratio,
             request_rate=args.request_rate,
             arrival_interval_ms=args.arrival_interval_ms,
             arrival_seed=args.arrival_seed,
@@ -990,14 +981,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             shared_prefix_ratio=args.shared_prefix_ratio,
             num_prefix_groups=args.num_prefix_groups,
             inter_turn_delay_ms=args.inter_turn_delay_ms,
-            model_name=args.model_name,
-            sla_ttft_ms=args.sla_ttft_ms,
-            sla_itl_ms=args.sla_itl_ms,
-            sla_e2e_ms=args.sla_e2e_ms,
+            **replay_options,
         )
 
-    report_path = write_report_json(report, args.report_json)
-    sys.stdout.write(format_report_table(report))
+    if args.replay_mode == "online":
+        summary = report
+        report_payload = report
+    else:
+        summary = report.summary
+        report_payload = report.to_dict()
+        if args.per_request_jsonl is not None and not using_trace_file:
+            _write_per_request_jsonl(args.per_request_jsonl, report.per_request)
+
+    report_path = write_report_json(report_payload, args.report_json)
+    sys.stdout.write(format_report_table(summary))
     sys.stdout.write("\n")
     sys.stdout.write(f"Saved full report to: {report_path}\n")
+    if args.replay_mode == "offline" and report.planner is not None:
+        planner = report.planner
+        if planner.scaling_events:
+            sys.stdout.write("\nScaling events:\n")
+            for event in planner.scaling_events:
+                sys.stdout.write(
+                    f"  t={event.at_s:.1f}s [{event.component}]: "
+                    f"{event.from_count} -> {event.to_count} workers"
+                    f" ({event.reason})\n"
+                )
+        sys.stdout.write(f"Planner ticks: {planner.total_ticks}\n")
+        if planner.html_report_path:
+            sys.stdout.write(
+                f"Planner diagnostics report: {planner.html_report_path}\n"
+            )
     return 0

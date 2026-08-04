@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Agent instructions — docs, examples, recipes
 
 When creating or editing files under `docs/`, `examples/`, or `recipes/`, follow the
-[documentation style guide](documentation-style-guide.md). Non-negotiables:
+[documentation style guide](pages/community/contributing/documentation/documentation-style-guide.md). Non-negotiables:
 
 - SPDX header on every file: frontmatter `#` form for Fern docs, `<!-- -->` for plain READMEs,
   full Apache block for code/config; copyright range `2025-2026`.

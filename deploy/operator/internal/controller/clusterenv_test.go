@@ -195,7 +195,7 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatalf("create profiler token secret: %v", err)
 			}
 
-			t.Log("Apply the DGDR input manifest through Kubernetes admission and select the local profiler image")
+			t.Log("Apply the DGDR input manifest through Kubernetes admission and select the local profiler image with its runtime compatibility")
 			objects := golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
 			if len(objects) != 1 || objects[0].GetKind() != "DynamoGraphDeploymentRequest" {
 				t.Fatalf("scenario input contains %d objects, want one DynamoGraphDeploymentRequest", len(objects))
@@ -205,6 +205,7 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatalf("get admitted DGDR: %v", err)
 			}
 			dgdr.Spec.Image = profilerImage
+			dgdr.Spec.RuntimeVersionOverride = "1.4.0"
 			if err := env.Client().Update(ctx, dgdr); err != nil {
 				t.Fatalf("select profiler image: %v", err)
 			}
