@@ -319,21 +319,26 @@ export POD=<worker-pod>
 For a `labelKey` source, verify the source annotation and copied label:
 
 ```bash
+export LABEL_KEY=<label-key>
+
 kubectl get pod "$POD" -n "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.nvidia\.com/topology-label-key}{"\n"}'
 
 kubectl get pod "$POD" -n "$NAMESPACE" \
-  -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}'
+  -o go-template='{{ index .metadata.labels "'"$LABEL_KEY"'" }}{{ "\n" }}'
 ```
 
 For a `clusterTopologyName` source, verify the source annotation and the canonical label for the selected domain:
 
 ```bash
+export DOMAIN=<domain>
+TOPOLOGY_LABEL="nvidia.com/dynamo-topology.$DOMAIN"
+
 kubectl get pod "$POD" -n "$NAMESPACE" \
   -o jsonpath='{.metadata.annotations.nvidia\.com/topology-cluster-topology-name}{"\n"}'
 
 kubectl get pod "$POD" -n "$NAMESPACE" \
-  -o jsonpath='{.metadata.labels.nvidia\.com/dynamo-topology\.rack}{"\n"}'
+  -o go-template='{{ index .metadata.labels "'"$TOPOLOGY_LABEL"'" }}{{ "\n" }}'
 ```
 
 For either source, inspect the projected topology files:
@@ -362,8 +367,10 @@ kubectl logs "$POD" -n "$NAMESPACE" | grep -i "Topology config"
 For a `labelKey` source, check whether the node has the configured label:
 
 ```bash
+export LABEL_KEY=<label-key>
 NODE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.nodeName}')
-kubectl get node "$NODE" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}{"\n"}'
+kubectl get node "$NODE" \
+  -o go-template='{{ index .metadata.labels "'"$LABEL_KEY"'" }}{{ "\n" }}'
 ```
 
 For a `clusterTopologyName` source, verify that the referenced Grove topology resource exists, contains the selected `domain`, and maps each domain to a label present on the node. Also verify that the DGD does not set `nvidia.com/enable-grove: "false"`.

@@ -90,7 +90,7 @@ Decode workers without that taint are ineligible. If no eligible decode worker e
 preferred_taints = {"dynamo.topology/zone=us-east-1a": 0.85}
 ```
 
-All decode workers remain eligible, but matching workers receive a routing-cost bias. `preferredWeight` is required, must be from `0` to `1`, and controls the strength of that bias. It is not a probability and does not guarantee same-domain selection.
+Decode workers that satisfy existing required constraints remain eligible, but matching workers receive a routing-cost bias. When enforcement is `preferred`, `preferredWeight` is required, must be from `0` to `1`, and controls the strength of that bias. It is not a probability and does not guarantee same-domain selection.
 
 ## Worker Environment Contract
 
