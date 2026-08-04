@@ -210,12 +210,18 @@ RUN uv pip uninstall triton && \
 
 {% if context.vllm.enable_modelexpress == "true" %}
 # Install only the ModelExpress client package. --no-deps preserves the upstream
-# vLLM runtime dependency stack.
+# vLLM runtime dependency stack. google-crc32c is imported eagerly by the MX
+# vLLM plugin (>=0.5.0) and is not in the XPU base image, so install it
+# alongside; the plugin-load check below runs the exact vllm.general_plugins
+# entry point vLLM executes at every startup, failing the build on any future
+# --no-deps gap.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install {{ pip_target }} --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+        "modelexpress==${MODELEXPRESS_VERSION}"; \
+    uv pip install {{ pip_target }} "google-crc32c>=1.5.0"; \
+    python3 -c "import modelexpress; modelexpress.register_modelexpress_loaders()"
 {% endif %}
 
 {% endif %}
