@@ -101,11 +101,10 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), St
             .get("recipient")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown recipient");
-        let content = message
-            .get("content")
-            .and_then(serde_json::Value::as_array)
-            .map(|parts| {
-                parts
+        let content =
+            match message.get("content") {
+                Some(serde_json::Value::String(content)) => content.clone(),
+                Some(serde_json::Value::Array(parts)) => parts
                     .iter()
                     .map(
                         |part| match part.get("type").and_then(serde_json::Value::as_str) {
@@ -127,10 +126,12 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), St
                         },
                     )
                     .collect::<Result<Vec<_>, _>>()
-                    .map(|parts| parts.join("\n"))
-            })
-            .transpose()?
-            .unwrap_or_default();
+                    .map(|parts| parts.join("\n"))?,
+                Some(_) => {
+                    return Err("Codex agent_message content must be a string or array".to_string());
+                }
+                None => String::new(),
+            };
 
         *item = serde_json::json!({
             "type": "message",
@@ -3136,6 +3137,32 @@ thinking
             message.content,
             ChatCompletionRequestUserMessageContent::Text(
                 "Message from /root to /root/dynamo_subagent_smoke:\nFirst.\nSecond.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_nvcreate_response_normalizes_string_codex_agent_message() {
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/dynamo_subagent_smoke",
+                "content": "Return exactly OK.",
+            }],
+        });
+
+        let req: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let [ChatCompletionRequestMessage::User(message)] = &chat_req.inner.messages[..] else {
+            panic!("expected one user message");
+        };
+        assert_eq!(
+            message.content,
+            ChatCompletionRequestUserMessageContent::Text(
+                "Message from /root to /root/dynamo_subagent_smoke:\nReturn exactly OK."
+                    .to_string()
             )
         );
     }
