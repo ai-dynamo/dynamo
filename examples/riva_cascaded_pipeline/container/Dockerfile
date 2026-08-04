@@ -1,3 +1,4 @@
+# check=skip=InvalidDefaultArgInFrom
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,14 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE=dynamo:latest-vllm-runtime
+# Required so callers select an available, runtime-compatible published release.
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG RUNTIME_USER=dynamo
 
 USER root
 COPY --chmod=644 requirements.txt /tmp/riva-requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/riva-requirements.txt
+RUN uv pip install \
+    --system \
+    --no-cache \
+    --requirement /tmp/riva-requirements.txt
 
 COPY --chown=${RUNTIME_USER}:root riva_nim/ /opt/riva-cascaded-pipeline/riva_nim/
 ENV PYTHONPATH=/opt/riva-cascaded-pipeline
