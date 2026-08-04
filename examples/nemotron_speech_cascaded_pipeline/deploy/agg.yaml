@@ -58,6 +58,8 @@ spec:
                 - {name: NIM_GRPC_API_PORT, value: "50052"}
                 - {name: NIM_HTTP_API_PORT, value: "9001"}
                 - {name: NIM_TAGS_SELECTOR, value: "type=en-US,mode=str"}
+              ports:
+                - {containerPort: 9001, name: nim-http}
               resources: &nimResources
                 limits:
                   nvidia.com/gpu: "1"
@@ -66,18 +68,18 @@ spec:
                   memory: 16Gi
                   nvidia.com/gpu: "1"
               startupProbe: &asrStartupProbe
-                httpGet: {path: /v1/health/ready, port: 9001}
+                httpGet: {path: /v1/health/ready, port: nim-http}
                 failureThreshold: 360
                 initialDelaySeconds: 40
                 periodSeconds: 10
                 timeoutSeconds: 5
               livenessProbe: &asrLivenessProbe
-                httpGet: {path: /v1/health/live, port: 9001}
+                httpGet: {path: /v1/health/live, port: nim-http}
                 failureThreshold: 3
                 periodSeconds: 10
                 timeoutSeconds: 5
               readinessProbe: &asrReadinessProbe
-                httpGet: {path: /v1/health/ready, port: 9001}
+                httpGet: {path: /v1/health/ready, port: nim-http}
                 failureThreshold: 3
                 periodSeconds: 10
                 timeoutSeconds: 5
@@ -170,20 +172,22 @@ spec:
                 - {name: NIM_GRPC_API_PORT, value: "50051"}
                 - {name: NIM_HTTP_API_PORT, value: "9000"}
                 - {name: NIM_TAGS_SELECTOR, value: "name=magpie-tts-multilingual,batch_size=8"}
+              ports:
+                - {containerPort: 9000, name: nim-http}
               resources: *nimResources
               startupProbe:
-                httpGet: {path: /v1/health/ready, port: 9000}
+                httpGet: {path: /v1/health/ready, port: nim-http}
                 failureThreshold: 360
                 initialDelaySeconds: 40
                 periodSeconds: 10
                 timeoutSeconds: 5
               livenessProbe:
-                httpGet: {path: /v1/health/live, port: 9000}
+                httpGet: {path: /v1/health/live, port: nim-http}
                 failureThreshold: 3
                 periodSeconds: 10
                 timeoutSeconds: 5
               readinessProbe:
-                httpGet: {path: /v1/health/ready, port: 9000}
+                httpGet: {path: /v1/health/ready, port: nim-http}
                 failureThreshold: 3
                 periodSeconds: 10
                 timeoutSeconds: 5
