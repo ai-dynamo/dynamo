@@ -149,6 +149,10 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
     ) -> List[ArtifactT]:
         """Encode one cost-bounded batch; one artifact per item, in input order.
 
+        Artifacts are opaque, producer-defined values. Dynamo preserves their
+        order and passes them unchanged to the selected adapter, which owns the
+        concrete artifact contract and validation.
+
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
         so results are safe to consume from another thread. ``target_bucket`` is
         reserved for CUDA-graph batching, once supported (the ladder rung to pad

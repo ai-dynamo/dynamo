@@ -22,4 +22,11 @@ class CustomEncoderAdapter(ABC, Generic[ArtifactT]):
         token_ids: list[int],
         artifacts: Sequence[ArtifactT],
     ) -> EmbedsPrompt | TokensPrompt:
-        """Validate encoder artifacts and build the final vLLM prompt."""
+        """Validate encoder artifacts and build the final vLLM prompt.
+
+        Args:
+            token_ids: Tokenized prompt containing the image placeholders.
+            artifacts: Opaque values returned by the encoder backend, in image
+                order. Each adapter defines and validates its concrete artifact
+                contract.
+        """
