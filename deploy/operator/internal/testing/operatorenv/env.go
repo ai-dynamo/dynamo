@@ -482,6 +482,7 @@ func crdDirectoryPaths(opts Options) []string {
 	root := operatorRoot()
 	return []string{
 		filepath.Join(root, "config", "crd", "bases"),
+                filepath.Join(root, "internal", "controller", "testing", "disaggregatedset"),
 		filepath.Join(root, "internal", "controller", "testing", "prometheus"),
 		filepath.Join(root, "internal", "controller", "testing", "volcano.sh"),
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
