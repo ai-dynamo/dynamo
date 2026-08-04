@@ -97,6 +97,11 @@ func (p *disaggregatedSetProgram) Reconcile(
 			return programResult, retErr
 		}
 		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
+		if programResult.Status.State != nvidiacomv1beta1.DGDStateSuccessful {
+			// Keep the DisaggregatedSet and its service ownership until the
+			// fallback workloads are ready, so the switch causes no downtime.
+			return programResult, nil
+		}
 		if err := p.owner.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, req.DGD); err != nil {
 			retErr = fmt.Errorf("failed to restore DisaggregatedSet service ownership: %w", err)
 			return programResult, retErr
