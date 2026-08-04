@@ -84,9 +84,9 @@ We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtl
 
 ```bash
 # Runtime containers (CUDA 13 default; CUDA 12 discontinued as of v1.3.0)
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.1
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.1
 
 # Explicit CUDA 13 aliases (same digest as the default tag)
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-cuda13
@@ -99,10 +99,10 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-efa
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-efa
 
 # Infrastructure containers
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
-docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.3.0
-docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.0
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.1
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.1
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.3.1
+docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.3.1
 ```
 
 ### Python Wheels (PyPI)
