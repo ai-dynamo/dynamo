@@ -25,10 +25,11 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     marker::PhantomData,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
     task::Poll,
@@ -174,6 +175,11 @@ where
     /// Optional typed request extractor for multimodal embedding cache keys.
     multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
 
+    /// RAII anchor for this router's discovery-lifecycle subscription. Held
+    /// only for its `Drop`: dropping the router drops it, so the endpoint watcher
+    /// prunes the now-dead `Weak` and stops delivering events to a gone dispatch.
+    _instance_watcher_sub: Arc<InstanceWatcherSubscription>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -306,9 +312,30 @@ fn device_aware_candidate_group(
     }
 }
 
+/// Type-erased discovery lifecycle hooks for one dispatch on one endpoint.
+type InstanceHook =
+    Box<dyn Fn(EndpointInstanceId) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// One dispatch's subscription to an endpoint's discovery events. Held
+/// per-endpoint as a `Weak` (see [`ENDPOINT_WATCHERS`]) so a dropped router
+/// deregisters itself; the owning `PushRouter` keeps the sole strong ref.
+struct InstanceWatcherSubscription {
+    on_added: InstanceHook,
+    on_removed: InstanceHook,
+}
+
+/// Fan-out point for one endpoint: every dispatch attached to the endpoint
+/// registers a subscriber here, and the single per-endpoint watcher task
+/// notifies them all. Lets heterogeneous dispatches (request-plane + gRPC)
+/// on the same endpoint each receive lifecycle events.
+struct EndpointWatch {
+    subscribers: parking_lot::Mutex<Vec<Weak<InstanceWatcherSubscription>>>,
+}
+
 /// At most one `list_and_watch` per endpoint, across all `PushRouter`
-/// instances. Entry removed on watcher exit so a later router can re-arm.
-static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+/// instances, fanning events out to every attached dispatch. Entry removed on
+/// watcher exit so a later router can re-arm.
+static ENDPOINT_WATCHERS: std::sync::OnceLock<dashmap::DashMap<EndpointId, Arc<EndpointWatch>>> =
     std::sync::OnceLock::new();
 
 /// At most one multimodal cache cleanup watcher per endpoint.
@@ -316,16 +343,41 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
     dashmap::DashMap<EndpointId, ()>,
 > = std::sync::OnceLock::new();
 
-/// Watch discovery for instance removals and cancel pending response-stream
-/// registrations on the removed instance, unblocking queued requests with
-/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
-/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+/// Notify every live subscriber of an endpoint discovery add/remove, pruning
+/// subscribers whose owning router has dropped. The lock is released before
+/// awaiting the hooks — never held across `.await`.
+async fn notify_subscribers(watch: &EndpointWatch, id: &EndpointInstanceId, added: bool) {
+    let subscribers: Vec<Arc<InstanceWatcherSubscription>> = {
+        let mut guard = watch.subscribers.lock();
+        guard.retain(|w| w.strong_count() > 0);
+        guard.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    for sub in subscribers {
+        if added {
+            (sub.on_added)(id.clone()).await;
+        } else {
+            (sub.on_removed)(id.clone()).await;
+        }
+    }
+}
+
+/// Register a dispatch for an endpoint's discovery lifecycle events, spawning
+/// the single per-endpoint `list_and_watch` watcher on the first registration.
+/// The watcher fans `on_instance_removed` / `on_instance_added` out to every
+/// attached dispatch, so heterogeneous dispatches (request-plane + gRPC) on the
+/// same endpoint all get events. Uses raw events (not a coalesced snapshot
+/// diff) so a rapid remove→re-add of the same identity is not silently
+/// swallowed.
+///
+/// The returned [`InstanceWatcherSubscription`] is the router's RAII anchor:
+/// dropping the router drops it, and the endpoint's watcher prunes the now-dead
+/// `Weak` on its next event.
 fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) where
+) -> Arc<InstanceWatcherSubscription>
+where
     T: Data + Serialize + 'static,
     U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
 {
@@ -334,15 +386,40 @@ fn spawn_instance_removal_watcher<T, U>(
     };
     use tokio_stream::StreamExt as _;
 
-    // One watcher per endpoint: if one is already running, skip.
-    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    // Type-erase the concrete dispatch's async hooks so heterogeneous dispatches
+    // can share one per-endpoint subscriber list.
+    let added_dispatch = dispatch.clone();
+    let on_added: InstanceHook = Box::new(move |id| {
+        let dispatch = added_dispatch.clone();
+        Box::pin(async move { dispatch.on_instance_added(&id).await })
+    });
+    let removed_dispatch = dispatch;
+    let on_removed: InstanceHook = Box::new(move |id| {
+        let dispatch = removed_dispatch.clone();
+        Box::pin(async move { dispatch.on_instance_removed(&id).await })
+    });
+    let subscription = Arc::new(InstanceWatcherSubscription {
+        on_added,
+        on_removed,
+    });
+
+    // Attach to the endpoint's watch, creating (and arming) it on first use.
+    let watchers = ENDPOINT_WATCHERS.get_or_init(dashmap::DashMap::new);
     let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
-        tracing::debug!(
-            ?endpoint_id,
-            "Instance removal watcher already running for this endpoint, skipping"
-        );
-        return;
+    let (watch, spawn_needed) = match watchers.entry(endpoint_id.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(e) => (e.get().clone(), false),
+        dashmap::mapref::entry::Entry::Vacant(e) => {
+            let watch = Arc::new(EndpointWatch {
+                subscribers: parking_lot::Mutex::new(Vec::new()),
+            });
+            e.insert(watch.clone());
+            (watch, true)
+        }
+    };
+    watch.subscribers.lock().push(Arc::downgrade(&subscription));
+
+    if !spawn_needed {
+        return subscription;
     }
 
     let endpoint_name = endpoint.name().to_string();
@@ -353,7 +430,7 @@ fn spawn_instance_removal_watcher<T, U>(
         struct GuardRelease(EndpointId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
-                if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                if let Some(map) = ENDPOINT_WATCHERS.get() {
                     map.remove(&self.0);
                 }
             }
@@ -392,12 +469,12 @@ fn spawn_instance_removal_watcher<T, U>(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    dispatch.on_instance_removed(eid).await;
+                                    notify_subscribers(&watch, eid, false).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                dispatch.on_instance_added(&eid).await;
+                                notify_subscribers(&watch, &eid, true).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -424,6 +501,8 @@ fn spawn_instance_removal_watcher<T, U>(
 
         tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
     });
+
+    subscription
 }
 
 /// Watch discovery removals for cache-aware routers and drop stale worker cache entries.
@@ -553,7 +632,7 @@ where
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
-        spawn_instance_removal_watcher(
+        let instance_watcher_sub = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
@@ -569,6 +648,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            _instance_watcher_sub: instance_watcher_sub,
             _phantom: PhantomData,
         })
     }
@@ -615,7 +695,7 @@ where
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
-        spawn_instance_removal_watcher(
+        let instance_watcher_sub = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
@@ -640,6 +720,7 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
+            _instance_watcher_sub: instance_watcher_sub,
             _phantom: PhantomData,
         };
 
@@ -669,7 +750,7 @@ where
             None
         };
 
-        spawn_instance_removal_watcher(
+        let instance_watcher_sub = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             dispatch.clone(),
             client.endpoint.drt().primary_token(),
@@ -685,6 +766,7 @@ where
             occupancy_state,
             multimodal_cache_indexer: None,
             multimodal_cache_key_extractor: None,
+            _instance_watcher_sub: instance_watcher_sub,
             _phantom: PhantomData,
         })
     }
@@ -2867,7 +2949,7 @@ mod tests {
 
     /// The watcher dedup guard must be released even if the spawned task panics.
     /// Without this, a panic anywhere in the watcher body would leave a stale
-    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
+    /// `ENDPOINT_WATCHERS` entry, silently disabling orphaned-pending-
     /// request cancellation for that endpoint until process restart.
     ///
     /// We exercise the Drop-guard pattern directly against the same static
@@ -2885,8 +2967,13 @@ mod tests {
         };
 
         // Mimic the production code's pre-spawn dedup insert.
-        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        let map = ENDPOINT_WATCHERS.get_or_init(dashmap::DashMap::new);
+        map.insert(
+            endpoint_id.clone(),
+            Arc::new(EndpointWatch {
+                subscribers: parking_lot::Mutex::new(Vec::new()),
+            }),
+        );
 
         let endpoint_id_clone = endpoint_id.clone();
         let join = tokio::spawn(async move {
@@ -2894,7 +2981,7 @@ mod tests {
             struct GuardRelease(EndpointId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
-                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                    if let Some(map) = ENDPOINT_WATCHERS.get() {
                         map.remove(&self.0);
                     }
                 }
@@ -2922,15 +3009,20 @@ mod tests {
             name: "normal-test-endpoint".to_string(),
         };
 
-        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        let map = ENDPOINT_WATCHERS.get_or_init(dashmap::DashMap::new);
+        map.insert(
+            endpoint_id.clone(),
+            Arc::new(EndpointWatch {
+                subscribers: parking_lot::Mutex::new(Vec::new()),
+            }),
+        );
 
         let endpoint_id_clone = endpoint_id.clone();
         tokio::spawn(async move {
             struct GuardRelease(EndpointId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
-                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                    if let Some(map) = ENDPOINT_WATCHERS.get() {
                         map.remove(&self.0);
                     }
                 }
@@ -3090,5 +3182,79 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         pred()
+    }
+
+    /// Two dispatches attached to the SAME endpoint must EACH receive discovery
+    /// add/remove events. Before the per-endpoint fan-out, the endpoint-keyed
+    /// dedup delivered them to only the first-registered dispatch.
+    #[tokio::test]
+    async fn heterogeneous_dispatches_on_one_endpoint_each_get_lifecycle() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_fanout_lifecycle".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let d1 = Arc::new(RecordingDispatch::default());
+        let d2 = Arc::new(RecordingDispatch::default());
+        // Both routers share the one endpoint; each attaches its own subscriber.
+        let _r1 = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            d1.clone(),
+        )
+        .await
+        .unwrap();
+        let _r2 = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            d2.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Wait until the watcher is live (delivered its initial snapshot add) so
+        // the removal below can't race ahead of its discovery subscription.
+        assert!(
+            poll_until(|| !d1.added.lock().unwrap().is_empty()).await,
+            "watcher did not deliver the initial add"
+        );
+
+        // Both subscriptions attach synchronously at construction, so both must
+        // observe the live removal — pre-fix, only the first-registered did.
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| {
+                d1.removed.lock().unwrap().contains(&instance_id)
+                    && d2.removed.lock().unwrap().contains(&instance_id)
+            })
+            .await,
+            "both dispatches must receive the removal"
+        );
+
+        // ...and the re-registration add.
+        let (a1, a2) = (
+            d1.added.lock().unwrap().len(),
+            d2.added.lock().unwrap().len(),
+        );
+        endpoint.register_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| {
+                d1.added.lock().unwrap().len() > a1 && d2.added.lock().unwrap().len() > a2
+            })
+            .await,
+            "both dispatches must receive the re-registration add"
+        );
+
+        rt.shutdown();
     }
 }
