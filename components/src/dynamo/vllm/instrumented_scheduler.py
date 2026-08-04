@@ -89,7 +89,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
 from typing import TYPE_CHECKING, cast
@@ -1407,11 +1407,20 @@ class InstrumentedScheduler(AsyncScheduler):
             is_benchmark_point = self._bench_active and (
                 self._bench_should_record_scheduled(scheduled)
             )
-            wall_time = self._iteration_wall_time(
-                model_output_arrival,
-                t_sched,
-                is_benchmark_point=is_benchmark_point,
-            )
+            if is_benchmark_point and self._bench_steady_fpm_expected():
+                # Steady-state sample of a two-step decode point. Under async
+                # scheduling its schedule() ran while the admission step was
+                # still on the GPU, so the narrow schedule->output span would
+                # also count that wait; the inter-update period is the true
+                # iteration time (and is what the non-benchmark path reports
+                # for production steps).
+                wall_time = model_output_arrival - self._last_update_time
+            else:
+                wall_time = self._iteration_wall_time(
+                    model_output_arrival,
+                    t_sched,
+                    is_benchmark_point=is_benchmark_point,
+                )
             self._last_update_time = model_output_arrival
 
             metrics = self._extract_metrics(
@@ -1532,6 +1541,29 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_should_record_fpm(self, metrics: ForwardPassMetrics) -> bool:
         """Keep only the forward-pass type represented by the current point."""
         return self._bench_should_record_scheduled(metrics.scheduled_requests)
+
+    def _bench_steady_fpm_expected(self) -> bool:
+        """True when the FPM about to be recorded is a steady-state sample.
+
+        The admission FPM of a two-step decode point is already in
+        ``_bench_current_fpms``, so the update being processed belongs to
+        the steady step. ``_last_update_time`` is the admission step's
+        arrival: the steady step is dispatched by the first ``schedule()``
+        call after the admission step, so the two updates are adjacent in
+        the engine's FIFO and the empty-step zeroing of
+        ``_last_update_time`` (empty outputs DO flow through
+        ``update_from_output``) can only happen after the steady update.
+        Should that adjacency ever break, the ``> 0`` guard fails closed
+        to the narrow window instead of recording a garbage timestamp.
+        """
+        point = getattr(self, "_bench_current_point", None)
+        return (
+            point is not None
+            and point.point_type == "decode"
+            and getattr(self, "_bench_expected_fpms", 1) > 1
+            and len(getattr(self, "_bench_current_fpms", [])) >= 1
+            and self._last_update_time > 0
+        )
 
     def _bench_should_record_scheduled(
         self, scheduled: ScheduledRequestMetrics
@@ -1691,6 +1723,17 @@ class InstrumentedScheduler(AsyncScheduler):
                 "decode query length"
             )
 
+        if (
+            self._bench_config.mode in {"decode", "agg"}
+            and getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1) > 1
+        ):
+            raise ValueError(
+                "decode self-benchmarking does not yet support pipeline "
+                "parallelism: the steady-state step neither returns sampled "
+                "tokens through new_token_ids (required by non-last PP "
+                "stages) nor honors the pp_size decode cadence"
+            )
+
         compilation_config = getattr(vllm_config, "compilation_config", None)
         cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
         self._bench_cudagraph_mode = getattr(cudagraph_mode, "name", None) or "NONE"
@@ -1778,6 +1821,13 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_stop_requested = False
         self._bench_stop_reason: str | None = None
         self._bench_point_deadline = 0.0
+        # Steady-state decode measurement (see _bench_make_steady_step):
+        # how many extra production-shaped steps remain to dispatch for the
+        # current point, and how many FPMs the point must collect before it
+        # is saved (decode: admission + steady = 2; prefill: 1).
+        self._bench_extra_steps_left = 0
+        self._bench_expected_fpms = 1
+        self._bench_admission_kv_tokens = 0
         self._bench_point_result_timeout_seconds = (
             float(_BenchmarkSynchronizer.MAX_SYNC_TIMEOUT_SECONDS) * 0.8
         )
@@ -2442,6 +2492,22 @@ class InstrumentedScheduler(AsyncScheduler):
             minimum_units=1,
         )
 
+    @classmethod
+    def _bench_decode_steady_kv_tokens(
+        cls, batch_size: int, total_kv_read_tokens: int
+    ) -> int:
+        """Coordinate the steady step actually measures for this point.
+
+        Mirrors the admission clamp in ``_bench_step_decode``: every request
+        is admitted at ``max(1, ctx - 1)`` tokens, so ctx=1 entries run one
+        token deeper than their nominal coordinate. Idempotent: coordinates
+        at or above ``2 * batch_size`` map to themselves.
+        """
+        context_lengths = cls._bench_decode_context_lengths(
+            total_kv_read_tokens, batch_size
+        )
+        return sum(max(1, ctx - 1) for ctx in context_lengths) + batch_size
+
     def _bench_decode_point_feasible(
         self, batch_size: int, total_kv_read_tokens: int
     ) -> bool:
@@ -2453,13 +2519,19 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         except ValueError:
             return False
-        # Fake decode requests carry one prompt-padding token at ``context_len``
-        # so async input-slot reuse never reads its -1 placeholder, then sample
-        # one output token in the measured iteration. Both tokens must fit.
-        if any(context_len + 2 > self.max_model_len for context_len in context_lengths):
+        # A decode point admits at max(1, ctx-1) and measures its steady step
+        # one position later, so a request occupies max(ctx, 2) + 1 slots and
+        # the runner's post-step bookkeeping writes through slot
+        # max(ctx, 2) + 2, which must stay within max_model_len (ctx + 2 for
+        # the ordinary ctx >= 2 case; one extra slot for clamped ctx = 1
+        # entries, which run one token deeper than their nominal coordinate).
+        if any(
+            max(context_len, 2) + 2 > self.max_model_len
+            for context_len in context_lengths
+        ):
             return False
         required_blocks = sum(
-            self._bench_blocks_per_req(context_len + 1)
+            self._bench_blocks_per_req(max(context_len, 2) + 1)
             for context_len in context_lengths
         )
         return required_blocks <= self._bench_usable_blocks(
@@ -2490,7 +2562,23 @@ class InstrumentedScheduler(AsyncScheduler):
             if value >= batch_size
         )
         presets.append(max_kv_read_tokens)
-        return sorted(set(presets))
+        # Normalize every preset to the coordinate its steady step actually
+        # measures before IDs and the grid digest are assigned. All presets
+        # below 2 * batch_size land on 2 * batch_size (their partitions only
+        # contain ctx 1 and 2 entries, which the admission clamp makes
+        # indistinguishable), so without deduplication the grid would carry
+        # duplicate rows at that coordinate and overweight it in the fit.
+        # Normalization never exceeds max_kv_read_tokens: a non-empty ladder
+        # always has max_kv_read_tokens >= 2 * batch_size because
+        # _bench_decode_point_feasible prices ctx=1 and ctx=2 identically
+        # (the max(ctx, 2) floor), so feasibility at batch_size implies
+        # feasibility at 2 * batch_size.
+        return sorted(
+            {
+                self._bench_decode_steady_kv_tokens(batch_size, value)
+                for value in presets
+            }
+        )
 
     # -- Request injection / cleanup ------------------------------------
 
@@ -2635,6 +2723,16 @@ class InstrumentedScheduler(AsyncScheduler):
         Also allocate ``ctx_len + 1`` KV slots so block-table indexing for
         position ``ctx_len`` (block ``ctx_len // block_size`` -- which is
         a NEW block when ``ctx_len % block_size == 0``) stays in range.
+
+        Under the two-step measurement the STEADY step reads the input slot
+        at ``ctx_len + 1`` -- exactly where the async placeholder lands. That
+        read is safe through production mechanisms, not through padding:
+        under async scheduling ``_prepare_input_ids`` takes the
+        common-request fast path and scatters the admission step's sampled
+        token from ``prev_sampled_token_ids`` on the GPU (the CPU ``-1`` is
+        never uploaded); under synchronous scheduling the runner writes the
+        real sampled token into that slot. The padding above remains
+        load-bearing only for the admission read at ``ctx_len``.
         """
         new_reqs_data: list[NewRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
@@ -2744,6 +2842,7 @@ class InstrumentedScheduler(AsyncScheduler):
         ]
         self._bench_active_req_ids.clear()
         self._schedule_times.clear()
+        self._bench_extra_steps_left = 0
 
     def _bench_clear_prefix_cache(self) -> None:
         """Remove all synthetic prefix entries before normal serving starts."""
@@ -2787,9 +2886,8 @@ class InstrumentedScheduler(AsyncScheduler):
             time.monotonic() + self._bench_point_result_timeout_seconds
         )
 
-    @staticmethod
     def _bench_output_validation_error(
-        point: BenchmarkPoint, summary: dict
+        self, point: BenchmarkPoint, summary: dict
     ) -> str | None:
         if point.point_type == "prefill":
             expected = {
@@ -2801,13 +2899,16 @@ class InstrumentedScheduler(AsyncScheduler):
                 "sum_decode_kv_tokens": 0,
             }
         else:
+            # The synchronized output is the ADMISSION step, which runs one
+            # token short of the point's coordinate (the steady step measured
+            # afterwards reads the full context).
             expected = {
                 "total_num_scheduled_tokens": point.batch_size,
                 "num_prefill_requests": 0,
                 "sum_prefill_tokens": 0,
                 "sum_prefill_kv_tokens": 0,
                 "num_decode_requests": point.batch_size,
-                "sum_decode_kv_tokens": point.total_kv_read_tokens,
+                "sum_decode_kv_tokens": self._bench_admission_kv_tokens,
             }
         if summary == expected:
             return None
@@ -2823,6 +2924,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_active = False
         self._bench_phase = _BenchPhase.IDLE
         self._bench_sync_pending = False
+        self._bench_extra_steps_left = 0
+        self._bench_expected_fpms = 1
         self._schedule_times.clear()
         self._last_update_time = 0.0
         if resume_publisher:
@@ -3068,6 +3171,8 @@ class InstrumentedScheduler(AsyncScheduler):
             self.kv_cache_manager.new_step_starts()
 
             self._bench_current_point = point
+            self._bench_expected_fpms = 1
+            self._bench_extra_steps_left = 0
             injected = self._bench_inject_prefill(
                 prompt_lens=[
                     new_tokens + kv_read_tokens
@@ -3098,6 +3203,8 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
 
         self._bench_current_point = point
+        self._bench_expected_fpms = 1
+        self._bench_extra_steps_left = 0
         injected = self._bench_inject_prefill(
             prompt_lens=new_token_lengths,
             max_tokens=1,
@@ -3114,12 +3221,107 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         return None
 
+    def _bench_make_steady_step(self) -> SchedulerOutput | None:
+        """One production-shaped decode step for the injected requests.
+
+        A decode point's first step admits its requests as brand-new
+        (``scheduled_new_reqs``: full prompt arrays, first-touch bookkeeping)
+        -- a shape that production decode traffic never has after its prefill.
+        The step built here goes out through ``scheduled_cached_reqs`` exactly
+        like a real decode iteration: a per-request delta instead of the full
+        token arrays. Only this step's FPM is recorded.
+
+        Mirrors the parent scheduler's running-request branch
+        (vllm/v1/core/sched/scheduler.py); ``delay_cache_blocks=True`` matches
+        the admission injection and skips the allocation-time prefix-cache
+        commit (the async scheduler still caches blocks on output updates --
+        isolation is guaranteed by the per-request cache salts and the
+        post-benchmark ``reset_prefix_cache``).
+        """
+        reqs = [
+            request
+            for request in self.running
+            if request.request_id in self._bench_active_req_ids
+            and not request.is_finished()
+        ]
+        if not reqs:
+            return None
+        new_blocks = {}
+        for request in reqs:
+            blocks = self.kv_cache_manager.allocate_slots(
+                request,
+                1,
+                num_lookahead_tokens=getattr(self, "num_lookahead_tokens", 0),
+                delay_cache_blocks=True,
+            )
+            if blocks is None:
+                return None
+            new_blocks[request.request_id] = blocks
+        cached = CachedRequestData(
+            req_ids=[request.request_id for request in reqs],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[
+                new_blocks[request.request_id].get_block_ids(allow_none=True)
+                for request in reqs
+            ],
+            num_computed_tokens=[request.num_computed_tokens for request in reqs],
+            num_output_tokens=[
+                max(1, request.num_output_tokens + request.num_output_placeholders)
+                for request in reqs
+            ],
+        )
+        output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=cached,
+            num_scheduled_tokens={request.request_id: 1 for request in reqs},
+            total_num_scheduled_tokens=len(reqs),
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
+            finished_req_ids=self.finished_req_ids,
+            free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=(
+                (self.kv_cache_manager.take_new_block_ids() or None)
+                if getattr(self, "needs_kv_cache_zeroing", False)
+                else None
+            ),
+        )
+        if self.connector is not None:
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
+        if self.ec_connector is not None:
+            output.ec_connector_metadata = self.ec_connector.build_connector_meta(
+                output
+            )
+        return output
+
     def _bench_step_decode(self) -> SchedulerOutput | None:
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
 
         elif self._bench_active_req_ids:
-            if not self._bench_current_fpms:
+            if (
+                getattr(self, "_bench_extra_steps_left", 0) > 0
+                and not self._bench_point_result_timed_out()
+            ):
+                # The steady step deliberately does NOT re-arm the READY/GO
+                # barrier: production decode steps have no per-step barrier
+                # either (ranks stay aligned through the collectives), and a
+                # ZMQ round between the admission and steady updates would be
+                # counted into the steady step's inter-update wall_time under
+                # synchronous scheduling. Group agreement on the point is
+                # still enforced at collect_result.
+                steady = self._bench_make_steady_step()
+                if steady is not None:
+                    self._bench_extra_steps_left -= 1
+                    return steady
+                # Defensive: feasibility reserved ctx+1 slots per request, so
+                # this should be unreachable. Wait out the point deadline; the
+                # admission-only FPM then fails shape validation and the point
+                # is skipped through the normal group-synchronized save path.
+                return None
+            if len(self._bench_current_fpms) < getattr(self, "_bench_expected_fpms", 1):
                 if not self._bench_point_result_timed_out():
                     return None
             self._bench_save_current_point()
@@ -3137,17 +3339,33 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_phase = _BenchPhase.DONE
             return None
 
-        self._bench_current_point = point
-        self._bench_current_fpms = []
         context_lengths = self._bench_decode_context_lengths(
             point.total_kv_read_tokens, point.batch_size
         )
+        # Steady-state measurement: admit the requests one token short so the
+        # SECOND step -- a production-shaped decode step -- reads the point's
+        # context. A request must keep at least one computed token, so ctx=1
+        # entries are clamped; the point is then recorded at the coordinate
+        # the steady step actually measures.
+        injected_lengths = [max(1, ctx - 1) for ctx in context_lengths]
+        self._bench_admission_kv_tokens = sum(injected_lengths)
+        steady_kv_tokens = self._bench_admission_kv_tokens + point.batch_size
+        if steady_kv_tokens != point.total_kv_read_tokens:
+            point = replace(
+                point,
+                total_kv_read_tokens=steady_kv_tokens,
+                sample_reasons=[*point.sample_reasons, "context_clamped"],
+            )
+        self._bench_current_point = point
+        self._bench_current_fpms = []
+        self._bench_extra_steps_left = 1
+        self._bench_expected_fpms = 2
         logger.info(
             "Benchmark decode: total_kv_reads=%d batch_size=%d",
             point.total_kv_read_tokens,
             point.batch_size,
         )
-        output = self._bench_inject_fake_decode(context_lengths)
+        output = self._bench_inject_fake_decode(injected_lengths)
         if output.total_num_scheduled_tokens != point.batch_size:
             logger.warning(
                 "Skipping benchmark decode point after request injection produced "
@@ -3159,6 +3377,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_cleanup_requests()
             self._bench_skip_point(point, "decode_injection_failed")
             self._bench_current_point = None
+            self._bench_extra_steps_left = 0
             return None
         self._bench_sync_pending = True
         return output
@@ -3181,6 +3400,15 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_current_point is not None:
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
+            expected_fpms = getattr(self, "_bench_expected_fpms", 1)
+            if expected_fpms > 1 and len(local_fpms) >= expected_fpms:
+                # Keep only the steady-state sample; the admission step is
+                # scaffolding. A rank that reached the deadline with the
+                # admission FPM alone sends it through collect_result
+                # unchanged: the shape validator rejects it
+                # (sum_decode_kv_tokens mismatch) and every rank skips the
+                # point together -- no rank ever bypasses the barrier.
+                local_fpms = local_fpms[-1:]
             if self._bench_synchronizer is not None:
                 group_result = self._bench_synchronizer.collect_result(
                     point,
@@ -3389,6 +3617,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 "feasible_max_batch_size": getattr(
                     self, "_bench_feasible_max_decode_batch_size", 0
                 ),
+            },
+            "measurement_policy": {
+                "decode": "steady_state_second_step",
+                "prefill": "single_step",
             },
             "cudagraph": {
                 "mode": getattr(self, "_bench_cudagraph_mode", "NONE"),
