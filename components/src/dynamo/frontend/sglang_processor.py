@@ -78,6 +78,27 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
     return []
 
 
+_I32_MIN = -(2**31)
+_I32_MAX = 2**31 - 1
+_U32_MAX = 2**32 - 1
+
+
+def _is_i32(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and _I32_MIN <= value <= _I32_MAX
+    )
+
+
+def _is_u32(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= _U32_MAX
+    )
+
+
 def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     agent_hints = nvext.get("agent_hints")
     if not isinstance(agent_hints, dict):
@@ -85,7 +106,7 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
 
     routing: dict[str, Any] = {}
     priority = agent_hints.get("priority")
-    if isinstance(priority, int) and not isinstance(priority, bool):
+    if _is_i32(priority):
         routing["priority"] = priority
         routing["priority_jump"] = float(max(priority, 0))
     else:
@@ -96,13 +117,11 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
             routing["priority_jump"] = float(latency_sensitivity)
 
     strict_priority = agent_hints.get("strict_priority")
-    if isinstance(strict_priority, int) and not isinstance(strict_priority, bool):
+    if _is_u32(strict_priority):
         routing["strict_priority"] = strict_priority
 
     expected_output_tokens = agent_hints.get("osl")
-    if isinstance(expected_output_tokens, int) and not isinstance(
-        expected_output_tokens, bool
-    ):
+    if _is_u32(expected_output_tokens):
         routing["expected_output_tokens"] = expected_output_tokens
 
     return routing or None

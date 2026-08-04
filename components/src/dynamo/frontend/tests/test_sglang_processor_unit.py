@@ -287,6 +287,42 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
         assert result["routing"] == {"priority_jump": 2.5}
 
+    @pytest.mark.parametrize("priority", [2**40, 10**400])
+    def test_out_of_range_priority_hint_is_ignored(self, priority):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": priority}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("strict_priority", -1),
+            ("strict_priority", 2**32),
+            ("osl", -1),
+            ("osl", 2**32),
+        ],
+    )
+    def test_out_of_range_u32_agent_hints_are_ignored(self, field, value):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"priority": 1, field: value}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] == {"priority": 1, "priority_jump": 1.0}
+
     @pytest.mark.parametrize("require_reasoning", [False, True])
     def test_require_reasoning_passthrough(self, require_reasoning):
         """The Python chat processor preserves SGLang's reasoning gate."""
