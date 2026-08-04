@@ -50,7 +50,6 @@ Use Dynamo as the rollout-serving plane behind an RL framework. The framework re
 |---|---|---|
 | [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Run Dynamo as an async rollout backend with KV-aware routing, rollout token data, and weight-update control. | Available recipe |
 | [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint and direct per-worker controls. | Open PR |
-| [NeMo RL](https://docs.nvidia.com/nemo/rl/latest/index.html) | Use the [Generation Interface](https://docs.nvidia.com/nemo/rl/latest/design-docs/generation.html) and [GRPO walkthrough](https://docs.nvidia.com/nemo/rl/latest/guides/grpo.html) as starting points for mapping NeMo RL rollout generation to an external Dynamo serving plane. A Dynamo-specific NeMo RL recipe is not published yet. | Integration target |
 
 ## Backend Support Snapshot
 
