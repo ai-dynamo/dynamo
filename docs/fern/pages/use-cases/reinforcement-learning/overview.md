@@ -5,7 +5,30 @@ title: Reinforcement Learning Integration
 subtitle: Connect RL orchestrators to Dynamo inference and engine administration interfaces
 ---
 
-**Experimental.** This guide is for RL framework authors and rollout orchestrator maintainers who need Dynamo to serve rollouts during a training loop, return token IDs and log probabilities, expose routing or engine metadata, discover live workers, and push weight updates without restarting the serving stack. Use the frontend for rollout inference, discover vLLM workers through the read-only RL discovery API, and send lifecycle or weight updates directly to the selected worker system URL.
+**Experimental.** This guide is for engineers using Dynamo to serve RL rollouts during a training loop. It covers how to return token IDs and log probabilities, expose routing or engine metadata, discover live workers, and push weight updates without restarting the serving stack. Use the frontend for rollout inference, discover vLLM workers through the read-only RL discovery API, and send lifecycle or weight updates directly to the selected worker system URL.
+
+Dynamo can add value to RL rollout serving when the rollout plane needs more than a static inference endpoint. Advanced routing can steer rollout traffic across heterogeneous workers, weight synchronization with Model Express can help move updated checkpoints into serving quickly, fault tolerance can keep rollout generation available across worker failures, and autoscaling can match serving capacity to changing rollout demand during training.
+
+## Framework Integrations
+
+Use Dynamo as the rollout-serving plane behind an RL framework. The framework remains responsible for the training loop, reward pipeline, and policy update logic; Dynamo serves rollout generation, exposes backend-specific RL control surfaces, and provides production serving capabilities around the rollout workers.
+
+| Framework or example | Dynamo integration path | Status |
+|---|---|---|
+| [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Use the upstream verl recipe to run Dynamo as an async rollout backend with KV-aware routing, rollout token data, weight-update control, and an optional ThunderAgent variant. | Available recipe |
+| UniAgent / ThunderAgent router example | Use Dynamo's [ThunderAgent Program Scheduler](../agents/thunderagent-program-scheduler.md) as a reference for integrating framework-level trajectory identity, routing, and lifecycle control with Dynamo's router. | Available example |
+| [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint for `/generate` and per-worker `/engine` controls for pause, resume, cache flush, and NCCL weight updates. | Open PR |
+| [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | NeMo RL can use Dynamo as an external rollout-serving endpoint through the same OpenAI-compatible request path and RL control surfaces. Dynamo-specific integration docs are not published in NeMo RL yet. | Integration target |
+
+## What This Page Covers
+
+| User need | Dynamo surface | Status |
+|---|---|---|
+| Serve rollout generation through an OpenAI-compatible endpoint | Frontend `/v1/completions` and `/v1/chat/completions` | Available |
+| Return token IDs, prompt log probabilities, and selected backend metadata | `nvext.token_data` and `nvext.extra_fields` | Available |
+| Discover live rollout workers and their direct administration URLs | `/v1/rl/workers` on the frontend RL listener | vLLM only |
+| Pause generation, update weights, and resume a selected worker | Direct `/engine/` routes on the worker system server | vLLM supported; SGLang uses backend-specific routes |
+| Upload large SGLang rollout metadata out-of-band | `nvext.metadata_upload.url` | SGLang only |
 
 ## Backend Support
 

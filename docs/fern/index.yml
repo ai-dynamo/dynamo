@@ -94,7 +94,7 @@ navigation:
           path: pages/kubernetes/installation/install-dynamo.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
-        - page: Gateway API Routing
+        - page: Gateway API Inference Extension
           path: pages/kubernetes/installation/gateway-api-routing.mdx
         - section: RDMA Setup
           contents:
@@ -114,8 +114,6 @@ navigation:
               path: pages/kubernetes/installation/model-storage/azure-lustre-csi-driver.mdx
             - page: EFS
               path: pages/kubernetes/installation/model-storage/efs.mdx
-        - page: Observability
-          path: pages/kubernetes/installation/observability.md
         - section: Managed Kubernetes
           contents:
             - section: EKS
@@ -167,11 +165,11 @@ navigation:
         contents:
           - page: Overview
             path: pages/kubernetes/kv-aware-routing/overview.md
-          - page: Dynamo Frontend
+          - page: Using the Dynamo Frontend
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
-          - page: Gateway API
+          - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
-          - page: Vanilla vLLM On-ramp
+          - page: Using GAIE with vanilla vLLM
             path: pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx
             slug: vanilla-vllm-onramp
 
@@ -196,7 +194,7 @@ navigation:
         icon: shield-halved
         collapsed: true
         contents:
-          - page: Introduction
+          - page: Overview
             path: pages/kubernetes/fault-tolerance/introduction.md
           - page: Request Migration
             path: pages/kubernetes/fault-tolerance/request-migration.md
@@ -227,12 +225,6 @@ navigation:
         contents:
           - page: Observability
             path: pages/kubernetes/operations/observability.mdx
-          - page: Benchmarking with AIPerf
-            path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
-          - page: Performance Tuning
-            path: pages/kubernetes/operations/performance-tuning.md
-          - page: LoRA Adapters
-            path: pages/kubernetes/operations/lora-adapters.md
           - section: Cold Start Optimizations
             collapsed: true
             contents:
@@ -260,6 +252,12 @@ navigation:
               - page: DynoSim Planner Replay
                 slug: planner-simulation-benchmarking
                 path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+          - page: Benchmarking with AIPerf
+            path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
+          - page: Performance Tuning
+            path: pages/kubernetes/operations/performance-tuning.md
+          - page: LoRA Adapters
+            path: pages/kubernetes/operations/lora-adapters.md
 
   # ==================== CLI Guide ====================
   - tab: cli-guide
@@ -284,8 +282,6 @@ navigation:
             path: pages/cli/installation/install-dynamo.mdx
           - page: Minikube Setup
             path: pages/cli/installation/minikube-setup.mdx
-          - page: Observability
-            path: pages/cli/installation/observability.mdx
 
       - section: Model Deployment
         icon: microchip
@@ -328,10 +324,6 @@ navigation:
         contents:
           - page: Observability
             path: pages/cli/operations/observability.mdx
-          - page: Benchmarking with AIPerf
-            path: pages/cli/operations/benchmarking-with-aiperf.mdx
-          - page: LoRA Adapters
-            path: pages/cli/operations/lora-adapters.md
           - section: Simulation with DynoSim
             slug: dynosim
             contents:
@@ -348,6 +340,10 @@ navigation:
               - page: DynoSim Sweeps
                 slug: simulation-sweeps
                 path: pages/cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx
+          - page: Benchmarking with AIPerf
+            path: pages/cli/operations/benchmarking-with-aiperf.mdx
+          - page: LoRA Adapters
+            path: pages/cli/operations/lora-adapters.md
 
   - tab: use-cases
     layout:
