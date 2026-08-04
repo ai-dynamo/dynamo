@@ -826,13 +826,26 @@ impl RequestPlaneMode {
     /// - Set to anything else: `Err` carrying the [`std::str::FromStr`] error, which names both
     ///   the offending value and the valid options. A typo such as `DYN_REQUEST_PLANE=nat` must
     ///   not silently start the process on a transport the operator did not configure.
+    ///
+    /// "Anything else" includes a value that is not valid Unicode. [`std::env::var`] reports that
+    /// as [`std::env::VarError::NotUnicode`] rather than as a successful read, so matching every
+    /// `Err` as absence would reintroduce exactly the silent fallback this function exists to
+    /// prevent: `DYN_REQUEST_PLANE=$'nat\xff'` is a present, misspelled value, not an unset one.
     fn from_env() -> Result<Self> {
         match std::env::var("DYN_REQUEST_PLANE") {
             // Unset or empty: keep the historical default. Empty is treated as absent to match
             // the adjacent `DYN_EVENT_PLANE` handling in `resolve_event_transport_kind`.
-            Err(_) => Ok(Self::default()),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
             Ok(s) if s.is_empty() => Ok(Self::default()),
             Ok(s) => s.parse(),
+            // Present but not valid Unicode. Neither valid option contains a non-UTF-8 byte, so
+            // such a value is always invalid; report it in the same shape as any other invalid
+            // value, rendered lossily so the operator can see roughly what they typed.
+            Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}' is not valid Unicode. \
+                 Valid options are: 'nats', 'tcp'",
+                raw.to_string_lossy()
+            )),
         }
     }
 
@@ -908,6 +921,38 @@ mod request_plane_env_tests {
         assert!(
             message.contains("nat"),
             "error should name the offending value, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
+    }
+
+    /// A present-but-non-Unicode value is a *present* value, and must not be mistaken for an unset
+    /// one. `std::env::var` surfaces it as `VarError::NotUnicode`, so a blanket `Err(_) => default`
+    /// arm would silently start the process on TCP — the very defect this change removes, reached
+    /// by a different door. Unix-only: constructing a non-Unicode `OsString` from raw bytes needs
+    /// `OsStringExt`, whose Windows counterpart takes `u16` and has different validity rules.
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_request_plane_is_an_error_not_a_default() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // "nat" plus a lone 0xFF continuation byte: invalid UTF-8 in any position.
+        let raw = OsString::from_vec(b"nat\xff".to_vec());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let err = temp_env::with_vars(
+            [("DYN_REQUEST_PLANE", Some(&raw))],
+            RequestPlaneMode::from_env,
+        )
+        .expect_err("a non-Unicode DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("not valid Unicode"),
+            "error should say the value was not valid Unicode, got: {message}"
         );
         assert!(
             message.contains("'nats'") && message.contains("'tcp'"),
