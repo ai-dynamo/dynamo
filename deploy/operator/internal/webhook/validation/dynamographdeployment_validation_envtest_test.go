@@ -751,6 +751,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantSchemaErr: `spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "Bad_Name": spec.components[1].experimental.gpuMemoryService.extraClientContainers[0] in body should match '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'`,
 		},
 		{
+			name: "GMS client container references must resolve",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-b", "missing-a"}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-b": does not name a container in podTemplate.spec.containers`,
+				`spec.components[1].experimental.gpuMemoryService.extraClientContainers[1]: Invalid value: "missing-a": does not name a container in podTemplate.spec.containers`,
+			},
+		},
+		{
+			name: "GMS client container references must be unique",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers,
+					corev1.Container{Name: "loader", Image: "loader:latest"},
+				)
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"loader", "loader"}
+			}),
+			wantSchemaErr: `spec.components[1].experimental.gpuMemoryService.extraClientContainers[1]: Duplicate value: "loader"`,
+		},
+		{
+			name: "GMS accepts multiple declared client containers",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers,
+					corev1.Container{Name: "loader", Image: "loader:latest"},
+					corev1.Container{Name: "metrics-client", Image: "metrics:latest"},
+				)
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"loader", "metrics-client"}
+			}),
+		},
+		{
 			name: "intra-pod failover requires GMS",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaContainerDiscovery(dgd)
@@ -1525,6 +1561,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 
 		// GMS and failover updates.
+		{
+			name: "GMS extra client container update must resolve",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaIntraPodGMS(worker)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.GPUMemoryService.ExtraClientContainers = []string{"missing-client"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.extraClientContainers[0]: Invalid value: "missing-client": does not name a container in podTemplate.spec.containers`},
+		},
 		{
 			name:          "inter-pod GMS layout is immutable",
 			oldDeployment: newBetaDGDForValidation(),
