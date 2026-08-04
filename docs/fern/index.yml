@@ -937,12 +937,16 @@ navigation:
     layout:
       - page: Compatibility
         path: pages/reference/general/compatibility.mdx
+        slug: compatibility
       - page: Examples
         path: pages/reference/general/examples.md
+        slug: examples
       - page: Release Artifacts
         path: pages/reference/general/release-artifacts.mdx
+        slug: release-artifacts
       - page: Nightly Release Info
         path: pages/reference/general/nightly-release-info.md
+        slug: nightly-release-info
       - section: Releases
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
@@ -966,8 +970,10 @@ navigation:
             path: pages/reference/general/releases/deprecations.mdx
       - page: Model Early Access Builds
         path: pages/reference/general/model-early-access-builds.mdx
+        slug: model-early-access-builds
       - page: Glossary
         path: pages/reference/general/glossary.md
+        slug: glossary
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
