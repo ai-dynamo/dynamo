@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated vLLM deployment with OpenTelemetry tracing on Intel XPU.
+# Base deployment: disagg_xpu_dra.yaml
+# See docs/observability/tracing.md for setup instructions.
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-tracing-xpu
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: OTEL_SERVICE_NAME
+            value: dynamo-frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
+          - --block-size
+          - "64"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          - name: OTEL_SERVICE_NAME
+            value: dynamo-worker-decode
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+          - --block-size
+          - "64"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          - name: OTEL_SERVICE_NAME
+            value: dynamo-worker-prefill
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    type: prefill
+  env:
+  - name: DYN_LOGGING_JSONL
+    value: "true"
+  - name: OTEL_EXPORT_ENABLED
+    value: "true"
+  - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    value: http://tempo.observability.svc.cluster.local:4317

@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# XPU Aggregated Deployment with KV Router
+#
+# This example demonstrates aggregated serving (single worker type that handles
+# both prefill and decode) with KV Router enabled.
+#
+# ⚠️ IMPORTANT LIMITATION: In Aggregated mode, VllmDecodeWorker does not generate
+# KV cache events (BlockStored) because these events are only produced during the
+# prefill phase in Disaggregated mode. As a result, KV Router in Aggregated mode
+# cannot perform intelligent routing based on KV cache availability.
+#
+# For full KV-aware routing capabilities, use disagg_router_xpu_dra.yaml instead.
+#
+# Requirements:
+# - Intel XPU with DRA (Dynamic Resource Allocation) driver installed
+# - Dynamo Operator with v1beta1 support
+# - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag)
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: xpu-agg-router
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --block-size
+          - "64"
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --enable-prefix-caching
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 2
+    type: worker

@@ -116,7 +116,7 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to the [`disagg.yaml` manifest](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/disagg.yaml):
+For example, refer to the [`release/1.2.1` disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/release/1.2.1/examples/deployments/GKE/vllm/v1beta1/disagg.yaml):
 
 ```yaml
 metadata:
@@ -143,7 +143,7 @@ spec:
 </Step>
 <Step title="Deploy the model" id="deploy-the-model">
 ```bash
-cd examples/deployments/GKE/vllm
+cd examples/deployments/GKE/vllm/v1beta1
 
 kubectl apply -f disagg.yaml -n ${NAMESPACE}
 ```
