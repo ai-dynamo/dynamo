@@ -33,20 +33,13 @@ def test_model_taint_route_updates_worker(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert runtime.route_name == "update/model_taints"
     response = asyncio.run(
-        runtime.handler(
-            {"taints": ["capacity/fast", "capacity/fast"], "lora_name": None}
-        )
+        runtime.handler({"taints": ["capacity/fast", "capacity/fast"]})
     )
     assert response == {
         "status": "ok",
         "taints": ["capacity/fast"],
-        "lora_name": None,
     }
-    update.assert_awaited_once_with(
-        endpoint,
-        {"capacity/fast"},
-        lora_name=None,
-    )
+    update.assert_awaited_once_with(endpoint, {"capacity/fast"})
 
 
 @pytest.mark.parametrize(
@@ -59,7 +52,6 @@ def test_model_taint_route_updates_worker(monkeypatch: pytest.MonkeyPatch) -> No
             {"taints": ["dynamo.topology/zone=west"]},
             "uses reserved prefix 'dynamo.topology/'",
         ),
-        ({"taints": [], "lora_name": 1}, "'lora_name' must be a string or null"),
     ],
 )
 def test_model_taint_route_rejects_invalid_requests(body, message) -> None:

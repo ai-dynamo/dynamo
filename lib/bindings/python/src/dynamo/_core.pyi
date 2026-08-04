@@ -2282,7 +2282,6 @@ async def unregister_model(
 async def update_model_taints(
     endpoint: Endpoint,
     taints: Set[str],
-    lora_name: Optional[str] = None,
 ) -> None:
     """Replace caller-managed taints on this worker's registered model.
 

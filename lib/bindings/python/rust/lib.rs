@@ -697,16 +697,14 @@ fn unregister_model<'p>(
 
 /// Replace the caller-managed taints on this worker's registered model.
 #[pyfunction]
-#[pyo3(signature = (endpoint, taints, lora_name=None))]
+#[pyo3(signature = (endpoint, taints))]
 fn update_model_taints<'p>(
     py: Python<'p>,
     endpoint: Endpoint,
     taints: std::collections::HashSet<String>,
-    lora_name: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    let lora_name = lora_name.map(str::to_owned);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        update_model_taints_rs(&endpoint.inner, taints, lora_name.as_deref())
+        update_model_taints_rs(&endpoint.inner, taints)
             .await
             .map_err(to_pyerr)
     })
