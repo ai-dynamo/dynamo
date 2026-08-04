@@ -725,6 +725,7 @@ def vllm_processor_module(monkeypatch):
 async def test_generator_preserves_zero_top_logprobs(
     vllm_processor_module,
     monkeypatch,
+    caplog,
 ):
     class RequestForSampling(SimpleNamespace):
         model_fields = {}
@@ -783,6 +784,10 @@ async def test_generator_preserves_zero_top_logprobs(
                 }
             )
         )
+    assert (
+        "Logprobs requested but not supported in distributed inference mode"
+        in caplog.messages
+    )
 
 
 def _make_processor(module, routed_engine):
