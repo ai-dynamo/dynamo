@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-import os
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.snapshot import (
-    _configure_trtllm_snapshot_capture_env,
     _should_prefetch_model_for_snapshot,
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
@@ -71,16 +68,6 @@ def _prefetch_config(**overrides):
 
 def test_snapshot_config_accepts_single_gpu_aggregated_text_path():
     _validate_supported_snapshot_config(_snapshot_config())
-
-
-def test_snapshot_capture_disables_trtllm_nccl_registered_window(monkeypatch, caplog):
-    monkeypatch.setenv("TLLM_NCCL_SYMMETRIC_ZERO_COPY", "1")
-
-    with caplog.at_level(logging.WARNING):
-        _configure_trtllm_snapshot_capture_env()
-
-    assert os.environ["TLLM_NCCL_SYMMETRIC_ZERO_COPY"] == "0"
-    assert "cuda-checkpoint cannot capture NCCL registered windows" in caplog.text
 
 
 def test_snapshot_prefetches_remote_hf_model_before_forcing_offline_mode():

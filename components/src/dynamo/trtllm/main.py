@@ -21,7 +21,6 @@ from dynamo.runtime.logging import configure_dynamo_logging, get_bool_env_var
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.snapshot import (
-    _configure_trtllm_snapshot_capture_env,
     _should_prefetch_model_for_snapshot,
     _SnapshotRuntimeProxy,
     _validate_supported_snapshot_config,
@@ -123,7 +122,6 @@ async def worker(argv: list[str] | None = None):
         if _should_prefetch_model_for_snapshot(config):
             await fetch_model(config.model)
         configure_snapshot_capture_env()
-        _configure_trtllm_snapshot_capture_env()
         # vLLM/SGLang snapshot paths build the engine before creating a runtime.
         # TRT-LLM's engine is built inside init_worker(), so pass a guarded
         # runtime proxy through that shared path and materialize the real runtime
