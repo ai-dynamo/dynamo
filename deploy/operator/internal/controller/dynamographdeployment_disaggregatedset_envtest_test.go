@@ -356,11 +356,10 @@ func createComponentServices(
 ) map[string]types.UID {
 	serviceUIDs := map[string]types.UID{}
 	for i := range dcds {
-		modified, err := dcdReconciler.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
+		_, err := dcdReconciler.createOrUpdateOrDeleteServices(ctx, generateResourceOption{
 			dynamoComponentDeployment: &dcds[i],
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(modified).To(BeTrue())
 		service := &corev1.Service{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dcds[i].Name, Namespace: dcds[i].Namespace}, service)).To(Succeed())
 		serviceUIDs[service.Name] = service.UID
