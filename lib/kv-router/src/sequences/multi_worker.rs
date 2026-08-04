@@ -838,7 +838,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
     // NOTE: Output blocks remain local and are intentionally not replicated because their
-    // frequency would consume disproportionate replica-sync network bandwidth.
+    // frequency would consume disproportionate replica-sync network bandwidth. Keep their load
+    // observation local too: a full snapshot containing replica-local output state must not
+    // overwrite shared worker load reported by another router.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
@@ -867,7 +869,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             load
         };
 
-        self.publish_worker_load_snapshot(worker, load, Instant::now());
+        let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
 
         Ok(())
     }
@@ -1811,6 +1813,28 @@ mod tests {
         sequences.free(&request_id, Instant::now()).unwrap();
 
         assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn output_block_observes_load_without_publishing_or_replication() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "output".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        state.clear();
+
+        sequences.add_output_block(&request_id, None).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+        assert!(state.single_loads.lock().unwrap().is_empty());
+        let observations = state.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, worker);
+        assert_eq!(observations[0].1, 4);
+        assert_eq!(sequences.active_blocks().get(&worker), Some(&4));
     }
 
     #[test]
