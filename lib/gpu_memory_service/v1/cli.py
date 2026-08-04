@@ -10,17 +10,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from threading import Event
 
-import torch
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
+from gpu_memory_service.core import device as device_identity
 from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.rpc import GMSRPCServer
 
 _DOMAINS = ("weights", "kv_cache")
-
-
-def _gpu_uuid(device: int) -> str:
-    return str(torch.cuda.get_device_properties(device).uuid)
 
 
 def run_servers(
@@ -59,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     vmm = get_vmm()
-    gpu_uuid = _gpu_uuid(args.device)
+    gpu_uuid = device_identity.get_device_uuid(args.device)
     with ExitStack() as stack:
         servers = [
             stack.enter_context(

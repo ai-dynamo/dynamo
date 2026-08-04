@@ -7,13 +7,9 @@ import threading
 from contextlib import ExitStack
 
 import pytest
-from _deps import HAS_TORCH
-
-if not HAS_TORCH:
-    pytest.skip("PyTorch is required", allow_module_level=True)
-
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.core import device as device_identity
 from gpu_memory_service.core.server.gms import GMSServerMemoryManager
 from gpu_memory_service.core.server.rpc import GMSRPCServer
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
@@ -41,11 +37,7 @@ def test_same_client_manager_preserves_weights_and_recreates_kv(
             servers[domain] = stack.enter_context(server)
             threads[domain] = thread
 
-        monkeypatch.setattr(
-            GMSClientMemoryManager,
-            "_gpu_identity",
-            lambda self: "GPU-0",
-        )
+        monkeypatch.setattr(device_identity, "get_device_uuid", lambda device: "GPU-0")
         weights = GMSClientMemoryManager(paths["weights"], vmms["weights"], 0)
         kv_cache = GMSClientMemoryManager(paths["kv_cache"], vmms["kv_cache"], 0)
         weights.connect(RequestedLockType.RW)

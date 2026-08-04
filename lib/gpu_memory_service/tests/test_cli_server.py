@@ -95,6 +95,32 @@ def test_default_cli_help_does_not_import_torch():
     assert "GPU Memory Service" in result.stdout
 
 
+def test_generic_v1_modules_do_not_import_torch():
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockTorch(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "torch" or fullname.startswith("torch."):
+                    raise ModuleNotFoundError("torch is intentionally unavailable")
+
+        sys.meta_path.insert(0, BlockTorch())
+        import gpu_memory_service.cli.runner
+        import gpu_memory_service.v1.cli
+        import gpu_memory_service.v1.memory_manager
+        """
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 class _Process:
     def __init__(self, exit_code: int | None = None) -> None:
         self.exit_code = exit_code
@@ -120,7 +146,7 @@ def test_supervisor_terminates_siblings_when_child_exits():
 
 
 def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
-    # get_socket_path queries the GPU UUID through NVML; stub the hardware.
+    # get_socket_path queries the GPU UUID through the CUDA driver; stub the hardware.
     monkeypatch.setattr(
         cli_args,
         "get_socket_path",

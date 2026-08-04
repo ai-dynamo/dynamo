@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""CUDA device identity shared by GMS clients and servers."""
+
+from __future__ import annotations
+
+from functools import cache
+from uuid import UUID
+
+try:
+    from cuda.bindings import driver as cuda
+except ImportError:
+    cuda = None
+
+
+def _check_cuda(result, operation: str) -> None:
+    if cuda is None:
+        raise RuntimeError(
+            "cuda-python is required for GPU Memory Service device identity"
+        )
+    if result == cuda.CUresult.CUDA_SUCCESS:
+        return
+
+    detail = str(result)
+    try:
+        error_result, error_string = cuda.cuGetErrorString(result)
+        if error_result == cuda.CUresult.CUDA_SUCCESS and error_string:
+            detail = (
+                error_string.decode()
+                if isinstance(error_string, bytes)
+                else str(error_string)
+            )
+    except Exception:
+        pass
+    raise RuntimeError(f"CUDA driver call {operation} failed: {detail}")
+
+
+@cache
+def get_device_uuid(device: int) -> str:
+    """Return the UUID of a CUDA-visible device ordinal."""
+    if cuda is None:
+        raise RuntimeError(
+            "cuda-python is required for GPU Memory Service device identity"
+        )
+
+    (result,) = cuda.cuInit(0)
+    _check_cuda(result, "cuInit")
+    result, cuda_device = cuda.cuDeviceGet(device)
+    _check_cuda(result, "cuDeviceGet")
+    result, uuid = cuda.cuDeviceGetUuid(cuda_device)
+    _check_cuda(result, "cuDeviceGetUuid")
+    return f"GPU-{UUID(bytes=bytes(uuid.bytes))}"
+
+
+def invalidate_device_uuid_cache() -> None:
+    """Clear cached device UUIDs after the visible GPU assignment changes."""
+    get_device_uuid.cache_clear()

@@ -11,9 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
-import torch
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
+from gpu_memory_service.core import device as device_identity
 from gpu_memory_service.core.client.memory_manager import (
     LocalMapping,
     install_mapping,
@@ -83,7 +83,7 @@ class GMSClientMemoryManager:
                     lock_type,
                     self._identity,
                 )
-                if session.identity[1] != self._gpu_identity():
+                if session.identity[1] != device_identity.get_device_uuid(self._device):
                     session.close()
                     raise RuntimeError("GMS sidecar is on another physical GPU")
                 if self._identity is None:
@@ -235,9 +235,6 @@ class GMSClientMemoryManager:
     def _unmap(self, mapping: _InstalledMapping) -> None:
         unmap_mapping(self._vmm, mapping, mapping.handle)
         self._mappings[mapping.base] = replace(mapping, handle=0)
-
-    def _gpu_identity(self) -> str:
-        return str(torch.cuda.get_device_properties(self._device).uuid)
 
     def _select_device(self) -> None:
         self._vmm.runtime_set_device(self._device)

@@ -8,6 +8,8 @@ import os
 import tempfile
 from typing import NoReturn
 
+from gpu_memory_service.core import device as device_identity
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,12 +43,9 @@ def fail(message: str, *args, exc_info=None) -> NoReturn:
     os._exit(1)
 
 
-_uuid_cache: dict[int, str] = {}
-
-
 def invalidate_uuid_cache() -> None:
     """Clear cached GPU UUIDs. Call after CRIU restore when GPU assignment may change."""
-    _uuid_cache.clear()
+    device_identity.invalidate_device_uuid_cache()
 
 
 def get_socket_path(device: int, tag: str = "weights") -> str:
@@ -62,17 +61,7 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         Socket path
         (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc_weights.sock").
     """
-    uuid = _uuid_cache.get(device)
-    if uuid is None:
-        import pynvml  # deferred: not available in all environments
-
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-            uuid = pynvml.nvmlDeviceGetUUID(handle)
-        finally:
-            pynvml.nvmlShutdown()
-        _uuid_cache[device] = uuid
+    uuid = device_identity.get_device_uuid(device)
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
 
