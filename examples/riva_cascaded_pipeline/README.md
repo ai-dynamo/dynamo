@@ -38,20 +38,20 @@ flowchart LR
         direction LR
 
         subgraph FrontendPod["Kubernetes Pod: Frontend"]
-            Frontend["Container: main<br/>Dynamo Frontend<br/>OpenAI APIs and routing"]
+            Frontend["Container: main<br/>Published Dynamo Frontend<br/>OpenAI APIs and routing"]
         end
 
         subgraph ASRPod["Kubernetes Pod: RivaAsrWorker"]
-            ASRWorker["Container: main<br/>Dynamo ASR adapter"]
+            ASRWorker["Container: main<br/>Custom Dynamo ASR adapter<br/>CPU only"]
             ASR["Container: riva-asr<br/>Same Nemotron ASR NIM<br/>1 GPU"]
         end
 
         subgraph LLMPod["Kubernetes Pod: VllmWorker"]
-            LLMWorker["Container: main<br/>Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
+            LLMWorker["Container: main<br/>Published Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
         end
 
         subgraph TTSPod["Kubernetes Pod: RivaTtsWorker"]
-            TTSWorker["Container: main<br/>Dynamo TTS adapter"]
+            TTSWorker["Container: main<br/>Custom Dynamo TTS adapter<br/>CPU only"]
             TTS["Container: riva-tts<br/>Same Magpie TTS NIM<br/>1 GPU"]
         end
     end
@@ -123,11 +123,10 @@ once:
 
 ```bash
 export NAMESPACE=voice-agent
-export DYNAMO_RUNTIME_VERSION="$(
-  python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
-)"
-export LOCAL_DYNAMO_BASE_IMAGE="dynamo-vllm-runtime-local:${DYNAMO_RUNTIME_VERSION}"
-export CUSTOM_DYNAMO_IMAGE="<registry-host>/<project>/dynamo-riva-custom:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_RUNTIME_VERSION=<compatible-published-version>
+export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
+export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_RIVA_ADAPTER_IMAGE="<registry-host>/<project>/dynamo-riva-adapter:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_REGISTRY=<registry-host>
 export DYNAMO_REGISTRY_USER=<username>
 export DYNAMO_REGISTRY_PASSWORD=<password>
@@ -136,26 +135,24 @@ export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
 ```
 
-The custom image's semantic tag lets the Dynamo operator derive the runtime
-compatibility version directly from each component's main image.
+Use the same Dynamo runtime version for the two published images and the custom
+adapter image. Its semantic tag lets the Dynamo operator derive compatibility
+directly from each component's main image.
 
-### 1. Build and push the image
+### 1. Build and push the adapter image
 
-To ensure the runtime contains the Dynamo changes used by this example, first
-build the vLLM runtime from the same checkout. Then add the Riva client and
-adapters:
+The speech worker's main container is a small CPU-only adapter. It derives from
+the published Dynamo frontend image, which provides the Dynamo runtime without
+vLLM, and adds the Riva client and this example's adapter code:
 
 ```bash
-container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t "${LOCAL_DYNAMO_BASE_IMAGE}" -f container/rendered.Dockerfile .
-
-BASE_IMAGE="${LOCAL_DYNAMO_BASE_IMAGE}" TAG="${CUSTOM_DYNAMO_IMAGE}" \
-  ./examples/riva_cascaded_pipeline/container/build.sh
-docker push "${CUSTOM_DYNAMO_IMAGE}"
+./examples/riva_cascaded_pipeline/container/build.sh
+docker push "${CUSTOM_RIVA_ADAPTER_IMAGE}"
 ```
 
-When the same revision is available in a published runtime image, that image
-can be passed directly as `BASE_IMAGE`.
+The selected published version must contain the Dynamo realtime and streaming
+speech support required by this example. Use branch-built images only when
+validating changes that have not reached a published release.
 
 ### 2. Create the namespace and credentials
 
@@ -211,10 +208,10 @@ EOF
 
 ### 4. Deploy the graph
 
-Render the image environment variable while applying the tracked manifest:
+Render the image environment variables while applying the tracked manifest:
 
 ```bash
-envsubst '${CUSTOM_DYNAMO_IMAGE}' \
+envsubst '${DYNAMO_FRONTEND_IMAGE} ${DYNAMO_VLLM_IMAGE} ${CUSTOM_RIVA_ADAPTER_IMAGE}' \
   < examples/riva_cascaded_pipeline/deploy/agg.yaml \
   | kubectl apply --namespace "${NAMESPACE}" -f -
 ```

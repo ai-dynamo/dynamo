@@ -14,25 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build a Dynamo image with the RIVA NIM Python client layered on top, for the
-# cascaded voice pipeline example.
+# Build the CPU-only Dynamo-to-Riva adapter image for the cascaded voice
+# pipeline example. The published Dynamo frontend image supplies the runtime;
+# this layer adds only the Riva client and adapter code.
 #
-#   BASE_IMAGE  Dynamo image to layer on (default: dynamo:latest-vllm-runtime)
-#   TAG         Output image tag        (default: dynamo-riva-custom:latest)
+#   DYNAMO_FRONTEND_IMAGE     Published Dynamo frontend base image
+#   CUSTOM_RIVA_ADAPTER_IMAGE Output adapter image tag
 
 set -euo pipefail
 
-BASE_IMAGE="${BASE_IMAGE:-dynamo:latest-vllm-runtime}"
-TAG="${TAG:-dynamo-riva-custom:latest}"
+: "${DYNAMO_FRONTEND_IMAGE:?Set DYNAMO_FRONTEND_IMAGE to a published Dynamo frontend image}"
+: "${CUSTOM_RIVA_ADAPTER_IMAGE:?Set CUSTOM_RIVA_ADAPTER_IMAGE to the output adapter image tag}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXAMPLE_DIR="$(dirname "${SCRIPT_DIR}")"
 
-echo "Building ${TAG} from base ${BASE_IMAGE}"
+echo "Building ${CUSTOM_RIVA_ADAPTER_IMAGE} from ${DYNAMO_FRONTEND_IMAGE}"
 docker build \
-  --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-  -t "${TAG}" \
+  --build-arg "BASE_IMAGE=${DYNAMO_FRONTEND_IMAGE}" \
+  -t "${CUSTOM_RIVA_ADAPTER_IMAGE}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
   "${EXAMPLE_DIR}"
 
-echo "Built ${TAG}"
+echo "Built ${CUSTOM_RIVA_ADAPTER_IMAGE}"
