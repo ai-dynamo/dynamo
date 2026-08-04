@@ -5,7 +5,7 @@
 # DYN_ROUTER_POLICY_CONFIG at this file.
 #
 # A request's class is the pair (policy family, uncached-ISL bucket):
-#   - The EPP names the family from request headers. `x-dynamo-policy-class`
+#   - The EPP names the family from request headers. `x-dynamo-meta-policy-class`
 #     names one directly; otherwise `x-dynamo-retry-attempt` or an
 #     `x-envoy-attempt-count` above 1 selects `retry`, and everything else
 #     falls through to `default_policy_family`.

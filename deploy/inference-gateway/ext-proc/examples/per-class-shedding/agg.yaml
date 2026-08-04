@@ -12,9 +12,10 @@
 # which is why the policy below arrives as a mounted file named by an env var.
 #
 # A request's class is the pair (policy family, uncached-ISL bucket):
-#   - The family comes from the caller. `x-dynamo-policy-class` names one
-#     directly; otherwise `x-dynamo-retry-attempt` marks a retry, and an
-#     unmarked request falls through to `default_policy_family`.
+#   - The family comes from the caller. `x-dynamo-meta-policy-class` names one
+#     directly — the same header the selection service reads — otherwise
+#     `x-dynamo-retry-attempt` marks a retry, and an unmarked request falls
+#     through to `default_policy_family`.
 #   - The bucket comes from the router, which measures uncached ISL (the prompt
 #     tokens still needing prefill after cache overlap) itself. No header.
 #

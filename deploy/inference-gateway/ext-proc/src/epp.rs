@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{HEADER_POLICY_CLASS, RoutingConstraints, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::QueueRejection;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
@@ -79,10 +79,6 @@ fn cache_namespace_with_header_override(
         .or(body_cache_namespace)
 }
 
-/// Names the router policy-class family to admit this request under, overriding
-/// any retry marker.
-const HEADER_POLICY_CLASS: &str = "x-dynamo-policy-class";
-
 /// Marks a request as a retry. Any non-empty, non-`0` value counts.
 const HEADER_RETRY_ATTEMPT: &str = "x-dynamo-retry-attempt";
 
@@ -118,12 +114,18 @@ static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
 
 /// Resolve the router policy-class family for a request from its headers.
 ///
-/// The router pairs this family with an uncached-ISL bucket it derives itself, so
-/// the family only carries what the gateway knows and the router cannot see:
-/// whether this is a retry. `None` lets the router apply its configured default
-/// family, which keeps deployments without a policy config unchanged.
+/// [`HEADER_POLICY_CLASS`] names a family directly, matching the selection
+/// service so both entry points read the same wire name. Otherwise a retry marker
+/// selects the retry family: the router pairs whichever family it gets with an
+/// uncached-ISL bucket it derives itself, so the header only carries what the
+/// gateway knows and the router cannot see. `None` lets the router apply its
+/// configured default family, which keeps deployments without a policy config
+/// unchanged.
 fn policy_class_from_headers(headers: &[(String, String)]) -> Option<String> {
-    if let Some(class) = find_header(headers, HEADER_POLICY_CLASS).filter(|c| !c.is_empty()) {
+    if let Some(class) = find_header(headers, HEADER_POLICY_CLASS)
+        .map(str::trim)
+        .filter(|class| !class.is_empty())
+    {
         return Some(class.to_owned());
     }
     is_retry_attempt(headers).then(|| POLICY_FAMILY_RETRY.to_string())
