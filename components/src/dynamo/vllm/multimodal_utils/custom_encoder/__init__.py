@@ -5,6 +5,7 @@
 
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter import (
     CustomEncoderAdapter,
+    Qwen3VLImageEncoding,
     build_mixed_embeds,
     create_custom_encoder_adapter,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "create_custom_encoder_adapter",
     "ItemT",
     "Preprocessed",
+    "Qwen3VLImageEncoding",
     "RawT",
     "VisionEncoderBackend",
 ]
