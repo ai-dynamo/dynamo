@@ -144,6 +144,11 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
       contents: read
+    env:
+      # Debuginfo triples the target dir; the full-workspace test + doctest
+      # builds do not fit a hosted runner's disk with it on.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
@@ -151,7 +156,10 @@ jobs:
     - name: Free runner disk space
       # Hosted runners leave ~14GB free; the full-workspace test build does not
       # fit and dies mid-link (ENOSPC). Drop preinstalled toolchains we never use.
-      run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/lib/node_modules
+        sudo docker system prune -af >/dev/null 2>&1 || true
+        df -h /
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
