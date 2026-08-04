@@ -30,6 +30,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const testRuntimeVersion15 = "1.5.0"
+
 func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) *v1alpha1.DynamoGraphDeployment {
 	return &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -88,6 +90,29 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) 
 	assert.NoError(t, err)
 	assert.Equal(t, expectedLegacyHash, legacyHash)
 	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, beta), legacyHash)
+}
+
+func TestComputeLegacyAlphaDGDWorkersSpecHash_IgnoresRuntimeProfile(t *testing.T) {
+	t.Log("construct a legacy worker with an enabled runtime profile")
+	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{Image: "registry.example/runtime:custom"},
+			},
+			RuntimeVersionOverride: "1.4.0",
+		},
+	})
+
+	t.Log("compute the frozen alpha hash before and after an equivalent profile change")
+	baseHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
+	assert.NoError(t, err)
+	alpha.Spec.Services["worker"].RuntimeVersionOverride = testRuntimeVersion15
+	changedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(betaDGD(t, alpha))
+	assert.NoError(t, err)
+
+	t.Log("verify runtime profiles do not alter the legacy hash contract")
+	assert.Equal(t, baseHash, changedHash)
 }
 
 func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversNameOnlyMainContainerHash(t *testing.T) {
@@ -296,16 +321,74 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_KeepsPreGateRuntimeProfileEmpty(t *testing.T) {
+	t.Log("compute the hash with an unresolved legacy runtime")
 	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	}))
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
 
-	withOverride := base.DeepCopy()
-	withOverride.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+	t.Log("resolve an explicit runtime below every feature threshold")
+	runtime13 := base.DeepCopy()
+	runtime13.Spec.Components[0].RuntimeVersionOverride = "1.3.0"
 
-	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
+	t.Log("verify both inputs retain the same empty rendering profile")
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, runtime13))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_UsesCanonicalResolvedRuntimeProfile(t *testing.T) {
+	t.Log("compute the profile hash from a semantic image tag")
+	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	base.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			}},
+		},
+	}
+	implicitHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+
+	t.Log("declare the equivalent compatibility version explicitly")
+	explicit := base.DeepCopy()
+	explicit.Spec.Components[0].RuntimeVersionOverride = testRuntimeVersion15
+
+	t.Log("verify equivalent resolved profiles hash identically")
+	assert.Equal(t, implicitHash, mustComputeBetaDGDWorkersSpecHash(t, explicit))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_ChangesWithRuntimeProfile(t *testing.T) {
+	t.Log("compute the hash for a runtime below the canary gate")
+	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	base.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "registry.example/runtime:custom",
+			}},
+		},
+	}
+	base.Spec.Components[0].RuntimeVersionOverride = "1.3.0"
+	disabledProfileHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+
+	t.Log("cross the canary gate threshold")
+	versioned := base.DeepCopy()
+	versioned.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+	enabledProfileHash := mustComputeBetaDGDWorkersSpecHash(t, versioned)
+
+	t.Log("verify a changed rendering profile produces a new worker generation")
+	assert.NotEqual(t, disabledProfileHash, enabledProfileHash)
+
+	t.Log("move to a newer runtime with the same effective gates")
+	newerSameProfile := base.DeepCopy()
+	newerSameProfile.Spec.Components[0].RuntimeVersionOverride = "2.0.0"
+
+	t.Log("verify an equivalent rendering profile avoids an unnecessary rollout")
+	assert.Equal(t, enabledProfileHash, mustComputeBetaDGDWorkersSpecHash(t, newerSameProfile))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

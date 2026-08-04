@@ -1376,6 +1376,7 @@ func TestGenerateComponentContext(t *testing.T) {
 		expectedComponentType      string
 		expectedParentDGDName      string
 		expectedParentDGDNamespace string
+		expectedCanaryHealthChecks bool
 	}{
 		{
 			name: "namespace-scoped operator: computes correct dynamo namespace",
@@ -1427,6 +1428,25 @@ func TestGenerateComponentContext(t *testing.T) {
 			expectedParentDGDNamespace: "production",
 		},
 		{
+			name: "runtime profile is resolved for the component",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.4.0",
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/runtime:custom"},
+				},
+			},
+			parentGraphDeploymentName:  "runtime-profile",
+			namespace:                  "default",
+			numberOfNodes:              1,
+			discoveryBackend:           configv1alpha1.DiscoveryBackendKubernetes,
+			expectedDynamoNamespace:    "default-runtime-profile",
+			expectedComponentType:      commonconsts.ComponentTypeWorker,
+			expectedParentDGDName:      "runtime-profile",
+			expectedParentDGDNamespace: "default",
+			expectedCanaryHealthChecks: true,
+		},
+		{
 			name: "nil dynamoNamespace field still computes correctly",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:   commonconsts.ComponentTypePlanner,
@@ -1474,6 +1494,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			assert.Equal(t, tt.expectedParentDGDNamespace, ctx.ParentGraphDeploymentNamespace)
 			assert.Equal(t, tt.numberOfNodes, ctx.numberOfNodes)
 			assert.Equal(t, tt.discoveryBackend, ctx.Discovery.Backend)
+			assert.Equal(t, tt.expectedCanaryHealthChecks, ctx.RuntimeProfile.CanaryHealthChecks)
 		})
 	}
 }

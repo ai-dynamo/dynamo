@@ -104,3 +104,52 @@ func TestParseImageVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestResolve(t *testing.T) {
+	t.Log("define image and override combinations")
+	tests := []struct {
+		name     string
+		image    string
+		override string
+		want     Version
+		wantErr  bool
+	}{
+		{
+			name:  "uses image version without override",
+			image: "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			want:  Version{Major: 1, Minor: 5, Patch: 0},
+		},
+		{
+			name:     "prefers explicit override",
+			image:    "nvcr.io/nvidia/ai-dynamo/runtime:1.4.0",
+			override: "1.6.0",
+			want:     Version{Major: 1, Minor: 6, Patch: 0},
+		},
+		{
+			name:     "uses override for custom image tag",
+			image:    "registry.example/runtime:custom",
+			override: "1.5.0",
+			want:     Version{Major: 1, Minor: 5, Patch: 0},
+		},
+		{
+			name:    "rejects custom image without override",
+			image:   "registry.example/runtime:custom",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("resolve the effective runtime compatibility version")
+			got, err := Resolve(tt.image, tt.override)
+
+			t.Log("verify the resolved version or expected error")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Resolve(%q, %q) error = %v, wantErr %t", tt.image, tt.override, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("Resolve(%q, %q) = %+v, want %+v", tt.image, tt.override, got, tt.want)
+			}
+		})
+	}
+}

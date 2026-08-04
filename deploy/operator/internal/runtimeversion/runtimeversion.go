@@ -64,6 +64,18 @@ func ParseImageVersion(image string) (Version, error) {
 	return fromSemver(version), nil
 }
 
+// Resolve returns the explicit override when set, or the compatibility version
+// derived from the image tag otherwise.
+func Resolve(image, override string) (Version, error) {
+	// Treat an explicit compatibility declaration as authoritative.
+	if override != "" {
+		return Parse(override)
+	}
+
+	// Fall back to the semantic version encoded in the image tag.
+	return ParseImageVersion(image)
+}
+
 func fromSemver(version *semver.Version) Version {
 	return Version{Major: version.Major(), Minor: version.Minor(), Patch: version.Patch()}
 }

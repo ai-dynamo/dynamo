@@ -25,6 +25,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 )
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
@@ -60,9 +61,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	type workerTemplate struct {
-		Labels      map[string]string                     `json:"labels,omitempty"`
-		Annotations map[string]string                     `json:"annotations,omitempty"`
-		Spec        v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
+		Labels         map[string]string                     `json:"labels,omitempty"`
+		Annotations    map[string]string                     `json:"annotations,omitempty"`
+		RuntimeProfile *runtimefeatures.RuntimeProfile       `json:"runtimeProfile,omitempty"`
+		Spec           v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
 	}
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
@@ -75,10 +77,15 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 			if _, exists := workerDCDs[componentName]; exists {
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
+
+			// Hash effective gate decisions alongside the generated worker template.
+			profile := runtimeProfileForComponent(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+
 			workerDCDs[componentName] = workerTemplate{
-				Labels:      GetDCDKubeLabels(dcd),
-				Annotations: GetDCDKubeAnnotations(dcd),
-				Spec:        workerHashSpec(dcd),
+				Labels:         GetDCDKubeLabels(dcd),
+				Annotations:    GetDCDKubeAnnotations(dcd),
+				RuntimeProfile: nonEmptyRuntimeProfile(profile),
+				Spec:           workerHashSpec(dcd),
 			}
 		}
 	}
@@ -101,8 +108,18 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
-	// RuntimeVersionOverride has no rendered Pod effect yet.
+	// Hash the resolved rendering profile rather than this raw optional input.
 	spec.RuntimeVersionOverride = ""
 
 	return *spec
+}
+
+func nonEmptyRuntimeProfile(profile runtimefeatures.RuntimeProfile) *runtimefeatures.RuntimeProfile {
+	// Preserve the existing hash shape until at least one runtime gate is enabled.
+	if profile.IsEmpty() {
+		return nil
+	}
+
+	// Include enabled decisions in the canonical worker hash input.
+	return &profile
 }
