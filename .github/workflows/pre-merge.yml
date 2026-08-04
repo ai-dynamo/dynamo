@@ -191,11 +191,28 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run canonical replay feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: |
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib canonical_digest_tests
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib pressure_readmission
+        cargo test --locked -p dynamo-mocker --features replay-bench --lib fresh_prefill_tracks_cache_owned_prefix_pages
+        cargo test --locked -p dynamo-bench --features replay-bench \
+          --bench offline_replay_bench -- \
+          testdata/mooncake_trace_tiny.jsonl \
+          --iterations 2 \
+          --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
+    - name: Run Python bindings AIC feature tests
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --features aic-forward-pass -- --nocapture
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: |
         cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload replay_forces_g1_to_g2 -- --nocapture
+        cargo test --locked -p dynamo-mocker --features replay-bench,kvbm-offload aggregated_canonical_evidence -- --nocapture
         cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'

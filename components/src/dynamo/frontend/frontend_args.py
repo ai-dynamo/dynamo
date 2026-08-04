@@ -88,7 +88,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     trust_remote_code: bool
     frontend_route_extensions: list[str]
 
-    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -505,11 +505,12 @@ class FrontendArgGroup(ArgGroup):
             default="default",
             dest="tokenizer_backend",
             help=(
-                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
-                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
-                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
+                "'fastokens' (fastokens crate for high-performance BPE encoding), or "
+                "'basetenkenizer' (Baseten Tokenizer for native encoding and decoding). "
+                "Has no effect on TikToken models."
             ),
-            choices=["default", "fastokens"],
+            choices=["default", "fastokens", "basetenkenizer"],
         )
 
         add_negatable_bool_argument(
