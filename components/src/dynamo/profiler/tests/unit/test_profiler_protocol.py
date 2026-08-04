@@ -826,6 +826,44 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
         assert args[args.index("--served-model-name") + 1] == model_name
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_update_model_from_pvc_absolute_path_inside_mount_is_not_doubled(
+    backend,
+) -> None:
+    """Absolute pvcModelPath values already under pvcMountPath are used as-is."""
+    modifier = CONFIG_MODIFIERS[backend]
+    pvc_name = "model-cache"
+    pvc_mount_path = "/opt/models"
+    model_name = "Qwen/Qwen3-32B"
+    model_path = "/opt/models/hub/models--Qwen--Qwen3-32B/snapshots/abc123"
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name="stale/model",
+        image=f"example/{backend}:test",
+        agg_cli_args=[],
+        agg_replicas=1,
+        agg_gpus=1,
+    )
+
+    result = modifier.update_model_from_pvc(
+        dgd_config,
+        model_name=model_name,
+        pvc_name=pvc_name,
+        pvc_mount_path=pvc_mount_path,
+        pvc_path=model_path,
+    )
+
+    for component in result["spec"]["components"]:
+        args = _main_container(component).get("args", [])
+        flat_args = " ".join(args) if args else ""
+        assert f"{pvc_mount_path}{pvc_mount_path}" not in flat_args
+
+    for component in _worker_components(result):
+        args = _main_container(component).get("args", [])
+        flat_args = " ".join(args) if args else ""
+        assert model_path in flat_args
+
+
 @pytest.mark.parametrize(
     "backend,model_arg",
     [("vllm", "--model"), ("sglang", "--model-path"), ("trtllm", "--model-path")],

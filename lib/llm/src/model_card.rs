@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
@@ -1174,8 +1174,8 @@ impl ModelDeploymentCard {
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Tokenizer backend controls:
-    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
-    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
+    /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
@@ -1185,10 +1185,7 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1207,9 +1204,9 @@ impl ModelDeploymentCard {
                 })?;
 
                 // Load HF first — needed both for fallback and (if cache is on) for
-                // extracting special-token strings. `FastTokenizer` does not re-expose
-                // `get_added_tokens_decoder`, so we must capture specials from the raw
-                // HF tokenizer before any swap.
+                // extracting special-token strings. Alternate backends do not re-expose
+                // `get_added_tokens_decoder`, so capture specials from the raw HF
+                // tokenizer before any swap.
                 let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -1260,30 +1257,54 @@ impl ModelDeploymentCard {
                     |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                Arc::new(fast)
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
+                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                    TokenizerBackend::Fastokens => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                                Ok(fast) => {
+                                    tracing::info!("Using fastokens tokenizer backend");
+                                    Arc::new(fast)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load fastokens, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
-                                );
-                                Arc::new(wrap_hf(hf))
-                            }
+                        } else {
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
                         }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                        Arc::new(wrap_hf(hf))
                     }
-                } else {
-                    Arc::new(wrap_hf(hf))
+                    TokenizerBackend::Basetenkenizer => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
+                                Ok(baseten) => {
+                                    tracing::info!("Using basetenkenizer tokenizer backend");
+                                    Arc::new(baseten)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load basetenkenizer, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
+                        }
+                    }
                 };
 
                 if cache_enabled {
