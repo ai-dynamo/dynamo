@@ -50,6 +50,7 @@ from dynamo.profiler.utils.profile_common import (
     derive_planner_image,
     is_mocker_enabled,
     is_planner_enabled,
+    needs_mocker_aic_perf_model,
     needs_profile_data,
 )
 
@@ -733,9 +734,8 @@ def build_aic_interpolation_spec(
     the mocker (via ``--aic-perf-model`` flags injected into worker args).
     Returns ``None`` when any of the following hold:
 
-    * no AIC consumer needs it — planner is disabled or has
-      ``enable_throughput_scaling=False``, **and** mocker is disabled
-    * ``pre_deployment_sweeping_mode`` is not ``Rapid``
+    * neither a throughput-scaling Planner with a rapid sweep nor a mocker in
+      rapid mode needs it
     * picks are missing
     * ``resolved_backend`` is not one AIC supports
 
@@ -757,16 +757,14 @@ def build_aic_interpolation_spec(
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    mocker_enabled = is_mocker_enabled(dgdr)
+    mocker_needs_aic = needs_mocker_aic_perf_model(dgdr)
     planner_needs_aic = (
         is_planner_enabled(dgdr)
         and planner is not None
         and planner.enable_throughput_scaling
+        and planner.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
     )
-    if not planner_needs_aic and not mocker_enabled:
-        return None
-    sweep_mode = planner.pre_deployment_sweeping_mode if planner is not None else None
-    if sweep_mode != PlannerPreDeploymentSweepMode.Rapid:
+    if not planner_needs_aic and not mocker_needs_aic:
         return None
     if best_prefill_pick is None or best_decode_pick is None:
         logger.info(

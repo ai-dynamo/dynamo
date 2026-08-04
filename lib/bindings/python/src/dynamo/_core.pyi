@@ -16,6 +16,7 @@ from typing import (
     Set,
     Tuple,
     TypedDict,
+    overload,
 )
 
 from typing_extensions import NotRequired
@@ -2394,6 +2395,33 @@ async def run_input(
     """
     ...
 
+class _OfflineReplayResult:
+    @property
+    def summary(self) -> Dict[str, Any]: ...
+    @property
+    def per_request(self) -> Optional[List[Dict[str, Any]]]: ...
+    @property
+    def coverage(self) -> Dict[str, Any]: ...
+    @property
+    def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
+
+@overload
+def run_mocker_trace_replay(
+    trace_files: Sequence[str | os.PathLike[str]],
+    *args: Any,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Any,
+) -> _OfflineReplayResult: ...
+
+@overload
+def run_mocker_trace_replay(
+    trace_files: Sequence[str | os.PathLike[str]],
+    *args: Any,
+    replay_mode: Literal["online"],
+    **kwargs: Any,
+) -> Dict[str, Any]: ...
+
+@overload
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,
@@ -2426,13 +2454,18 @@ def run_mocker_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
-) -> Dict[str, Any]:
+) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
     Supports aggregated or disaggregated engine configurations.
 
-    When ``report_jsonl_path`` is provided (offline disagg replay only), one
+    Offline replay returns an internal native result consumed by
+    ``dynamo.replay``; online replay retains the summary dictionary.
+
+    When ``report_jsonl_path`` is provided, one
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
@@ -2447,6 +2480,27 @@ def run_mocker_trace_replay(
     """
     ...
 
+@overload
+def run_mocker_synthetic_trace_replay(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    *args: Any,
+    replay_mode: Literal["offline"] = "offline",
+    **kwargs: Any,
+) -> _OfflineReplayResult: ...
+
+@overload
+def run_mocker_synthetic_trace_replay(
+    input_tokens: int,
+    output_tokens: int,
+    request_count: int,
+    *args: Any,
+    replay_mode: Literal["online"],
+    **kwargs: Any,
+) -> Dict[str, Any]: ...
+
+@overload
 def run_mocker_synthetic_trace_replay(
     input_tokens: int,
     output_tokens: int,
@@ -2474,9 +2528,14 @@ def run_mocker_synthetic_trace_replay(
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
+    capture_per_request: bool = False,
+    capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
-) -> Dict[str, Any]:
+) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
+
+    Offline replay returns an internal native result consumed by
+    ``dynamo.replay``; online replay retains the summary dictionary.
 
     ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
     (offline replay only); when any is set the report carries ``goodput_*`` keys

@@ -923,15 +923,15 @@ class TestAssembleFinalConfig:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
-    def test_mocker_only_no_planner_returns_mocker_config(self, tmp_path):
-        """Mocker-only (no planner): generate_mocker_config is called,
-        add_planner_to_config is not, profile data is still attached."""
+    def test_mocker_only_rapid_returns_mocker_config_without_profile_data(
+        self, tmp_path
+    ):
+        """Mocker-only rapid uses AIC data and does not attach profile files."""
         dgdr = _make_dgdr(features=FeaturesSpec(mocker=MockerSpec(enabled=True)))
         ops = _make_ops(tmp_path)
         os.makedirs(ops.output_dir, exist_ok=True)
         dgd_config = {"kind": "DGD"}
         mocker_base = {"kind": "MockerDGD", "spec": {"components": []}}
-        profile_cm = {"kind": "ConfigMap", "metadata": {"name": "profile-cm"}}
 
         with (
             patch(
@@ -943,7 +943,6 @@ class TestAssembleFinalConfig:
             ) as mock_planner,
             patch(
                 f"{_DGD_GEN}.add_profile_data_to_config",
-                return_value=profile_cm,
             ) as mock_profile,
         ):
             result = assemble_final_config(
@@ -956,8 +955,8 @@ class TestAssembleFinalConfig:
 
         mock_mocker.assert_called_once()
         mock_planner.assert_not_called()
-        mock_profile.assert_called_once()
-        assert result == [profile_cm, mocker_base]
+        mock_profile.assert_not_called()
+        assert result is mocker_base
 
 
 # ---------------------------------------------------------------------------

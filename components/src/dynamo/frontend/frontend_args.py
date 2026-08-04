@@ -59,6 +59,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -88,7 +91,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     trust_remote_code: bool
     frontend_route_extensions: list[str]
 
-    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -246,6 +249,30 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
         )
 
         # Router options (shared with dynamo.router)
@@ -505,11 +532,12 @@ class FrontendArgGroup(ArgGroup):
             default="default",
             dest="tokenizer_backend",
             help=(
-                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library) "
-                "or 'fastokens' (fastokens crate for high-performance BPE encoding). "
-                "Decoding always uses HuggingFace. Has no effect on TikToken models."
+                "Tokenizer backend for BPE models: 'default' (HuggingFace tokenizers library), "
+                "'fastokens' (fastokens crate for high-performance BPE encoding), or "
+                "'basetenkenizer' (Baseten Tokenizer for native encoding and decoding). "
+                "Has no effect on TikToken models."
             ),
-            choices=["default", "fastokens"],
+            choices=["default", "fastokens", "basetenkenizer"],
         )
 
         add_negatable_bool_argument(
