@@ -157,8 +157,13 @@ jobs:
           if [ -d source-checkout/docs/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
             # Keep fern/blogs for older versioned docs that still reference ../blogs.
-            rm -rf docs-checkout/fern/digest
-            cp -r source-checkout/docs/digest docs-checkout/fern/digest
+              # Merge rather than replace. The digest posts were renamed
+              # .md -> .mdx at the source after this branch was cut, and every
+              # released versions/v*.yml on docs-website points at the .mdx
+              # names. Replacing the directory deletes those files and every
+              # published version 404s its digest pages.
+              mkdir -p docs-checkout/fern/digest
+              cp -r source-checkout/docs/digest/. docs-checkout/fern/digest/
           fi
 
           # Sync main.css
