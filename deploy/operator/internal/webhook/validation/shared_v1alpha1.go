@@ -127,13 +127,22 @@ func (v *sharedValidation) validateVolumeMountV1alpha1(
 	volumeMount *nvidiacomv1alpha1.VolumeMount,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if volumeMount.UseAsCompilationCache || volumeMount.MountPoint != "" {
-		return nil
+	allErrs := field.ErrorList{}
+	// The v1alpha1 schema marks name required, but OpenAPI required is
+	// presence-based and cannot reject an explicit empty string. On the
+	// v1beta1 admission registration the API server's cross-version round
+	// trip strips the empty value before schema validation; on the legacy
+	// v1alpha1 registration no round trip happens, so enforce it here.
+	if volumeMount.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("name"), ""))
 	}
-	return field.ErrorList{field.Required(
-		fldPath.Child("mountPoint"),
-		"is required when useAsCompilationCache is false",
-	)}
+	if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("mountPoint"),
+			"is required when useAsCompilationCache is false",
+		))
+	}
+	return allErrs
 }
 
 // validateIngressSpecV1alpha1 validates ingress. ingress and fldPath must not be nil.

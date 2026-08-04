@@ -17,11 +17,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.trtllm.backend_args import (
-    DynamoTrtllmArgGroup,
-    DynamoTrtllmConfig,
-    _warn_deprecated,
-)
+from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 

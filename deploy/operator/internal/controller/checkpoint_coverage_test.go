@@ -413,7 +413,11 @@ func TestCheckpointDeleteFailureRetriesBeforeArtifactNormalization(t *testing.T)
 	ctx := context.Background()
 	ckpt := newOwnedCheckpoint()
 	ckpt.Status.JobName = defaultCheckpointJobName
-	ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
+	// Use an artifact version that differs from the default so the checkpoint
+	// requires normalization; the default-versioned job name would already match.
+	const nonDefaultArtifactVersion = "3"
+	require.NotEqual(t, snapshotprotocol.DefaultCheckpointArtifactVersion, nonDefaultArtifactVersion)
+	ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: nonDefaultArtifactVersion}
 	job := markCheckpointJobComplete(newCheckpointJob(defaultCheckpointJobName))
 	setCheckpointJobOwner(ckpt, job)
 	deleteCalls := 0
@@ -441,7 +445,7 @@ func TestCheckpointDeleteFailureRetriesBeforeArtifactNormalization(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ckpt), stored))
 	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, stored.Status.Phase)
-	assert.Equal(t, "checkpoint-job-"+testHash+"-2", stored.Status.JobName)
+	assert.Equal(t, snapshotprotocol.GetCheckpointJobName(testHash, nonDefaultArtifactVersion), stored.Status.JobName)
 	assert.Equal(t, 2, deleteCalls)
 	err = r.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{})
 	assert.True(t, apierrors.IsNotFound(err), "old Job was not deleted before normalization: %v", err)
