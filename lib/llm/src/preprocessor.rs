@@ -42,7 +42,12 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -2698,6 +2703,30 @@ impl OpenAIPreprocessor {
         Ok(transformed_stream)
     }
 
+    /// Ensure the first emitted delta for each choice carries the assistant role.
+    ///
+    /// This runs after reasoning and tool-call parsing so a parser that buffers the
+    /// original role-bearing delta cannot leave downstream consumers without a role.
+    fn normalize_chat_stream_roles<S>(
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let mut role_emitted_choices = HashSet::new();
+
+        stream.map(move |mut response| {
+            if let Some(data) = response.data.as_mut() {
+                for choice in &mut data.inner.choices {
+                    choice.delta.role = role_emitted_choices
+                        .insert(choice.index)
+                        .then_some(dynamo_protocols::types::Role::Assistant);
+                }
+            }
+            response
+        })
+    }
+
     pub fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -3915,6 +3944,7 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
+        let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Apply request payload aggregation strategy.
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
@@ -4159,6 +4189,72 @@ impl
 #[cfg(test)]
 mod strip_tests {
     use super::OpenAIPreprocessor;
+
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+        CreateChatCompletionStreamResponse, Role,
+    };
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::{StreamExt, stream};
+
+    fn chat_stream_chunk(
+        index: u32,
+        role: Option<Role>,
+    ) -> Annotated<super::NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                role,
+                content: Some(ChatCompletionMessageContent::Text("content".to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        Annotated::from_data(super::NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "test".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
+        let input = stream::iter(vec![
+            // Mirrors a parser releasing buffered content without the role that
+            // arrived on the original, swallowed chunk.
+            chat_stream_chunk(0, None),
+            chat_stream_chunk(1, None),
+            chat_stream_chunk(0, Some(Role::Assistant)),
+            chat_stream_chunk(1, Some(Role::Assistant)),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::normalize_chat_stream_roles(input)
+            .collect()
+            .await;
+        let roles: Vec<_> = output
+            .iter()
+            .map(|response| response.data.as_ref().unwrap().inner.choices[0].delta.role)
+            .collect();
+
+        assert_eq!(
+            roles,
+            vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
 
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
