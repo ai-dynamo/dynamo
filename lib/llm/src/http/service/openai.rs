@@ -1825,7 +1825,6 @@ fn push_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// `role` is excluded; backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -1836,7 +1835,7 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 content,
                 function_call,
                 tool_calls,
-                role: _,
+                role,
                 refusal,
                 reasoning_content,
             } = &c.delta;
@@ -1852,9 +1851,22 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
+                && role.is_none()
                 && refusal.is_none()
                 && reasoning_content.is_none()
         })
+}
+
+/// Preserve the first role delta for each choice and remove parser-generated repeats.
+fn deduplicate_stream_roles(
+    resp: &mut NvCreateChatCompletionStreamResponse,
+    emitted_roles: &mut HashSet<u32>,
+) {
+    for choice in &mut resp.inner.choices {
+        if choice.delta.role.is_some() && !emitted_roles.insert(choice.index) {
+            choice.delta.role = None;
+        }
+    }
 }
 
 /// Completions variant of [`is_empty_stream_response`].
@@ -2152,6 +2164,7 @@ async fn chat_completions(
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -2176,6 +2189,10 @@ async fn chat_completions(
                             }
                         }
                     }
+                }
+
+                if let Some(data) = response.data.as_mut() {
+                    deduplicate_stream_roles(data, &mut emitted_roles);
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
@@ -6346,9 +6363,9 @@ mod tests {
             "usage present → not empty",
         );
 
-        // Role-only: still empty (backends repeat role on every chunk)
+        // Role-only: not empty; duplicate roles are removed before this predicate.
         assert!(
-            is_empty_stream_response(&make_delta(
+            !is_empty_stream_response(&make_delta(
                 None,
                 None,
                 None,
@@ -6358,7 +6375,7 @@ mod tests {
                 None,
                 None,
             )),
-            "role-only → empty",
+            "role-only → not empty",
         );
 
         // Not empty: has refusal
@@ -6393,6 +6410,37 @@ mod tests {
             )),
             "function_call present → not empty",
         );
+    }
+
+    #[test]
+    fn test_deduplicate_stream_roles_preserves_only_first_role_per_choice() {
+        let mut emitted_roles = HashSet::new();
+        let mut first = make_delta(
+            None,
+            Some("thinking"),
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+        let mut second = make_delta(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Role::Assistant),
+            None,
+            None,
+        );
+
+        deduplicate_stream_roles(&mut first, &mut emitted_roles);
+        deduplicate_stream_roles(&mut second, &mut emitted_roles);
+
+        assert_eq!(first.inner.choices[0].delta.role, Some(Role::Assistant));
+        assert_eq!(second.inner.choices[0].delta.role, None);
     }
 
     #[test]

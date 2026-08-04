@@ -170,6 +170,7 @@ impl DeltaGenerator {
         };
 
         let choices = vec![choice];
+        self.msg_counter += 1;
 
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
@@ -510,6 +511,25 @@ mod tests {
             .expect("completion token details should be propagated");
 
         assert_eq!(completion_details.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_role_is_emitted_only_in_first_delta() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-stream-role".to_string());
+
+        let first = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("first choice generation");
+        let second = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("second choice generation");
+
+        assert_eq!(
+            first.inner.choices[0].delta.role,
+            Some(dynamo_protocols::types::Role::Assistant)
+        );
+        assert_eq!(second.inner.choices[0].delta.role, None);
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
