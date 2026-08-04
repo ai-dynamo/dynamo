@@ -23,7 +23,7 @@
 #    - Triggers on trusted pushes to main or pull-request/N when docs-site files change
 #    - On main: commits and pushes to docs-website, then publishes via `fern generate --docs`
 #    - On gated PR branches: generates a preview URL via `fern generate --docs --preview` and comments on PR
-#    - Preserves versioned documentation (products[0]) from docs-website's docs.yml
+#    - Preserves the release-managed version list from docs-website's docs.yml
 #
 # 2. VERSION RELEASE (tags): Creates versioned documentation snapshot
 #    - Triggers on new version tags (vX.Y.Z format)
@@ -157,8 +157,13 @@ jobs:
           if [ -d source-checkout/docs/digest ]; then
             echo "Syncing digest/ to docs-website branch..."
             # Keep fern/blogs for older versioned docs that still reference ../blogs.
-            rm -rf docs-checkout/fern/digest
-            cp -r source-checkout/docs/digest docs-checkout/fern/digest
+              # Merge rather than replace. The digest posts were renamed
+              # .md -> .mdx at the source after this branch was cut, and every
+              # released versions/v*.yml on docs-website points at the .mdx
+              # names. Replacing the directory deletes those files and every
+              # published version 404s its digest pages.
+              mkdir -p docs-checkout/fern/digest
+              cp -r source-checkout/docs/digest/. docs-checkout/fern/digest/
           fi
 
           # Sync main.css
@@ -188,11 +193,21 @@ jobs:
         run: |
           cd docs-checkout/fern
 
-          # Save the full products[0] block from docs-website (versions, path, etc.)
-          yq '.products[0]' docs.yml > /tmp/preserved_product.yml
+          # Save the release-managed version list from docs-website. Production
+          # moved from the product-switcher wrapper to top-level versioning, so
+          # read either shape: a bare .products[0] read returns null against the
+          # current site and writes that null straight back, which Fern then
+          # rejects as "expected object but received null".
+          yq '. as $doc | ([$doc.products[]? | select(.display-name == "Docs" or .display-name == "Dynamo")][0].versions // $doc.versions)' \
+            docs.yml > /tmp/preserved_versions.yml
 
-          echo "Preserved products[0] block:"
-          cat /tmp/preserved_product.yml
+          if [ "$(head -c4 /tmp/preserved_versions.yml)" = "null" ]; then
+            echo "::error::No release-managed versions found in docs.yml"
+            exit 1
+          fi
+
+          echo "Preserved release state:"
+          cat /tmp/preserved_versions.yml
 
           # Copy docs.yml from source to get config updates (redirects, layout, etc.)
           cp ../../source-checkout/fern/docs.yml docs.yml
@@ -201,8 +216,15 @@ jobs:
           # but on docs-website assets live at fern/assets/ so we need ./assets/
           sed -i 's|\.\./docs/assets/|./assets/|g' docs.yml
 
-          # Restore the preserved products[0] block
-          yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
+          # This branch's source docs.yml still uses the product switcher, so
+          # restore the history there rather than at top level; writing both
+          # shapes would leave the composed file with two version lists.
+          yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
+
+          # The source config points the product at ../docs/index.yml, which is
+          # its own repo layout and does not exist on docs-website. Point it at
+          # the Latest entry the preserved list already carries.
+          yq -i '.products[0].path = .products[0].versions[0].path' docs.yml
 
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
@@ -356,6 +378,15 @@ jobs:
           ref: docs-website
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Second, into a subdirectory: the checkout above owns the workspace
+      # root. This provides the tagged docs and nav, so the snapshot reflects
+      # what shipped in the release rather than whatever main holds today.
+      - name: Checkout source at tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          path: source-checkout
+
       - name: Check if version already exists
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -381,13 +412,67 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
-          echo "Creating fern/pages-$TAG/ from fern/pages-dev/..."
+          echo "Creating fern/pages-$TAG/ from source @ $TAG docs/..."
 
-          # Copy current pages-dev/ to pages-vX.Y.Z/
-          cp -r fern/pages-dev "fern/pages-$TAG"
+          # pages-dev tracks main and can differ from a tag cut off a release
+          # branch, so copy the tag's authored pages instead. Same excludes as
+          # the dev sync above: digest is synced separately and index.yml
+          # becomes the version config, not a page.
+          rm -rf "fern/pages-$TAG"
+          mkdir -p "fern/pages-$TAG"
+          rsync -a \
+            --exclude='digest' \
+            --exclude='index.yml' \
+            source-checkout/docs/ "fern/pages-$TAG/"
+
+          # Faithfulness guard: every file in the snapshot must trace back to
+          # the tagged source, so a stale or foreign tree cannot ship under a
+          # release label.
+          missing=0
+          while IFS= read -r f; do
+            rel="${f#fern/pages-$TAG/}"
+            if [ ! -e "source-checkout/docs/$rel" ]; then
+              echo "::error::Snapshot file has no counterpart in the tagged source: $rel"
+              missing=1
+            fi
+          done < <(find "fern/pages-$TAG" -type f)
+          if [ "$missing" != "0" ]; then
+            echo "::error::Release snapshot for $TAG contains files absent from the tag; aborting."
+            exit 1
+          fi
 
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
+
+      - name: Snapshot translation mirrors
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # This branch keeps translations as .zh-CN siblings of the English
+          # page rather than a translations/<lang>/pages tree, so build the
+          # mirror by stripping the .zh-CN infix. Path and extension otherwise
+          # match the English page, which is what pairs the mirror with
+          # fern/pages-$TAG. Snapshot from the tagged source, not the
+          # docs-website dev mirror, whose links are already rewritten to dev
+          # URLs. No-op when the tag carries no translations.
+          LANG_CODE=zh-CN
+          DEST="fern/translations/$LANG_CODE/pages-$TAG"
+          count=0
+          rm -rf "$DEST"
+          while IFS= read -r src; do
+            rel="${src#source-checkout/docs/}"
+            out="$DEST/$(printf '%s' "$rel" | sed "s|\.$LANG_CODE\.|.|")"
+            mkdir -p "$(dirname "$out")"
+            cp "$src" "$out"
+            count=$((count + 1))
+          done < <(find source-checkout/docs -name "*.$LANG_CODE.md" -o -name "*.$LANG_CODE.mdx")
+
+          if [ "$count" = "0" ]; then
+            echo "No $LANG_CODE pages at $TAG; skipping the mirror."
+            rm -rf "$DEST"
+          else
+            echo "Snapshotted $count $LANG_CODE page(s) to $DEST"
+          fi
 
       - name: Update GitHub links to 'main' to version tag
         run: |
@@ -429,15 +514,20 @@ jobs:
 
           echo "Creating version config: $VERSION_FILE"
 
-          # Copy dev.yml as template
-          cp fern/versions/dev.yml "$VERSION_FILE"
+          # From the tag's own index.yml, for the same reason the pages come
+          # from the tag: dev.yml tracks main's navigation.
+          cp source-checkout/docs/index.yml "$VERSION_FILE"
 
-          # Update the comment at the top
-          sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
-          sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
+          # Same two transforms the dev sync applies to dev.yml, and in the
+          # same order: digest is a sibling of the pages tree, not inside it,
+          # so it must be rewritten first or the second sub() re-matches it.
+          yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' "$VERSION_FILE"
+          yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-'"$TAG"'/${1}")' "$VERSION_FILE"
 
-          # Update all page paths from ../pages-dev/ to ../pages-vX.Y.Z/
-          sed -i "s|path: \.\./pages-dev/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+          # The version file is a copy of the tag's index.yml, whose nav header
+          # points at /dynamo/dev/. Rewrite that line so the snapshot does not
+          # claim to be the dev navigation.
+          sed -i "s|^# Navigation structure matching https://docs.nvidia.com/dynamo/dev/|# Navigation structure snapshot from tag $TAG|" "$VERSION_FILE"
 
           echo "Created $VERSION_FILE"
           echo "First 30 lines:"
@@ -450,33 +540,77 @@ jobs:
 
           echo "Updating $DOCS_FILE to include $TAG..."
 
-          # Check if version already in docs.yml
-          if yq ".products[0].versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
+          # docs.yml here is docs-website's own file, which uses top-level
+          # versioning rather than the product switcher this branch's source
+          # still carries. Addressing .products[0] would read null and then
+          # fabricate a product wrapper, corrupting the published config.
+          if yq ".versions[] | select(.display-name == \"$TAG\")" "$DOCS_FILE" | grep -q .; then
             echo "Version $TAG already in docs.yml, skipping update"
             exit 0
           fi
 
           # Find the index of the "dev" entry and insert new version right after it
-          DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          DEV_IDX=$(yq '.versions | to_entries | map(select(.value.display-name == "dev")) | .[0].key' "$DOCS_FILE")
+          if [ -z "$DEV_IDX" ] || [ "$DEV_IDX" = "null" ]; then
+            echo "::error::No dev entry found in $DOCS_FILE versions list"
+            exit 1
+          fi
           INSERT_IDX=$((DEV_IDX + 1))
 
           yq -i "
-            .products[0].versions |= (
+            .versions |= (
               .[:$INSERT_IDX] +
               [{\"display-name\": \"$TAG\", \"path\": \"./versions/$TAG.yml\", \"slug\": \"$TAG\", \"availability\": \"stable\"}] +
               .[$INSERT_IDX:]
             )
           " "$DOCS_FILE"
 
-          # Update the top-level entry to point to the new version
-          yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
-
           # Update the "Latest" entry to point to the new version
-          yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
-          yq -i ".products[0].versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
+          yq -i ".versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
+          yq -i ".versions[0].display-name = \"Latest ($TAG)\"" "$DOCS_FILE"
 
-          echo "Updated docs.yml products/versions section:"
-          yq '.products[0].versions' "$DOCS_FILE"
+          echo "Updated docs.yml versions section:"
+          yq '.versions' "$DOCS_FILE"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: Validate release snapshot
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION_FILE="fern/versions/$TAG.yml"
+
+          # Every navigation target must resolve before anything reaches
+          # docs-website. Versioned pages belong to this release and must exist;
+          # the shared Digest syncs independently from main, so a frozen nav can
+          # drift there without this cut being wrong: report it, do not block.
+          while IFS= read -r path; do
+            case "$path" in
+              ../pages-$TAG/*)
+                if [ ! -e "fern/versions/$path" ]; then
+                  echo "::error::Version navigation target does not exist: $path"
+                  exit 1
+                fi
+                ;;
+              ../digest/*)
+                if [ ! -e "fern/versions/$path" ]; then
+                  echo "::warning::Shared Digest navigation target does not exist in docs-website: $path"
+                fi
+                ;;
+            esac
+          done < <(yq -r '(.. | select(has("path")).path)' "$VERSION_FILE")
+
+          # Fern's own structural validation. docs-website carries historical
+          # broken-link debt, so link checking stays scoped to the release
+          # navigation above rather than failing on unrelated versions.
+          fern check
 
       - name: Commit and push changes
         run: |
@@ -485,6 +619,11 @@ jobs:
           git add "fern/pages-$TAG/"
           git add "fern/versions/$TAG.yml"
           git add fern/docs.yml
+          # Versioned translation snapshots; the glob is empty for tags cut
+          # from branches carrying no translations.
+          for d in fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && git add "$d"
+          done
 
           git commit -m "docs(fern): release version $TAG
 
@@ -498,14 +637,6 @@ jobs:
           git push origin docs-website
 
           echo "Successfully released documentation for $TAG on docs-website branch"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install Fern CLI
-        run: npm install -g fern-api
 
       - name: Publish Docs
         env:
