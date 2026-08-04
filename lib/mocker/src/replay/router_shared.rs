@@ -108,9 +108,10 @@ pub(super) fn replay_slots(
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
     #[cfg(feature = "replay-bench")]
-    return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
+    if super::canonical_replay_active() {
+        return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
+    }
 
-    #[cfg(not(feature = "replay-bench"))]
     DefaultWorkerSelector::new(Some(config.clone()), "replay")
 }
 

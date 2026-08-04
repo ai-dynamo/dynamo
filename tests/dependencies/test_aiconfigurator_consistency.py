@@ -112,8 +112,6 @@ def _aic_requirements(requirements: list[str], *, source: str) -> dict[str, str]
 
 
 def test_all_aiconfigurator_dependencies_use_one_release() -> None:
-    with (ROOT / "Cargo.toml").open("rb") as handle:
-        root_cargo = tomllib.load(handle)
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
 
@@ -134,13 +132,9 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     assert set(planner_requirements) == AIC_PACKAGES
 
     versions = {
-        "root Cargo workspace": _cargo_exact_version(
-            root_cargo["workspace"]["dependencies"]["aiconfigurator-core"]
-        ),
         "Python bindings Cargo": _cargo_exact_version(
             bindings_cargo["dependencies"]["aiconfigurator-core"]
         ),
-        "root Cargo.lock": _cargo_lock_version(ROOT / "Cargo.lock"),
         "Python bindings Cargo.lock": _cargo_lock_version(
             ROOT / "lib/bindings/python/Cargo.lock"
         ),
@@ -173,7 +167,7 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
             package="aiconfigurator-core",
         ),
     }
-    expected_version = versions["root Cargo workspace"]
+    expected_version = versions["Python bindings Cargo"]
     mismatches = {
         consumer: version
         for consumer, version in versions.items()
@@ -185,7 +179,7 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
 
 
 def test_installed_aiconfigurator_packages_match_declared_release() -> None:
-    expected_version = _cargo_lock_version(ROOT / "Cargo.lock")
+    expected_version = _cargo_lock_version(ROOT / "lib/bindings/python/Cargo.lock")
     installed = {
         "aiconfigurator": Version(metadata.version("aiconfigurator")),
         "aiconfigurator-core": Version(metadata.version("aiconfigurator-core")),

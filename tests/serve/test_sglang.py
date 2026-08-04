@@ -815,6 +815,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(56.0),
+            pytest.mark.requested_sglang_vram_gib(56.0),
             # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
             pytest.mark.nightly,
