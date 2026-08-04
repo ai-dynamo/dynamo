@@ -170,44 +170,91 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 }
 
 func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
-	sourceTemplate := &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				TargetContainersAnnotation:   "main",
+	cases := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name:        "no user annotations",
+			annotations: nil,
+		},
+		{
+			name: "pre-existing enabled injection overwritten",
+			annotations: map[string]string{
 				linkerdInjectAnnotation:      "enabled",
 				istioSidecarInjectAnnotation: "true",
-				"example.com/keep":           "true",
+				"example.com/keep":           "keep-value",
 			},
 		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:    "main",
-				Command: []string{"python3"},
-			}},
-		},
 	}
 
-	job, err := NewCheckpointJob(sourceTemplate, CheckpointJobOptions{
-		Namespace:    "test-ns",
-		CheckpointID: "hash",
-		Name:         "test-job",
-	})
-	if err != nil {
-		t.Fatalf("expected checkpoint job, got error: %v", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var originalAnnotations map[string]string
+			if tc.annotations != nil {
+				originalAnnotations = make(map[string]string, len(tc.annotations))
+				for k, v := range tc.annotations {
+					originalAnnotations[k] = v
+				}
+			}
 
-	annotations := job.Spec.Template.Annotations
-	if got := annotations[linkerdInjectAnnotation]; got != linkerdInjectDisabled {
-		t.Fatalf("linkerd injection annotation = %q, want %q", got, linkerdInjectDisabled)
+			source := &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: tc.annotations,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "main",
+						Command: []string{"python3"},
+					}},
+				},
+			}
+			if source.Annotations == nil {
+				source.Annotations = map[string]string{}
+			}
+			source.Annotations[TargetContainersAnnotation] = "main"
+
+			job, err := NewCheckpointJob(source, CheckpointJobOptions{
+				Namespace:    "test-ns",
+				CheckpointID: "hash",
+				Name:         "test-job",
+			})
+			if err != nil {
+				t.Fatalf("NewCheckpointJob() error = %v", err)
+			}
+
+			got := job.Spec.Template.Annotations
+			if got[linkerdInjectAnnotation] != linkerdInjectDisabled {
+				t.Errorf("linkerd annotation = %q, want %q", got[linkerdInjectAnnotation], linkerdInjectDisabled)
+			}
+			if got[istioSidecarInjectAnnotation] != istioSidecarInjectDisabled {
+				t.Errorf("istio annotation = %q, want %q", got[istioSidecarInjectAnnotation], istioSidecarInjectDisabled)
+			}
+			if tc.annotations != nil {
+				if v, ok := tc.annotations["example.com/keep"]; ok && got["example.com/keep"] != v {
+					t.Errorf("user annotation lost: got %q, want %q", got["example.com/keep"], v)
+				}
+				// Source template must not be mutated.
+				for k, origV := range originalAnnotations {
+					if tc.annotations[k] != origV {
+						t.Errorf("source template mutated: key %q changed from %q to %q", k, origV, tc.annotations[k])
+					}
+				}
+			}
+		})
 	}
-	if got := annotations[istioSidecarInjectAnnotation]; got != istioSidecarInjectDisabled {
-		t.Fatalf("istio injection annotation = %q, want %q", got, istioSidecarInjectDisabled)
+}
+
+func TestDisableCheckpointJobSidecarInjectionNilMap(t *testing.T) {
+	got := DisableCheckpointJobSidecarInjection(nil)
+	if got == nil {
+		t.Fatal("expected non-nil map, got nil")
 	}
-	if got := annotations["example.com/keep"]; got != "true" {
-		t.Fatalf("existing annotation was not preserved, got %q", got)
+	if got[linkerdInjectAnnotation] != linkerdInjectDisabled {
+		t.Errorf("linkerd annotation = %q, want %q", got[linkerdInjectAnnotation], linkerdInjectDisabled)
 	}
-	if got := sourceTemplate.Annotations[linkerdInjectAnnotation]; got != "enabled" {
-		t.Fatalf("source template was mutated: linkerd annotation = %q", got)
+	if got[istioSidecarInjectAnnotation] != istioSidecarInjectDisabled {
+		t.Errorf("istio annotation = %q, want %q", got[istioSidecarInjectAnnotation], istioSidecarInjectDisabled)
 	}
 }
 

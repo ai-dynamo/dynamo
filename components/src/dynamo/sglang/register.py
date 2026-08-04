@@ -8,11 +8,11 @@ import os
 from typing import Any, List, Optional
 
 import sglang as sgl
-from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -27,6 +27,7 @@ from dynamo.llm import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     model_card_dp_rank_bounds,
     runtime_capacity,
@@ -150,6 +151,7 @@ async def _register_model_with_runtime_config(
         else None
     )
 
+    aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
     try:
         await register_model(
             input_type,
@@ -166,6 +168,7 @@ async def _register_model_with_runtime_config(
             needs=needs,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
+            model_aliases=aliases or None,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -228,33 +231,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         getattr(server_args, "hicache_storage_backend_extra_config", None)
     )
 
-    try:
-        from sglang.srt.mem_cache.storage.mooncake_store.mooncake_store import (
-            MooncakeStoreConfig,
-        )
-    except ImportError as e:
-        logging.warning(f"MooncakeStoreConfig import unavailable: {e}")
-        return None
-
-    # Graceful degradation: Mooncake runtime metadata is optional. If config
-    # resolution fails for any reason (file not found, malformed env vars,
-    # upstream API change), skip publishing the metadata rather than crashing
-    # the worker -- the worker still serves requests, just without HiCache
-    # router hints. Broad catch is intentional per python-guidelines.md.
-    try:
-        if extra_config and (
-            extra_config.get("master_server_address") is not None
-            or extra_config.get("client_server_address") is not None
-        ):
-            mooncake_config = MooncakeStoreConfig.load_from_extra_config(extra_config)
-        elif envs.SGLANG_HICACHE_MOONCAKE_CONFIG_PATH.is_set():
-            mooncake_config = MooncakeStoreConfig.from_file()
-        else:
-            mooncake_config = MooncakeStoreConfig.load_from_env()
-    except Exception as e:
-        logging.warning(f"Failed to resolve Mooncake config for runtime metadata: {e}")
-        return None
-
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
@@ -292,10 +268,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
         extra_backend_tag = None
 
-    master_server_address = getattr(mooncake_config, "master_server_address", None)
-    if not isinstance(master_server_address, str) or not master_server_address:
-        master_server_address = None
-
     return {
         "backend": "mooncake",
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
@@ -306,11 +278,35 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
-        "master_server_address": master_server_address,
-        "master_metrics_port": int(
-            getattr(mooncake_config, "master_metrics_port", 9003)
-        ),
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
+
+
+def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
+    """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
+
+    Derived from sglang's ``SpeculativeAlgorithm.is_eagle()`` -- the SAME predicate the radix
+    cache uses to bigram-key its KV-event block hashes (``srt/managers/scheduler.py``). The KV
+    router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes; deriving it
+    from ``is_eagle()`` (instead of a hand-maintained name set) keeps the two in lockstep and
+    covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
+    normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
+    """
+    try:
+        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    except Exception as e:
+        # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
+        # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
+        # ``None``, so the default case does not raise); catch broadly -- matching the sibling
+        # ``_get_mooncake_runtime_data`` above, per python-guidelines.md -- so any future signature/enum
+        # change can't crash the worker either. Default to not enabling eagle bigram routing; the
+        # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
+        logging.warning(
+            "Could not derive enable_eagle from speculative_algorithm %r: %s; leaving it disabled.",
+            speculative_algorithm,
+            e,
+        )
+        return False
 
 
 async def _get_runtime_config(
@@ -327,10 +323,16 @@ async def _get_runtime_config(
         ModelRuntimeConfig with extracted values, or None if extraction fails.
     """
     runtime_config = ModelRuntimeConfig()
+    runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if dynamo_args.dyn_default_thinking_mode is not None:
+        runtime_config.set_engine_specific(
+            "default_thinking_mode",
+            json.dumps(dynamo_args.dyn_default_thinking_mode),
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
@@ -344,6 +346,7 @@ async def _get_runtime_config(
     runtime_config.enable_local_indexer = (
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
+    runtime_config.kv_event_publishing_enabled = dynamo_args.use_kv_events
 
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank
@@ -393,7 +396,7 @@ async def _get_runtime_config(
     if base_capacity.max_num_batched_tokens is not None:
         runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
-    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+    if _eagle_enabled_for(server_args.speculative_algorithm):
         runtime_config.enable_eagle = True
 
     spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
@@ -455,11 +458,27 @@ async def _get_runtime_config(
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+    try:
+        offloading_capacity = get_hicache_native_offloading_capacity(
+            server_args, scheduler_info
+        )
+        if offloading_capacity is not None:
+            runtime_config.set_engine_specific(
+                NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+                json.dumps(offloading_capacity),
+            )
+            logging.info("Published native offloading capacity from SGLang HiCache.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach native offloading capacity from SGLang HiCache: %s",
+            e,
+        )
+
+    return runtime_config
 
 
 async def register_model_with_readiness_gate(

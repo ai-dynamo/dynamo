@@ -36,6 +36,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
@@ -1021,7 +1022,7 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		},
 	}
 
-	if !meshConfig.IsEnabled() || meshConfig.Istio == nil {
+	if configv1alpha1.ServiceMeshProvider(meshConfig.Provider) != configv1alpha1.ServiceMeshProviderIstio || meshConfig.Istio == nil {
 		return dr
 	}
 
@@ -1434,11 +1435,9 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 func applyCheckpointProbeCadence(
 	container *corev1.Container,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) {
-	if operatorConfig.Checkpoint.Enabled &&
-		checkpointInfo != nil &&
+	if checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
 		checkpointInfo.Ready &&
 		IsWorkerComponent(string(component.ComponentType)) {
@@ -1532,7 +1531,7 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
-	applyCheckpointProbeCadence(&container, component, operatorConfig, checkpointInfo)
+	applyCheckpointProbeCadence(&container, component, checkpointInfo)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -2114,9 +2113,8 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
 }
 
-// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 // cliqueParams groups the context needed to build a single PodClique template
-// from a ServiceRole. All fields come from the enclosing GenerateGrovePodCliqueSet
+// from a ServiceRole. All fields come from the enclosing Grove render
 // loop iteration and are read-only.
 type cliqueParams struct {
 	r                           ServiceRole
@@ -2138,8 +2136,7 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	kubeClient                  ctrlclient.Client
-	ctx                         context.Context
+	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
 
@@ -2158,15 +2155,22 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
+	checkpointEnabled := p.runtimeConfig.Gate.Enabled(features.Checkpoint)
+	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
-	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
-		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
-			p.operatorConfig.Checkpoint.Storage,
+	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
+		if p.checkpointInfo != nil &&
+			p.checkpointInfo.Enabled &&
+			p.checkpointInfo.Ready &&
+			p.checkpointRestore == nil {
+			return nil, fmt.Errorf("resolved checkpoint restore is required for role %s", p.r.Name)
+		}
+		if err := checkpoint.InjectResolvedCheckpointIntoPodSpec(
+			podSpec,
+			p.checkpointRestore,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
@@ -2285,16 +2289,16 @@ func applyRestartAnnotation(annotations map[string]string, componentName string,
 	return annotations
 }
 
-func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclient.Client, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
+func resolveGroveClusterTopologyDomains(ctx context.Context, reader ctrlclient.Reader, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
 	if kvt == nil || kvt.ClusterTopologyName == "" {
 		return nil, nil
 	}
-	if kubeClient == nil {
+	if reader == nil {
 		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
 	ct := &grovev1alpha1.ClusterTopologyBinding{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
@@ -2329,17 +2333,49 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 	return false
 }
 
+func resolveGroveSchedulerQueue(
+	ctx context.Context,
+	annotations map[string]string,
+	runtimeConfig *controller_common.RuntimeConfig,
+) (string, error) {
+	if runtimeConfig.Gate.Enabled(features.Grove) && runtimeConfig.Gate.Enabled(features.KaiScheduler) && runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
+		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
+	}
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
+		return "", nil
+	}
+
+	queueName, err := DetermineKaiSchedulerQueue(ctx, annotations)
+	if err != nil {
+		return "", fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+	}
+	return queueName, nil
+}
+
+// GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
+// desired PodCliqueSet. Resolved domain values stay local and are passed to
+// the leaf rendering helpers that consume them.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Client,
+	reader ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
+	if dynamoDeployment == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
+	}
+	if operatorConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without operator configuration")
+	}
+	if runtimeConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without runtime configuration")
+	}
+
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Components)
 	gangSet.Namespace = dynamoDeployment.Namespace
@@ -2353,6 +2389,15 @@ func GenerateGrovePodCliqueSet(
 	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
 	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
+	updateStrategy, err := groveUpdateStrategyFromAnnotations(dynamoDeployment.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	if updateStrategy != nil {
+		gangSet.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{
+			Type: *updateStrategy,
+		}
+	}
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
 	}
@@ -2366,18 +2411,9 @@ func GenerateGrovePodCliqueSet(
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
-		return nil, fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
-	}
-
-	// Validate kai-scheduler queue once if kai-scheduler is enabled
-	var validatedQueueName string
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
-		var err error
-		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
-		}
+	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
@@ -2386,7 +2422,7 @@ func GenerateGrovePodCliqueSet(
 	var groveClusterTopologyDomains []v1beta1.TopologyDomain
 	if dynamoDeployment.Spec.Experimental != nil {
 		var err error
-		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, kubeClient, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, reader, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -2418,6 +2454,22 @@ func GenerateGrovePodCliqueSet(
 		if checkpointInfoByComponent != nil {
 			checkpointInfo = checkpointInfoByComponent[componentName]
 		}
+		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
+		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
+			checkpointInfo != nil &&
+			checkpointInfo.StartupPolicy != "" &&
+			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
+			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
+				ctx,
+				reader,
+				dynamoDeployment.Namespace,
+				checkpointInfo,
+				operatorConfig.Checkpoint.Storage,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)
+			}
+		}
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
@@ -2448,8 +2500,7 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				kubeClient:                  kubeClient,
-				ctx:                         ctx,
+				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 			})
 			if err != nil {
@@ -2526,6 +2577,30 @@ func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointIn
 		checkpointInfo.Enabled &&
 		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!checkpointInfo.Ready
+}
+
+func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
+	value, ok := annotations[commonconsts.KubeAnnotationGroveUpdateStrategy]
+	if !ok {
+		return nil, nil
+	}
+
+	var strategy grovev1alpha1.UpdateStrategyType
+	switch value {
+	case string(grovev1alpha1.RollingRecreateStrategy):
+		strategy = grovev1alpha1.RollingRecreateStrategy
+	case string(grovev1alpha1.OnDeleteStrategy):
+		strategy = grovev1alpha1.OnDeleteStrategy
+	default:
+		return nil, fmt.Errorf(
+			"unsupported Grove update strategy annotation %q=%q: supported values are %q and %q",
+			commonconsts.KubeAnnotationGroveUpdateStrategy,
+			value,
+			grovev1alpha1.RollingRecreateStrategy,
+			grovev1alpha1.OnDeleteStrategy,
+		)
+	}
+	return &strategy, nil
 }
 
 // generatePodSpecForRole builds the pod spec for a single role, handling GMS

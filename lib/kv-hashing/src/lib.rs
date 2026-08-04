@@ -25,6 +25,7 @@ mod salt;
 pub use block::UniversalBlock;
 pub use error::KvHashingError;
 pub use request::{Request, RequestBuilder, RequestMmObjectInfo};
+pub use salt::compute_salt_hash;
 
 // Re-export the underlying primitives so consumers can depend solely on this crate.
 pub use dynamo_tokens::{

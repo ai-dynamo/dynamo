@@ -141,15 +141,11 @@ impl LoraAllocationConfig {
     pub fn from_env() -> Self {
         let defaults = Self::default();
 
-        // Map recognised values; unknown strings fall through to None so the
-        // default is preserved instead of silently disabling allocation.
+        // Map recognised values; empty or unknown strings fall through to None
+        // so the default is preserved instead of silently disabling allocation.
         let enabled = std::env::var(llm::DYN_LORA_ALLOCATION_ENABLED)
             .ok()
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "true" | "1" | "yes" => Some(true),
-                "false" | "0" | "no" => Some(false),
-                _ => None,
-            })
+            .and_then(|v| dynamo_runtime::config::parse_bool_opt(&v))
             .unwrap_or(defaults.enabled);
 
         let algorithm = std::env::var(llm::DYN_LORA_ALLOCATION_ALGORITHM)

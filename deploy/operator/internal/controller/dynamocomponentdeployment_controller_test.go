@@ -32,6 +32,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
@@ -632,6 +633,7 @@ func TestDynamoComponentDeploymentReconciler_generateService_DottedDeleteStub(t 
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
+	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme
 	require.NoError(t, v1alpha1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
@@ -685,6 +687,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -692,6 +695,15 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		},
 	}
 
+	t.Log("Render the reusable component Service and multinode pod templates directly")
+	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	renderedService, renderedServiceToDelete, err := renderer.generateService(context.Background(), dcd)
+	require.NoError(t, err)
+	require.False(t, renderedServiceToDelete)
+	renderedLeaderTemplate, renderedWorkerTemplate, err := renderer.renderMultinodePodTemplateSpecs(context.Background(), dcd)
+	require.NoError(t, err)
+
+	t.Log("Compose the same resources through the DCD controller")
 	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
@@ -700,6 +712,10 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
+	t.Log("Verify controller composition preserves the reusable renderer output")
+	require.Equal(t, renderedService, service)
+	require.Equal(t, renderedLeaderTemplate, lws.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	require.Equal(t, *renderedWorkerTemplate, lws.Spec.LeaderWorkerTemplate.WorkerTemplate)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
@@ -764,6 +780,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -771,9 +788,9 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -886,7 +903,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFro
 			WithScheme(s).
 			WithObjects(dcd, existingLeaderWorkerSet).
 			Build(),
-		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
 	}
 
 	componentType, err := r.getDCDWorkloadComponentType(context.Background(), dcd)
@@ -938,6 +955,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -945,9 +963,9 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		},
 	}
 
-	podTemplate, err := r.generatePodTemplateSpec(
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(),
-		generateResourceOption{dynamoComponentDeployment: dcd},
+		dcd,
 		dynamo.RoleMain,
 	)
 	require.NoError(t, err)
@@ -1737,6 +1755,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
 
@@ -1759,9 +1778,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1786,7 +1805,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1819,9 +1837,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1898,9 +1917,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		_, err = r.generatePodTemplateSpec(
+		_, err = r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		require.Error(t, err)
@@ -1908,7 +1927,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1940,9 +1958,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, GMSSnapshot: true}}
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -1985,9 +2004,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2046,16 +2065,16 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != defaultNamespace {
+		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != testNamespace {
 			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
 		}
 		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
@@ -2089,9 +2108,9 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 
 		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.generatePodTemplateSpec(
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
-			generateResourceOption{dynamoComponentDeployment: dcd},
+			dcd,
 			dynamo.RoleMain,
 		)
 		if err != nil {
@@ -2194,6 +2213,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Enabled: true,
 				},
 			},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
 		}
 	}
 
@@ -2282,7 +2302,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := defaultNamespace
+	namespace := testNamespace
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
@@ -3404,4 +3424,71 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 			g.Expect(deployment.Spec.Strategy).To(gomega.Equal(tt.wantStrategy))
 		})
 	}
+}
+
+func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-no-gpu-check",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  commonconsts.MainContainerName,
+								Image: "nvcr.io/nvidia/dynamo:latest",
+								Command: []string{
+									"python3",
+								},
+								Args: []string{
+									"-m",
+									"dynamo.vllm",
+								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{"cpu": resource.MustParse("1")},
+									Limits:   corev1.ResourceList{"cpu": resource.MustParse("1")},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	got, err := reconciler.workloadRenderer().generateWorkerPodTemplateSpec(
+		context.Background(),
+		dcd,
+		map[string]string{"app": "demo"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "worker", got.Labels["role"])
+	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
 }

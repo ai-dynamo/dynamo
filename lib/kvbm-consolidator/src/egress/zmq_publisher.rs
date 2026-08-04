@@ -95,6 +95,7 @@ fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             source: _,
         } => {
             let token_ids_i32: Vec<i32> = token_ids
@@ -116,6 +117,7 @@ fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
                 token_ids: token_ids_i32,
                 block_size: block_size_i32,
                 lora_name,
+                cache_namespace,
                 medium: None,
             })
         }
@@ -178,7 +180,11 @@ pub async fn spawn(
                     let batch = EventBatch(now_f64, events, Some(0));
 
                     let mut buf = Vec::new();
-                    if let Err(e) = batch.serialize(&mut rmp_serde::Serializer::new(&mut buf)) {
+                    // Store events have optional named fields such as cache_salt. Encode
+                    // structs as maps so omitted fields cannot shift positional values.
+                    let mut serializer =
+                        rmp_serde::Serializer::new(&mut buf).with_struct_map();
+                    if let Err(e) = batch.serialize(&mut serializer) {
                         tracing::warn!("Failed to publish batch: {e}");
                         continue;
                     }
@@ -210,6 +216,7 @@ mod sort_tests {
             token_ids: vec![],
             block_size: 0,
             lora_name: None,
+            cache_namespace: None,
             source: EventSource::Vllm,
         }
     }

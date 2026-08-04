@@ -19,7 +19,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - round-robin
-            - --router-reset-states
             - --request-plane
             - nats
           env:

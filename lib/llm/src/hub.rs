@@ -122,9 +122,7 @@ fn is_offline_mode() -> bool {
 /// server and worker pods do not share a filesystem (e.g. RWO PVCs, cross-namespace
 /// deployments).
 fn is_no_shared_storage() -> bool {
-    env::var(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
 }
 
 /// Download a model using ModelExpress client. The client first requests for the model
@@ -162,11 +160,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         Ok(mut client) => {
             tracing::info!("Successfully connected to ModelExpress server");
             match client
-                .request_model_with_provider_and_fallback(
-                    &model_name,
-                    MxModelProvider::HuggingFace,
-                    ignore_weights,
-                )
+                .request_model(&model_name, MxModelProvider::HuggingFace, ignore_weights)
                 .await
             {
                 Ok(()) => {

@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::future::{self, Future};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
-use crate::sequences::{SequencePublisher, SequenceSubscriber};
+use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
 use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
@@ -23,9 +24,23 @@ const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScopedReplicaEvent {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub block_size: u32,
     pub event: ActiveSequenceEvent,
+}
+
+impl ScopedReplicaEvent {
+    pub(crate) fn partition_ref(&self) -> RoutingPartitionRef<'_> {
+        RoutingPartitionRef::new(&self.model_name, &self.routing_group)
+    }
+
+    pub(crate) fn into_parts(self) -> (RoutingPartitionId, u32, ActiveSequenceEvent) {
+        (
+            RoutingPartitionId::new(self.model_name, self.routing_group),
+            self.block_size,
+            self.event,
+        )
+    }
 }
 
 pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
@@ -34,13 +49,54 @@ pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 pub(crate) struct ReplicaSyncConfig {
     process_id: u64,
     outbound_tx: ReplicaEventSender,
+    cancel_token: CancellationToken,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReplicaSyncRuntime {
+    config: ReplicaSyncConfig,
+    cancel_token: CancellationToken,
+    publisher_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ReplicaSyncRuntime {
+    pub(crate) fn config(&self) -> ReplicaSyncConfig {
+        self.config.clone()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.publisher_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn abort(&self) {
+        self.cancel_token.cancel();
+        if let Ok(mut task) = self.publisher_task.try_lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for ReplicaSyncRuntime {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl ReplicaSyncConfig {
-    pub(crate) fn new(process_id: u64, outbound_tx: ReplicaEventSender) -> Self {
+    pub(crate) fn new(
+        process_id: u64,
+        outbound_tx: ReplicaEventSender,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             process_id,
             outbound_tx,
+            cancel_token,
         }
     }
 
@@ -68,10 +124,10 @@ pub(crate) struct ScopedSequencePublisher {
 
 #[derive(Clone)]
 struct ScopedReplicaPublisher {
-    model_name: Arc<str>,
-    tenant_id: Arc<str>,
+    partition: Arc<RoutingPartitionId>,
     block_size: u32,
     tx: ReplicaEventSender,
+    cancel_token: CancellationToken,
 }
 
 impl ScopedSequencePublisher {
@@ -80,52 +136,54 @@ impl ScopedSequencePublisher {
     }
 
     pub(crate) fn enabled(
-        model_name: Arc<str>,
-        tenant_id: Arc<str>,
+        partition: Arc<RoutingPartitionId>,
         block_size: u32,
         tx: ReplicaEventSender,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             replica: Some(ScopedReplicaPublisher {
-                model_name,
-                tenant_id,
+                partition,
                 block_size,
                 tx,
+                cancel_token,
             }),
         }
     }
 }
 
 impl SequencePublisher for ScopedSequencePublisher {
-    fn publish_event(
-        &self,
-        event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = Result<()>> + Send {
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> Result<()> {
         let Some(replica) = &self.replica else {
-            return future::ready(Ok(()));
+            return Ok(());
         };
         let envelope = ScopedReplicaEvent {
-            model_name: replica.model_name.to_string(),
-            tenant_id: replica.tenant_id.to_string(),
+            model_name: replica.partition.model_name.clone(),
+            routing_group: replica.partition.routing_group.clone(),
             block_size: replica.block_size,
-            event: event.clone(),
+            event,
         };
-        let result = match replica.tx.try_send(envelope) {
+        match replica.tx.try_send(envelope) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    model_name = %event.model_name,
-                    tenant_id = %event.tenant_id,
-                    request_id = %event.event.request_id,
-                    "Replica publisher channel full; dropping event"
+                let error = SequencePublishQueueError::full(event.event, replica.tx.max_capacity());
+                Err(anyhow::Error::new(error).context(format!(
+                    "replica publisher for model_name={} routing_group={}",
+                    event.model_name, event.routing_group
+                )))
+            }
+            Err(mpsc::error::TrySendError::Closed(event)) => {
+                let error = SequencePublishQueueError::closed(
+                    event.event,
+                    replica.tx.max_capacity(),
+                    replica.cancel_token.is_cancelled(),
                 );
-                Ok(())
+                Err(anyhow::Error::new(error).context(format!(
+                    "replica publisher for model_name={} routing_group={}",
+                    event.model_name, event.routing_group
+                )))
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(anyhow!("replica publisher channel is closed"))
-            }
-        };
-        future::ready(result)
+        }
     }
 
     fn publish_load(&self, _load: ActiveLoad) {}
@@ -165,7 +223,7 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
 
 fn generate_process_id() -> u64 {
     loop {
-        let id = rand::random();
+        let id = fastrand::u64(..);
         if id != 0 {
             return id;
         }
@@ -183,7 +241,7 @@ pub(crate) fn setup_replica_sync(
     port: Option<u16>,
     initial_peers: &[String],
     cancel_token: CancellationToken,
-) -> Result<Option<ReplicaSyncConfig>> {
+) -> Result<Option<ReplicaSyncRuntime>> {
     let Some(port) = port else {
         if !initial_peers.is_empty() {
             anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
@@ -193,14 +251,18 @@ pub(crate) fn setup_replica_sync(
 
     let bind_endpoint = replica_sync_bind_endpoint(port)?;
     let process_id = generate_process_id();
-    let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token)?;
-    Ok(Some(ReplicaSyncConfig::new(process_id, outbound_tx)))
+    let (outbound_tx, publisher_task) =
+        start_replica_publisher(&bind_endpoint, cancel_token.clone())?;
+    Ok(Some(ReplicaSyncRuntime {
+        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token.clone()),
+        cancel_token,
+        publisher_task: Mutex::new(Some(publisher_task)),
+    }))
 }
 
 pub(crate) fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
-    model_name: &str,
-    tenant_id: &str,
+    partition: &RoutingPartitionId,
     block_size: u32,
 ) -> ScopedReplicaSync {
     let Some(config) = config else {
@@ -215,10 +277,10 @@ pub(crate) fn setup_scoped_replica_sync(
     let (replica_tx, replica_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
     ScopedReplicaSync {
         publisher: ScopedSequencePublisher::enabled(
-            Arc::from(model_name),
-            Arc::from(tenant_id),
+            Arc::new(partition.clone()),
             block_size,
             config.outbound_tx.clone(),
+            config.cancel_token.clone(),
         ),
         enabled: true,
         process_id: config.process_id,
@@ -229,13 +291,13 @@ pub(crate) fn setup_scoped_replica_sync(
 pub(crate) fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
-) -> Result<ReplicaEventSender> {
+) -> Result<(ReplicaEventSender, JoinHandle<()>)> {
     validate_endpoint(bind_endpoint)?;
     let mut socket = create_bound_pub_socket(bind_endpoint)
         .with_context(|| format!("failed to bind replica publisher to `{bind_endpoint}`"))?;
     let (tx, mut rx) = mpsc::channel::<ScopedReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let event = tokio::select! {
                 _ = cancel_token.cancelled() => break,
@@ -248,10 +310,13 @@ pub(crate) fn start_replica_publisher(
             };
 
             let request_id = event.event.request_id.clone();
+            let partition = event.partition_ref();
             let payload = match rmp_serde::to_vec_named(&event) {
                 Ok(payload) => payload,
                 Err(error) => {
                     tracing::error!(
+                        model_name = %partition.model_name,
+                        routing_group = %partition.routing_group,
                         request_id = %request_id,
                         "Failed to encode active-sequence replica event: {error}"
                     );
@@ -263,6 +328,8 @@ pub(crate) fn start_replica_publisher(
                 .await
             {
                 tracing::error!(
+                    model_name = %partition.model_name,
+                    routing_group = %partition.routing_group,
                     request_id = %request_id,
                     "Failed to publish active-sequence replica event: {error}"
                 );
@@ -270,24 +337,29 @@ pub(crate) fn start_replica_publisher(
         }
     });
 
-    Ok(tx)
+    Ok((tx, task))
 }
 
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-pub(crate) enum PeerError {
+pub enum ReplicaPeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
+
+    #[allow(dead_code)]
+    #[error("replica sync is disabled")]
+    Disabled,
 
     #[error("replica peer manager is unavailable")]
     Unavailable,
 }
 
-#[derive(Clone)]
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
+    cancel_token: CancellationToken,
+    subscriber_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
@@ -326,10 +398,11 @@ impl PeerManager {
         let peers = Arc::new(RwLock::new(configured_peers));
         let (command_tx, mut command_rx) = mpsc::channel(PEER_COMMAND_CHANNEL_CAPACITY);
         let task_peers = Arc::clone(&peers);
-        tokio::spawn(async move {
+        let task_cancel = cancel_token.clone();
+        let subscriber_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => break,
+                    _ = task_cancel.cancelled() => break,
                     command = command_rx.recv() => {
                         let Some(command) = command else {
                             break;
@@ -348,35 +421,40 @@ impl PeerManager {
             }
         });
 
-        Ok(Self { command_tx, peers })
+        Ok(Self {
+            command_tx,
+            peers,
+            cancel_token,
+            subscriber_task: Mutex::new(Some(subscriber_task)),
+        })
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-    pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
+    pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Register { endpoint, response })
             .await
-            .map_err(|_| PeerError::Unavailable)?;
+            .map_err(|_| ReplicaPeerError::Unavailable)?;
         result
             .await
-            .map_err(|_| PeerError::Unavailable)?
-            .map_err(PeerError::InvalidEndpoint)
+            .map_err(|_| ReplicaPeerError::Unavailable)?
+            .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-    pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
+    pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Deregister { endpoint, response })
             .await
-            .map_err(|_| PeerError::Unavailable)?;
+            .map_err(|_| ReplicaPeerError::Unavailable)?;
         result
             .await
-            .map_err(|_| PeerError::Unavailable)?
-            .map_err(PeerError::InvalidEndpoint)
+            .map_err(|_| ReplicaPeerError::Unavailable)?
+            .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
@@ -384,6 +462,28 @@ impl PeerManager {
         let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
         peers.sort();
         peers
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.subscriber_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn abort(&self) {
+        self.cancel_token.cancel();
+        if let Ok(mut task) = self.subscriber_task.try_lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for PeerManager {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
 
@@ -456,12 +556,12 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
     #[cfg(feature = "standalone-slot-tracker")]
-    use crate::services::slot_tracker::registry::{SlotTrackerRegistry, TrackerKey};
+    use crate::services::slot_tracker::registry::SlotTrackerRegistry;
 
     fn event() -> ScopedReplicaEvent {
         ScopedReplicaEvent {
             model_name: "model".to_string(),
-            tenant_id: "tenant".to_string(),
+            routing_group: "group".to_string(),
             block_size: 16,
             event: ActiveSequenceEvent {
                 request_id: "request".to_string(),
@@ -495,25 +595,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replica_event_wire_schema_uses_routing_group() {
+        let payload = rmp_serde::to_vec_named(&event()).unwrap();
+        let value: serde_json::Value = rmp_serde::from_slice(&payload).unwrap();
+        let fields = value.as_object().unwrap();
+
+        assert_eq!(fields.len(), 4);
+        assert!(fields.contains_key("model_name"));
+        assert_eq!(value["routing_group"], "group");
+        assert!(fields.contains_key("block_size"));
+        assert!(fields.contains_key("event"));
+        assert!(value.get("partition").is_none());
+        assert!(value.get("tenant_id").is_none());
+
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+    }
+
+    #[test]
+    fn previous_flat_replica_event_wire_schema_is_accepted() {
+        let previous = serde_json::json!({
+            "model_name": "model",
+            "routing_group": "group",
+            "block_size": 16,
+            "event": event().event,
+        });
+        let payload = rmp_serde::to_vec_named(&previous).unwrap();
+
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(
+            decoded.partition_ref(),
+            RoutingPartitionRef::new("model", "group")
+        );
+        assert_eq!(decoded.block_size, 16);
+    }
+
+    #[test]
+    fn legacy_replica_event_wire_schema_is_rejected() {
+        let legacy = serde_json::json!({
+            "model_name": "model",
+            "tenant_id": "tenant",
+            "block_size": 16,
+            "event": event().event,
+        });
+        let payload = rmp_serde::to_vec_named(&legacy).unwrap();
+
+        assert!(rmp_serde::from_slice::<ScopedReplicaEvent>(&payload).is_err());
+    }
+
     #[tokio::test]
-    async fn scoped_publisher_drops_when_outbound_channel_is_full() {
+    async fn scoped_publisher_reports_full_and_closed_channels() {
         let (tx, mut rx) = mpsc::channel(1);
-        let publisher =
-            ScopedSequencePublisher::enabled(Arc::from("model"), Arc::from("tenant"), 16, tx);
+        let cancel_token = CancellationToken::new();
+        let publisher = ScopedSequencePublisher::enabled(
+            Arc::new(RoutingPartitionId::new("model", "group")),
+            16,
+            tx,
+            cancel_token.clone(),
+        );
         let event = event().event;
 
-        publisher.publish_event(&event).await.unwrap();
-        publisher.publish_event(&event).await.unwrap();
+        publisher.enqueue_event(event.clone()).unwrap();
+        let full = publisher.enqueue_event(event.clone()).unwrap_err();
 
         assert_eq!(rx.len(), 1);
         assert_eq!(rx.recv().await.unwrap().event.request_id, "request");
+        let full = format!("{full:#}");
+        assert!(full.contains("queue full"));
+        assert!(full.contains("model_name=model"));
+        assert!(full.contains("routing_group=group"));
+        assert!(full.contains("capacity=1"));
+
+        drop(rx);
+        let unexpected_closed = publisher.enqueue_event(event.clone()).unwrap_err();
+        assert!(matches!(
+            unexpected_closed.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: false,
+                ..
+            })
+        ));
+
+        cancel_token.cancel();
+        let shutdown_closed = publisher.enqueue_event(event).unwrap_err();
+        assert!(matches!(
+            shutdown_closed.downcast_ref::<SequencePublishQueueError>(),
+            Some(SequencePublishQueueError::Closed {
+                during_shutdown: true,
+                ..
+            })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dynamic_peer_registration_controls_delivery() {
         let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let outbound =
+        let (outbound, publisher_task) =
             start_replica_publisher(&endpoint, cancel_token.child_token()).expect("publisher");
         let (received_tx, mut received_rx) = mpsc::channel(16);
         let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
@@ -551,6 +733,8 @@ mod tests {
         );
 
         cancel_token.cancel();
+        manager.shutdown().await;
+        publisher_task.await.unwrap();
     }
 
     #[cfg(feature = "standalone-slot-tracker")]
@@ -559,23 +743,25 @@ mod tests {
         let endpoint_a = reserve_tcp_endpoint();
         let endpoint_b = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let outbound_a = start_replica_publisher(&endpoint_a, cancel_token.child_token()).unwrap();
-        let outbound_b = start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
+        let (outbound_a, publisher_a) =
+            start_replica_publisher(&endpoint_a, cancel_token.child_token()).unwrap();
+        let (outbound_b, publisher_b) =
+            start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            ReplicaSyncConfig::new(11, outbound_a),
+            ReplicaSyncConfig::new(11, outbound_a, cancel_token.clone()),
         ));
         let registry_b = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
-            ReplicaSyncConfig::new(22, outbound_b),
+            ReplicaSyncConfig::new(22, outbound_b, cancel_token.clone()),
         ));
         let dispatch_registry_b = Arc::clone(&registry_b);
-        let _peer_b =
+        let peer_b =
             PeerManager::start(vec![endpoint_a], cancel_token.child_token(), move |event| {
                 dispatch_registry_b.dispatch_replica_event(event)
             })
             .unwrap();
-        let key = TrackerKey::new("model".to_string(), Some("tenant".to_string()));
+        let key = RoutingPartitionId::new("model", "group");
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();
         let worker = WorkerWithDpRank::new(1, 0);
@@ -610,6 +796,9 @@ mod tests {
         registry_a.free(&key, "target").unwrap();
         wait_for_load(&registry_b, 0, 0).await;
         cancel_token.cancel();
+        peer_b.shutdown().await;
+        publisher_a.await.unwrap();
+        publisher_b.await.unwrap();
     }
 
     #[cfg(feature = "standalone-slot-tracker")]

@@ -9,9 +9,9 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::BlockExtraInfo;
 
-use super::extra_keys::extra_keys_to_block_mm_infos;
+use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
-use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, RawKvEvent};
+use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -49,8 +49,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
+        let mut cache_namespace: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut locality: Option<Option<Locality>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -76,6 +78,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "lora_name" => {
                     lora_name = Some(map.next_value()?);
                 }
+                "cache_salt" => {
+                    cache_namespace = Some(map.next_value()?);
+                }
                 "extra_keys" => {
                     extra_keys = Some(map.next_value()?);
                 }
@@ -90,6 +95,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "kv_cache_spec_sliding_window" => {
                     metadata.kv_cache_spec_sliding_window = map.next_value()?;
+                }
+                "locality" => {
+                    locality = Some(map.next_value()?);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -106,21 +114,28 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let medium = medium.unwrap_or(None);
+                let lora_name = lora_name.unwrap_or(None);
+                let extra_keys = extra_keys.unwrap_or(None);
+                let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
+                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
+                });
                 let block_mm_infos = block_mm_infos
                     .unwrap_or(None)
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys.unwrap_or(None)));
+                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
                     token_ids: raw_token_ids,
                     block_size,
                     medium,
-                    lora_name: lora_name.unwrap_or(None),
+                    lora_name,
+                    cache_namespace,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: locality.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -133,6 +148,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: locality.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
@@ -194,6 +210,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
+                let cache_namespace =
+                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
                 let block_mm_infos =
                     block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
@@ -205,11 +223,13 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     medium,
                     lora_name,
+                    cache_namespace,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: None,
                 })
             }
             "BlockRemoved" => {
@@ -235,6 +255,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: None,
                 })
             }
             "AllBlocksCleared" => {

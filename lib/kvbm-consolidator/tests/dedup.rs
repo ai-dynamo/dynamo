@@ -49,11 +49,13 @@ fn bs_event(
         block_size,
         lora_name,
         medium: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
     }
 }
 
@@ -64,6 +66,7 @@ fn br_event(hashes: Vec<u64>) -> RawKvEvent {
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
     }
 }
 

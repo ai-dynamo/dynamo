@@ -104,25 +104,21 @@ impl SideIndexer {
         }
     }
 
-    pub(super) async fn remove_worker(&self, worker_id: WorkerId) {
+    pub(super) async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
-                KvIndexerInterface::remove_worker(indexer, worker_id).await;
+                indexer
+                    .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                    .await
             }
             Self::Concurrent(indexer) => {
-                KvIndexerInterface::remove_worker(indexer.as_ref(), worker_id).await;
-            }
-        }
-    }
-
-    pub(super) async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        match self {
-            Self::KvIndexer(indexer) => {
-                KvIndexerInterface::remove_worker_dp_rank(indexer, worker_id, dp_rank).await;
-            }
-            Self::Concurrent(indexer) => {
-                KvIndexerInterface::remove_worker_dp_rank(indexer.as_ref(), worker_id, dp_rank)
-                    .await;
+                indexer
+                    .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
+                    .await
             }
         }
     }

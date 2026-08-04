@@ -423,6 +423,18 @@ impl DeltaAggregator {
             }
         }
 
+        // Enforce parallel_tool_calls == false as a universal post-parse fallback,
+        // similar to vLLM's maybe_filter_parallel_tool_calls
+        if parsing_options.parallel_tool_calls == Some(false) {
+            for choice in aggregator.choices.values_mut() {
+                if let Some(calls) = choice.tool_calls.as_mut()
+                    && calls.len() > 1
+                {
+                    calls.truncate(1);
+                }
+            }
+        }
+
         // Extract aggregated choices and sort them by index.
         let mut choices: Vec<_> = aggregator
             .choices
@@ -430,7 +442,7 @@ impl DeltaAggregator {
             .map(dynamo_protocols::types::ChatChoice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
@@ -458,7 +470,8 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        // TODO: Revisit whether tool calls produced at the output-token limit should
+        // preserve Length and yield an incomplete Responses result.
         let finish_reason = if delta
             .tool_calls
             .as_ref()
@@ -568,8 +581,8 @@ mod tests {
         let tool_calls: Option<serde_json::Value> =
             tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
 
-        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
-            Some(vec![
+        let tool_call_chunks = tool_calls.map(|tool_calls| {
+            vec![
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
@@ -579,10 +592,8 @@ mod tests {
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
                 },
-            ])
-        } else {
-            None
-        };
+            ]
+        });
 
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(text.to_string())),
@@ -847,6 +858,84 @@ mod tests {
         assert_eq!(tool_calls[1].id, "tc1");
         assert_eq!(tool_calls[1].function.name, "get_time");
         assert_eq!(tool_calls[1].function.arguments, "{\"tz\":\"JST\"}");
+    }
+
+    /// When parallel_tool_calls == false, the aggregator limits the
+    /// response to the first tool call, even if the model emitted multiple calls.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_false_caps_to_first_call() {
+        let make_name = |idx: u32, id: &str, name: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: idx,
+                id: Some(id.to_string()),
+                r#type: Some(dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some(name.to_string()),
+                    arguments: None,
+                }),
+            }
+        };
+        let make_args = |idx: u32, fragment: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: idx,
+                id: None,
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: None,
+                    arguments: Some(fragment.to_string()),
+                }),
+            }
+        };
+
+        let deltas = vec![
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![make_name(0, "tc0", "get_weather")],
+                None,
+                Some(dynamo_protocols::types::Role::Assistant),
+            ),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![make_name(1, "tc1", "get_time")],
+                None,
+                None,
+            ),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![make_args(0, "{\"city\":\"Tokyo\"}")],
+                None,
+                None,
+            ),
+            create_test_delta_with_tool_chunks(
+                0,
+                vec![make_args(1, "{\"tz\":\"JST\"}")],
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                None,
+            ),
+        ];
+        let stream = Box::pin(stream::iter(deltas));
+
+        let response = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::default().with_parallel_tool_calls(Some(false)),
+        )
+        .await
+        .expect("aggregation should succeed");
+
+        assert_eq!(response.inner.choices.len(), 1);
+        let tool_calls = response.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls should be Some");
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "parallel_tool_calls=false must cap to a single tool call"
+        );
+        // The first-emitted call (index 0) is the one retained.
+        assert_eq!(tool_calls[0].id, "tc0");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 
     /// When fragment-only chunks arrive but no id/name ever establishes the
@@ -1210,7 +1299,7 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(

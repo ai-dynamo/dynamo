@@ -235,6 +235,7 @@ def send_cancellable_request(
     frontend_port: int,
     request_type: str = "completion",
     use_long_prompt: bool = False,
+    max_tokens: int = 16384,
 ) -> CancellableRequest:
     """Send a request that can be manually cancelled.
 
@@ -242,6 +243,7 @@ def send_cancellable_request(
         frontend_port: Port where the frontend is running
         request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
         use_long_prompt: Whether to use an extremely long prompt
+        max_tokens: Maximum tokens to generate for the cancellable request
 
     Returns:
         A CancellableRequest object that can be explicitly cancelled
@@ -251,11 +253,15 @@ def send_cancellable_request(
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 16384, frontend_port)
+        return send_completion_request(prompt, max_tokens, frontend_port)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=False)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=False
+        )
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 16384, frontend_port, stream=True)
+        return send_chat_completion_request(
+            prompt, max_tokens, frontend_port, stream=True
+        )
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 

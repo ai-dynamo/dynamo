@@ -50,24 +50,29 @@ func GetOverlayUpperDir(pid int) (string, error) {
 }
 
 // CaptureRootfsDiff captures the overlay upperdir to a tar file.
+//
+// The archive is written to a temporary file first and renamed atomically on
+// success, so a partial or failed capture never leaves a corrupt archive at the
+// final path.
 func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlaySettings, bindMountDests []string) (string, error) {
 	if upperDir == "" {
 		return "", fmt.Errorf("upperdir is empty")
 	}
 
 	rootfsDiffPath := filepath.Join(checkpointDir, rootfsDiffFilename)
+
 	tmpFile, err := os.CreateTemp(checkpointDir, rootfsDiffFilename+".*.tmp")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temporary rootfs diff: %w", err)
 	}
-	tmpRootfsDiffPath := tmpFile.Name()
+	tmpPath := tmpFile.Name()
 	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpRootfsDiffPath)
+		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to close temporary rootfs diff: %w", err)
 	}
 	defer func() {
-		if tmpRootfsDiffPath != "" {
-			_ = os.Remove(tmpRootfsDiffPath)
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
@@ -78,24 +83,26 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 	for _, dest := range bindMountDests {
 		tarArgs = append(tarArgs, "--exclude=."+dest)
 	}
-	tarArgs = append(tarArgs, "-C", upperDir, "-cf", tmpRootfsDiffPath, ".")
+	tarArgs = append(tarArgs, "-C", upperDir, "-cf", tmpPath, ".")
 
 	cmd := exec.Command("tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
 	}
-	info, err := os.Stat(tmpRootfsDiffPath)
+
+	info, err := os.Stat(tmpPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat temporary rootfs diff: %w", err)
 	}
 	if info.Size() == 0 {
 		return "", fmt.Errorf("tar produced empty rootfs diff")
 	}
-	if err := os.Rename(tmpRootfsDiffPath, rootfsDiffPath); err != nil {
+
+	if err := os.Rename(tmpPath, rootfsDiffPath); err != nil {
 		return "", fmt.Errorf("failed to publish rootfs diff: %w", err)
 	}
-	tmpRootfsDiffPath = ""
+	tmpPath = ""
 
 	return rootfsDiffPath, nil
 }
@@ -154,7 +161,7 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 		return fmt.Errorf("failed to stat rootfs diff: %w", err)
 	}
 	if info.Size() == 0 {
-		log.Info("Empty rootfs-diff.tar, skipping")
+		log.V(1).Info("rootfs-diff.tar is empty, skipping")
 		return nil
 	}
 

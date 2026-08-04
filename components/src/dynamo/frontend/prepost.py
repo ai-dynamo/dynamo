@@ -17,11 +17,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.async_utils import make_async
+
+from .thinking import apply_default_thinking_mode_to_template_kwargs
 
 
 class _Renderer(Protocol):
@@ -93,6 +95,8 @@ def _prepare_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
+    default_thinking_mode: str | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -136,8 +140,35 @@ def _prepare_request(
         )
         else None
     )
-    chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
-    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # serde's `alias` is deserialize-only, so pythonize emits the Rust field
+    # name `chat_template_args`; read it too or client kwargs are dropped.
+    raw_template_args = (
+        request.get("chat_template_args") if isinstance(request, dict) else None
+    )
+    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
+    # default; copy the result since the default dict is shared across requests
+    # and we mutate reasoning_effort below.
+    chat_template_kwargs = dict(
+        merge_kwargs(
+            default_chat_template_kwargs,
+            request_for_sampling.chat_template_kwargs or raw_template_args or {},
+        )
+    )
+    # reasoning_effort is a request-level thinking control. Put an explicit
+    # value into the kwargs before applying the deployment default so the two
+    # cannot produce contradictory template controls.
+    if request_for_sampling.reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=(
+            isinstance(request, dict) and request.get("thinking") is not None
+        ),
+    )
+    # Don't let an absent top-level field clobber a nested reasoning_effort.
+    if request_for_sampling.reasoning_effort is None:
+        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -154,14 +185,15 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        chat_template_kwargs=dict(
-            add_generation_prompt=request_for_sampling.add_generation_prompt,
-            continue_final_message=request_for_sampling.continue_final_message,
-            tools=tool_dicts,
-            documents=request_for_sampling.documents,
-            tokenize=tokenize_in_template,
+        # Renderer-managed keys last so a nested duplicate can't raise TypeError.
+        chat_template_kwargs={
             **chat_template_kwargs,
-        ),
+            "add_generation_prompt": request_for_sampling.add_generation_prompt,
+            "continue_final_message": request_for_sampling.continue_final_message,
+            "tools": tool_dicts,
+            "documents": request_for_sampling.documents,
+            "tokenize": tokenize_in_template,
+        },
     )
 
     return (
@@ -181,6 +213,8 @@ async def preprocess_chat_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
+    default_thinking_mode: str | None = None,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -194,6 +228,8 @@ async def preprocess_chat_request(
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
+        default_chat_template_kwargs=default_chat_template_kwargs,
+        default_thinking_mode=default_thinking_mode,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -321,6 +357,44 @@ class StreamingPostProcessor:
         return (
             self.tool_parser is not None
             and self.request_for_sampling.tool_choice != "none"
+        )
+
+    def _tool_parser_terminal_markers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        parser_engine = getattr(self.tool_parser, "_parser_engine", None)
+        parser_engine_config = getattr(parser_engine, "parser_engine_config", None)
+        terminals = getattr(parser_engine_config, "terminals", None)
+        if not isinstance(terminals, dict):
+            return ()
+
+        markers: list[str] = []
+        for name in names:
+            marker = terminals.get(name)
+            if isinstance(marker, str) and marker:
+                markers.append(marker)
+        return tuple(markers)
+
+    def _tool_start_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_start_token", None),
+            # MistralToolParser names its [TOOL_CALLS] marker bot_token.
+            getattr(self.tool_parser, "bot_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_START", "FUNC_PREFIX")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
+    def _tool_end_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_end_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_END", "FUNC_END")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
         )
 
     @staticmethod
@@ -510,9 +584,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            tool_call_end = getattr(self.tool_parser, "tool_call_end_token", None)
             buffer_complete = (
-                tool_call_end and tool_call_end in self._tool_text_buffer
+                any(
+                    marker in self._tool_text_buffer
+                    for marker in self._tool_end_markers()
+                )
             ) or output.finish_reason
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
@@ -551,10 +627,10 @@ class StreamingPostProcessor:
                 current_text = ""
                 current_token_ids = []
 
-                tool_call_start = getattr(
-                    self.tool_parser, "tool_call_start_token", None
-                )
-                if post_content and tool_call_start and tool_call_start in post_content:
+                tool_start_markers = self._tool_start_markers()
+                if post_content and any(
+                    marker in post_content for marker in tool_start_markers
+                ):
                     # Tool call markup present — buffer for non-streaming
                     # extraction (streaming parser can't handle the combined
                     # reasoning-end + tool-start in a single chunk).

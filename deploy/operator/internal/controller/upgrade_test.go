@@ -27,6 +27,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -795,29 +796,18 @@ spec:
 				render: func(ctx context.Context, t *testing.T, parent, child client.Object) (client.Object, map[string]string) {
 					t.Helper()
 
-					t.Log("prepare Grove render deployment from the converted DGD and existing PodCliqueSet")
+					t.Log("render Grove workloads from the converted DGD and existing PodCliqueSet")
 					dgd := parent.(*v1beta1.DynamoGraphDeployment)
 					reconciler := newUpgradeDGDReconciler(t, dgd, child)
-					renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
-					require.NoError(t, err)
-					require.NotNil(t, existing)
-
-					t.Log("generate the desired Grove PodCliqueSet from the prepared render deployment")
-					pcs, err := dynamo.GenerateGrovePodCliqueSet(
-						ctx,
-						renderDGD,
+					renderer := newGroveWorkloadRenderer(
+						reconciler.Client,
 						&configv1alpha1.OperatorConfiguration{},
 						&controller_common.RuntimeConfig{},
-						reconciler.Client,
-						nil,
-						nil,
-						nil,
 						nil,
 					)
+					pcs, err := renderer.Render(ctx, dgd, nil, nil)
 					require.NoError(t, err)
-
-					t.Log("preserve the existing PodCliqueSet clique order before comparing specs")
-					preserveGrovePodCliqueSetOrder(pcs, existing)
+					renderDGD := groveRenderDeployment(dgd, pcs)
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
 					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
@@ -933,27 +923,16 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 	t.Log("seed the fake client with a native v1beta1 DGD and existing PodCliqueSet")
 	reconciler := newUpgradeDGDReconciler(t, dgd, existingPCS)
 
-	t.Log("prepare the Grove render deployment without legacy worker selector migration")
-	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
-	require.NoError(t, err)
-	require.NotNil(t, existing)
-
-	t.Log("generate the desired PodCliqueSet from the prepared native render deployment")
-	desired, err := dynamo.GenerateGrovePodCliqueSet(
-		ctx,
-		renderDGD,
+	t.Log("render Grove workloads without legacy worker selector migration")
+	renderer := newGroveWorkloadRenderer(
+		reconciler.Client,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
-		reconciler.Client,
-		nil,
-		nil,
-		nil,
 		nil,
 	)
+	desired, err := renderer.Render(ctx, dgd, nil, nil)
 	require.NoError(t, err)
-
-	t.Log("preserve existing clique order before checking native labels")
-	preserveGrovePodCliqueSetOrder(desired, existing)
+	renderDGD := groveRenderDeployment(dgd, desired)
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
 	prefillComponent := renderDGD.GetComponentByName("prefill")
@@ -993,7 +972,7 @@ func newUpgradeDCDReconciler(
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
