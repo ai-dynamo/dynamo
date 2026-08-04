@@ -45,9 +45,16 @@ class _MockAsyncOmni:
     """Fake AsyncOmni: drains the streaming audio input, then echoes it back.
 
     Yields a stage-0 text frame (transcript) followed by the accumulated audio
-    as a single multimodal output, matching the fields RealtimeOmniHandler reads
-    off a real ``OmniRequestOutput`` (``stage_id``, ``outputs[].text``, and a
-    ``MultimodalPayload`` whose ``tensors['audio']`` holds the waveform).
+    as a single multimodal output, mirroring the shapes a real
+    ``OmniRequestOutput`` exposes (``stage_id``, ``outputs[].text``, and
+    ``multimodal_output``).
+
+    ``multimodal_output`` is a property whose type depends on the step: a
+    ``MultimodalPayload`` when a stage attached a non-empty one, and the plain
+    ``dict`` fallback field otherwise. Stage-0 attaches nothing, so its frame
+    must carry ``{}`` rather than an empty payload -- a mock that hands back a
+    payload on every step tests only what the handler already assumes and cannot
+    catch a consumer that reaches past the ``Mapping`` API.
     """
 
     default_sampling_params_list: list = []
@@ -61,7 +68,7 @@ class _MockAsyncOmni:
             stage_id=0,
             outputs=[SimpleNamespace(text=MOCK_TRANSCRIPT, token_ids=[1])],
             prompt_token_ids=[0],
-            multimodal_output=MultimodalPayload(),
+            multimodal_output={},
         )
         yield SimpleNamespace(
             stage_id=1,
