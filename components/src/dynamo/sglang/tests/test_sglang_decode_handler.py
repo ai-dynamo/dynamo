@@ -1461,7 +1461,7 @@ async def test_process_token_stream_trims_logprobs_for_suppressed_stop_token():
             "finish_reason": "stop",
             "token_ids": [101],
             "log_probs": [-0.1],
-            "top_logprobs": [[{"rank": 1, "token": "a", "logprob": -0.1}]],
+            "top_logprobs": [[{"rank": 1, "token_id": 101, "token": "a", "logprob": -0.1}]],
         }
     ]
 
