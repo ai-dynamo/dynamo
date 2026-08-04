@@ -118,20 +118,51 @@ Count categories, not citations. Multiple AIPerf metrics still count as one cate
 path or citation, observation, what it supports, and its limitation. Do not invent category 5 when no applicable
 analysis exists. If fewer than three categories qualify, use `no-proposal` and name the missing evidence.
 
+## Calibrate Exploration Versus Exploitation
+
+Before generating a hypothesis, determine whether a broad or narrow knob adjustment is needed.
+
+- Prefer a broad move while any materially applicable, plausibly higher-upside lever family
+  remains untested or has not been ruled out by current evidence.
+- Prefer a narrow move only after the broad landscape has been screened and valid measurements
+  show a demonstrated, meaningful signal in the selected family.
+- Return to exploration when a narrow change is invalid, inconclusive, within the `0.5%` noise floor, reverses the
+  expected direction, or reveals a different limiting regime.
+
+Perform a fresh broad-lever scan before every hypothesis. Explicitly screen:
+
+1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
+   serving, disaggregated rate matching, GPU allocation, and placement or fabric constraints;
+2. every Category 2 family in `tuning-hierarchy.md`: CUDA graphs; admission, batching, prefill scheduling, and
+   workspace; speculative decoding; KV-cache dtype and capacity; engine backend or autotuner selection; Dynamo
+   routing and prefix reuse; KVBM or engine KV offload; and frontend, transport, and pod resources; and
+3. Local Planner only when its conditional lane applies.
+
+For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, or
+`reopened-by-new-evidence`, plus its expected upside and the evidence for that disposition. Compare all applicable families for potential benefit and information value before choosing one.
+
+During exploration, prefer an independently testable change that crosses into a different high-impact family or tests
+a coarse, documented operating regime. Do not keep adjusting the same knob in single-digit or otherwise near-neighbor
+increments while a plausible higher-impact family remains untested. An immediate adjacent adjustment is appropriate only
+when current evidence shows that family dominates the objective or a broad scan finds no plausible higher-upside alternative; record that exception.
+
 ## Select One Lever
 
 Follow `agent-docs/guides/knob-tuning/tuning-hierarchy.md`:
 
 1. Classify the exact model and compute memory fit, minimum parallelism, and headroom.
-2. Screen topology first. Keep it unchanged unless current evidence supports a structural mismatch.
-3. When topology is viable, consider Tier 2 families in default priority order.
-4. Record why every higher-priority family through the selected family was retained, skipped, rejected, or superseded
-   by stronger current-run evidence.
-5. Consider Local Planner only when autoscaling is the explicit objective and the current single DGD already contains
+2. Complete the exploration-versus-exploitation calibration and full broad-lever scan above.
+3. Screen topology first. Keep it unchanged unless current evidence supports a structural mismatch.
+4. When topology is viable, consider Tier 2 families in default priority order, then finish screening the remaining
+   families before selecting a candidate.
+5. Record why each major family was retained, skipped, rejected, or superseded by stronger current-run evidence.
+6. Consider Local Planner only when autoscaling is the explicit objective and the current single DGD already contains
    it.
-6. Deduplicate the shortlist against all prior attempts and challenger reviews.
-7. Rank surviving choices by direct evidence, expected effect on the primary objective, information value, risk,
+7. Deduplicate the shortlist against all prior attempts and challenger reviews.
+8. Rank surviving choices by direct evidence, expected effect on the primary objective, information value, risk,
    reversibility, experiment cost, and diff size.
+9. Select a candidate consistent with the recorded search mode and explain why a broader move is not preferable when
+   choosing narrow exploitation.
 
 Select one independently testable knob. A coupled bundle is allowed only when every changed field is required for one
 functional mechanism or prior isolated evidence supports the interaction. Classify the reason as
@@ -162,6 +193,15 @@ way best explains the recommendation, add useful subsections, and omit irrelevan
 
 ## Decision
 - Status: proposed | no-proposal | blocked
+- Search mode: exploration | exploitation
+- Search breadth: broad | narrow
+- Calibration rationale:
+
+## Search Calibration
+Include one row for topology and fit and for every Category 2 lever family. Include Local Planner only when applicable.
+
+| Major lever category or family | Coverage status | Evidence and reason | Expected upside | Disposition |
+|---|---|---|---|---|
 
 ## Reasoning
 Summarize the primary objective/SLO, the measured problem, relevant comparisons and uncertainty, applicable model or topology constraints, tuning guidance, prior attempts, and why this is the most useful next experiment. Include assumptions or missing evidence that affect confidence.
@@ -198,7 +238,9 @@ official documentation that supplied a constraint or recommendation.
 Include relevant same-series history and tuning-hierarchy decisions without reproducing every rejected option. Treat
 cross-series results as context only. Classify an absolute change of `0.5%` or less as noise. A clear, substantial,
 plausible improvement may be supported by one valid run; do not require a repeat or confidence intervals solely to
-support it. Preserve an `inconclusive` analysis when the evidence cannot support the direction or magnitude.
+support it. Preserve an `inconclusive` analysis when the evidence cannot support the direction or magnitude. Always
+include the search calibration, even for `no-proposal` or `blocked`, so the next iteration does not forget unexplored
+families or resume narrow tuning by default.
 
 ## Return
 
