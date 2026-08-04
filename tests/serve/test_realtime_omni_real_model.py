@@ -3,12 +3,21 @@
 
 """Realtime WebSocket end-to-end test against a real vLLM-Omni model.
 
-``test_realtime_omni_bridge.py`` covers the same wire protocol with a mock
-engine, which keeps it GPU-free but means the engine's own output shapes are
-never exercised. This module closes that gap: it launches the real
+``tests/frontend/test_realtime_omni_bridge.py`` covers the same wire protocol
+with a mock engine, which keeps it GPU-free but means the engine's own output
+shapes are never exercised. This module closes that gap: it launches the real
 ``dynamo.vllm.omni --realtime`` worker (the same command as
 ``examples/backends/vllm/launch/agg_omni_realtime.sh``), drives one turn over
 ``/v1/realtime``, and asserts the turn completes with audio.
+
+It sits alongside the other vLLM-Omni end-to-end tests but drives itself rather
+than going through ``test_vllm_omni.py``'s config table. That harness sends one
+HTTP request per payload and validates one response (``run_serve_deployment``
+hardcodes ``send_request`` over ``BasePayload.url()``, which is ``http://``).
+A realtime turn is instead a stateful WebSocket session -- ``session.update``,
+then a committed audio buffer, then an ordered stream of ``response.*`` frames
+correlated by ``response_id`` -- so it uses the WebSocket driver already written
+for the mock bridge test rather than reshaping shared plumbing for one caller.
 
 Skipped on CI, and it cannot currently be otherwise. The realtime path requires
 the model class to implement vLLM's ``SupportsRealtime`` interface
