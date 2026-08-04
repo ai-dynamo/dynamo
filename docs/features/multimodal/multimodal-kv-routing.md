@@ -99,7 +99,7 @@ Frontend (round-robin) → MM Router Worker → Backend Workers
                               └─ KvRouter selects best worker
 ```
 
-For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
+For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/release/1.3.1/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
 
 ### SGLang
 
@@ -199,7 +199,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
 ./launch.sh
 ```
 
-See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
+See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/release/1.3.1/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
 
 ### SGLang
 
