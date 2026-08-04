@@ -9,36 +9,37 @@ SPDX-License-Identifier: Apache-2.0
 
 | | |
 |---|---|
-| Needed per root | **~53 GB** |
-| `nvme2` free (worst root) | **~212 GB** |
+| Needed per device | **~55.2 GiB** |
+| Devices per root | 1, except `nvme4` which carries 2 |
+| `nvme2` free (worst root) | **~197.7 G**, carrying 1 device |
 | Verdict | **Run A fits today without any cleanup.** |
 
 Clean up anyway for headroom across repeated runs (each run writes a fresh
-`<leaf>/device-N/shards/` tree), but do **not** treat this as a prerequisite.
+`<leaf>/device-N/{manifest.json,shards/}` tree), but do **not** treat this as a
+prerequisite.
 
 ## Capacity math
 
-GLM-5.2-NVFP4 is ~**372 GB** of weights in total across the 8 ranks. GMS
-sharded-SSD save stripes each device's shards across all configured roots
-(`snapshot/backends/sharded_ssd.py:36-46`, `snapshot/storage_client.py:142-149`).
+The V1 saver is **per-device**: each process writes one device's weights to its
+own `--checkpoint-dir` (`v1/saver.py:30-35`). There is no cross-root striping —
+`--sharded-ssd-roots` does not exist in the V1 CLI. Spreading is achieved by
+pointing each device at a different NVMe root.
 
-```
-372 GB total ÷ 7 roots ≈ 53 GB per root
-                      ≈ 80 GB per root with a 1.5× safety margin
-```
+7 roots, 8 devices, ~55.2 GiB per device, so exactly one root is doubled up:
 
-| Root | Free | Needed | Headroom |
-|---|---:|---:|---|
-| **nvme2** | **212 GB** (94 % full) | ~53 GB | ~4× — tight but **sufficient** |
-| nvme4 | 1.73 TB | ~53 GB | ample |
-| nvme5-9 | ~2.4-2.5 TB each | ~53 GB | ample |
+| Root | Free | Devices | Needed | Headroom |
+|---|---:|---:|---:|---|
+| **nvme2** | **197.7 G** (94 % full) | 1 (dev 0) | ~55 GiB | ~3.6× — tight but **sufficient**; deliberately never doubled |
+| nvme4 | 1.7 T | **2** (dev 1, 7) | ~110 GiB | ~15× |
+| nvme5-9 | 2.3–2.4 T each | 1 each (dev 2-6) | ~55 GiB | ample |
 
-Each root is 3.78 TB. `nvme2` is the binding constraint; everything else is
-comfortable. Sharding is even, so **`nvme2` filling up fails the whole save.**
+Each root is 3.78 TB. `nvme2` is the binding constraint, so **`nvme2` filling up
+fails device 0's save and therefore the whole capture** (the `gms-saver` shell
+latches a non-zero rc if any device fails).
 
 > [!TIP]
 > If you only want to de-risk cheaply, deleting just `gms-storage` (2.3 TB) on
-> nvme2 takes it from 212 GB → ~2.5 TB free and matches the other roots. Steps
+> nvme2 takes it from ~198 G → ~2.5 TB free and matches the other roots. Steps
 > 1-2 below are enough; the rest is optional tidying.
 
 ## Non-negotiable exclusions
@@ -213,18 +214,18 @@ the run needs.
 
 ## Pre-create the run's leaf directories
 
-The saver creates them (`storage_client.py:_prepare_output_dir` →
-`os.makedirs(..., exist_ok=True)`), but pre-creating catches permission problems
-before GPU time is spent:
+The `gms-saver` container `mkdir -p`s them, but pre-creating catches permission
+problems before GPU time is spent:
 
 ```bash
 for n in 2 4 5 6 7 8 9; do
-  J "mkdir -p /mnt/nvme$n/schwinns/gmsv1-glm52-dep8 && ls -ld /mnt/nvme$n/schwinns/gmsv1-glm52-dep8"
+  J "mkdir -p /mnt/nvme$n/schwinns/gmsv1-glm52-tep8 && ls -ld /mnt/nvme$n/schwinns/gmsv1-glm52-tep8"
 done
 ```
 
-Those are the **host**-side paths; the saver sees them as
-`/mnt/gms-ssd/nvme{N}/schwinns/gmsv1-glm52-dep8` (see `05-prior-attempts.md`).
+Those are the **host**-side paths; the saver and loader see them as
+`/mnt/gms-ssd/nvme{N}/schwinns/gmsv1-glm52-tep8` (see `05-prior-attempts.md`).
+Use the `dep8` leaf for the DEP8 variant.
 
 ## Teardown
 

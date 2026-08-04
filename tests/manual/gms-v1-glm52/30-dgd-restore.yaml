@@ -15,6 +15,25 @@
 #           -n schwinns apply -f 30-dgd-restore.yaml
 # ============================================================================
 #
+# ---------------------------------------------------------------------------
+# TOPOLOGY SWITCH — TEP8 (default) <-> DEP8
+#
+# TEP8 is the default: in the last live run it loaded GLM-5.2 and committed GMS
+# weights on all 8 devices, while DEP8 died earlier in vLLM DP engine-core init.
+#
+# To flip BOTH files to DEP8, change EXACTLY these:
+#   1. sed -i 's/tep8/dep8/g; s/TEP8/DEP8/g' 20-dynamocheckpoint.yaml 30-dgd-restore.yaml
+#      Covers here: the DGD name, checkpointRef, and the NVMe leaf directory in
+#      gms-loader.
+#   2. spec.identity.tensorParallelSize 8 -> 1   [20-dynamocheckpoint.yaml only]
+#   3. the "TOPOLOGY BLOCK" in main.args: comment TEP8, uncomment DEP8.
+#      In BOTH files — the restore container's args must match the captured
+#      process exactly.
+#
+# Everything that must move together is tagged "# TOPOLOGY:":
+#   grep -n 'TOPOLOGY:' 20-dynamocheckpoint.yaml 30-dgd-restore.yaml
+# ---------------------------------------------------------------------------
+#
 # HOW THE RESTORE PATH WORKS (verified, so you know where to look when it fails)
 #
 #  1. The DGD controller sees experimental.checkpoint.checkpointRef and resolves
@@ -22,7 +41,7 @@
 #  2. Worker pods are stamped as restore candidates
 #     (checkpoint.ApplyRestoreCandidateMetadata - checkpoint/podspec.go:95-130):
 #       annotations: nvidia.com/dynamo-checkpoint-restore-candidate: "true"
-#                    nvidia.com/dynamo-checkpoint-name: gmsv1-glm52-dep8
+#                    nvidia.com/dynamo-checkpoint-name: gmsv1-glm52-tep8
 #                    nvidia.com/snapshot-target-containers: main
 #  3. On pod CREATE the mutating webhook mpodcheckpointrestore.kb.io fires
 #     (webhook/mutation/pod_checkpoint_restore_handler.go:96-175). If the
@@ -30,7 +49,8 @@
 #       - stamps restore labels/annotations
 #       - injects the checkpoint PVC + snapshot-control volume, and
 #         DYN_SNAPSHOT_RESTORE_STANDBY=1 (protocol/restore.go:98-118)
-#       - installs a restore-complete startup probe (restore.go:127-156)
+#       - installs a restore-complete startup probe (restore.go:127-156),
+#         budget 1800s at 1s cadence (restore.go:39)
 #       - **re-injects the GMS sidecar + client wiring** from the CHECKPOINT's
 #         gpuMemoryService spec (podspec.go:296-305 -> EnsureIntraPodGPUMemoryService
 #         at podspec.go:332-357)
@@ -53,11 +73,20 @@
 #       -o jsonpath='{.spec.initContainers[?(@.name=="gms-server")].args}'
 #   Expect ["--use-v1"]. If it is empty, the restore is running a V0 server against
 #   V1 clients and any failure is (P) plumbing, NOT a driver signal.
+#
+# !! THE RESTORED GMS SERVER IS EMPTY — WEIGHTS MUST BE HYDRATED !!
+#   The rank-local gms-server above is a FRESH process holding no allocations.
+#   V1's contract is that the restored worker re-imports its committed weight
+#   allocations, under the SAME allocation IDs, from a server that a loader has
+#   already populated and committed (v1/README.md:27-30, 90-104, 145-158).
+#   The gms-loader initContainer below does that. Without it the restored worker
+#   wakes against an empty weights server.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: gmsv1-glm52-dep8-restore
+  # TOPOLOGY
+  name: gmsv1-glm52-tep8-restore
   namespace: schwinns
   annotations:
     # Grove adds a scheduling layer that is not needed for a single-pod probe
@@ -89,16 +118,21 @@ spec:
             - name: main
               # Frontend can use the plain runtime image - it is not a CRIU target.
               # Using the placeholder too keeps the tag set to one value.
-              # Verified present in ACR (build-on-demand run 30895328284).
               # Keep in lockstep with 20-dynamocheckpoint.yaml - the restore
               # container must be the SAME image the checkpoint was captured
               # from. The `&image` anchor covers the frontend, the restored
-              # worker and the gms-server sidecar. MUST be -vllm-placeholder:
-              # the agent nsenters this container and runs
-              # /usr/local/bin/nsrestore from its filesystem
+              # worker, the gms-server sidecar and the gms-loader.
+              # MUST be -vllm-placeholder: the agent nsenters the worker
+              # container and runs /usr/local/bin/nsrestore from its filesystem
               # (executor/restore.go:206-210, snapshot values.yaml:176).
-              # See 06-placeholder-image.md.
-              image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-584202bf08bc11a71484cfaac28ba99683db881f-vllm-placeholder
+              #
+              # The image MUST contain #12011 *AND* #12392 — #12392 is what
+              # provides the V1 saver/loader. See 06-placeholder-image.md.
+              #
+              # Verified in ACR: contains PR #12011 + #12392 (build-on-demand run 30897584753).
+              # The value below is the PREVIOUS build's tag, kept only as a
+              # placeholder — it predates #12392 and has no V1 loader.
+              image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-09868b9bb872fac8b15ad315b126a98e334bbb7f-vllm-placeholder
               imagePullPolicy: Always
 
     # ---------------------------------------------------------------
@@ -121,7 +155,8 @@ spec:
           # Restore from OUR existing checkpoint rather than creating a new one.
           # With checkpointRef set, this component's identity is ignored and the
           # DGD never owns/deletes the checkpoint (common.go:338, 343-346).
-          checkpointRef: gmsv1-glm52-dep8
+          # TOPOLOGY: must name the DynamoCheckpoint in 20-dynamocheckpoint.yaml.
+          checkpointRef: gmsv1-glm52-tep8
           # Keep replicas at 0 until the checkpoint is Ready, then start FROM it.
           # With Immediate the pod would cold-start first and only later pods
           # would be restore-shaped (common.go:329-335) - useless for this probe.
@@ -147,6 +182,11 @@ spec:
           # this must exist BEFORE the webhook runs so EnsureServerSidecar's
           # name check (gms/gms.go:51-55) short-circuits and does not inject a
           # V0 server.
+          #
+          # ORDER MATTERS: gms-server is a NATIVE sidecar (init +
+          # restartPolicy: Always), so kubelet starts it and moves straight on
+          # to gms-loader (gms/gms.go:36-41). gms-loader is a PLAIN
+          # initContainer, so it runs to completion before `main` starts.
           initContainers:
             - name: gms-server
               image: *image
@@ -162,6 +202,131 @@ spec:
                 claims:
                   - name: intrapod-shared-gpu
 
+            # =============================================================
+            # gms-loader — hydrates the saved V1 weights into the FRESH
+            # rank-local GMS server, 8 per-device processes, then exits.
+            #
+            # WHY THIS EXISTS: the restored worker does not reload the model.
+            # It re-imports its committed weight allocations under the SAME
+            # allocation IDs from a server a loader has already populated and
+            # committed (v1/README.md:27-30, 90-104). The gms-server above is a
+            # brand-new process holding nothing, so without this the restored
+            # worker wakes against an empty weights server.
+            #
+            # WHY A PLAIN initContainer AND NOT A REGULAR CONTAINER — three
+            # independent reasons, any one of them sufficient:
+            #
+            #  1. The V1 loader EXITS after hydration (v1/loader.py:32-38,
+            #     "GMS V1 loader complete; exiting"). DGD worker pods are
+            #     Deployment-backed, so pod restartPolicy is Always and kubelet
+            #     would restart a regular container that exits 0. On restart it
+            #     would connect RW to an already-committed server, which CLEARS
+            #     THE OLD EPOCH (core/server/sessions.py:12-14, 100-116) and
+            #     destroys the hydrated weights under the restored worker.
+            #     Contrast the V0 loader, which deliberately blocks forever
+            #     (cli/snapshot/loader.py:215-216) precisely so it can be a
+            #     regular sidecar — its docstring says so at
+            #     cli/snapshot/loader.py:6-9. V1 inverts that choice, so V1 must
+            #     invert the container kind.
+            #
+            #  2. Ordering must be deterministic, not lock-mediated. A regular
+            #     container would race the restored worker's `connect RO,
+            #     remap_all_vas` (v1/README.md:156-157). RO is only grantable
+            #     once the server is committed (sessions.py:133-139), and that
+            #     acquire is UNTIMED (rpc.py:49 -> sessions.py:51-57,
+            #     timeout=None), so the worker would silently block inside its
+            #     CUDA wake path. A hang there is exactly the symptom that would
+            #     be misread as a (D) driver failure. As an initContainer the
+            #     weights are committed and RO-available before `main` — and
+            #     therefore before nsrestore — even starts.
+            #
+            #  3. Init containers get unbounded time here. The restore-complete
+            #     startup probe budget (1800s at 1s cadence,
+            #     protocol/restore.go:39,127-156) only starts ticking once
+            #     `main` starts, i.e. after hydration is done. ~440 GiB off
+            #     local NVMe would otherwise eat that budget.
+            #
+            # NOT listed in experimental.gpuMemoryService.extraClientContainers:
+            # every wiring path that consumes that list scans podSpec.Containers
+            # only and silently ignores absent names (dynamo/graph.go:1615-1627;
+            # checkpoint/podspec.go:344-355; v1beta1/common.go:217-226), so an
+            # initContainer can never be matched. checkpoint/gms_pod_validation.go
+            # governs DynamoCheckpoint objects, not this DGD, and also scans
+            # podSpec.Containers (:63-71). The GMS client contract
+            # (gms_pod_validation.go:75-85) is therefore hand-written below:
+            # DRA claim + gms-intrapod-control mount + GMS_SOCKET_DIR.
+            #
+            # Reads the SAME per-device NVMe roots the saver wrote
+            # (<checkpoint-dir>/device-N — v1/loader.py:32-34 mirrors
+            # v1/saver.py:30-32). The mapping must stay identical to
+            # 20-dynamocheckpoint.yaml's gms-saver:
+            #   device 0 -> nvme2   device 4 -> nvme7
+            #   device 1 -> nvme4   device 5 -> nvme8
+            #   device 2 -> nvme5   device 6 -> nvme9
+            #   device 3 -> nvme6   device 7 -> nvme4
+            #
+            # The V1 loader accepts ONLY --checkpoint-dir (required), --device
+            # and --max-workers (v1/loader.py:22-30, allow_abbrev=False); the
+            # V0 flags --transfer-backend / --sharded-ssd-roots /
+            # --sharded-ssd-queues-per-root / --device-type are NOT accepted by
+            # the V1 path. --max-workers is left at its default of 16.
+            # =============================================================
+            - name: gms-loader
+              image: *image
+              imagePullPolicy: Always
+              # UNVERIFIED: /bin/bash is assumed present, as in gms-saver. The
+              # placeholder is FROM the vLLM runtime image
+              # (deploy/snapshot/Dockerfile:371), an Ubuntu 24.04 base.
+              command: ["/bin/bash", "-c"]
+              args:
+                # No `set -e`: a failing child must not abort the loop before
+                # the other 7 devices are waited on. rc is latched instead.
+                - |
+                  set -uo pipefail
+                  # TOPOLOGY: must match gms-saver's LEAF in 20-dynamocheckpoint.yaml.
+                  LEAF=schwinns/gmsv1-glm52-tep8
+                  # Index = CUDA device, value = container NVMe mount.
+                  ROOTS=(nvme2 nvme4 nvme5 nvme6 nvme7 nvme8 nvme9 nvme4)
+                  pids=(); rc=0
+                  for d in 0 1 2 3 4 5 6 7; do
+                    root="/mnt/gms-ssd/${ROOTS[$d]}/${LEAF}"
+                    if [ ! -f "$root/device-$d/manifest.json" ]; then
+                      # v1/snapshot.py:331-339 would fail on a missing manifest
+                      # anyway; failing here names the missing artifact.
+                      echo "gms-loader: MISSING $root/device-$d/manifest.json" >&2
+                      rc=1; continue
+                    fi
+                    echo "gms-loader: device=$d checkpoint-dir=$root"
+                    python3 -m gpu_memory_service.cli.snapshot.loader --use-v1 \
+                      --checkpoint-dir "$root" --device "$d" &
+                    pids+=($!)
+                  done
+                  for p in "${pids[@]}"; do wait "$p" || rc=1; done
+                  echo "gms-loader: all devices finished rc=$rc"
+                  exit $rc
+              env:
+                - {name: GMS_SOCKET_DIR, value: /gms-intrapod-control}
+              securityContext:
+                # Same as gms-saver: the NVMe hostPath roots are root-owned.
+                runAsUser: 0
+              resources:
+                claims:
+                  - name: intrapod-shared-gpu
+              volumeMounts:
+                - {name: gms-intrapod-control, mountPath: /gms-intrapod-control}
+                # UNVERIFIED: /dev/shm is mounted because hydrate_weights drives
+                # the NIXL transfer backend (v1/snapshot.py:205-208) and NIXL
+                # initialisation is not proven to work with the 64 MiB default.
+                # Harmless if unnecessary - the volume already exists.
+                - {name: shared-memory, mountPath: /dev/shm}
+                - {name: gms-ssd-nvme2, mountPath: /mnt/gms-ssd/nvme2}
+                - {name: gms-ssd-nvme4, mountPath: /mnt/gms-ssd/nvme4}
+                - {name: gms-ssd-nvme5, mountPath: /mnt/gms-ssd/nvme5}
+                - {name: gms-ssd-nvme6, mountPath: /mnt/gms-ssd/nvme6}
+                - {name: gms-ssd-nvme7, mountPath: /mnt/gms-ssd/nvme7}
+                - {name: gms-ssd-nvme8, mountPath: /mnt/gms-ssd/nvme8}
+                - {name: gms-ssd-nvme9, mountPath: /mnt/gms-ssd/nvme9}
+
           volumes:
             - name: hf-cache
               persistentVolumeClaim:
@@ -172,8 +337,9 @@ spec:
               emptyDir: {medium: Memory, sizeLimit: 64Gi}
             - name: gms-intrapod-control
               emptyDir: {}
-            # 7 NVMe roots. The GMS server re-imports weight shards from these
-            # on wake, so the restored pod needs the same host mounts.
+            # 7 NVMe roots. gms-loader reads the saved weight shards from these
+            # during init; `main` keeps the same mounts so the paths in any
+            # restored process state still resolve.
             # No nvme3. Host paths; see 05-prior-attempts.md.
             - {name: gms-ssd-nvme2, hostPath: {path: /mnt/dynamo-gms-nvme2, type: Directory}}
             - {name: gms-ssd-nvme4, hostPath: {path: /mnt/dynamo-gms-nvme4, type: Directory}}
@@ -199,13 +365,22 @@ spec:
               # captured process - keep these in lockstep with 20-dynamocheckpoint.yaml.
               command: ["python3", "-m", "dynamo.vllm"]
               args:
-                # DEP8 - must match 20-dynamocheckpoint.yaml. If you flipped that
-                # file to the TEP8 control, flip this too.
+                # ==== TOPOLOGY BLOCK — TEP8 active, DEP8 alternate ==========
+                # TOPOLOGY: MUST match 20-dynamocheckpoint.yaml exactly. CRIU
+                # restores the captured process; a mismatch means the standby
+                # container differs from what was captured.
+                #
+                # ---- TEP8 (ACTIVE) ----------------------------------------
                 - --tensor-parallel-size
-                - "1"
-                - --data-parallel-size
                 - "8"
                 - --enable-expert-parallel
+                # ---- DEP8 (ALTERNATE) — uncomment, comment out TEP8 above --
+                # - --tensor-parallel-size
+                # - "1"
+                # - --data-parallel-size
+                # - "8"
+                # - --enable-expert-parallel
+                # ===========================================================
                 - --worker-cls
                 - gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
                 - --enable-sleep-mode

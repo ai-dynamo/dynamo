@@ -111,15 +111,24 @@ the two halves of a normal volume mapping, and both are correct:
 | Layer | Path | Where it lives |
 |---|---|---|
 | `volumes[].hostPath.path` | `/mnt/dynamo-gms-nvme{N}` | on node s2877 |
-| `gms-saver` `volumeMounts[].mountPath` | `/mnt/gms-ssd/nvme{N}` | inside the container |
-| `--sharded-ssd-roots` | `/mnt/gms-ssd/nvme{N}/<run-leaf>` | **container** paths — the saver is the process reading them |
+| `gms-saver`/`gms-loader` `volumeMounts[].mountPath` | `/mnt/gms-ssd/nvme{N}` | inside the container |
+| the reference's `--sharded-ssd-roots` | `/mnt/gms-ssd/nvme{N}/<run-leaf>` | **container** paths — the saver is the process reading them |
 
-`--sharded-ssd-roots` must use **container** paths because
-`cli/snapshot/saver.py` resolves them with `os.path.abspath` inside its own
-mount namespace (`snapshot/backends/sharded_ssd.py:30-46`).
+Any root passed to a saver/loader must use **container** paths because those
+processes resolve them inside their own mount namespace.
 
-`20-dynamocheckpoint.yaml` keeps this mapping **verbatim** from the reference and
-changes only the per-run leaf subdirectory.
+> [!NOTE]
+> `--sharded-ssd-roots` is a **V0-only** flag and the current manifests no longer
+> use it. The V1 saver/loader are per-device and take a single
+> `--checkpoint-dir` each (`v1/saver.py:22-28`, `v1/loader.py:22-30`), so
+> spreading across NVMe now comes from giving each device a `--checkpoint-dir`
+> on a different root. See the device→root mapping table in
+> [`README.md`](README.md). The host/container split above is unchanged and
+> still applies.
+
+`20-dynamocheckpoint.yaml` and `30-dgd-restore.yaml` keep the volume/mount
+mapping **verbatim** from the reference; only the per-run leaf subdirectory and
+the way roots are passed to the saver differ.
 
 Roots: **7 total — 2, 4, 5, 6, 7, 8, 9. There is no `nvme3`.** A `hostPath` with
 `type: Directory` pointing at a missing path fails the pod at kubelet admission

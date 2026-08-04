@@ -120,29 +120,46 @@ R 'python3 -c "from gpu_memory_service.v1.cli import _DOMAINS; print(_DOMAINS)"'
 # -> ('weights', 'kv_cache')
 ```
 
-## 4. Saver CLI flags match `20-dynamocheckpoint.yaml`
+## 4. Saver/loader CLIs are the **V1** (per-device) ones
+
+This is the check the last run needed and did not have: an image with #12011 but
+without #12392 has only the V0 saver, and `gms-saver` dies with
+`msgspec.ValidationError: Object missing required field 'success'`.
 
 ```bash
-R 'python3 -m gpu_memory_service.cli.snapshot.saver --help'
+R 'python3 -m gpu_memory_service.cli.snapshot.saver  --use-v1 --help'
+R 'python3 -m gpu_memory_service.cli.snapshot.loader --use-v1 --help'
 ```
 
-Confirm all four flags used in the manifest exist:
-`--checkpoint-dir`, `--sharded-ssd-roots`, `--shard-size-bytes`, `--max-workers`
-(`cli/snapshot/saver.py:80-118`).
+| CLI | Must list **exactly** | Must **not** list |
+|---|---|---|
+| saver `--use-v1` | `--checkpoint-dir` (required), `--device`, `--shard-size-bytes` | `--sharded-ssd-roots`, `--max-workers`, `--save-lock-timeout-ms`, `--device-type` |
+| loader `--use-v1` | `--checkpoint-dir` (required), `--device`, `--max-workers` | `--sharded-ssd-roots`, `--transfer-backend`, `--sharded-ssd-queues-per-root`, `--device-type` |
+
+Verified at `v1/saver.py:22-28` and `v1/loader.py:22-30`. Both parsers are
+`allow_abbrev=False`, so a stray V0 flag is a hard error rather than a silent
+no-op. If either shows `--sharded-ssd-roots`, **the image predates #12392 —
+stop and rebuild.**
 
 ```bash
-# Root parsing + per-device fan-out, dry.
+# The modules must exist at all (they are what #12392 adds).
 R 'python3 -c "
-from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots, device_sharded_ssd_roots
-roots = parse_sharded_ssd_roots(\",\".join(f\"/mnt/gms-ssd/nvme{n}/schwinns/gmsv1-glm52-dep8\" for n in [2,4,5,6,7,8,9]))
-print(len(roots), \"roots\")
-print(device_sharded_ssd_roots(\"/checkpoints/gms/gmsv1-glm52-dep8/versions/1\", 0, roots)[0])
+import gpu_memory_service.v1.saver, gpu_memory_service.v1.loader
+from gpu_memory_service.v1.snapshot import save_weights, hydrate_weights
+print(\"V1 saver/loader present\")
+"'
+
+# Artifact layout is per-device: <checkpoint-dir>/device-<N>.
+R 'python3 -c "
+import os
+print(os.path.join(\"/mnt/gms-ssd/nvme2/schwinns/gmsv1-glm52-tep8\", \"device-0\"))
 "'
 ```
 
-Expect `7 roots` and a device-0 path ending
-`.../gmsv1-glm52-dep8/versions/1/device-0` — the `versions` special-case in
-`_checkpoint_suffix` (`sharded_ssd.py:49-55`).
+Expect `/mnt/gms-ssd/nvme2/schwinns/gmsv1-glm52-tep8/device-0`
+(`v1/saver.py:30-35`, `v1/loader.py:32-34`). The saver creates
+`device-N/shards/` and writes `device-N/manifest.json`
+(`v1/snapshot.py:138-140,167-169`).
 
 ## 5. GLM-5.2 architecture is registered in this vLLM (needs a GPU)
 

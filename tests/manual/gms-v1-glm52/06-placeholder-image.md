@@ -6,6 +6,36 @@ SPDX-License-Identifier: Apache-2.0
 # 06 — Placeholder image: BLOCKER for Run A
 
 > [!CAUTION]
+> **The image must contain BOTH PR #12011 and PR #12392.**
+> #12011 ships GMS V1 but **no V1 saver**. Its saver speaks the V0 protocol
+> (`gpu_memory_service.common.protocol.messages.HandshakeResponse`) while a
+> `--use-v1` server speaks `gpu_memory_service.core.protocol.HandshakeResponse`.
+> The last live run died in `gms-saver` with exactly that mismatch:
+>
+> ```
+> msgspec.ValidationError: Object missing required field `success`
+> ConnectionError: GMS handshake failed: Object missing required field `success`
+> ```
+>
+> #12392 ("feat(gms): add v1 weight snapshot hydration") adds
+> `lib/gpu_memory_service/v1/saver.py` and `v1/loader.py` and is cherry-picked
+> onto this branch. Confirm before building:
+>
+> ```bash
+> git log --oneline -1   # feat(gms): add v1 weight snapshot hydration
+> ```
+
+> [!NOTE]
+> **What the composition deliberately EXCLUDES.**
+> - **PR #12226** — no `checkpoint_prepare` / `checkpoint_restore`. Those are
+>   upstream vLLM `Worker`/`AsyncLLM` methods present only on the nightly base;
+>   including them would change what Run A is probing.
+> - The vLLM base stays pinned at **v0.26.0**
+>   (`container/context.yaml:64`, `vllm/vllm-openai:v0.26.0-ubuntu2404`).
+>   This is above the v0.25.0 that introduced the pluggable sleep-mode backend
+>   GMS V1 depends on, so V1 is viable here.
+
+> [!CAUTION]
 > **The image built for this experiment is `-vllm-runtime`. It will not work.**
 > The checkpoint Job needs a **`-vllm-placeholder`** image. Fix this before
 > applying `20-dynamocheckpoint.yaml`.
@@ -218,16 +248,31 @@ If a future change makes the placeholder run compliance, it would need
 
 ## 6. After the build — update the manifests
 
-`20-dynamocheckpoint.yaml` and `30-dgd-restore.yaml` already reference:
+`20-dynamocheckpoint.yaml` and `30-dgd-restore.yaml` each carry a single
+`&image` YAML anchor, currently holding a **stale placeholder tag that predates
+#12392**:
 
 ```
-dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-placeholder
+dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-584202bf08bc11a71484cfaac28ba99683db881f-vllm-placeholder
 ```
 
-on all three containers (`main`, `gms-server`, `gms-saver`), via a single YAML
-anchor per file. If the dispatched branch head differs from `05dac0c7…`, update
-that one anchor value in each file to the tag from the run summary — search for
-`# TODO: confirm this matches the tag produced by build-on-demand`.
+A build is running from branch head as **build-on-demand run 30897584753**.
+Read its ACR tag from the run's step summary and put it in both anchors:
+
+```bash
+gh run view --repo ai-dynamo/dynamo 30897584753
+grep -n 'TODO: set to the tag from build-on-demand run 30897584753' \
+  20-dynamocheckpoint.yaml 30-dgd-restore.yaml
+```
+
+The anchor covers every container in each file — `gms-server`, `main`,
+`gms-saver` in the checkpoint; the frontend, `gms-server`, `gms-loader` and
+`main` in the restore. Change the one anchored value per file.
+
+> [!WARNING]
+> If you apply the manifests with the stale tag, `gms-saver` will reproduce the
+> `Object missing required field 'success'` failure, because that image has no
+> V1 saver.
 
 ## 7. Alternative: full CI on the PR (slower, less certain)
 
