@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::common::perf_model::PerfModel;
-use crate::common::protocols::{MockEngineArgs, WorkerType};
+use crate::common::protocols::{KvTransferTimingMode, MockEngineArgs, WorkerType};
 
 const DEFAULT_MAX_PREFILL_TOKENS: usize = 16384;
 const DEFAULT_CHUNKED_PREFILL_SIZE: usize = 8192;
@@ -26,6 +26,7 @@ pub enum SchedulePolicy {
 pub(super) struct SglangConfig {
     pub(super) schedule_policy: SchedulePolicy,
     pub(super) max_prefill_tokens: usize,
+    pub(super) max_running_requests: usize,
     pub(super) chunked_prefill_size: usize,
     pub(super) clip_max_new_tokens: usize,
     pub(super) init_new_token_ratio: f64,
@@ -39,6 +40,7 @@ pub(super) struct SglangConfig {
     pub(super) total_kv_tokens: usize,
     pub(super) kv_bytes_per_token: Option<usize>,
     pub(super) kv_transfer_bandwidth: Option<f64>,
+    pub(super) kv_transfer_timing_mode: KvTransferTimingMode,
     pub(super) speculative_max_tokens: Option<usize>,
 }
 
@@ -68,6 +70,7 @@ impl SglangConfig {
 
         Self {
             schedule_policy,
+            max_running_requests: args.max_num_seqs.unwrap_or(usize::MAX),
             max_prefill_tokens: sglang
                 .and_then(|s| s.max_prefill_tokens)
                 .unwrap_or(DEFAULT_MAX_PREFILL_TOKENS),
@@ -88,8 +91,30 @@ impl SglangConfig {
             total_kv_tokens: args.num_gpu_blocks * args.block_size,
             kv_bytes_per_token: args.kv_bytes_per_token,
             kv_transfer_bandwidth: args.kv_transfer_bandwidth,
+            kv_transfer_timing_mode: args.kv_transfer_timing_mode,
             speculative_max_tokens: args.aic_nextn.map(|nextn| nextn + 1),
         }
+    }
+
+    /// Storage reservation hint for output tokens that this worker can realize.
+    ///
+    /// Planned replay outputs keep their known length for allocation-free
+    /// appends. Online requests use SGLang's existing decode-reservation clip
+    /// so a large caller-declared limit does not eagerly size every queued
+    /// request to the whole KV pool.
+    pub(super) fn output_storage_hint(
+        &self,
+        prompt_len: usize,
+        max_output_tokens: usize,
+        has_planned_output: bool,
+    ) -> usize {
+        let realizable = self.total_kv_tokens.saturating_sub(prompt_len);
+        let requested = if has_planned_output {
+            max_output_tokens
+        } else {
+            max_output_tokens.min(self.clip_max_new_tokens)
+        };
+        requested.min(realizable)
     }
 }
 

@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -51,6 +52,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 		return 0
 	})
 	tmpSecrets := make(map[string]map[string][]string)
+	var refreshErrors []error
 	for _, secret := range secrets.Items {
 		if secret.Type == corev1.SecretTypeDockerConfigJson {
 			// unmarshal the secret data
@@ -58,7 +60,8 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 				Auths map[string]any `json:"auths"`
 			}{}
 			if err := json.Unmarshal(secret.Data[corev1.DockerConfigJsonKey], dockerConfig); err != nil {
-				return fmt.Errorf("unable to unmarshal docker config json for secret %s: %w", secret.Name, err)
+				refreshErrors = append(refreshErrors, fmt.Errorf("unable to unmarshal docker config json for secret %s/%s: %w", secret.Namespace, secret.Name, err))
+				continue
 			}
 			namespace := secret.Namespace
 			if _, ok := tmpSecrets[namespace]; !ok {
@@ -68,7 +71,8 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 				// retrieve the registry host
 				registry, err := common.GetHost(auth)
 				if err != nil {
-					return fmt.Errorf("unable to get host for registry %s for secret %s: %w", auth, secret.Name, err)
+					refreshErrors = append(refreshErrors, fmt.Errorf("unable to get host for registry %q for secret %s/%s: %w", auth, secret.Namespace, secret.Name, err))
+					continue
 				}
 				tmpSecrets[namespace][registry] = append(tmpSecrets[namespace][registry], secret.Name)
 			}
@@ -83,7 +87,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.secrets = tmpSecrets
-	return nil
+	return errors.Join(refreshErrors...)
 }
 
 func (i *DockerSecretIndexer) listOptions() []client.ListOption {

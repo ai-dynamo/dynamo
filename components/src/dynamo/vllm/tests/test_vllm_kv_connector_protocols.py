@@ -224,6 +224,231 @@ def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     assert isinstance(proto, MooncakeConnectorProtocol)
 
 
+def test_make_kv_connector_protocol_dispatches_multiconnector_to_nixl():
+    """MultiConnector delegates PD coordination to its single PD-capable child."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector"},
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_connector_extra_config": {"load_async": True},
+                    },
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_multiconnector_to_mooncake(
+    fake_mooncake,
+):
+    """Non-PD sub-connectors are ignored when selecting the PD protocol."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_connector_extra_config": {"load_async": True},
+                    },
+                    {"kv_connector": "MooncakeConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, MooncakeConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_raises_when_multiconnector_has_no_pd_child():
+    with pytest.raises(ValueError, match="no PD-capable sub-connector") as exc:
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={
+                    "connectors": [{"kv_connector": "MooncakeStoreConnector"}]
+                },
+            )
+        )
+    assert "MooncakeStoreConnector" in str(exc.value)
+
+
+def test_make_kv_connector_protocol_raises_when_multiconnector_is_ambiguous():
+    with pytest.raises(ValueError, match="multiple PD-capable sub-connectors") as exc:
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "NixlConnector"},
+                        {"kv_connector": "MooncakeConnector"},
+                    ]
+                },
+            )
+        )
+    assert "NixlConnector" in str(exc.value)
+    assert "MooncakeConnector" in str(exc.value)
+
+
+def test_make_kv_connector_protocol_dispatches_pd_connector_to_nixl():
+    """Dynamo's PdConnector (kvbm.vllm_integration.connector) subclasses
+    vLLM's MultiConnector with the same config shape — an offload child
+    (e.g. DynamoConnector) plus NixlConnector for PD — so it must resolve
+    through the same delegation instead of the unsupported-connector error."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "PdConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "DynamoConnector"},
+                    {"kv_connector": "NixlConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_pd_connector_errors_name_the_wrapper():
+    """Misconfiguration errors must name the connector the operator actually
+    configured (PdConnector), not the MultiConnector base it routes through."""
+    with pytest.raises(ValueError, match="PdConnector has no PD-capable"):
+        make_kv_connector_protocol(
+            _config(
+                "PdConnector",
+                kv_connector_extra_config={
+                    "connectors": [{"kv_connector": "DynamoConnector"}]
+                },
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# MultiConnector: malformed-config validation
+#
+# Misconfiguration must surface as the intended ValueError, not an
+# AttributeError from dereferencing an unexpected type.
+# ---------------------------------------------------------------------------
+
+
+def test_multiconnector_rejects_non_dict_extra_config():
+    with pytest.raises(ValueError, match="kv_connector_extra_config to be a dict"):
+        make_kv_connector_protocol(
+            _config("MultiConnector", kv_connector_extra_config="bogus")
+        )
+
+
+def test_multiconnector_rejects_non_list_connectors():
+    with pytest.raises(ValueError, match="be a list of connector configs"):
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={"connectors": "NixlConnector"},
+            )
+        )
+
+
+def test_multiconnector_rejects_non_dict_connector_entry():
+    with pytest.raises(ValueError, match="must be a dict"):
+        make_kv_connector_protocol(
+            _config(
+                "MultiConnector",
+                kv_connector_extra_config={"connectors": ["NixlConnector"]},
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# MultiConnector: child config binding
+#
+# vLLM instantiates each sub-connector with its own KVTransferConfig
+# (child entry + engine_id fallback to the wrapper's). The delegated
+# protocol must be bound the same way, or Mooncake's decode params would
+# advertise the wrapper's engine_id as remote_engine_id and the decode
+# side could never match the transfer.
+# ---------------------------------------------------------------------------
+
+
+def test_multiconnector_decode_uses_child_engine_id_not_wrapper(fake_mooncake):
+    """Regression: child engine_id override must reach remote_engine_id."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            engine_id="wrapper-eng",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_connector_extra_config": {"load_async": True},
+                    },
+                    {"kv_connector": "MooncakeConnector", "engine_id": "mooncake-eng"},
+                ]
+            },
+        )
+    )
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params["remote_engine_id"] == "mooncake-eng"
+
+
+def test_multiconnector_child_engine_id_falls_back_to_wrapper(fake_mooncake):
+    """Children without their own engine_id inherit the wrapper's — the
+    same fallback vLLM's MultiConnector applies when instantiating them."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            engine_id="wrapper-eng",
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "MooncakeConnector"}]
+            },
+        )
+    )
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    assert params["remote_engine_id"] == "wrapper-eng"
+
+
+def test_multiconnector_child_config_does_not_leak_wrapper_internals():
+    """The delegated protocol sees the child's config: the child's connector
+    name, and the child's extra config (not the wrapper's, which holds the
+    "connectors" list itself)."""
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            engine_id="wrapper-eng",
+            kv_connector_extra_config={
+                "connectors": [{"kv_connector": "NixlConnector"}]
+            },
+        )
+    )
+    child_cfg = proto._vllm_config.kv_transfer_config
+    assert child_cfg.kv_connector == "NixlConnector"
+    assert child_cfg.kv_connector_extra_config == {}
+    assert child_cfg.engine_id == "wrapper-eng"
+
+
+def test_multiconnector_resolution_does_not_mutate_wrapper_config():
+    """The child view is built on copies; the engine's own config object
+    must keep its wrapper shape (other code paths still read it)."""
+    cfg = _config(
+        "MultiConnector",
+        engine_id="wrapper-eng",
+        kv_connector_extra_config={
+            "connectors": [{"kv_connector": "NixlConnector", "engine_id": "nixl-eng"}]
+        },
+    )
+    make_kv_connector_protocol(cfg)
+    assert cfg.kv_transfer_config.kv_connector == "MultiConnector"
+    assert cfg.kv_transfer_config.engine_id == "wrapper-eng"
+    assert "connectors" in cfg.kv_transfer_config.kv_connector_extra_config
+
+
 def test_make_kv_connector_protocol_falls_back_to_nixl_for_missing_config():
     """No KVTransferConfig at all — preserve pre-existing (NIXL) behavior."""
     proto = make_kv_connector_protocol(SimpleNamespace())

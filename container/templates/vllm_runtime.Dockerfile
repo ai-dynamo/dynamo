@@ -10,9 +10,9 @@
 {% if platform == "multi" %}
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
 FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
-FROM vllm_runtime_${TARGETARCH} AS runtime
+FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG PYTHON_VERSION
@@ -23,6 +23,7 @@ ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
+ARG MODELEXPRESS_VERSION
 
 WORKDIR /workspace
 
@@ -69,7 +70,8 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
@@ -110,8 +112,21 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
+{% if device == "xpu" %}
+ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c058b87 \
+    https://github.com/intel/xpumanager/releases/download/v1.3.6/xpu-smi_1.3.6_20260206.143628.1004f6cb.u24.04_amd64.deb \
+    /tmp/xpu-smi.deb
+
+# Install xpu-smi in the runtime stage so dev/local-dev inherit it, without
+# explicitly changing the Intel compute runtime stack.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    rm -f /tmp/xpu-smi.deb && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 # Copy attribution files and wheels
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
@@ -123,7 +138,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # v1.1.0 nixl-cu13 has in-built RPATH point to conflicting built-in libs with symbols unsupported in non-cuda builds.
 # we therefore avoid installing nixl-cu13
 
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
@@ -133,14 +148,10 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl-cu12==${NIXL_VERSION}"
 {% endif %}
 
-# Copy attribution files and wheels
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
@@ -152,7 +163,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 # Install Dynamo runtime wheels and optional KVBM/GMS wheels.
 # Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
@@ -165,21 +176,25 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-# vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
-# jq for readable curl output just like the upstream omni image does.
+# Launch-script examples use jq for readable curl output like the upstream omni
+# image. SoX is intentionally NOT installed: vLLM-Omni replaced its sox audio path
+# with a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), pysox isn't
+# installed, and nothing shells out to the sox binary — so `sox`/`libsox-fmt-all`
+# were dead weight that only dragged in a GPL-2.0+ codec cluster (sox, libsox*,
+# libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
+# inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
+# (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        jq \
-        sox \
-        libsox-fmt-all; \
+        jq; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
@@ -192,26 +207,95 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install {{ pip_target }} --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
 {% endif %}
 
-{% if context.vllm.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+{% endif %}
+
+{% if device == "xpu" %}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    #ffmpeg \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    wget \
+    vim \
+    linux-libc-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+{% if device == "cuda" %}
+# The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
+# against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
+# codec packages and replace them with the LGPL-only in-tree ffmpeg built in
+# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
+# libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
+# own libraries and do not link the system ffmpeg/codecs, so removing them is
+# safe. dpkg-query keeps the match robust across base-image/arch version
+# suffixes (e.g. libavcodec58 vs 60).
+#
+# This grep is the COMPLETE, auditable set of what leaves the image: there is
+# deliberately NO apt-get autoremove, so the removal can never cascade into
+# unrelated auto-installed packages. That matters because the base image marks
+# both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
+# runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
+# wheels here ship no bundled cublas and load the system copies) as
+# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
+# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
+# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
+# dead weight, not a compliance issue.
+RUN set -eux; \
+    purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        || true); \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
+# Regression guard for the codec purge above: torch.inductor/Triton JIT shell
+# out to a host C/C++ compiler at runtime, so a missing toolchain only surfaces
+# on the first compile in production. Reproduce that compile path at build time
+# (CPU-only) so a missing compiler aborts the build instead of shipping.
+RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
+    python3 /tmp/validate_torch_compile_smoke.py
+
+# Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
+# libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
+# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
+# was just purged, so the LGPL CLI must always be present for the omni
+# video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 {% endif %}
 
-# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships
-# a GPL-encumbered prebuilt ffmpeg binary) with a source install that leaves
-# no binary on disk. vLLM-Omni uses diffusers.export_to_video and doesn't
-# invoke imageio-ffmpeg, so no IMAGEIO_FFMPEG_EXE is needed — this is
-# purely to clear the GPL binary. The --no-binary directive lives in the
-# requirements file itself.
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
+# GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
+# with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
+# (set above) points imageio at the LGPL CLI copied from wheel_builder. The
+# --no-binary directive lives in the requirements file itself.
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
@@ -249,3 +333,17 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.
 ENTRYPOINT []
+
+
+{# Compliance is skipped for dev/local-dev: those images are not shipped (release
+   ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
+   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
+{% if target not in ("dev", "local-dev") %}
+{% include "templates/compliance.Dockerfile" %}
+{% endif %}
+
+
+FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+COPY --from=licenses /legal /legal
+{% endif %}

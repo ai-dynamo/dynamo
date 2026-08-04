@@ -8,7 +8,7 @@ The extension adds three plugin-aware fields:
 - reconcile_reasons: dict[str, str]
 - held_over_plugins: list[str]
 
-All three default to empty collections so PSM-path callers that never
+All three default to empty collections so callers that never
 touch them still produce a byte-identical ``TickDiagnostics()`` value.
 
 SCOPE NOTE: no production code path populates these three fields in this
@@ -122,7 +122,7 @@ def test_asdict_round_trip_preserves_new_fields():
 
 
 def test_asdict_empty_new_fields_round_trip():
-    """PSM path never writes the new fields; round-trip must preserve
+    """Callers may leave the new fields unset; round-trip must preserve
     the empty defaults without drifting to None or leaking."""
     d = TickDiagnostics(load_decision_reason="scale_up", estimated_itl_ms=12.3)
     encoded = dataclasses.asdict(d)
@@ -134,12 +134,12 @@ def test_asdict_empty_new_fields_round_trip():
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility with PSM path
+# Backward compatibility with existing construction sites
 # ---------------------------------------------------------------------------
 
 
-def test_psm_style_construction_still_works():
-    """PSM call sites only pass existing numeric + reason fields; adding
+def test_existing_style_construction_still_works():
+    """Existing call sites only pass numeric + reason fields; adding
     new fields with default_factory MUST NOT break those call sites."""
     d = TickDiagnostics(
         estimated_ttft_ms=12.3,

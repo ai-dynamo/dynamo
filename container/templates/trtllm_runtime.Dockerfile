@@ -18,41 +18,39 @@ COPY --chmod=775 components/src/dynamo/frontend /workspace_src/components/src/dy
 COPY --chmod=775 components/src/dynamo/trtllm /workspace_src/components/src/dynamo/trtllm
 COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dynamo/mocker
 COPY --chmod=775 lib /workspace_src/lib
-COPY --chmod=664 ATTRIBUTION* LICENSE /workspace_src/
+COPY --chmod=664 LICENSE /workspace_src/
 
-# Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
-# because upstream is usrmerged and cross-stage COPY chokes on the symlink.
+# Transport stage for dynamo_base artifacts. nats-server goes to /usr/bin (not
+# /bin) because upstream is usrmerged and cross-stage COPY chokes on the symlink.
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /usr/bin/uv
-COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uv
+COPY --from=dynamo_base /opt/uv/bin/uvx /opt/uv/bin/uvx
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
-# and overlay our changes as a single layer (cuts depth for downstream wrappers).
+# and overlay our changes as a single layer (cuts depth for downstream wrappers,
+# incl. the dev image, which otherwise overflows overlay2's ~128-layer cap).
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
+ARG NIXL_REF
 
-# DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
-# $DYNAMO_HOME/examples/... resolve. LD_PRELOAD/NIXL_PLUGIN_DIR are a workaround
-# for ai-dynamo/nixl#1668: nixl-cu13's bundled UCX 1.20.0 hangs in
-# `uct_md_query_tl_resources` (md_resources realloc loop, >1 GiB) when two NIXL
-# agents init on the same host. Force-load TRT-LLM's bundled libnixl 0.9.0
-# (uses system UCX, no bug). LD_PRELOAD is the only lever: nixl-cu13's
-# _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH. Drop the two NIXL
-# vars when the upstream issue is fixed.
+# LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
+# (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
+# NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
 
 WORKDIR /workspace
 
@@ -88,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
+ENV PATH=/opt/uv/bin:${PATH}
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
 # (otherwise pytest collects broken tutorial test files), and create the
@@ -103,7 +102,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh{% if target not in ("dev", "local-dev") %} \
     && python3 -m venv --system-site-packages /opt/dynamo/venv \
-    && ln -sf /usr/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
+    && ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
@@ -117,7 +116,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
@@ -125,9 +124,17 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \
-    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
-    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
-    # The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
+    # nixl/nixl-cu13 for KVBM's `import nixl` ABI; version from NIXL_REF, matching
+    # the nixl-sys wheel_builder links. LD_PRELOAD swaps the runtime .so (nixl#1668).
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
+    _nixl_ver="${NIXL_REF#v}" && \
+    uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
+    \
+    # Record effective NIXL versions (pip vs loaded .so) for diagnosis.
+    { uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)'; echo "loaded_libnixl: ${LD_PRELOAD##*:}"; } | tee /opt/dynamo/nixl-versions.txt && \
+    \
+    # Third-party deps Dynamo wheels declare but upstream lacks. The
+    # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
     # directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
     # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
@@ -160,7 +167,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
-# Pull /workspace_src (incl. ATTRIBUTION/LICENSE) from the transport stage and
+# Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
     --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -181,11 +188,11 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 ENTRYPOINT []
 CMD ["/bin/bash"]
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Rebase on upstream so this stage inherits upstream's image config
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, and single-file
 # /usr/local/bin/etcd would leak alongside our content.
@@ -194,13 +201,26 @@ COPY --from=runtime_full / /
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
+# dev/local-dev create their own venv in a later stage, so the venv ENV is left
+# out for them — keeps this config identical to the unsquashed dev path.
+{% if target in ("dev", "local-dev") %}
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
+{% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
+    NIXL_VERSION=
+{% endif %}
 
 WORKDIR /workspace
 
@@ -211,4 +231,18 @@ USER dynamo
 
 ENTRYPOINT []
 CMD ["/bin/bash"]
+{% endif %}
+
+
+{# Compliance is skipped for dev/local-dev: those images are not shipped (release
+   ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
+   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
+{% if target not in ("dev", "local-dev") %}
+{% include "templates/compliance.Dockerfile" %}
+{% endif %}
+
+
+FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+COPY --from=licenses /legal /legal
 {% endif %}

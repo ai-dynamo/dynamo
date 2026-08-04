@@ -24,13 +24,6 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def test_scheduling_defaults_opt_out_of_orchestrator():
-    """Feature flag default MUST be False — upgrading existing
-    deployments shouldn't flip behavior until operators opt in."""
-    s = SchedulingConfig()
-    assert s.use_orchestrator is False
-
-
 def test_scheduling_default_timeouts_match_spec():
     s = SchedulingConfig()
     assert s.tick_max_duration_seconds == 30.0
@@ -50,7 +43,7 @@ def test_scale_interval_default_matches_load_cadence():
     """Default 5.0s matches the default load_adjustment_interval_seconds
     so an orchestrator-path deployment with default config sees
     pipeline ticks at the same cadence the load cadence used to drive
-    (under the legacy PSM-mirror model). Behaviour-equivalent default."""
+    under the builtin plugin pipeline."""
     s = SchedulingConfig()
     assert s.scale_interval_seconds == 5.0
 
@@ -73,14 +66,13 @@ def test_scale_interval_accepts_explicit_value():
 
 
 # ---------------------------------------------------------------------------
-# PlannerConfig integration — backwards compat
+# PlannerConfig integration
 # ---------------------------------------------------------------------------
 
 
 def test_planner_config_default_has_scheduling_subtree():
     pc = PlannerConfig()
     assert isinstance(pc.scheduling, SchedulingConfig)
-    assert pc.scheduling.use_orchestrator is False
 
 
 def test_planner_config_without_scheduling_section_loads_unchanged():
@@ -96,7 +88,6 @@ def test_planner_config_without_scheduling_section_loads_unchanged():
     )
     loaded = yaml.safe_load(raw)
     pc = PlannerConfig.model_validate(loaded)
-    assert pc.scheduling.use_orchestrator is False
     assert pc.scheduling.tick_max_duration_seconds == 30.0
 
 
@@ -107,12 +98,10 @@ def test_planner_config_with_scheduling_override_parses():
             "environment": "kubernetes",
             "enable_throughput_scaling": True,
             "scheduling": {
-                "use_orchestrator": True,
                 "tick_max_duration_seconds": 60.0,
             },
         }
     )
-    assert pc.scheduling.use_orchestrator is True
     assert pc.scheduling.tick_max_duration_seconds == 60.0
 
 
@@ -122,14 +111,110 @@ def test_planner_config_yaml_round_trip_preserves_scheduling():
             "mode": "disagg",
             "environment": "kubernetes",
             "enable_throughput_scaling": True,
-            "scheduling": {"use_orchestrator": True},
+            "scheduling": {"tick_max_duration_seconds": 45.0},
         }
     )
     # mode="json" projects enums → strings so yaml.safe_dump is happy.
     dumped = yaml.safe_dump(pc.model_dump(mode="json"))
     reloaded = yaml.safe_load(dumped)
     pc2 = PlannerConfig.model_validate(reloaded)
-    assert pc2.scheduling.use_orchestrator is True
+    assert pc2.scheduling.tick_max_duration_seconds == 45.0
+
+
+def test_planner_config_scale_interval_defaults_to_legacy_loop_gcd():
+    pc = PlannerConfig.model_validate(
+        {
+            "mode": "disagg",
+            "environment": "kubernetes",
+            "optimization_target": "sla",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
+    )
+    assert pc.scheduling.scale_interval_seconds == 1.0
+
+
+def test_planner_config_scale_interval_ignores_disabled_throughput_loop():
+    pc = PlannerConfig.model_validate(
+        {
+            "mode": "disagg",
+            "environment": "kubernetes",
+            "optimization_target": "throughput",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "load_adjustment_interval_seconds": 7.0,
+            "throughput_adjustment_interval_seconds": 60.0,
+        }
+    )
+    assert pc.enable_throughput_scaling is False
+    assert pc.scheduling.scale_interval_seconds == 7.0
+
+
+def test_planner_config_rejects_scale_interval_that_skips_legacy_fire_time():
+    with pytest.raises(
+        ValidationError, match="scale_interval_seconds must evenly divide"
+    ):
+        PlannerConfig.model_validate(
+            {
+                "mode": "disagg",
+                "environment": "kubernetes",
+                "optimization_target": "sla",
+                "enable_load_scaling": True,
+                "enable_throughput_scaling": True,
+                "load_adjustment_interval_seconds": 7.0,
+                "throughput_adjustment_interval_seconds": 60.0,
+                "scheduling": {"scale_interval_seconds": 7.0},
+            }
+        )
+
+
+def test_planner_config_rejects_non_positive_load_interval():
+    with pytest.raises(ValidationError):
+        PlannerConfig.model_validate(
+            {
+                "mode": "disagg",
+                "environment": "kubernetes",
+                "enable_load_scaling": True,
+                "enable_throughput_scaling": False,
+                "load_adjustment_interval_seconds": 0.0,
+            }
+        )
+
+
+def test_planner_config_rejects_non_positive_throughput_interval():
+    with pytest.raises(
+        ValidationError,
+        match="throughput_adjustment_interval_seconds must be > 0",
+    ):
+        PlannerConfig.model_validate(
+            {
+                "mode": "disagg",
+                "environment": "kubernetes",
+                "optimization_target": "sla",
+                "enable_load_scaling": True,
+                "enable_throughput_scaling": True,
+                "load_adjustment_interval_seconds": 5.0,
+                "throughput_adjustment_interval_seconds": 0.0,
+            }
+        )
+
+
+def test_planner_config_accepts_zero_throughput_interval_when_disabled():
+    pc = PlannerConfig.model_validate(
+        {
+            "mode": "disagg",
+            "environment": "kubernetes",
+            "optimization_target": "sla",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "load_adjustment_interval_seconds": 5.0,
+            "throughput_adjustment_interval_seconds": 0.0,
+        }
+    )
+    assert pc.enable_throughput_scaling is False
+    assert pc.scheduling.scale_interval_seconds == 5.0
 
 
 def test_planner_config_partial_scheduling_override_keeps_other_defaults():
@@ -138,9 +223,8 @@ def test_planner_config_partial_scheduling_override_keeps_other_defaults():
             "mode": "disagg",
             "environment": "kubernetes",
             "enable_throughput_scaling": True,
-            "scheduling": {"use_orchestrator": True},  # only flip the flag
+            "scheduling": {"tick_max_duration_seconds": 30.0},
         }
     )
-    assert pc.scheduling.use_orchestrator is True
     # Other fields take defaults.
     assert pc.scheduling.tick_max_duration_seconds == 30.0

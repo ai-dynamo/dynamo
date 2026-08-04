@@ -10,9 +10,10 @@
 //! this crate while the runtime glue stays in `lib/llm`.
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
+use std::env;
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
@@ -22,14 +23,14 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::PrefillTokenDeltas;
 use super::prefill_tracker::PrefillTimeLoad;
-#[cfg(any(test, feature = "bench"))]
-use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
+use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
@@ -40,6 +41,47 @@ use crate::protocols::{
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Minimum interval between repeated logs for a saturated or unexpectedly closed publish queue.
+const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Environment override for the stale active-request cleanup guard.
+const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+/// Returns the configured stale active-request cleanup guard.
+fn active_request_expiry_duration() -> Duration {
+    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
+}
+
+/// Parses the cleanup guard from an environment lookup, falling back on invalid input.
+fn active_request_expiry_duration_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    let Ok(seconds) = raw.parse::<u64>() else {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            value = %raw,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "invalid active request expiry override, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    if seconds == 0 {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "active request expiry override must be greater than zero, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    }
+
+    Duration::from_secs(seconds)
+}
+
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------
@@ -48,13 +90,14 @@ const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::fr
 ///
 /// Implementations provide the runtime-specific transport (e.g., NATS EventPublisher,
 /// Prometheus gauges) while the business logic in [`ActiveSequencesMultiWorker`] stays
-/// runtime-agnostic.
+/// runtime-agnostic. Implementations enqueue accepted replica-sync events synchronously so
+/// lifecycle callers never await transport I/O, and publish successful enqueues in FIFO order.
 pub trait SequencePublisher: Send + Sync {
-    /// Publish a replica-sync event to peer routers.
-    fn publish_event(
-        &self,
-        event: &ActiveSequenceEvent,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// Enqueue a replica-sync event for publication to peer routers.
+    ///
+    /// Queue-backed implementations must preserve [`SequencePublishQueueError`] as the error
+    /// source for admission failures so callers can classify queue saturation and closure.
+    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()>;
 
     /// Fire-and-forget publish of an [`ActiveLoad`] metric payload.
     fn publish_load(&self, load: ActiveLoad);
@@ -74,6 +117,123 @@ pub trait SequencePublisher: Send + Sync {
         blocks: usize,
         tokens: usize,
     );
+
+    /// Observe that a worker/dp_rank is currently registered in the router.
+    fn observe_worker_registered(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+
+    /// Observe that a worker/dp_rank was removed from the router.
+    fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+}
+
+/// Admission failures reported by bounded active-sequence publisher queues.
+#[derive(Debug, thiserror::Error)]
+pub enum SequencePublishQueueError {
+    #[error(
+        "active-sequence publish queue full; dropping newest event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Full {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+    },
+    #[error(
+        "active-sequence publish queue closed; dropping event \
+         (request_id={request_id}, worker={worker:?}, capacity={capacity})"
+    )]
+    Closed {
+        request_id: String,
+        worker: WorkerWithDpRank,
+        capacity: usize,
+        during_shutdown: bool,
+    },
+}
+
+impl SequencePublishQueueError {
+    pub fn full(event: ActiveSequenceEvent, capacity: usize) -> Self {
+        Self::Full {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+        }
+    }
+
+    pub fn closed(event: ActiveSequenceEvent, capacity: usize, during_shutdown: bool) -> Self {
+        Self::Closed {
+            request_id: event.request_id,
+            worker: event.worker,
+            capacity,
+            during_shutdown,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RateLimitedPublishFailure {
+    last_logged_at: Option<Instant>,
+    suppressed_since_last_log: u64,
+}
+
+impl RateLimitedPublishFailure {
+    fn record(&mut self, now: Instant) -> Option<u64> {
+        let should_log = self.last_logged_at.is_none_or(|last_logged_at| {
+            now.saturating_duration_since(last_logged_at) >= SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL
+        });
+        if should_log {
+            let failures_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            self.last_logged_at = Some(now);
+            self.suppressed_since_last_log = 0;
+            Some(failures_since_last_log)
+        } else {
+            self.suppressed_since_last_log = self.suppressed_since_last_log.saturating_add(1);
+            None
+        }
+    }
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogState {
+    full: RateLimitedPublishFailure,
+    unexpected_closed: RateLimitedPublishFailure,
+    shutdown_closed_logged: bool,
+}
+
+#[derive(Default)]
+struct SequencePublishFailureLogLimiter {
+    state: Mutex<SequencePublishFailureLogState>,
+}
+
+impl SequencePublishFailureLogLimiter {
+    fn record_full(&self, now: Instant) -> Option<u64> {
+        self.state.lock().full.record(now)
+    }
+
+    fn record_unexpected_closed(&self, now: Instant) -> Option<u64> {
+        self.state.lock().unexpected_closed.record(now)
+    }
+
+    fn record_shutdown_closed(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.shutdown_closed_logged {
+            false
+        } else {
+            state.shutdown_closed_logged = true;
+            true
+        }
+    }
+}
+
+/// No-op publisher for callers that do not need active-sequence event transport.
+pub struct NoopSequencePublisher;
+
+impl SequencePublisher for NoopSequencePublisher {
+    fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn publish_load(&self, _load: ActiveLoad) {}
+
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -103,6 +263,12 @@ pub enum ReplicaWorkerPolicy {
     LazyRegister,
     /// Drop replica events until the worker rank has been registered locally.
     RequireRegistered,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SequenceTrackerOptions {
+    replica_worker_policy: ReplicaWorkerPolicy,
+    expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -151,6 +317,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     block_size: usize,
     pub(super) router_id: u64,
     pub(super) publisher: Arc<P>,
+    publish_failure_logs: SequencePublishFailureLogLimiter,
     remote_state_updates: watch::Sender<()>,
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
@@ -182,6 +349,61 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         )
     }
 
+    /// Create a tracker that relies exclusively on explicit request lifecycle events.
+    pub fn new_without_expiry(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+    ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: None,
+            },
+        )
+    }
+
+    /// Create a tracker with an explicit stale active-request cleanup guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expiry_duration` or `block_size` is zero.
+    pub fn new_with_expiry_duration(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        expiry_duration: Duration,
+    ) -> Self {
+        assert!(
+            !expiry_duration.is_zero(),
+            "expiry_duration must be greater than zero"
+        );
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(expiry_duration),
+            },
+        )
+    }
+
     /// Create a tracker with an explicit worker-admission policy for replica events.
     pub fn new_with_replica_worker_policy(
         publisher: P,
@@ -192,10 +414,44 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
         replica_worker_policy: ReplicaWorkerPolicy,
     ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy,
+                expiry_duration: Some(active_request_expiry_duration()),
+            },
+        )
+    }
+
+    /// Builds a tracker from resolved replica-admission and expiry policies.
+    fn new_with_options(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        options: SequenceTrackerOptions,
+    ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = WorkerTable::new(block_size, &dp_range);
-        let prompt_registry = PromptRegistry::new(workers.workers());
+        let workers = match options.expiry_duration {
+            Some(duration) => {
+                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
+            }
+            None => WorkerTable::new_without_expiry(block_size, &dp_range),
+        };
+        let initial_workers: Vec<_> = workers.workers().collect();
+        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
+        let publisher = Arc::new(publisher);
+        for worker in &initial_workers {
+            publisher.observe_worker_registered(worker, worker_type);
+        }
 
         Self {
             workers: RwLock::new(workers),
@@ -203,12 +459,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             prompt_registry,
             block_size,
             router_id,
-            publisher: Arc::new(publisher),
+            publisher,
+            publish_failure_logs: SequencePublishFailureLogLimiter::default(),
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
-            replica_worker_policy,
+            replica_worker_policy: options.replica_worker_policy,
             worker_type,
         }
     }
@@ -227,6 +484,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             "expected all workers to have zero active tokens, got {active_tokens:?}",
         );
 
+        let active_requests = self.active_request_counts();
+        assert!(
+            active_requests.values().all(|&count| count == 0),
+            "expected all workers to have zero active requests, got {active_requests:?}",
+        );
+
         assert!(
             self.request_index.is_empty(),
             "expected no active request-to-worker mappings, found {}",
@@ -240,23 +503,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
-        );
-
-        let trie_lookup_live_hashes: Vec<_> = {
-            let table = self.workers.read();
-            table
-                .slots
-                .iter()
-                .filter_map(|slot| {
-                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
-                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
-                })
-                .collect()
-        };
-        assert!(
-            trie_lookup_live_hashes.is_empty(),
-            "expected all worker trie lookups to reference only dead nodes after drain, found {:?}",
-            trie_lookup_live_hashes,
         );
     }
 
@@ -291,23 +537,78 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn spawn_publish_event(&self, event: ActiveSequenceEvent) {
+    fn enqueue_publish_event(&self, event: ActiveSequenceEvent) {
         if !self.replica_sync {
             return;
         }
 
         // TODO: Publish explicit prompt-load decay timestamps with these events so peer routers
         // can mirror the same oldest-prefill anchor instead of approximating from receive time.
-        let publisher = Arc::clone(&self.publisher);
-        tokio::spawn(async move {
-            if let Err(e) = publisher.publish_event(&event).await {
-                tracing::error!(
-                    request_id = %event.request_id,
-                    worker = ?event.worker,
-                    "failed to publish active sequence event: {e}"
-                );
+        // FIFO begins at this enqueue boundary. Local mutation completes first, so overlapping
+        // lifecycle calls can enqueue in a different order from their local mutations; replica
+        // sync is best-effort and peer expiry reconciles stale state.
+        let request_id = event.request_id.clone();
+        let worker = event.worker;
+        if let Err(error) = self.publisher.enqueue_event(event) {
+            match error.downcast_ref::<SequencePublishQueueError>() {
+                Some(SequencePublishQueueError::Full { capacity, .. }) => {
+                    if let Some(dropped_events) =
+                        self.publish_failure_logs.record_full(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue full; dropping newest event"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: true,
+                    ..
+                }) => {
+                    if self.publish_failure_logs.record_shutdown_closed() {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed during shutdown"
+                        );
+                    }
+                }
+                Some(SequencePublishQueueError::Closed {
+                    capacity,
+                    during_shutdown: false,
+                    ..
+                }) => {
+                    if let Some(dropped_events) = self
+                        .publish_failure_logs
+                        .record_unexpected_closed(Instant::now())
+                    {
+                        tracing::error!(
+                            request_id = %request_id,
+                            worker = ?worker,
+                            capacity,
+                            dropped_events_since_last_log = dropped_events,
+                            error = %format!("{error:#}"),
+                            "active-sequence publish queue closed unexpectedly; dropping event"
+                        );
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        request_id = %request_id,
+                        worker = ?worker,
+                        error = %error,
+                        "failed to enqueue active-sequence event"
+                    );
+                }
             }
-        });
+        }
     }
 
     /// Subscribe to remote lifecycle updates that were applied through replica sync.
@@ -340,7 +641,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for worker in &change.added {
             tracing::debug!("Registering worker {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -361,7 +663,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for worker in &change.added {
             tracing::debug!("Registering external worker rank {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -375,7 +678,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for removed in &change.removed {
             tracing::warn!("Removing worker {:?}", removed.worker);
         }
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -398,7 +702,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             tracing::warn!("Adding worker {:?}", worker);
         }
 
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -412,11 +717,27 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.workers.read().has_registered_workers()
     }
 
-    fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
+    /// Maintains the same topology-change invariant as the prior implementation:
+    /// mutate `WorkerTable` under `workers.write()`, then clean up derived state
+    /// after releasing the table lock.
+    fn apply_worker_topology_change(&self, change: &WorkerTopologyChange) {
         for removed in &change.removed {
             self.request_index.remove_worker_requests(removed.worker);
         }
-        self.prompt_registry.apply_topology_change(change);
+        self.prompt_registry
+            .apply_topology_change_without_cleanup(change);
+    }
+
+    fn finish_worker_topology_change(&self, change: &WorkerTopologyChange) {
+        for removed in &change.removed {
+            self.publisher
+                .observe_worker_removed(&removed.worker, self.worker_type);
+        }
+        for worker in &change.added {
+            self.publisher
+                .observe_worker_registered(worker, self.worker_type);
+        }
+        self.prompt_registry.maybe_cleanup();
     }
 
     pub fn add_request(
@@ -459,9 +780,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         });
         self.add_request_local(req, decay_now, lazily_register_worker)?;
         if let Some(event) = event {
-            self.spawn_publish_event(event);
+            self.enqueue_publish_event(event);
         }
         Ok(())
+    }
+
+    pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+        self.request_index.worker_for(request_id)
     }
 
     /// Free all blocks associated with a request.
@@ -512,8 +837,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
-    // TODO: output blocks are not replicated via replica_sync — add an
-    // ActiveSequenceEventData variant if cross-instance accuracy matters.
+    // NOTE: Output blocks remain local and are intentionally not replicated because their
+    // frequency would consume disproportionate replica-sync network bandwidth.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
@@ -559,37 +884,37 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Query all workers for the potential blocks and tokens.
-    pub fn potential_blocks_and_tokens(
+    pub fn potential_blocks_and_tokens<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
-        self.potential_blocks_and_tokens_at(token_sequence, prefill_token_deltas, Instant::now())
+    ) -> PotentialLoadMaps {
+        self.potential_blocks_and_tokens_at::<INCLUDE_ACTIVE_REQUESTS>(
+            token_sequence,
+            prefill_token_deltas,
+            Instant::now(),
+        )
     }
 
-    pub fn potential_blocks_and_tokens_at(
+    pub fn potential_blocks_and_tokens_at<const INCLUDE_ACTIVE_REQUESTS: bool>(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
-    ) -> (
-        FxHashMap<WorkerWithDpRank, usize>,
-        FxHashMap<WorkerWithDpRank, usize>,
-    ) {
+    ) -> PotentialLoadMaps {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self.prompt_registry.potential_blocks_and_tokens(
-            token_sequence,
-            prefill_token_deltas,
-            decay_now,
-        );
+        let result = self
+            .prompt_registry
+            .potential_blocks_and_tokens::<INCLUDE_ACTIVE_REQUESTS>(
+                token_sequence,
+                prefill_token_deltas,
+                decay_now,
+            );
 
         #[cfg(feature = "bench")]
         {
@@ -598,6 +923,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 num_workers,
                 total_us = total_elapsed.as_micros() as u64,
                 "potential_blocks_and_tokens completed"
+            );
+        }
+
+        result
+    }
+
+    pub fn project_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        #[cfg(feature = "bench")]
+        let start = tokio::time::Instant::now();
+
+        #[cfg(feature = "bench")]
+        let num_workers = self.workers.read().slots.len();
+
+        let result = self
+            .prompt_registry
+            .project_worker_loads(token_sequence, decay_now);
+
+        #[cfg(feature = "bench")]
+        {
+            let total_elapsed = start.elapsed();
+            tracing::info!(
+                num_workers,
+                total_us = total_elapsed.as_micros() as u64,
+                "project_worker_loads completed"
             );
         }
 
@@ -659,6 +1012,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.request_index.active_lora_counts()
     }
 
+    pub fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.prompt_registry.active_request_counts()
+    }
+
     /// Force expire stale requests across all workers (one-shot).
     ///
     /// This is necessary because worker expiration otherwise only runs as a side-effect
@@ -677,7 +1034,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = seq.worker_load_snapshot();
                 self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
-                    &slot.trie_lookup,
                     outcome.membership_delta,
                     load,
                 );
@@ -725,10 +1081,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub(super) fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
-        if self.workers.read().index.contains_key(&worker) {
-            return;
+        {
+            let table = self.workers.read();
+            if table.index.contains_key(&worker) {
+                return;
+            }
         }
 
+        self.ensure_worker_registered_after_miss(worker);
+    }
+
+    fn ensure_worker_registered_after_miss(&self, worker: WorkerWithDpRank) {
+        // Called only after any read guard has been dropped.
         let mut table = self.workers.write();
         if table.index.contains_key(&worker) {
             return;
@@ -738,7 +1102,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let change = table.ensure_worker(self.block_size, worker);
         drop(table);
 
-        self.apply_worker_topology_change(change);
+        self.apply_worker_topology_change(&change);
+        self.finish_worker_topology_change(&change);
     }
 
     fn add_request_local(
@@ -757,16 +1122,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        if lazily_register_worker {
-            self.ensure_worker_registered(worker);
-        }
+        let mut attempted_lazy_registration = false;
 
-        let (expired_request_ids, load) = {
+        let (expired_request_ids, load) = loop {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                if !lazily_register_worker || attempted_lazy_registration {
+                    return Err(SequenceError::WorkerNotFound { worker });
+                }
+                attempted_lazy_registration = true;
+                self.ensure_worker_registered_after_miss(worker);
+                continue;
+            };
             if let Err(existing_worker) =
                 self.request_index
                     .try_insert_request(request_id.clone(), worker, lora_name)
@@ -789,11 +1157,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let load = seq.worker_load_snapshot();
             self.prompt_registry.apply_membership_delta_and_load(
                 worker,
-                &slot.trie_lookup,
                 outcome.membership_delta,
                 load,
             );
-            (outcome.expired_request_ids, load)
+            break (outcome.expired_request_ids, load);
         };
 
         self.request_index
@@ -850,12 +1217,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let mut seq = slot.sequences.write();
             let delta = mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
-                worker,
-                &slot.trie_lookup,
-                delta,
-                load,
-            );
+            self.prompt_registry
+                .apply_membership_delta_and_load(worker, delta, load);
             load
         };
 
@@ -915,7 +1278,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             mutate_fn,
             remove_mapping,
         )?;
-        self.spawn_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: event_data,
@@ -940,7 +1303,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         let lora_name = self.request_index.lora_for(request_id);
         self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
-        self.spawn_publish_event(ActiveSequenceEvent {
+        self.enqueue_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
             data: event_data,
@@ -955,7 +1318,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::{self, Future};
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex, mpsc as std_mpsc};
     use std::time::Duration;
 
     use rustc_hash::FxHashMap;
@@ -968,6 +1331,51 @@ mod tests {
     };
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
+
+    /// Verifies that a positive expiry override is accepted.
+    #[test]
+    fn active_request_expiry_duration_override_uses_positive_seconds() {
+        let lookup =
+            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(lookup),
+            Duration::from_secs(3600)
+        );
+    }
+
+    /// Verifies that absent and invalid expiry overrides use the default.
+    #[test]
+    fn active_request_expiry_duration_override_falls_back_to_default() {
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(|_| None),
+            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+        );
+        for value in ["", "abc", "0"] {
+            let lookup = |key: &str| {
+                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
+            };
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+            );
+        }
+    }
+
+    /// Verifies that zero duration is rejected before worker-table construction.
+    #[test]
+    #[should_panic(expected = "expiry_duration must be greater than zero")]
+    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
+        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            false,
+            0,
+            "test",
+            Duration::ZERO,
+        );
+    }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(
@@ -1079,6 +1487,17 @@ mod tests {
             .collect()
     }
 
+    fn active_request_count(
+        sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        sequences
+            .active_request_counts()
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+    }
+
     struct VecSubscriber {
         events: VecDeque<anyhow::Result<ActiveSequenceEvent>>,
     }
@@ -1138,9 +1557,12 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingPublisherState {
+        events: Mutex<Vec<ActiveSequenceEventData>>,
         single_loads: Mutex<Vec<ActiveLoad>>,
         load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
+        registered: Mutex<Vec<WorkerWithDpRank>>,
+        removed: Mutex<Vec<WorkerWithDpRank>>,
     }
 
     impl RecordingPublisherState {
@@ -1149,9 +1571,12 @@ mod tests {
         }
 
         fn clear(&self) {
+            self.events.lock().unwrap().clear();
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
+            self.registered.lock().unwrap().clear();
+            self.removed.lock().unwrap().clear();
         }
     }
 
@@ -1160,11 +1585,9 @@ mod tests {
     }
 
     impl SequencePublisher for RecordingPublisher {
-        fn publish_event(
-            &self,
-            _event: &ActiveSequenceEvent,
-        ) -> impl Future<Output = anyhow::Result<()>> + Send {
-            future::ready(Ok(()))
+        fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            self.state.events.lock().unwrap().push(event.data);
+            Ok(())
         }
 
         fn publish_load(&self, load: ActiveLoad) {
@@ -1188,6 +1611,53 @@ mod tests {
                 .unwrap()
                 .push((*worker, blocks, tokens));
         }
+
+        fn observe_worker_registered(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.registered.lock().unwrap().push(*worker);
+        }
+
+        fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.removed.lock().unwrap().push(*worker);
+        }
+    }
+
+    struct BlockingPublisher {
+        blocked_worker_id: u64,
+        entered: std_mpsc::Sender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SequencePublisher for BlockingPublisher {
+        fn enqueue_event(&self, _event: ActiveSequenceEvent) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+            if !loads
+                .iter()
+                .any(|load| load.worker_id == self.blocked_worker_id)
+            {
+                return;
+            }
+
+            self.entered.send(()).unwrap();
+            let (released, ready) = &*self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+
+        fn observe_load(
+            &self,
+            _worker: &WorkerWithDpRank,
+            _worker_type: &str,
+            _blocks: usize,
+            _tokens: usize,
+        ) {
+        }
     }
 
     fn make_recording_sequences(
@@ -1208,6 +1678,31 @@ mod tests {
             "test",
         );
         (sequences, state)
+    }
+
+    #[test]
+    fn worker_topology_observes_registered_and_removed_workers() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 2))]));
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
+
+        state.clear();
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(2, 0)]
+        );
+
+        state.clear();
+        sequences.unregister_worker(1).unwrap();
+        assert_eq!(
+            *state.removed.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
     }
 
     fn replica_add(
@@ -1255,6 +1750,97 @@ mod tests {
         }
     }
 
+    fn local_sequence_request(request_id: &str, worker: WorkerWithDpRank) -> SequenceRequest {
+        SequenceRequest {
+            request_id: request_id.to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: true,
+            expected_output_tokens: None,
+            prefill_load_hint: tracking_hint(12),
+            worker,
+            lora_name: None,
+        }
+    }
+
+    #[test]
+    fn active_sequence_publish_enqueues_lifecycle_in_order() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "ordered".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [
+                ActiveSequenceEventData::AddRequest { .. },
+                ActiveSequenceEventData::MarkPrefillCompleted,
+                ActiveSequenceEventData::Free,
+            ]
+        ));
+    }
+
+    #[test]
+    fn active_sequence_publish_skips_enqueue_when_replica_sync_disabled() {
+        let state = Arc::new(RecordingPublisherState::default());
+        let sequences = ActiveSequencesMultiWorker::new(
+            RecordingPublisher {
+                state: Arc::clone(&state),
+            },
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "disabled".to_string();
+
+        sequences
+            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .unwrap();
+        sequences
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        assert!(state.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_sequence_publish_failure_logs_are_aggregated() {
+        let limiter = SequencePublishFailureLogLimiter::default();
+        let now = Instant::now();
+
+        assert_eq!(limiter.record_full(now), Some(1));
+        assert_eq!(limiter.record_full(now + Duration::from_secs(1)), None);
+        assert_eq!(
+            limiter.record_full(now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL),
+            Some(2)
+        );
+
+        assert_eq!(limiter.record_unexpected_closed(now), Some(1));
+        assert_eq!(
+            limiter.record_unexpected_closed(now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            limiter.record_unexpected_closed(
+                now + SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL + Duration::from_secs(1)
+            ),
+            Some(2)
+        );
+
+        assert!(limiter.record_shutdown_closed());
+        assert!(!limiter.record_shutdown_closed());
+    }
+
     #[tokio::test]
     async fn add_request_can_skip_prefill_token_tracking() {
         let sequences = make_sequences();
@@ -1280,6 +1866,7 @@ mod tests {
             sequences.active_tokens(decay_now).get(&worker).copied(),
             Some(0)
         );
+        assert_eq!(active_request_count(&sequences, worker), 1);
     }
 
     #[test]
@@ -1342,6 +1929,7 @@ mod tests {
         );
 
         sequences.mark_prefill_completed(&a_oldest, query).unwrap();
+        assert_eq!(active_request_count(&sequences, worker_a), 2);
 
         let loads = modeled_time_loads_by_worker(&sequences, query + Duration::from_secs(2));
         assert_eq!(loads.get(&worker_a).copied(), Some(Ok(2_000)));
@@ -1403,6 +1991,7 @@ mod tests {
         );
 
         sequences.free(&later, completion_time).unwrap();
+        assert_eq!(active_request_count(&sequences, worker), 1);
 
         assert_eq!(
             sequences
@@ -1470,14 +2059,33 @@ mod tests {
         let expected =
             naive_potential_loads(&sequences, Some(&prompt), &prefill_token_deltas, decay_now);
 
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt),
             &prefill_token_deltas,
             decay_now,
         );
+        let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
+        assert_eq!(
+            projections.get(&worker_a).copied(),
+            Some(WorkerLoadProjection {
+                active_prefill_tokens: 0,
+                active_decode_blocks: 2,
+                active_requests: 1,
+                additional_active_blocks: 1,
+            })
+        );
+        assert_eq!(
+            projections.get(&worker_b).copied(),
+            Some(WorkerLoadProjection {
+                active_prefill_tokens: 12,
+                active_decode_blocks: 3,
+                active_requests: 1,
+                additional_active_blocks: 2,
+            })
+        );
     }
 
     #[test]
@@ -1501,7 +2109,7 @@ mod tests {
             )
             .unwrap();
 
-        let (potential_blocks, _) = sequences.potential_blocks_and_tokens_at(
+        let (potential_blocks, _, _) = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3, 5]),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1557,7 +2165,7 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&base_prompt),
             &PrefillTokenDeltas::none(),
             decay_now,
@@ -1617,12 +2225,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
         assert_eq!(actual.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
 
@@ -1634,12 +2243,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual_after_free = sequences.potential_blocks_and_tokens_at(
+        let actual_after_free = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&prompt_b),
             &PrefillTokenDeltas::none(),
             decay_now,
         );
-        assert_eq!(actual_after_free, expected_after_free);
+        assert_eq!(actual_after_free.0, expected_after_free.0);
+        assert_eq!(actual_after_free.1, expected_after_free.1);
         assert_eq!(actual_after_free.0.get(&worker_a).copied(), Some(4));
         assert_eq!(actual_after_free.0.get(&worker_b).copied(), Some(3));
 
@@ -1673,6 +2283,57 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_expiry_requires_explicit_cleanup_for_all_workers() {
+        let sequences = ActiveSequencesMultiWorker::new_without_expiry(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        );
+        let initial_worker = WorkerWithDpRank::new(1, 0);
+        let dynamic_worker = WorkerWithDpRank::new(2, 0);
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+
+        for (request_id, token_sequence, worker) in [
+            ("initial", vec![1, 2], initial_worker),
+            ("dynamic", vec![3], dynamic_worker),
+        ] {
+            sequences
+                .add_request(
+                    SequenceRequest {
+                        request_id: request_id.to_string(),
+                        token_sequence: Some(token_sequence),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: tracking_hint(4),
+                        worker,
+                        lora_name: None,
+                    },
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+
+        tokio::time::advance(Duration::from_secs(331)).await;
+        sequences.force_expire_requests_across_all_workers();
+
+        assert_eq!(active_request_count(&sequences, initial_worker), 1);
+        assert_eq!(active_request_count(&sequences, dynamic_worker), 1);
+        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&2));
+        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&1));
+
+        let now = Instant::now();
+        sequences.free(&"initial".to_string(), now).unwrap();
+        sequences.free(&"dynamic".to_string(), now).unwrap();
+        sequences.assert_completely_drained(now);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1721,12 +2382,13 @@ mod tests {
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        let actual = sequences.potential_blocks_and_tokens_at(
+        let actual = sequences.potential_blocks_and_tokens_at::<false>(
             Some(&[1, 2, 3]),
             &PrefillTokenDeltas::none(),
             Instant::now(),
         );
-        assert_eq!(actual, expected);
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(actual.1, expected.1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1764,6 +2426,109 @@ mod tests {
         assert_eq!(
             sequences.request_index.worker_for(&"req-1".to_string()),
             None
+        );
+        assert_eq!(
+            sequences.active_request_counts().get(&worker).copied(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn replica_batch_apply_uses_one_deferred_effect_flush() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, publisher) =
+            make_recording_sequences(HashMap::from([(1_u64, (0_u32, 1_u32))]));
+
+        sequences.apply_replica_batch(vec![
+            replica_add("req-1", worker, vec![1, 2, 3]),
+            replica_add("req-2", worker, vec![4, 5, 6]),
+            replica_mark("req-2", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let batches = publisher.load_batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0].active_decode_blocks, Some(3));
+        assert_eq!(batches[0][0].active_prefill_tokens, Some(0));
+        assert_eq!(sequences.remote_state_update_count(), 1);
+        assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-2".to_string()),
+            Some(worker)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"req-1".to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn replica_batches_apply_concurrently_to_independent_workers() {
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let sequences = Arc::new(ActiveSequencesMultiWorker::new(
+            BlockingPublisher {
+                blocked_worker_id: worker_a.worker_id,
+                entered: entered_tx,
+                release: Arc::clone(&release),
+            },
+            4,
+            HashMap::from([(1, (0, 1)), (2, (0, 1))]),
+            true,
+            0,
+            "test",
+        ));
+
+        let source_a = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-a",
+                    worker_a,
+                    vec![1, 2, 3],
+                )]);
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("source A should block inside tracker batch flush");
+
+        let (source_b_done_tx, source_b_done_rx) = std_mpsc::channel();
+        let source_b = {
+            let sequences = Arc::clone(&sequences);
+            std::thread::spawn(move || {
+                sequences.apply_replica_batch(vec![replica_add(
+                    "source-b",
+                    worker_b,
+                    vec![4, 5, 6],
+                )]);
+                source_b_done_tx.send(()).unwrap();
+            })
+        };
+        let source_b_completed = source_b_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+
+        let (released, ready) = &*release;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+        source_a.join().unwrap();
+        source_b.join().unwrap();
+
+        assert!(
+            source_b_completed,
+            "source B should apply while source A remains blocked"
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-a".to_string()),
+            Some(worker_a)
+        );
+        assert_eq!(
+            sequences.request_index.worker_for(&"source-b".to_string()),
+            Some(worker_b)
         );
     }
 
@@ -1988,6 +2753,7 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2293,15 +3059,18 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(active_request_count(&sequences, worker), 1);
         sequences.reconcile_workers([]).unwrap();
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert!(sequences.active_blocks().is_empty());
+        assert!(!sequences.active_request_counts().contains_key(&worker));
         assert!(sequences.request_index.is_empty());
 
         sequences
             .reconcile_workers([WorkerDpRange::new(1, 0, 1)])
             .unwrap();
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(active_request_count(&sequences, worker), 0);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -2370,9 +3139,7 @@ mod tests {
         sequences.free(&request_id, decay_now).unwrap();
         sequences.free(&request_id, decay_now).unwrap();
 
-        assert!(sequences.request_index.is_empty());
-        assert!(sequences.prompt_registry.is_block_index_empty());
-        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        sequences.assert_completely_drained(decay_now);
     }
 
     #[test]
@@ -2424,8 +3191,11 @@ mod tests {
         let active_tokens = sequences.active_tokens(decay_now);
         assert_eq!(active_tokens.get(&worker).copied(), Some(50));
 
-        let (_, potential_tokens) =
-            sequences.potential_blocks_and_tokens_at(None, &PrefillTokenDeltas::none(), decay_now);
+        let (_, potential_tokens, _) = sequences.potential_blocks_and_tokens_at::<false>(
+            None,
+            &PrefillTokenDeltas::none(),
+            decay_now,
+        );
         assert_eq!(potential_tokens.get(&worker).copied(), Some(50));
 
         assert!(

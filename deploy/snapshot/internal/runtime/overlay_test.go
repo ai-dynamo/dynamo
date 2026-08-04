@@ -144,6 +144,111 @@ func TestFindWhiteoutFiles(t *testing.T) {
 	}
 }
 
+func TestCaptureRootfsDiff(t *testing.T) {
+	t.Run("writes valid archive atomically", func(t *testing.T) {
+		upperDir := t.TempDir()
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(upperDir, "generated.txt"), []byte("runtime data"), 0644); err != nil {
+			t.Fatalf("write upperdir file: %v", err)
+		}
+
+		got, err := CaptureRootfsDiff(upperDir, checkpointDir, types.OverlaySettings{}, nil)
+		if err != nil {
+			t.Fatalf("CaptureRootfsDiff: %v", err)
+		}
+		want := filepath.Join(checkpointDir, rootfsDiffFilename)
+		if got != want {
+			t.Fatalf("got path %q, want %q", got, want)
+		}
+		info, err := os.Stat(want)
+		if err != nil {
+			t.Fatalf("stat rootfs diff: %v", err)
+		}
+		if info.Size() == 0 {
+			t.Fatal("rootfs diff should not be empty")
+		}
+		matches, err := filepath.Glob(filepath.Join(checkpointDir, rootfsDiffFilename+".*.tmp"))
+		if err != nil {
+			t.Fatalf("glob temp files: %v", err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("temporary rootfs diff files were not cleaned up: %v", matches)
+		}
+
+		targetRoot := t.TempDir()
+		if err := ApplyRootfsDiff(checkpointDir, targetRoot, testr.New(t)); err != nil {
+			t.Fatalf("ApplyRootfsDiff: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(targetRoot, "generated.txt"))
+		if err != nil {
+			t.Fatalf("read extracted file: %v", err)
+		}
+		if string(data) != "runtime data" {
+			t.Fatalf("extracted data = %q, want %q", string(data), "runtime data")
+		}
+	})
+
+	t.Run("failed capture does not publish partial archive", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		missingUpperDir := filepath.Join(t.TempDir(), "missing")
+
+		if _, err := CaptureRootfsDiff(missingUpperDir, checkpointDir, types.OverlaySettings{}, nil); err == nil {
+			t.Fatal("CaptureRootfsDiff should fail for missing upperdir")
+		}
+		if _, err := os.Stat(filepath.Join(checkpointDir, rootfsDiffFilename)); !os.IsNotExist(err) {
+			t.Fatalf("rootfs diff should not be published after failure, stat error: %v", err)
+		}
+		matches, err := filepath.Glob(filepath.Join(checkpointDir, rootfsDiffFilename+".*.tmp"))
+		if err != nil {
+			t.Fatalf("glob temp files: %v", err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("temporary rootfs diff files were not cleaned up: %v", matches)
+		}
+	})
+}
+
+func TestApplyRootfsDiff(t *testing.T) {
+	t.Run("missing archive is no-op", func(t *testing.T) {
+		if err := ApplyRootfsDiff(t.TempDir(), t.TempDir(), testr.New(t)); err != nil {
+			t.Fatalf("ApplyRootfsDiff: %v", err)
+		}
+	})
+
+	t.Run("empty archive is no-op", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), nil, 0644); err != nil {
+			t.Fatalf("write empty rootfs diff: %v", err)
+		}
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err != nil {
+			t.Fatalf("ApplyRootfsDiff: %v", err)
+		}
+	})
+
+	t.Run("non-empty invalid archive fails", func(t *testing.T) {
+		checkpointDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(checkpointDir, rootfsDiffFilename), []byte("not a tar archive"), 0644); err != nil {
+			t.Fatalf("write invalid rootfs diff: %v", err)
+		}
+		if err := ApplyRootfsDiff(checkpointDir, t.TempDir(), testr.New(t)); err == nil {
+			t.Fatal("ApplyRootfsDiff should fail for invalid non-empty archive")
+		}
+	})
+
+	t.Run("non-ENOENT stat error is propagated", func(t *testing.T) {
+		// Pass a regular file as checkpointPath so stat of
+		// checkpointPath/rootfs-diff.tar returns ENOTDIR, not ENOENT.
+		f, err := os.CreateTemp(t.TempDir(), "not-a-dir")
+		if err != nil {
+			t.Fatalf("create temp file: %v", err)
+		}
+		f.Close()
+		if err := ApplyRootfsDiff(f.Name(), t.TempDir(), testr.New(t)); err == nil {
+			t.Fatal("ApplyRootfsDiff should propagate non-ENOENT stat error")
+		}
+	})
+}
+
 func TestCaptureDeletedFiles(t *testing.T) {
 	t.Run("dir with whiteouts writes JSON and returns true", func(t *testing.T) {
 		upperDir := t.TempDir()

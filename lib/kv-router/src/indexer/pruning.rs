@@ -7,7 +7,7 @@
 //! approximate-mode blocks in the radix tree.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque, hash_map::Entry};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
@@ -124,20 +124,38 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Inserts timers using a caller-provided timestamp.
     pub fn insert_at(&mut self, keys: Vec<K>, now: Instant) {
+        let len = keys.len();
         let expiry_time = if self.ttl.is_zero() {
             now
         } else {
             self.bucket_expiry(now + self.ttl)
         };
+        let mut bucket_inserts: Option<Vec<K>> = None;
 
-        self.timers.reserve(keys.len());
+        self.timers.reserve(len);
         for key in keys {
-            if let Some(old_expiry) = self.timers.insert(key.clone(), expiry_time)
-                && old_expiry != expiry_time
-            {
-                self.remove_from_bucket(&old_expiry, &key);
+            match self.timers.entry(key.clone()) {
+                Entry::Occupied(entry) if *entry.get() == expiry_time => {
+                    continue;
+                }
+                Entry::Occupied(mut entry) => {
+                    let old_expiry = *entry.get();
+                    entry.insert(expiry_time);
+                    self.remove_from_bucket(&old_expiry, &key);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(expiry_time);
+                }
             }
-            self.expirations.entry(expiry_time).or_default().insert(key);
+            bucket_inserts
+                .get_or_insert_with(|| Vec::with_capacity(len))
+                .push(key);
+        }
+
+        if let Some(bucket_inserts) = bucket_inserts {
+            let bucket = self.expirations.entry(expiry_time).or_default();
+            bucket.reserve(bucket_inserts.len());
+            bucket.extend(bucket_inserts);
         }
     }
 
@@ -562,21 +580,20 @@ impl WorkerPruneManagerInner {
         let mut expired = Vec::new();
 
         loop {
-            let Some((Reverse(expiry), worker)) = ({
-                let mut expiries = self
-                    .next_expiries
-                    .lock()
-                    .expect("worker expiry index mutex poisoned");
-                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
-                    break;
-                };
-                if expiry > now {
-                    break;
-                }
-                expiries.pop()
-            }) else {
+            let mut expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
                 break;
             };
+            if expiry > now {
+                break;
+            }
+            let Some((Reverse(expiry), worker)) = ({ expiries.pop() }) else {
+                break;
+            };
+            drop(expiries);
 
             let (mut worker_expired, next_expiry) = {
                 let Some(state) = self.workers.get(&worker) else {
@@ -683,6 +700,25 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_manager_same_bucket_update_dedupes() {
+        const TTL: Duration = Duration::from_millis(50);
+        let prune_config = PruneConfig { ttl: TTL };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
+
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![42], now);
+        let expiry = *pm.get_expiry(&42).expect("expiry missing for key 42");
+
+        pm.insert_at(vec![42], now + Duration::from_millis(20));
+
+        assert_eq!(pm.get_expiry(&42), Some(&expiry));
+        assert_eq!(pm.expirations.len(), 1);
+        assert_eq!(pm.expirations.get(&expiry).map(FxHashSet::len), Some(1));
+        assert_eq!(pm.pop_expired(expiry), vec![42]);
+        assert!(pm.is_empty());
+    }
+
+    #[test]
     fn test_prune_manager_zero_ttl_expires_immediately() {
         let prune_config = PruneConfig {
             ttl: Duration::ZERO,
@@ -722,26 +758,6 @@ mod tests {
 
         let expired_after = pm.pop_expired(second_expiry);
         assert_eq!(expired_after, vec![42]);
-    }
-
-    /// Test that BlockEntry ordering prioritizes sequence position.
-    #[test]
-    fn test_block_entry_ordering() {
-        let worker = WorkerWithDpRank::from_worker_id(0);
-
-        let entry1 = BlockEntry {
-            key: ExternalSequenceBlockHash(100),
-            worker,
-            seq_position: 0,
-        };
-        let entry2 = BlockEntry {
-            key: ExternalSequenceBlockHash(50),
-            worker,
-            seq_position: 1,
-        };
-
-        // entry1 < entry2 because seq_position 0 < 1
-        assert!(entry1 < entry2);
     }
 
     #[test]

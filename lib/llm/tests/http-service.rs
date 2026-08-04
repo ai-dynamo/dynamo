@@ -21,6 +21,7 @@ use dynamo_llm::{
     },
     model_card::ModelDeploymentCard,
 };
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -40,6 +41,10 @@ mod ports;
 use ports::bind_random_port;
 
 struct CounterEngine {}
+
+struct FirstTokenGateEngine {
+    release: Arc<tokio::sync::Notify>,
+}
 
 // Add a new long-running test engine
 struct LongRunningEngine {
@@ -66,6 +71,33 @@ impl
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
         Error,
+    > for FirstTokenGateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let release = self.release.clone();
+
+        let stream = stream! {
+            release.notified().await;
+            let output = generator.create_choice(0, Some("choice 0".to_string()), None, None);
+            yield Annotated::from_data(output);
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
     > for CounterEngine
 {
     async fn generate(
@@ -83,8 +115,15 @@ impl
         let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
+            // Emit the first token immediately so the frontend's initial
+            // stream-peek (check_for_backend_error) unblocks quickly — this
+            // matches real engines (TTFT < 1s) rather than pathologically
+            // delaying every event by max_tokens ms.
+            let first = generator.create_choice(0, Some("choice 0".to_string()), None, None);
+            yield Annotated::from_data(first);
+
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
-            for i in 0..10 {
+            for i in 1..10 {
                 let output = generator.create_choice(i, Some(format!("choice {i}")), None, None);
 
                 yield Annotated::from_data(output);
@@ -144,6 +183,43 @@ impl
 }
 
 struct AlwaysFailEngine {}
+
+/// Engine that yields a single `Backend(InvalidArgument)` error frame as the
+/// first stream event — modeling a text-only model refusing multimodal input.
+struct InvalidArgumentEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let stream = stream! {
+            yield Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                        .message("Received multimodal data but multimodal processing is not enabled")
+                        .build(),
+                ),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
 
 #[async_trait]
 impl
@@ -215,6 +291,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
+        Endpoint::Generate => todo!(),
     };
 
     let request_type = match request_type {
@@ -418,8 +495,8 @@ async fn test_http_service() {
     // ==== ChatCompletions / Unary / Success ====
     request.stream = Some(false);
 
-    // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
-    request.max_tokens = Some(0);
+    // Use the smallest valid value to keep the CounterEngine delay minimal.
+    request.max_tokens = Some(1);
 
     let future = client
         .post(format!("http://localhost:{}/v1/chat/completions", port))
@@ -442,8 +519,8 @@ async fn test_http_service() {
     // ==== ChatCompletions / Stream / Error ====
     request.model = "bar".to_string();
 
-    // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
-    request.max_tokens = Some(0);
+    // Keep this request valid so authorization, rather than validation, rejects it.
+    request.max_tokens = Some(1);
     request.stream = Some(true);
 
     let response = client
@@ -573,6 +650,175 @@ async fn wait_for_service_ready(port: u16) {
             Err(e) => panic!("Service failed to start within timeout: {}", e),
         }
     }
+}
+
+#[tokio::test]
+async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .sse_keep_alive(std::time::Duration::from_millis(25))
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let first_token_gate = Arc::new(tokio::sync::Notify::new());
+    let card = ModelDeploymentCard::with_name_only("idle-stream-model");
+    state
+        .manager()
+        .add_chat_completions_model(
+            "idle-stream-model",
+            card.mdcsum(),
+            Arc::new(FirstTokenGateEngine {
+                release: first_token_gate.clone(),
+            }),
+        )
+        .unwrap();
+
+    let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+        dynamo_protocols::types::ChatCompletionRequestUserMessage {
+            content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                "hi".to_string(),
+            ),
+            name: None,
+        },
+    );
+    let mut request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+        .model("idle-stream-model")
+        .messages(vec![message])
+        .build()
+        .expect("failed to build request");
+    request.stream = Some(true);
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{response:?}");
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("idle stream did not emit an SSE comment frame")
+            .expect("idle stream ended before emitting an SSE comment frame")
+            .expect("failed to read stream");
+        body.extend_from_slice(&chunk);
+
+        let body_text = String::from_utf8_lossy(&body);
+        if body_text.contains(":\n\n") {
+            assert!(
+                !body_text.contains("data:"),
+                "model data arrived before the keep-alive comment: {body_text}"
+            );
+            break;
+        }
+    }
+
+    first_token_gate.notify_one();
+    while let Some(chunk) = timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream did not finish")
+    {
+        body.extend_from_slice(&chunk.expect("failed to read stream"));
+    }
+
+    let body = String::from_utf8(body).expect("SSE response was not UTF-8");
+    assert!(
+        body.contains("data:"),
+        "stream did not emit model data: {body}"
+    );
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream did not terminate with [DONE]: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_batch_api_skeleton_routes_return_not_implemented() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_batch_endpoints(true)
+        .build()
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
+
+    let response = client
+        .post(format!("{base}/v1/files"))
+        .body("{\"custom_id\":\"r1\"}\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(
+        body["message"],
+        "Batch file storage is not implemented yet."
+    );
+
+    let response = client
+        .post(format!("{base}/v1/batches"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("not valid JSON")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(
+        body["message"],
+        "Batch job lifecycle persistence is not implemented yet."
+    );
+
+    let response = client
+        .get(format!("{base}/v1/batches/batch-123"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(
+        body["message"],
+        "Batch job lifecycle persistence is not implemented yet."
+    );
+
+    let response = client
+        .get(format!("{base}/v1/files/file-123/content"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "Batch output file retrieval is not implemented yet."
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 // NOTE: BYOT (Bring Your Own Type) client tests were removed during the
@@ -903,6 +1149,323 @@ async fn test_request_id_annotation() {
         "✅ Request ID annotation test passed! Sent UUID: {}, Received: {}",
         request_uuid,
         received_uuid_str
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Exercises the per-model readiness sub-resource `GET /v1/models/{model}/ready`
+/// (Mechanism 4) end-to-end through the real router, including:
+///   - the endpoint returns the structured readiness body (not the OpenAI
+///     retrieve object),
+///   - the old `/readiness` path is retired (404),
+///   - a model literally named `.../ready` shadows the sub-resource (exact
+///     model match wins), and
+///   - an unknown model with a `/ready` suffix is a 404.
+#[tokio::test]
+async fn test_model_ready_endpoint() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // A normal, ready in-process model.
+    let card = ModelDeploymentCard::with_name_only("foo");
+    manager
+        .add_chat_completions_model("foo", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // A model whose *name* ends in `/ready` — must never be shadowed by the
+    // readiness sub-resource (exact-match precedence in `get_model_openai`).
+    let shadow_card = ModelDeploymentCard::with_name_only("shadow/ready");
+    manager
+        .add_chat_completions_model(
+            "shadow/ready",
+            shadow_card.mdcsum(),
+            Arc::new(CounterEngine {}),
+        )
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{}/v1/models", port);
+
+    // 1. `/ready` returns the structured readiness body, not the retrieve object.
+    let resp = client
+        .get(format!("{base}/foo/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "/foo/ready should be 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["model"], "foo",
+        "readiness body carries the model name"
+    );
+    assert!(
+        body.get("namespaces").is_some(),
+        "readiness body has a namespaces map, got: {body}"
+    );
+    assert!(
+        body.get("object").is_none(),
+        "readiness body must not be the OpenAI retrieve object, got: {body}"
+    );
+
+    // 2. The old `/readiness` path is retired — 404.
+    let resp = client
+        .get(format!("{base}/foo/readiness"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "old /readiness path must be gone"
+    );
+
+    // 3. A model literally named `shadow/ready` resolves to the retrieve object,
+    //    NOT the readiness sub-resource of a model named `shadow`.
+    let resp = client
+        .get(format!("{base}/shadow/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "/shadow/ready should be 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["object"], "model",
+        "exact model match wins over the /ready sub-resource, got: {body}"
+    );
+    assert_eq!(body["id"], "shadow/ready");
+
+    // 4. Unknown model with a `/ready` suffix is a 404 (no base model to gate).
+    let resp = client
+        .get(format!("{base}/ghost/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "/ready on an unknown model is 404"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Regression: exact-match precedence must hold for a *non-displayable* model
+/// whose ID ends in `/ready`. Such a model is absent from `model_display_names()`,
+/// so keying the exact-match check off the displayable set (the earlier bug)
+/// would fall through to the `/ready` sub-resource and return a sibling `foo`'s
+/// readiness — shadowing the registered `foo/ready`. Exact match must win for
+/// *any* registered model, displayable or not.
+#[tokio::test]
+async fn test_model_ready_endpoint_non_displayable_shadow() {
+    use dynamo_llm::discovery::WorkerSet;
+    use dynamo_llm::worker_type::WorkerType;
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // Base model `foo`: a normal, ready in-process model.
+    let foo = ModelDeploymentCard::with_name_only("foo");
+    manager
+        .add_chat_completions_model("foo", foo.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // `foo/ready`: registered but NOT displayable (no serving engine) and NOT
+    // ready (decode worker type whose prefill peer is absent).
+    let mut card = ModelDeploymentCard::with_name_only("foo/ready");
+    card.worker_type = Some(WorkerType::Decode);
+    card.needs = vec![vec![WorkerType::Prefill]];
+    let ws = WorkerSet::new(
+        "__nd_foo_ready".to_string(),
+        card.mdcsum().to_string(),
+        card,
+    );
+    manager.add_worker_set("foo/ready", "__nd_foo_ready", ws);
+
+    // `GET /v1/models/foo/ready` must resolve to the registered `foo/ready`
+    // model (exact match wins), NOT the readiness sub-resource of `foo`. Since
+    // `foo/ready` is registered-but-not-ready, its gated retrieve returns 503 —
+    // crucially *not* a 200 readiness body for `foo` (the pre-fix behavior).
+    let resp = reqwest::Client::new()
+        .get(format!("http://localhost:{}/v1/models/foo/ready", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "exact match on registered (non-displayable) foo/ready must hit its gated retrieve (503), not foo's readiness (200)"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.get("namespaces").is_none(),
+        "must not be foo's readiness body, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// With nvext disabled, a request asking for response `extra_fields` must not
+/// produce any `nvext` field in the response.
+#[tokio::test]
+async fn test_nvext_disabled_strips_request_and_response() {
+    dynamo_runtime::logging::init();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_nvext(false)
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("test-model");
+    manager
+        .add_chat_completions_model("test-model", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .header("x-dynamo-worker-instance-id", "42")
+        .json(&serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "max_tokens": 1,
+            "nvext": {
+                "extra_fields": ["worker_id", "timing", "engine_data"],
+                "backend_instance_id": 99
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert!(response.status().is_success());
+
+    let body = response.text().await.expect("read body");
+    assert!(
+        !body.contains("\"nvext\""),
+        "nvext gate off: response must not contain an `nvext` field, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Same regression for `/v1/responses`: the streaming Responses path shares
+/// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
+/// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
+///
+/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
+/// (default: unset → peek disabled). Enable it here so the assertion
+/// exercises the fix path. `#[serial]` prevents the env var from bleeding
+/// into other tests that may run in parallel.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
+    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
+    // this env var concurrently.
+    unsafe {
+        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
+    }
+    // Guard to unset on any exit path from this test.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
+            }
+        }
+    }
+    let _guard = EnvGuard;
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("invalid-arg-model");
+    manager
+        .add_chat_completions_model(
+            "invalid-arg-model",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentEngine {}),
+        )
+        .unwrap();
+
+    let body = serde_json::json!({
+        "model": "invalid-arg-model",
+        "stream": true,
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "describe this image"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+            ]
+        }]
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/responses"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /v1/responses");
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "streaming Backend(InvalidArgument) on /v1/responses must land as HTTP 400 before HTTP 200 is committed; got {status}, body: {text}"
+    );
+    assert!(
+        text.contains("Received multimodal data but multimodal processing is not enabled"),
+        "expected typed backend error message forwarded to client; got: {text}"
     );
 
     cancel_token.cancel();

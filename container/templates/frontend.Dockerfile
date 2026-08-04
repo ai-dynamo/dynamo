@@ -8,8 +8,16 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
+# NOTE: EPP's Go compliance SBOM (/sbom-go.cdx.json) + harvested license texts are
+# NO LONGER pulled from the EPP image here. compliance.Dockerfile's licenses stage
+# reads them from the build context (.epp-sbom/), populated by the CI EPP-build
+# step's `make sbom-export` while the build cache is warm. This replaced a fragile
+# COPY --from that re-pulled the pushed EPP image (whose runtime layer could miss
+# the files after a BuildKit cache refresh). Only the /epp binary is taken from
+# the EPP image (below).
+
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
-# reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,
+# reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,
 # which publishes no manylinux aarch64 wheel — without this, arm64 builds
 # fall back to sdist and fail in the final stage where gcc is intentionally
 # absent. amd64 has a prebuilt manylinux_x86_64 wheel on PyPI, so the build
@@ -38,7 +46,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
         && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
     fi
 
-FROM ${FRONTEND_IMAGE} AS frontend
+FROM ${FRONTEND_IMAGE} AS pre_frontend
 
 ARG PYTHON_VERSION
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
@@ -53,6 +61,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # required for installing dependencies from git repositories
         git \
         git-lfs \
+        # compliance audit bootstraps syft over HTTPS
+        curl \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
     && apt-get clean \
@@ -85,14 +95,15 @@ COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: dev /workspace/dev
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
-# Copy attribution files with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+# Copy LICENSE; ATTRIBUTIONS files removed in favor of /legal/ generated at build time.
+COPY --chown=dynamo: LICENSE /workspace/
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
 
 # Copy uv from base stage and wheels from wheel_builder (no runtime stage dependency)
-COPY --chown=dynamo: --from=dynamo_base /bin/uv /bin/uvx /bin/
+COPY --chown=dynamo: --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
@@ -100,17 +111,18 @@ COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/pyt
 COPY --chown=dynamo: --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
 
 # Create virtual environment
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Install runtime dependencies (common + frontend).
-# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving.
+# Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
+# plus AIC core for the experimental router-side prefill-load model.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
@@ -121,7 +133,7 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -155,5 +167,14 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
+ENTRYPOINT ["/epp"]
+CMD ["/bin/bash"]
+
+
+{% include "templates/compliance.Dockerfile" %}
+
+
+FROM pre_frontend AS frontend
+COPY --from=licenses /legal /legal
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]

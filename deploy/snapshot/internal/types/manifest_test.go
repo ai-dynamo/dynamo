@@ -24,7 +24,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			External: []string{"net[12345]:extNetNs"},
 			SkipMnt:  []string{"/proc/kcore"},
 		},
-		NewSourcePodManifest("ctr-abc", 42, "node-1", "my-pod", "default", []string{"pipe:[111]", "pipe:[222]", "pipe:[333]"}),
+		NewSourcePodManifest("ctr-abc", 42, "node-1", "my-pod", "default", "10.0.0.11", []string{"pipe:[111]", "pipe:[222]", "pipe:[333]"}),
 		OverlayManifest{
 			Exclusions:     OverlaySettings{Exclusions: []string{"/proc", "/sys"}},
 			UpperDir:       "/var/lib/containerd/upper",
@@ -67,6 +67,9 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if loaded.K8s.PodName != "my-pod" {
 		t.Errorf("K8s.PodName = %q", loaded.K8s.PodName)
+	}
+	if loaded.K8s.PodIP != "10.0.0.11" {
+		t.Errorf("K8s.PodIP = %q", loaded.K8s.PodIP)
 	}
 	if len(loaded.K8s.StdioFDs) != 3 {
 		t.Errorf("StdioFDs count = %d, want 3", len(loaded.K8s.StdioFDs))

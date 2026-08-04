@@ -25,9 +25,10 @@ on:
         type: boolean
         default: false
       build_timeout_minutes:
+        description: 'Timeout for the image build job. Matches the 60 min the other framework builds get in pr.yaml.'
         required: false
         type: number
-        default: 30
+        default: 60
       no_cache:
         description: 'Disable BuildKit cache-from/to. Nightly sets true for regression detection.'
         required: false
@@ -107,6 +108,11 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        # The image bakes CARGO_HOME=/usr/local/cargo owned by uid 1000, so cargo
+        # cannot write registry/{index,cache} as the uid-1001 runner and dies with
+        # "Permission denied (os error 13)" while downloading crates. Redirect
+        # CARGO_HOME to the runner-writable workspace so cargo owns its cache.
+        CARGO_HOME: /__w/dynamo/dynamo/.cargo
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     timeout-minutes: 30
     steps:
@@ -146,7 +152,20 @@ jobs:
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          # dynamo_llm lib unit tests mutate process env via `temp_env`
+          # (std::env::set_var/remove_var); in a multi-threaded libtest binary that
+          # write reallocates `environ` while another test thread (a parallel test's
+          # std::env::var, or a native UCX/CUDA thread) is inside getenv() -> teardown
+          # SIGSEGV after all tests pass (~14% under CI node contention). getenv/setenv
+          # aren't thread-safe and serial_test can't serialize the readers, so run the
+          # libtest binaries single-threaded via RUST_TEST_THREADS=1. Use the env var,
+          # NOT `-- --test-threads=1`: under --all-targets the CLI flag is also handed
+          # to the criterion `--bench` targets, which reject it ("unexpected argument")
+          # and fail the run; RUST_TEST_THREADS is read by libtest and ignored by
+          # criterion. (Verified on the GPU tester: whole command runs green with
+          # benches; lib suite 7s -> 35s single-threaded, other targets sub-second; and
+          # under 12x contention 3/3 parallel shards segfault vs 0/3 single-threaded.)
+          RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
@@ -220,7 +239,7 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
-      cpu_only_test_timeout_minutes: 30
+      cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}

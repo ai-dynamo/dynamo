@@ -7,7 +7,7 @@ Two layers:
 
 * **Pure math** (``compute_tolerance``, ``bounds_for_total``,
   ``proportional_clamp_pair``, ``proportional_clamp_single``): no I/O, no
-  state, no logging. Shared by the local PlannerStateMachine (where the
+  state, no logging. Shared by the builtin local planner state (where the
   budget is enforced intra-DGD by clamping the joint
   ``(num_prefill, num_decode)`` desired counts) and the centralized
   GlobalPlanner (where it is enforced across DGDs by accepting/rejecting

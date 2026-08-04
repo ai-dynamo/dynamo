@@ -285,22 +285,32 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 else:
                     raise ValueError(f"Unsupported frame type: {type(frame)}")
 
-            # Use imageio to write video
             import imageio
 
-            output_buffer = io.BytesIO()
-            with imageio.get_writer(
-                output_buffer,
-                format="mp4",  # type: ignore
-                fps=fps,
-                codec=codec,
-                output_params=["-pix_fmt", "yuv420p"],
-            ) as writer:
-                for frame in np_frames:
-                    writer.append_data(frame)  # type: ignore
+            def encode_with_codec(codec_name: str) -> bytes:
+                output_buffer = io.BytesIO()
+                with imageio.get_writer(
+                    output_buffer,
+                    format="mp4",  # type: ignore
+                    fps=fps,
+                    codec=codec_name,
+                    output_params=["-pix_fmt", "yuv420p"],
+                ) as writer:
+                    for frame in np_frames:
+                        writer.append_data(frame)  # type: ignore
 
-            output_buffer.seek(0)
-            return output_buffer.read()
+                output_buffer.seek(0)
+                return output_buffer.read()
+
+            try:
+                return encode_with_codec(codec)
+            except OSError:
+                if codec != "h264_nvenc":
+                    raise
+                logger.warning(
+                    "h264_nvenc failed; retrying video encoding with libx264"
+                )
+                return encode_with_codec("libx264")
 
         except ImportError as e:
             raise RuntimeError(

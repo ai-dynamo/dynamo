@@ -18,7 +18,24 @@ pub(super) type SharedNode = Arc<Node>;
 /// stored here, keeping the map compact and correct across concurrent splits.
 pub(super) type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
 
+#[derive(Clone, Copy)]
+pub(super) enum WorkerRemovalTarget {
+    WorkerId(WorkerId),
+    DpRank(WorkerWithDpRank),
+}
+
+impl WorkerRemovalTarget {
+    pub(super) fn matches(self, worker: WorkerWithDpRank) -> bool {
+        match self {
+            Self::WorkerId(worker_id) => worker.worker_id == worker_id,
+            Self::DpRank(target) => worker == target,
+        }
+    }
+}
+
 pub(super) struct MatchWalkResult {
+    // NOTE(perf): Replacing this set with a Vec did not improve throughput. Keep
+    // uniqueness by construction unless a new profile justifies changing it.
     pub(super) active: FxHashSet<WorkerWithDpRank>,
     pub(super) matched_depth: u32,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
@@ -106,6 +123,11 @@ pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
 }
 
+pub(super) struct RemoveBatchOutcome {
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+    pub(super) unmatched_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum LookupRepairDirection {
     TowardTail,
@@ -155,6 +177,7 @@ pub(super) struct ChildEdgeScan {
 pub(super) enum ParentChildPlan {
     Stale,
     StaleParent { hash: ExternalSequenceBlockHash },
+    InteriorParent { shape_version: u64 },
     Descend(SharedNode),
     MissingChild { shape_version: u64 },
 }

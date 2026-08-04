@@ -520,6 +520,11 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
 		},
 		{
+			name:     "H100 HBM3 implies SXM",
+			input:    "NVIDIA-H100-80GB-HBM3",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100SXM,
+		},
+		{
 			name:     "H200 SXM",
 			input:    "H200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,

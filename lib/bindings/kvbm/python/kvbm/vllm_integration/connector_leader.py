@@ -248,6 +248,10 @@ class KvConnectorLeader:
         status = self._connector.request_finished(request.request_id, block_ids)
         return status, None
 
+    def reset_cache(self) -> bool:
+        """Reset KVBM-managed prefix cache state."""
+        return self._connector.reset_cache()
+
     # Utility functions
 
     def _create_slot(self, request: Request) -> None:

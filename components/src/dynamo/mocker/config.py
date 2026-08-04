@@ -127,7 +127,7 @@ def _estimate_aic_num_gpu_blocks(
             if mem_fraction_static is not None
             else DEFAULT_MEM_FRACTION_STATIC
         ),
-        # None -> aic.py applies the TRT-LLM default (0.9).
+        # None -> aic.py applies the TRT-LLM default.
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         backend_version=aic_backend_version,
         moe_tp_size=aic_moe_tp_size,
@@ -243,6 +243,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     engine_type = getattr(args, "engine_type", None) or "vllm"
+    max_model_len = getattr(args, "max_model_len", None)
     num_gpu_blocks = _resolve_num_gpu_blocks(
         explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
         engine_type=engine_type,
@@ -267,11 +268,13 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         engine_type=engine_type,
         num_gpu_blocks=num_gpu_blocks,
         block_size=getattr(args, "block_size", 0) or 0,
+        max_model_len=max_model_len,
         max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
         max_num_batched_tokens=getattr(
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
         enable_prefix_caching=getattr(args, "enable_prefix_caching", True),
+        g1_backend=getattr(args, "g1_backend", None),
         enable_chunked_prefill=getattr(args, "enable_chunked_prefill", True),
         speedup_ratio=getattr(args, "speedup_ratio", 1.0),
         decode_speedup_ratio=getattr(args, "decode_speedup_ratio", 1.0),
@@ -293,9 +296,10 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        enable_local_indexer=not getattr(args, "durable_kv_events", False),
+        enable_local_indexer=True,
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
+        kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
         num_g2_blocks=getattr(args, "num_g2_blocks", None),
         num_g3_blocks=getattr(args, "num_g3_blocks", None),
         enable_g4_storage=getattr(args, "enable_g4_storage", False),
@@ -307,6 +311,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
         bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
+        response_replay_trace_path=args.response_replay_trace_path,
         sglang=_build_sglang_args(args),
         trtllm=_build_trtllm_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
@@ -347,8 +352,7 @@ def build_runtime_config(
     engine_args: MockEngineArgs,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
-    # Mocker does not enforce a model context limit.
-    rc.context_length = 0
+    rc.context_length = engine_args.max_model_len or 0
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:
@@ -359,7 +363,11 @@ def build_runtime_config(
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
+    rc.kv_event_publishing_enabled = (
+        engine_args.enable_prefix_caching and not engine_args.is_decode()
+    )
     rc.data_parallel_size = engine_args.dp_size
+    rc.set_engine_specific("output_replay_consumer", "true")
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:

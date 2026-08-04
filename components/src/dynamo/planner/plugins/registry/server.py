@@ -80,9 +80,8 @@ def _check_observation_window(
       N where (N > 0 and N is k * scale_interval) -> accept
       anything else                             -> reject
 
-    ``scale_interval_s == 0.0`` disables the check (PSM path constructs
-    the server without a scale_interval; the proto contract there is
-    implicit and unverifiable).
+    ``scale_interval_s == 0.0`` disables the check for tests that construct
+    the server without a pipeline cadence.
     """
     if scale_interval_s <= 0.0:
         return None
@@ -135,9 +134,8 @@ class PluginRegistryServer:
         # ``requires_produced_fields`` dependency between them would
         # silently deadlock.
         #
-        # ``scale_interval_seconds == 0.0`` (the default) disables phase
-        # alignment — preserves the legacy behaviour for tests and the
-        # PSM path that constructs the server without a scale_interval.
+        # ``scale_interval_seconds == 0.0`` disables phase alignment for
+        # tests that construct the server without a pipeline cadence.
         self._scale_interval_seconds = scale_interval_seconds
         self._plugins: dict[str, RegisteredPlugin] = {}
         self._unregister_callbacks: list[UnregisterCallback] = []
@@ -150,7 +148,7 @@ class PluginRegistryServer:
         """Compute the registered_at anchor for a plugin registering at
         ``raw_now`` (monotonic clock).  When ``scale_interval_seconds``
         > 0, snaps to the nearest tick boundary below ``raw_now``.
-        Otherwise returns ``raw_now`` unchanged (legacy / PSM path).
+        Otherwise returns ``raw_now`` unchanged.
         """
         if self._scale_interval_seconds <= 0.0:
             return raw_now
@@ -204,9 +202,8 @@ class PluginRegistryServer:
         # be 0 OR a positive multiple of ``scale_interval_seconds`` so
         # the resulting Prometheus window aligns to tick boundaries —
         # otherwise the aggregated value crosses tick boundaries and the
-        # plugin sees a moving target.  Only enforce when the server has
-        # a known scale_interval (PSM path constructs without one, so
-        # the constraint there is implicit / unverifiable).
+        # plugin sees a moving target. Only enforce when the server has
+        # a known scale_interval.
         reject_window = _check_observation_window(
             req.observation_window_seconds, self._scale_interval_seconds
         )
@@ -478,6 +475,13 @@ class PluginRegistryServer:
         if plugin_id in self._plugins:
             raise ValueError(
                 f"register_internal: plugin_id={plugin_id!r} already registered"
+            )
+        reject_window = _check_observation_window(
+            observation_window_seconds, self._scale_interval_seconds
+        )
+        if reject_window is not None:
+            raise ValueError(
+                "register_internal: " f"plugin_id={plugin_id!r} {reject_window}"
             )
         endpoint = f"inproc://{plugin_id}"
         transport = self._transport_factory(

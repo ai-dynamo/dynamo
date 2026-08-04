@@ -423,7 +423,7 @@ async def test_observation_window_negative_rejected():
 
 @pytest.mark.asyncio
 async def test_observation_window_unverifiable_without_scale_interval():
-    """When ``scale_interval_seconds == 0.0`` (PSM path constructs the
+    """When ``scale_interval_seconds == 0.0`` (older test fixtures construct the
     server without one), the alignment constraint can't be verified —
     accept any value rather than reject erroneously."""
     server = _make_server_with_scale_interval(0.0)
@@ -497,6 +497,19 @@ def test_register_internal_duplicate_raises():
     server.register_internal("p1", "propose", 1, object())
     with pytest.raises(ValueError, match="already registered"):
         server.register_internal("p1", "propose", 1, object())
+
+
+def test_register_internal_rejects_misaligned_observation_window():
+    server = _make_server_with_scale_interval(5.0)
+
+    with pytest.raises(ValueError, match="observation_window_misaligned"):
+        server.register_internal(
+            plugin_id="p1",
+            plugin_type="propose",
+            priority=1,
+            instance=object(),
+            observation_window_seconds=7.0,
+        )
 
 
 def test_register_internal_can_mark_user_inprocess_plugin():

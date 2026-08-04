@@ -84,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         pybind11-dev \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         # Debugging / tracing
         gdb \
         valgrind \
@@ -290,18 +291,16 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 # We stash the pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
 # and restore it after copying toolchains from dynamo_tools.
 RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
-COPY --from=dynamo_tools /usr/bin/ /usr/bin/
-COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
-COPY --from=dynamo_tools /usr/lib/ /usr/lib/
-COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
-COPY --from=dynamo_tools /usr/include/ /usr/include/
-COPY --from=dynamo_tools /lib/ /lib/
-COPY --from=dynamo_tools /usr/share/ /usr/share/
+# Pull the developer toolchain from dynamo_tools in as few COPY layers as
+# possible (overlay2 caps a downstream image at ~128 layers). The six /usr/*
+# subtrees collapse into one COPY; --exclude=local skips the multi-GB /usr/local
+# (CUDA, etc.) the dev image already inherits from its own base.
+COPY --from=dynamo_tools --exclude=local /usr/ /usr/
+COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
 COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
 COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
 COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
-COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
 
 # Restore the pre-tools python3 (keeps SGLang system python intact and avoids venv symlink loops).
 RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi
@@ -351,13 +350,13 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 # SGLang XPU: conda env from framework stage; install uv and maturin.
 # uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
 # --python to target the conda interpreter explicitly.
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     chmod +x ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
 # SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
-COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
@@ -374,7 +373,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
+    ln -sf /opt/uv/bin/uv /opt/dynamo/venv/bin/uv
 {% else %}
 # CPU/XPU: Runtime uses /opt/venv from upstream vLLM-CPU image. Reuse it directly
 # instead of creating /opt/dynamo/venv, since --system-site-packages points to UV Python
@@ -384,7 +383,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # Point /usr/local/bin/python to /opt/venv so scripts using 'python' work correctly
 # Use a wrapper script instead of symlink to ensure Python recognizes the venv context
 RUN chown -R dynamo:0 /opt/venv && \
-    ln -sf /usr/local/bin/uv /opt/venv/bin/uv && \
+    ln -sf /opt/uv/bin/uv /opt/venv/bin/uv && \
     rm -f /usr/local/bin/python && \
     echo '#!/bin/bash' > /usr/local/bin/python && \
     echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
@@ -398,9 +397,6 @@ RUN if [ ! -d /opt/dynamo/venv ]; then \
     fi
 {% endif %}
 
-# Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
-RUN git lfs install
-
 # Install only the ADDITIONAL dev/test dependencies.
 # Runtime deps (common, framework, planner, benchmark) are already installed
 # in the parent runtime image — re-resolving them here would risk version drift.
@@ -409,8 +405,10 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    # Git LFS init (needed for requirements with lfs=true); folded in to save a layer.
+    git lfs install && \
 {% if device == "xpu" and framework == "sglang" %}
     uv pip install \
         --python ${VIRTUAL_ENV}/bin/python \
@@ -471,10 +469,8 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 RUN --mount=type=bind,source=./container/launch_message/dev.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
-    (grep -q 'launch_screen' /etc/bash.bashrc || echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc)
-
-# Warn on interactive entry if /workspace is not bind-mounted from the host
-RUN printf '%s\n' \
+    (grep -q 'launch_screen' /etc/bash.bashrc || echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc) && \
+    printf '%s\n' \
     'if [ ! -f /workspace/Cargo.toml ]; then' \
     '    echo ""' \
     '    echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"' \

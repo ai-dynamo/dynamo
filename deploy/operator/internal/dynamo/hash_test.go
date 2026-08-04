@@ -274,6 +274,11 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
 
+	scaleToZero := betaDGD(t, base())
+	scaleToZero.Spec.Components[0].Replicas = ptr.To(int32(0))
+	scaleToZero.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scaleToZero))
+
 	scalingAdapter := betaDGD(t, base())
 	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))
@@ -289,6 +294,18 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	disabledScalingAdapter := base()
 	disabledScalingAdapter.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.T) {
+	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+
+	withOverride := base.DeepCopy()
+	withOverride.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

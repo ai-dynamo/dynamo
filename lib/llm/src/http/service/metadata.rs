@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use axum::http::HeaderMap;
+use dynamo_runtime::pipeline::Context;
 use tonic::metadata::{KeyAndValueRef, MetadataMap};
 
 /// Default header prefix for context metadata injected from HTTP request headers.
@@ -22,6 +23,7 @@ pub const DYNAMO_METADATA_HEADER_PREFIX_DEFAULT: &str = "x-dynamo-meta-";
 /// Environment variable that overrides [`DYNAMO_METADATA_HEADER_PREFIX_DEFAULT`].
 pub const DYNAMO_METADATA_HEADER_ENV: &str = "DYN_METADATA_HEADER";
 
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const DYNAMO_METADATA_MAX_ENTRIES_DEFAULT: usize = 64;
 const DYNAMO_METADATA_MAX_TOTAL_BYTES_DEFAULT: usize = 64 * 1024;
 
@@ -119,6 +121,25 @@ pub fn extract_metadata_from_http(
     )
 }
 
+pub(super) fn attach_x_request_id<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+) {
+    if !crate::request_trace::is_enabled() {
+        return;
+    }
+
+    if let Some(x_request_id) = headers
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        request.insert(
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.to_string(),
+        );
+    }
+}
+
 /// Extract all `<prefix><key>: <value>` gRPC metadata entries as a metadata map.
 ///
 /// Binary metadata entries and non-UTF-8 values are ignored.
@@ -181,11 +202,22 @@ mod tests {
             header_name(format!("{}token", DYNAMO_METADATA_HEADER_PREFIX_DEFAULT)),
             "Bearer secret".parse().unwrap(),
         );
+        headers.insert(
+            header_name(format!(
+                "{}policy-class",
+                DYNAMO_METADATA_HEADER_PREFIX_DEFAULT
+            )),
+            " latency ".parse().unwrap(),
+        );
         headers.insert("x-request-id", "irrelevant".parse().unwrap());
 
         let meta = extract_metadata_from_http(&headers).unwrap();
         assert_eq!(meta.get("tenant").map(String::as_str), Some("acme"));
         assert_eq!(meta.get("user-id").map(String::as_str), Some("u42"));
+        assert_eq!(
+            meta.get("policy-class").map(String::as_str),
+            Some("latency")
+        );
         assert!(!meta.contains_key("x-request-id"));
         assert!(!meta.contains_key("authorization"));
         assert!(!meta.contains_key("token"));

@@ -1,0 +1,22 @@
+---
+source: lib/llm/tests/anthropic_http_replay.rs
+expression: canonicalize(body)
+---
+{
+  "id": "[ID-1]",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Pong."
+    }
+  ],
+  "model": "harness-model",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 5,
+    "output_tokens": 2
+  }
+}

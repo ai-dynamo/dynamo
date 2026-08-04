@@ -7,7 +7,7 @@ import dataclasses
 import logging
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -16,7 +16,7 @@ import pytest
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import (
     EngineConfig,
     EngineProcess,
@@ -25,13 +25,15 @@ from tests.utils.engine_process import (
 from tests.utils.payload_builder import (
     make_chat_health_check,
     make_completions_health_check,
+    make_images_health_check,
 )
-from tests.utils.payloads import ChatPayload, CompletionPayload
+from tests.utils.payloads import ChatPayload, CompletionPayload, ImagesPayload
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
 def _tail_logs(content: str, *, lines: int = 80) -> str:
@@ -46,6 +48,7 @@ def _tail_logs(content: str, *, lines: int = 80) -> str:
 _ENDPOINT_HEALTH_CHECK_FACTORIES = (
     (CompletionPayload, make_completions_health_check),
     (ChatPayload, make_chat_health_check),
+    (ImagesPayload, make_images_health_check),
 )
 
 
@@ -113,30 +116,25 @@ def _format_request_failure(
     )
 
 
-def run_serve_deployment(
+@dataclasses.dataclass
+class _PreparedDeployment:
+    config: EngineConfig
+    merged_env: dict
+    frontend_port: int
+    system_ports: list
+    disagg_bootstrap_port: Optional[int]
+    extra_allocated_ports: list[int]
+
+
+def _prepare_deployment(
     config: EngineConfig,
     request: Any,
     *,
-    ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
-    extra_env: Optional[Dict[str, str]] = None,
-) -> None:
-    """Run a standard serve deployment test for any EngineConfig.
-
-    - Launches the engine via EngineProcess.from_script
-    - Builds a payload (with optional override/mutator)
-    - Iterates configured endpoints and validates responses and logs
-    """
-
-    logger = logging.getLogger(request.node.name)
-    logger.info("Starting %s test_deployment", config.name)
-
-    assert (
-        config.request_payloads is not None and len(config.request_payloads) > 0
-    ), "request_payloads must be provided on EngineConfig"
-
-    logger.info("Using model: %s", config.model)
-    logger.info("Script: %s", config.script_name)
-
+    ports: ServicePorts | None,
+    extra_env: Optional[Dict[str, str]],
+) -> _PreparedDeployment:
+    """Build the launch env (profile/KV overrides, dynamic ports, bootstrap
+    port) and the port-adjusted config shared by all deployment runners."""
     merged_env: dict[str, str] = {}
     if extra_env:
         merged_env.update(extra_env)
@@ -176,6 +174,19 @@ def run_serve_deployment(
                 str(gib_to_bytes),
             )
 
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
+
+    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
+    extra_allocated_ports: list[int] = []
+
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -210,8 +221,16 @@ def run_serve_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            # For multi-worker scripts (xpu_2 router tests), allocate separate
+            # KV event ports for each worker to avoid ZMQ bind collisions.
+            if len(dynamic_system_ports) >= 2:
+                kv_port1 = ports.kv_event_port
+                kv_port2 = allocate_port(ports.kv_event_port + 1)
+                extra_allocated_ports.append(kv_port2)
+                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
+                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -238,8 +257,52 @@ def run_serve_deployment(
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(12000)
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
+
+    return _PreparedDeployment(
+        config=config,
+        merged_env=merged_env,
+        frontend_port=dynamic_frontend_port,
+        system_ports=dynamic_system_ports,
+        disagg_bootstrap_port=disagg_bootstrap_port,
+        extra_allocated_ports=extra_allocated_ports,
+    )
+
+
+def run_serve_deployment(
+    config: EngineConfig,
+    request: Any,
+    *,
+    ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
+    extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
+) -> None:
+    """Run a standard serve deployment test for any EngineConfig.
+
+    - Launches the engine via EngineProcess.from_script
+    - Builds a payload (with optional override/mutator)
+    - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
+    """
+
+    logger = logging.getLogger(request.node.name)
+    logger.info("Starting %s test_deployment", config.name)
+
+    assert (
+        config.request_payloads is not None and len(config.request_payloads) > 0
+    ), "request_payloads must be provided on EngineConfig"
+
+    logger.info("Using model: %s", config.model)
+    logger.info("Script: %s", config.script_name)
+
+    prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
+    config = prep.config
+    merged_env = prep.merged_env
+    dynamic_frontend_port = prep.frontend_port
+    dynamic_system_ports = prep.system_ports
+    disagg_bootstrap_port = prep.disagg_bootstrap_port
+    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -255,10 +318,13 @@ def run_serve_deployment(
                 if hasattr(payload, "with_model"):
                     payload = payload.with_model(config.model)
 
-                # Default behavior: requests go to the frontend port, except metrics which target
-                # worker system ports (mapped from DefaultPort -> per-test ports).
+                # Default behavior: requests go to the frontend port. Metrics
+                # may target either the frontend or worker system ports; map
+                # each DefaultPort placeholder to its per-test allocation.
                 if getattr(payload, "endpoint", "") == "/metrics":
-                    if payload.port == DefaultPort.SYSTEM1.value:
+                    if payload.port == DefaultPort.FRONTEND.value:
+                        payload.port = dynamic_frontend_port
+                    elif payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
                                 "Payload targets SYSTEM_PORT1 but no system ports were provided "
@@ -299,7 +365,10 @@ def run_serve_deployment(
                             mapped_system_ports.append(p)
                     payload.system_ports = mapped_system_ports
 
-                for _ in range(payload.repeat_count):
+                for iteration in range(payload.repeat_count):
+                    # Resolve an iteration-specific body once so validation
+                    # retries resend the same request.
+                    request_body = payload.body_for_iteration(iteration)
                     # Re-issue the request (server stays up) on validation
                     # failure when payload.max_attempts > 1. See tests/README.md
                     # "Flaky Tests" for when this is appropriate. Backoff
@@ -311,7 +380,7 @@ def run_serve_deployment(
                             try:
                                 response = send_request(
                                     url=payload.url(),
-                                    payload=payload.body,
+                                    payload=request_body,
                                     timeout=payload.timeout,
                                     method=payload.method,
                                     stream=payload.http_stream,
@@ -353,9 +422,14 @@ def run_serve_deployment(
                 # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
                 if hasattr(payload, "final_validation"):
                     payload.final_validation()
+
+            if post_validation is not None:
+                post_validation()
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)
+        for p in extra_allocated_ports:
+            deallocate_port(p)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

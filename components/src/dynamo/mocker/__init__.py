@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 try:
     from ._version import __version__
 except Exception:
@@ -17,7 +19,6 @@ __all__ = ["__version__"]
 
 try:
     from dynamo._core import MockEngineArgs as MockEngineArgs
-    from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
     from dynamo._core import ReasoningConfig as ReasoningConfig
     from dynamo._core import SglangArgs as SglangArgs
     from dynamo._core import TrtllmArgs as TrtllmArgs
@@ -30,7 +31,6 @@ else:
     __all__.extend(
         [
             "MockEngineArgs",
-            "PlannerReplayBridge",
             "ReasoningConfig",
             "SglangArgs",
             "TrtllmArgs",
@@ -39,20 +39,28 @@ else:
     )
 
     def run_mocker_trace_replay(
-        trace_file,
+        trace_files,
         extra_engine_args=None,
         router_config=None,
         num_workers=1,
         replay_concurrency=None,
         router_mode="round_robin",
         arrival_speedup_ratio=1.0,
-        trace_block_size=512,
+        trace_block_size=None,
         trace_format="mooncake",
         trace_shared_prefix_ratio=0.0,
         trace_num_prefix_groups=0,
+        model_name=None,
+        sla_ttft_ms=None,
+        sla_itl_ms=None,
+        sla_e2e_ms=None,
     ):
+        if isinstance(trace_files, (str, os.PathLike)):
+            trace_files = [trace_files]
+        else:
+            trace_files = list(trace_files)
         return _run_mocker_trace_replay(
-            trace_file,
+            trace_files,
             extra_engine_args=extra_engine_args,
             router_config=router_config,
             num_workers=num_workers,
@@ -64,30 +72,9 @@ else:
             trace_format=trace_format,
             trace_shared_prefix_ratio=trace_shared_prefix_ratio,
             trace_num_prefix_groups=trace_num_prefix_groups,
+            model_name=model_name,
+            # Goodput SLA (offline only): report carries goodput_* when set.
+            sla_ttft_ms=sla_ttft_ms,
+            sla_itl_ms=sla_itl_ms,
+            sla_e2e_ms=sla_e2e_ms,
         )
-
-
-try:
-    from dynamo._core import AicEngineConfig as AicEngineConfig
-    from dynamo._core import EngineCapacity as EngineCapacity
-    from dynamo._core import EngineCapacityRequest as EngineCapacityRequest
-    from dynamo._core import EnginePerfLimits as EnginePerfLimits
-    from dynamo._core import OptimizationTarget as OptimizationTarget
-    from dynamo._core import RustEnginePerfModel as RustEnginePerfModel
-    from dynamo._core import RustEnginePerfOptions as RustEnginePerfOptions
-except ImportError:
-    # These classes are available only when the Python extension is built with
-    # the optional aic-forward-pass Cargo feature.
-    pass
-else:
-    __all__.extend(
-        [
-            "AicEngineConfig",
-            "EngineCapacity",
-            "EngineCapacityRequest",
-            "EnginePerfLimits",
-            "OptimizationTarget",
-            "RustEnginePerfModel",
-            "RustEnginePerfOptions",
-        ]
-    )

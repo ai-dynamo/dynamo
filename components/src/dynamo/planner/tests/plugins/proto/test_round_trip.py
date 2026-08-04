@@ -241,6 +241,7 @@ def test_prediction_data_optional_unset_vs_zero():
     assert not pb1.HasField("predicted_isl")
     assert not pb1.HasField("predicted_osl")
     assert not pb1.HasField("predicted_kv_hit_rate")
+    assert not pb1.HasField("predicted_accept_length")
 
     # Explicit 0.0 (rare but valid)
     p2 = pyd.PredictionData(predicted_num_req=0.0)
@@ -258,13 +259,14 @@ def test_prediction_data_optional_unset_vs_zero():
     assert p2_back.predicted_num_req == 0.0
     assert p2_back.predicted_isl is None
     assert p1_back.predicted_kv_hit_rate is None
+    assert p1_back.predicted_accept_length is None
 
 
 def test_kv_hit_rate_round_trip_traffic_and_prediction():
-    """PSM-parity gap fix: ``TrafficMetrics.kv_hit_rate`` and
-    ``PredictionData.predicted_kv_hit_rate`` must round-trip as
-    optional floats so external throughput-propose plugins can
-    replicate PSM behaviour over the wire.
+    """``TrafficMetrics.kv_hit_rate`` and
+    ``PredictionData.predicted_kv_hit_rate`` must round-trip with
+    proto3 field presence so external throughput-propose plugins can
+    preserve runtime metadata over the wire.
 
     Locks:
       - TrafficMetrics: unset → no proto field presence; 0.0 → set
@@ -311,18 +313,24 @@ def test_kv_hit_rate_round_trip_traffic_and_prediction():
     assert tm_warm_back.kv_hit_rate == pytest.approx(0.42)
     assert tm_warm_back.accept_length == 1.0
 
-    # PredictionData: predicted_kv_hit_rate unset/set parity with the
-    # other predicted_* fields.
+    # PredictionData: runtime metadata unset/set parity with the other
+    # predicted_* fields.
     pd_partial = pyd.PredictionData(
-        predicted_num_req=1000.0, predicted_kv_hit_rate=0.65, source="ext"
+        predicted_num_req=1000.0,
+        predicted_kv_hit_rate=0.65,
+        predicted_accept_length=2.0,
+        source="ext",
     )
     pb_pd = pydantic_to_proto(pd_partial)
     assert pb_pd.HasField("predicted_num_req")
     assert pb_pd.HasField("predicted_kv_hit_rate")
+    assert pb_pd.HasField("predicted_accept_length")
     assert not pb_pd.HasField("predicted_isl")  # untouched stays unset
     assert pb_pd.predicted_kv_hit_rate == pytest.approx(0.65)
+    assert pb_pd.predicted_accept_length == pytest.approx(2.0)
     pd_back = proto_to_pydantic(pb_pd)
     assert pd_back.predicted_kv_hit_rate == pytest.approx(0.65)
+    assert pd_back.predicted_accept_length == pytest.approx(2.0)
     assert pd_back.predicted_isl is None
     assert pd_back.predicted_osl is None
 
@@ -335,6 +343,7 @@ def test_float64_metrics_survive_round_trip_without_truncation():
     equality (not approx) so a regression back to ``float`` is caught."""
     v_num = 1234.5678901234567  # > 2^23 mantissa precision; float32-lossy
     v_kv = 0.123456789012345
+    v_accept = 2.123456789012345
     tm = pyd.TrafficMetrics(
         duration_s=60.0, num_req=v_num, isl=3000.0, osl=150.0, kv_hit_rate=v_kv
     )
@@ -342,10 +351,15 @@ def test_float64_metrics_survive_round_trip_without_truncation():
     assert tm_back.num_req == v_num
     assert tm_back.kv_hit_rate == v_kv
 
-    pd = pyd.PredictionData(predicted_num_req=v_num, predicted_kv_hit_rate=v_kv)
+    pd = pyd.PredictionData(
+        predicted_num_req=v_num,
+        predicted_kv_hit_rate=v_kv,
+        predicted_accept_length=v_accept,
+    )
     pd_back = proto_to_pydantic(pydantic_to_proto(pd))
     assert pd_back.predicted_num_req == v_num
     assert pd_back.predicted_kv_hit_rate == v_kv
+    assert pd_back.predicted_accept_length == v_accept
 
 
 def test_worker_state_scaling_in_progress_roundtrip():
@@ -569,7 +583,7 @@ def test_constrain_stage_response_at_least_at_most():
                     type=pyd.OverrideType.AT_MOST,
                 ),
             ],
-            reason="builtin-budget-constrain: min_endpoint=2 max_gpu_budget=20",
+            reason="budget_policy: min_endpoint=2 max_gpu_budget=20",
         ),
     )
     _round_trip_pyd(msg)

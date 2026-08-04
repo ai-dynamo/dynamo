@@ -9,7 +9,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, sticky::lifecycle::SessionCloseAction},
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -17,13 +17,12 @@ use crate::{
     },
 };
 
-/// Owns resources that must be released even when routing setup or streaming is cancelled.
+/// Owns scheduler cleanup after a worker is selected.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
     freed: bool,
-    deferred_close: Option<SessionCloseAction>,
 }
 
 impl RequestCleanup {
@@ -33,17 +32,10 @@ impl RequestCleanup {
             context_id,
             scheduler_tracked,
             freed: false,
-            deferred_close: None,
         }
     }
 
-    fn set_deferred_close(&mut self, deferred_close: Option<SessionCloseAction>) {
-        self.deferred_close = deferred_close;
-    }
-
     async fn finish(&mut self) {
-        // Free scheduler state before closing the session so both explicit and
-        // drop cleanup preserve the same lifecycle ordering.
         if self.scheduler_tracked
             && let Err(error) = self.chooser.free(&self.context_id).await
         {
@@ -54,19 +46,12 @@ impl RequestCleanup {
             );
         }
         self.freed = true;
-
-        if let Some(close) = self.deferred_close.take() {
-            close.execute(&self.context_id);
-        }
     }
 }
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        // Drop cannot await, so transfer any unfinished cleanup into one task.
-        let deferred_close = self.deferred_close.take();
-        let needs_free = !self.freed && self.scheduler_tracked;
-        if deferred_close.is_none() && !needs_free {
+        if self.freed || !self.scheduler_tracked {
             return;
         }
 
@@ -81,16 +66,13 @@ impl Drop for RequestCleanup {
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
         handle.spawn(async move {
-            // Match explicit finish ordering so session KV closes after scheduler cleanup.
-            if needs_free && let Err(error) = chooser.free(&context_id).await {
+            let result = chooser.free(&context_id).await;
+            if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
                     %error,
                     "Failed to free request from drop guard"
                 );
-            }
-            if let Some(close) = deferred_close {
-                close.execute(&context_id);
             }
         });
     }
@@ -257,7 +239,10 @@ impl OutputBlockTracker {
     }
 }
 
-/// Coordinates scheduler/session cleanup, observability, and streamed load tracking.
+/// Coordinates scheduler cleanup, observability, and streamed load tracking.
+///
+/// Session-affinity lifetime is separate: `AffinityAcquire` and
+/// `AffinityLease` own binding commit, release, and invalidation.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
@@ -268,6 +253,7 @@ pub(super) struct RequestGuard {
 impl RequestGuard {
     pub(super) fn new(
         chooser: Arc<KvRouter>,
+        request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
@@ -282,8 +268,9 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let request_metrics =
-            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        if scheduler_tracked {
+            request_metrics.requests_started_total().inc();
+        }
 
         Self {
             cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
@@ -304,10 +291,6 @@ impl RequestGuard {
 
     pub(super) fn start_dispatch(&mut self, phase_label: &str) {
         self.observability.start_dispatch(phase_label);
-    }
-
-    pub(super) fn set_deferred_close(&mut self, deferred_close: Option<SessionCloseAction>) {
-        self.cleanup.set_deferred_close(deferred_close);
     }
 
     pub(super) fn record_prefill_start(&self) {
@@ -346,10 +329,8 @@ impl RequestGuard {
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
         self.observability.observe_tokens(new_tokens);
-        let Some(update) = self
-            .output_blocks
-            .observe(self.observability.cumulative_osl())
-        else {
+        let cumulative_osl = self.observability.cumulative_osl();
+        let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
         };
 
@@ -371,6 +352,10 @@ impl RequestGuard {
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
+        self.cleanup.finish().await;
+    }
+
+    pub(super) async fn abort(&mut self) {
         self.cleanup.finish().await;
     }
 }

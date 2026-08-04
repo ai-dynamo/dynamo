@@ -48,6 +48,8 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -66,6 +68,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
+
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
+	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
+	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
 
 	// DynamoNamespace is deprecated and will be removed in a future version.
 	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
@@ -107,7 +118,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	// ExtraPodSpec allows to override the main pod spec configuration.
 	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
-	// that allows overriding the main container configuration.
+	// that allows overriding the main container configuration. New components must set
+	// extraPodSpec and provide a non-empty mainContainer image. Existing components created
+	// without extraPodSpec may remain unchanged.
 	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
@@ -119,6 +132,24 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// MinAvailable maps to Grove PodClique minAvailable for single-node and
+	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	//
+	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+	// 1 when omitted and is immutable after creation. Positive replica counts must
+	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+	// special scale-to-zero state; minAvailable remains configured but is not
+	// enforced again until replicas is scaled back to a positive value.
+	//
+	// For non-Grove deployments, setting this field will result in a validation error.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.

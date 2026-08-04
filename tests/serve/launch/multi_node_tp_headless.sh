@@ -11,6 +11,13 @@ set -e
 trap 'echo "Cleaning up..."; kill 0' EXIT
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+WORKER_MODULE="dynamo.vllm"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
 
 KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
 GPU_MEM_ARGS=""
@@ -21,8 +28,8 @@ fi
 echo "Starting Dynamo frontend..."
 python3 -m dynamo.frontend &
 
-echo "Starting dynamo.vllm head node (TP=2, nnodes=2, node-rank=0, GPU 0)..."
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+echo "Starting ${WORKER_MODULE} head node (TP=2, nnodes=2, node-rank=0, GPU 0)..."
+CUDA_VISIBLE_DEVICES=0 python3 -m "${WORKER_MODULE}" \
   --model "${MODEL}" \
   --tensor-parallel-size 2 \
   --nnodes 2 \
@@ -31,8 +38,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
   --enforce-eager \
   $GPU_MEM_ARGS &
 
-echo "Starting dynamo.vllm headless worker (TP=2, nnodes=2, node-rank=1, GPU 1)..."
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+echo "Starting ${WORKER_MODULE} headless worker (TP=2, nnodes=2, node-rank=1, GPU 1)..."
+CUDA_VISIBLE_DEVICES=1 python3 -m "${WORKER_MODULE}" \
   --model "${MODEL}" \
   --tensor-parallel-size 2 \
   --nnodes 2 \

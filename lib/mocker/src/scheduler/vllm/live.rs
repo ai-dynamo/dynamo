@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(all(test, feature = "kvbm-offload"))]
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -10,15 +12,15 @@ use tokio_util::sync::CancellationToken;
 use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
-use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, DeferredFpmBuffer, RouterEventVisibility, SchedulerHandle,
-    capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, SchedulerCancellationEnvelope,
+    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerEventSender,
+    SchedulerHandle, SchedulerLifecycleEvent, SchedulerOutputSender, spawn_live_scheduler,
 };
 
 use super::core::VllmCore;
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct MockerMetrics {
     pub dp_rank: dynamo_kv_router::protocols::DpRank,
     pub active_decode_blocks: u64,
@@ -72,17 +74,7 @@ impl MockerMetrics {
 
 #[derive(Clone)]
 pub struct Scheduler {
-    request_tx: mpsc::UnboundedSender<DirectRequest>,
-    metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
-    _cancel_guard: Arc<CancelGuard>,
-}
-
-struct CancelGuard(CancellationToken);
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
+    inner: LiveSchedulerState,
 }
 
 impl Scheduler {
@@ -94,168 +86,382 @@ impl Scheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        Self::new_with_output_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerOutputSender::from),
             kv_event_publishers,
             cancellation_token,
-            None,
             fpm_publisher,
         )
     }
 
-    pub(crate) fn new_with_admission(
+    pub(crate) fn new_with_output_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        let (scheduler, actor) = Self::spawn_with_event_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
-            admission_tx,
             fpm_publisher,
-        )
+        );
+        drop(actor);
+        scheduler
     }
 
-    fn new_internal(
+    pub(crate) fn spawn_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
-    ) -> Self {
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
-        let total_blocks = args.num_gpu_blocks as u64;
-        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks);
-        let (metrics_tx, metrics_rx) = tokio::sync::watch::channel(initial_metrics);
-
-        let cancel_token = cancellation_token.unwrap_or_default();
-        let cancel_token_clone = cancel_token.clone();
-        let cancel_guard = Arc::new(CancelGuard(cancel_token));
-
-        tokio::spawn(async move {
-            let (deferred_kv_events, buffering_publishers) =
-                capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
-            let deferred_fpm = DeferredFpmBuffer::default();
-            let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
-            #[cfg(feature = "kvbm-offload")]
-            if let Err(e) = core.init_offload_live().await {
-                tracing::error!("kvbm-offload live init failed: {e}");
-            }
-            // Wall-clock origin for this scheduler's simulated time. Drives
-            // `engine.tick(now_ms)` so the PS bandwidth models advance
-            // in real time across passes.
-            let scheduler_start = Instant::now();
-
-            loop {
-                if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
-                    .await
-                    .is_none()
-                {
-                    break;
-                }
-
-                let iteration_start = Instant::now();
-                let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
-                let pass = core.execute_pass_internal(None, now_ms, admission_tx.as_ref());
-                let total_time =
-                    std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
-                if let Some(fpm) = pass.fpm {
-                    deferred_fpm.push(fpm);
-                }
-                if pass.router_event_visibility == RouterEventVisibility::PassStart {
-                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                }
-                if total_time > std::time::Duration::ZERO {
-                    sleep_until_precise(iteration_start + total_time).await;
-                }
-                if pass.router_event_visibility == RouterEventVisibility::PassEnd {
-                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                }
-                flush_output_signals(&mut core, &output_tx, pass.output_signals);
-                publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                let _ = metrics_tx.send(core.mocker_metrics());
-            }
-        });
-
-        Self {
-            request_tx,
-            metrics_rx,
-            _cancel_guard: cancel_guard,
-        }
+    ) -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (inner, actor) = spawn_live_scheduler(
+            args,
+            dp_rank,
+            event_tx,
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+            VllmCore::new_with_sink,
+        );
+        (Self { inner }, actor)
     }
 }
 
 impl SchedulerHandle for Scheduler {
     fn receive(&self, request: DirectRequest) {
-        let _ = self.request_tx.send(request);
+        self.inner.receive(request);
     }
 
     fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
-        self.request_tx.clone()
+        self.inner.request_sender()
     }
 
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
-        self.metrics_rx.clone()
+        self.inner.metrics_receiver()
+    }
+
+    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
+        self.inner.command_sender()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
+    }
+
+    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
+        self.inner.take_lifecycle_receiver()
     }
 }
 
-async fn receive_requests(
-    core: &mut VllmCore,
-    request_rx: &mut mpsc::UnboundedReceiver<DirectRequest>,
-    cancel_token: &CancellationToken,
-) -> Option<()> {
-    if cancel_token.is_cancelled() {
-        return None;
+impl LiveBoundaryCore for VllmCore {
+    fn initialize_live(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            #[cfg(feature = "kvbm-offload")]
+            if let Err(error) = self.init_offload_live().await {
+                tracing::error!("kvbm-offload live init failed: {error}");
+            }
+        })
     }
 
-    if core.is_empty() {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return None,
-            result = request_rx.recv() => {
-                let request = result?;
-                core.receive(request);
-            }
+    fn live_is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn receive_live_request(&mut self, request: DirectRequest) {
+        self.receive(request);
+    }
+
+    fn apply_live_command(
+        &mut self,
+        command: SchedulerCommand,
+        allow_destination_admission: bool,
+        now_ms: f64,
+    ) -> anyhow::Result<SchedulerCommandEffects> {
+        self.apply_command_effects_at(command, allow_destination_admission, Some(now_ms))
+    }
+
+    fn retry_live_destinations(&mut self, now_ms: f64) -> Vec<SchedulerLifecycleEvent> {
+        self.retry_pending_destinations_at(Some(now_ms))
+    }
+
+    fn live_metrics(&self) -> MockerMetrics {
+        self.mocker_metrics()
+    }
+
+    fn pass_boundary_metrics(&self, _pass_metrics: MockerMetrics) -> MockerMetrics {
+        self.mocker_metrics()
+    }
+
+    fn live_internal_deadline_ms(&self) -> Option<f64> {
+        #[cfg(feature = "kvbm-offload")]
+        {
+            self.earliest_offload_deadline()
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        {
+            None
         }
     }
 
-    while let Ok(request) = request_rx.try_recv() {
-        core.receive(request);
+    fn execute_live_pass(
+        &mut self,
+        scheduler_start: &Instant,
+    ) -> anyhow::Result<LivePassExecution> {
+        // Wall-clock elapsed time drives the PS bandwidth models across
+        // vLLM passes; SGLang reports a duration directly from each pass.
+        let now_ms = scheduler_start.elapsed().as_secs_f64() * 1000.0;
+        let pass = self.execute_pass_internal(None, now_ms, None)?;
+        let duration = std::time::Duration::from_secs_f64((pass.end_ms - now_ms).max(0.0) / 1000.0);
+        Ok(LivePassExecution { pass, duration })
     }
 
-    Some(())
+    fn output_delivery_failed(&mut self, signals: Vec<OutputSignal>) {
+        for signal in signals {
+            self.drop_request(signal.uuid);
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn advance_live_offload(
+        &mut self,
+        now_ms: f64,
+        allow_destination_admission: bool,
+    ) -> crate::scheduler::OffloadTickEffects {
+        if allow_destination_admission {
+            self.tick_offload_only(now_ms)
+        } else {
+            self.tick_offload_transport_only(now_ms)
+        }
+    }
 }
 
-fn flush_output_signals(
-    core: &mut VllmCore,
-    output_tx: &Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
-    output_signals: Vec<OutputSignal>,
-) {
-    let Some(tx) = output_tx.as_ref() else {
-        return;
-    };
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "kvbm-offload")]
+    use super::*;
 
-    if output_signals.is_empty() {
-        return;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::common::protocols::KvCacheEventSink;
+    #[cfg(feature = "kvbm-offload")]
+    use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+    #[cfg(feature = "kvbm-offload")]
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(feature = "kvbm-offload")]
+    #[derive(Default)]
+    struct CapturingKvSink {
+        events: Mutex<Vec<(StorageTier, KvCacheEvent)>>,
     }
 
-    if let Err(error) = tx.send(output_signals) {
-        for signal in error.0 {
-            core.drop_request(signal.uuid);
+    #[cfg(feature = "kvbm-offload")]
+    impl KvCacheEventSink for CapturingKvSink {
+        fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push((StorageTier::Device, event));
+            Ok(())
+        }
+
+        fn publish_with_storage_tier(
+            &self,
+            event: KvCacheEvent,
+            storage_tier: StorageTier,
+        ) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push((storage_tier, event));
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_destination_reservation_wakes_at_offload_deadline() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(2)
+            .block_size(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_prefix_caching(true)
+            .worker_type(crate::common::protocols::WorkerType::Decode)
+            .speedup_ratio(1000.0)
+            .kv_bytes_per_token(Some(250_000))
+            .num_g2_blocks(Some(4))
+            .bandwidth_g1_to_g2_gbps(Some(1.0))
+            .build()
+            .unwrap();
+        let sink = Arc::new(CapturingKvSink::default());
+        let publishers = KvEventPublishers::new(Some(sink.clone()), None);
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let mut scheduler = Scheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            publishers,
+            None,
+            FpmPublisher::default(),
+        );
+        let mut lifecycle_rx = scheduler.take_lifecycle_receiver().unwrap();
+
+        scheduler.receive(DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            uuid: Some(uuid::Uuid::from_u128(1)),
+            ..Default::default()
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let seed = output_rx
+                    .recv()
+                    .await
+                    .expect("output channel should stay open");
+                if seed.iter().any(|signal| signal.completed) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("seed request should complete");
+        sink.events.lock().unwrap().clear();
+
+        let source_handoff_id = crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(10));
+        let source_request_id = uuid::Uuid::from_u128(11);
+        let (source_reply, source_reply_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope {
+                command: SchedulerCommand::SubmitHandoffPrefill {
+                    handoff_id: source_handoff_id,
+                    request: DirectRequest {
+                        tokens: vec![3; 3],
+                        max_output_tokens: 1,
+                        uuid: Some(source_request_id),
+                        ..Default::default()
+                    },
+                },
+                reply: source_reply,
+            })
+            .await
+            .unwrap();
+        let submitted = source_reply_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            submitted.result,
+            crate::scheduler::SchedulerCommandResult::Submitted(observed)
+                if observed == source_request_id
+        ));
+        let held = tokio::time::timeout(Duration::from_secs(1), lifecycle_rx.recv())
+            .await
+            .expect("source hold should complete")
+            .expect("lifecycle channel should stay open");
+        assert!(matches!(
+            held,
+            SchedulerLifecycleEvent::SourceHeld {
+                handoff_id: observed,
+                request_id: observed_request,
+                ..
+            } if observed == source_handoff_id && observed_request == source_request_id
+        ));
+
+        let handoff_id = crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(2));
+        let request_id = uuid::Uuid::from_u128(3);
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope {
+                command: SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: DirectRequest {
+                        tokens: vec![2; 4],
+                        max_output_tokens: 1,
+                        uuid: Some(request_id),
+                        ..Default::default()
+                    },
+                },
+                reply,
+            })
+            .await
+            .unwrap();
+        let accepted = reply_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            accepted.result,
+            crate::scheduler::SchedulerCommandResult::DestinationAccepted {
+                request_id: observed,
+            } if observed == request_id
+        ));
+        assert!(accepted.lifecycle_events.is_empty());
+
+        let reserved = tokio::time::timeout(Duration::from_secs(1), lifecycle_rx.recv())
+            .await
+            .expect("idle offload deadline should wake the scheduler")
+            .expect("lifecycle channel should stay open");
+        assert!(matches!(
+            reserved,
+            SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: observed,
+                request_id: observed_request,
+                ..
+            } if observed == handoff_id && observed_request == request_id
+        ));
+        let host_stores = || {
+            sink.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(tier, event)| {
+                    *tier == StorageTier::HostPinned
+                        && matches!(&event.data, KvCacheEventData::Stored(_))
+                })
+                .count()
+        };
+        assert_eq!(host_stores(), 1);
+
+        let (barrier_reply, barrier_rx) = tokio::sync::oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope {
+                command: SchedulerCommand::CancelDestination {
+                    handoff_id: crate::common::handoff::HandoffId::from(uuid::Uuid::from_u128(99)),
+                },
+                reply: barrier_reply,
+            })
+            .await
+            .unwrap();
+        let barrier = barrier_rx.await.unwrap().unwrap();
+        assert_eq!(
+            barrier.result,
+            crate::scheduler::SchedulerCommandResult::Noop
+        );
+        assert!(lifecycle_rx.try_recv().is_err());
+        assert_eq!(host_stores(), 1);
+
+        for command in [
+            SchedulerCommand::CancelDestination { handoff_id },
+            SchedulerCommand::CancelSource {
+                handoff_id: source_handoff_id,
+            },
+        ] {
+            let (reply, reply_rx) = tokio::sync::oneshot::channel();
+            scheduler
+                .command_sender()
+                .send(SchedulerCommandEnvelope { command, reply })
+                .await
+                .unwrap();
+            let cleanup = reply_rx.await.unwrap().unwrap();
+            assert_eq!(
+                cleanup.result,
+                crate::scheduler::SchedulerCommandResult::Applied
+            );
         }
     }
 }

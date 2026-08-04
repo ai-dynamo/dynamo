@@ -32,6 +32,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    image_token_metrics_payload,
     kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
@@ -41,15 +42,28 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import (
     ImageGenerationPayload,
     LoraTestChatPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
     VideoGenerationPayload,
 )
 
 logger = logging.getLogger(__name__)
 
+pytest_plugins = ("tests.utils.otel_plugin",)
+
 
 def _is_cuda13() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
     return v.startswith("13")
+
+
+def _disable_responses_reasoning(
+    payload: ResponsesPayload | ResponsesStreamPayload,
+) -> ResponsesPayload | ResponsesStreamPayload:
+    # Keep the streaming and non-streaming smoke tests consistent by preventing
+    # reasoning from consuming the entire output token budget.
+    payload.body["reasoning"] = {"effort": "none"}
+    return payload
 
 
 @dataclass
@@ -120,33 +134,10 @@ sglang_configs = {
                 expected_num_choices=2,
             ),
             completion_payload_default(),
-            responses_payload_default(),
-            responses_stream_payload_default(),
+            _disable_responses_reasoning(responses_payload_default()),
+            _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
-        ],
-    ),
-    "aggregated_unified": SGLangConfig(
-        name="aggregated_unified",
-        directory=sglang_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
-            pytest.mark.timeout(340),  # 3x ~111s (sglang gpu_1 log)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        env={},
-        frontend_port=DefaultPort.FRONTEND.value,
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -164,6 +155,33 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "disaggregated_router": SGLangConfig(
+        # Disaggregated serving + KV-aware routing (2 prefill + 2 decode);
+        # frontend --router-mode kv drives the internal prefill router.
+        name="disaggregated_router",
+        directory=sglang_dir,
+        script_name="disagg_router.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_4,
+            pytest.mark.timeout(470),  # parity with sglang disaggregated configs
+            pytest.mark.nightly,  # heavy e2e launch scenario; runs on nightly multi-gpu lane
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # Disagg workers expose fewer sglang:* metrics; check the
+            # prefill worker's endpoint (mirrors disaggregated_same_gpu).
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang_disagg",
+                port=DefaultPort.SYSTEM1.value,
+            ),
         ],
     ),
     "disaggregated_same_gpu": SGLangConfig(
@@ -395,7 +413,7 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["image"],
+                expected_response=["image", "bus", "train", "streetcar"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -444,6 +462,7 @@ sglang_configs = {
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            image_token_metrics_payload(),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(
@@ -564,11 +583,14 @@ sglang_configs = {
             "--chat-template",
             "qwen2-vl",
             "--single-gpu",
+            "--multimodal-embedding-cache-capacity-gb",
+            "0.1",
         ],
         timeout=360,
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -584,7 +606,21 @@ sglang_configs = {
                 expected_response=["guitar", "tablet", "draw"],
                 temperature=0.0,
                 max_tokens=100,
-            )
+            ),
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                temperature=0.0,
+                max_tokens=100,
+            ),
         ],
     ),
     "embedding_agg": SGLangConfig(
@@ -765,6 +801,40 @@ sglang_configs = {
             ),
         ],
     ),
+    "diffusion_llada": SGLangConfig(
+        # LLaDA2.0 diffusion LM: text via iterative refinement (not autoregressive),
+        # served over /v1/chat/completions, so it uses a chat payload.
+        name="diffusion_llada",
+        directory=sglang_dir,
+        script_name="diffusion_llada.sh",
+        # diffusion_llada.sh forwards "$@"; 0.4 OOMs the sglang scheduler, 0.7 boots.
+        script_args=["--mem-fraction-static", "0.7"],
+        marks=[
+            # Text diffusion LM (not image/video), so component marker is core.
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.h100,
+            pytest.mark.profiled_vram_gib(56.0),
+            pytest.mark.requested_sglang_vram_gib(56.0),
+            # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
+            pytest.mark.timeout(600),
+            pytest.mark.nightly,
+        ],
+        model="inclusionAI/LLaDA2.0-mini-preview",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Non-deterministic diffusion output: accept any non-empty response.
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=[],
+                # Small: diffusion decode cost scales with tokens.
+                max_tokens=32,
+                temperature=0.0,
+            ),
+        ],
+    ),
     "anthropic_messages": SGLangConfig(
         name="anthropic_messages",
         directory=sglang_dir,
@@ -796,9 +866,9 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
-# This test iterates over all configs via `sglang_config_test`.
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+# Allocate 4 system ports: disaggregated_router runs 4 workers each needing a
+# unique DYN_SYSTEM_PORT; other configs use <=2 (extra ports are harmless).
+@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
     request,

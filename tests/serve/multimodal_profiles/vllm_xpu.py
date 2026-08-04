@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.serve.common import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -56,6 +57,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     MultimodalModelProfile(
         name="Qwen/Qwen3-VL-2B-Instruct",
         short_name="qwen3-vl-2b",
+        gpu_marker="xpu_1",
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_1],
@@ -90,22 +92,34 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "agg_video": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[
+                    pytest.mark.skip(
+                        reason="flaky test, local video file downloading may fail due to network issues"
+                    ),
+                    pytest.mark.nightly,
+                    pytest.mark.multimodal,
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                tests=[
+                    MmCase(
+                        payload=make_video_payload(["red", "static", "still"]),
+                        env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR},
+                    )
+                ],
             ),
             # Pre_merge gater for the lightseek MM-routing path. Fine-grained
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
             # (post_merge).
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
+                gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             # The chat-processor variant of the MM-aware router: same routing
@@ -118,11 +132,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
+                gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             # Frontend-decode variant: same `agg_multimodal_router.sh` as
@@ -135,18 +150,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
+                gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={
-                    "SINGLE_GPU": "true",
+                    "NUM_WORKERS": "2",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
                 },
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
-        gpu_marker="xpu_1",
         extra_vllm_args=["--block-size", "16"],
     ),
     # Lightseek-supported VLM coverage on `agg_router` (Rust-frontend
@@ -163,10 +178,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
-                gpu_marker="xpu_1",
+                gpu_marker="xpu_2",
                 profiled_vram_gib=19.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -178,10 +193,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
-                gpu_marker="xpu_1",
+                gpu_marker="xpu_2",
                 profiled_vram_gib=16.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                env={"SINGLE_GPU": "true"},
+                env={"NUM_WORKERS": "2"},
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
@@ -209,6 +224,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
+                        timeout_s=900,
                     ),
                 ],
             ),

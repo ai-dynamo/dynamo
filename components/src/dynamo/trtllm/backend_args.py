@@ -6,7 +6,12 @@
 import argparse
 from typing import Optional
 
-from tensorrt_llm.llmapi import BuildConfig
+# trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
+# Remove this try-except once we bump trtllm version to >= 1.3.0rc21
+try:
+    from tensorrt_llm.llmapi import BuildConfig
+except ImportError:
+    from tensorrt_llm.llmapi.llm_args import BaseLlmArgs as BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -19,6 +24,8 @@ from . import __version__
 from .constants import DisaggregationMode, Modality
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+CANONICAL_AGGREGATED_MODE = "agg"
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -77,6 +84,26 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_ENABLE_ATTENTION_DP",
             default=False,
             help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--conversation-affinity",
+            env_var="DYN_ENGINE_CONV_AFFINITY",
+            default=False,
+            help="Force TensorRT-LLM conversation-affinity ADP routing regardless of engine "
+            "config detection. Initial DP-rank placement is controlled by "
+            "--conversation-affinity-dp-rank-source.",
+        )
+        add_argument(
+            g,
+            flag_name="--conversation-affinity-dp-rank-source",
+            env_var="DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+            default="engine",
+            choices=["engine", "dynamo"],
+            help="Select initial attention-DP placement while conversation affinity is enabled. "
+            "'engine' lets TensorRT-LLM load-balance the first request; 'dynamo' forwards the "
+            "Dynamo router's selected rank and requires a TensorRT-LLM build containing "
+            "NVIDIA/TensorRT-LLM#16815 or equivalent.",
         )
         add_argument(
             g,
@@ -186,9 +213,28 @@ class DynamoTrtllmArgGroup(ArgGroup):
             g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
-            default=DisaggregationMode.AGGREGATED.value,
-            choices=[mode.value for mode in DisaggregationMode],
-            help="Mode to use for disaggregation.",
+            default=CANONICAL_AGGREGATED_MODE,
+            choices=[
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+                *[
+                    mode.value
+                    for mode in DisaggregationMode
+                    if mode != DisaggregationMode.AGGREGATED
+                ],
+            ],
+            help=(
+                "Worker disaggregation mode. Use 'agg' for aggregated serving, "
+                "'pd' for a combined prefill+decode worker, 'prefill', "
+                "'decode', or 'encode'."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_TRTLLM_ENABLE_MULTIMODAL",
+            default=False,
+            help="Enable multimodal LLM request processing.",
         )
         add_argument(
             g,
@@ -196,7 +242,10 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_MODALITY",
             default=Modality.TEXT.value,
             choices=[m.value for m in Modality],
-            help="Modality to use for the model.",
+            help=(
+                "Modality to use for the model. For multimodal LLM serving, "
+                "prefer --enable-multimodal; diffusion modalities remain here."
+            ),
         )
         add_argument(
             g,
@@ -439,6 +488,8 @@ class DynamoTrtllmConfig(ConfigBase):
     pipeline_parallel_size: int
     expert_parallel_size: Optional[int]
     enable_attention_dp: bool
+    conversation_affinity: bool
+    conversation_affinity_dp_rank_source: str
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int
@@ -454,6 +505,7 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
+    enable_multimodal: bool
     modality: Modality
     encode_endpoint: str
     allowed_local_media_path: str
@@ -485,8 +537,30 @@ class DynamoTrtllmConfig(ConfigBase):
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                raise ValueError(
+                    "--disaggregation-mode=prefill_and_decode is no longer supported; "
+                    "use --disaggregation-mode=agg for aggregated serving or "
+                    "--disaggregation-mode=pd for a combined prefill+decode worker."
+                )
+            if self.disaggregation_mode in {
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+            }:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        if self.enable_multimodal:
+            if Modality.is_diffusion(self.modality):
+                raise ValueError(
+                    "--enable-multimodal cannot be combined with "
+                    f"--modality {self.modality.value}. Use --modality only for "
+                    "diffusion models."
+                )
+            self.modality = Modality.MULTIMODAL
+        elif self.modality == Modality.MULTIMODAL:
+            self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None

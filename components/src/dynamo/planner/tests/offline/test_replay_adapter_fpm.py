@@ -1,30 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test for the replay-path FPM feed.
-
-``ReplayPlannerAdapter._feed_extra_fpm_to_regression`` feeds accumulated
-intra-tick FPM snapshots into the regression model. The regression slots
-hold ``PlannerEnginePerfModel`` (built by the PSM in SLA mode), which
-exposes only ``add_observations(dict)`` — the pre-fix singular
-``add_observation(fpm)`` raised ``AttributeError`` and crashed the
-*default* (``use_orchestrator=False``) SLA-mode replay on any tick that
-carried more than one FPM snapshot per worker. No test covered this
-method, so the crash shipped silently.
-
-This test drives the method against a real PSM-built regression and
-asserts it does not raise.
-"""
+"""Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
+from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     EngineCapabilities,
     ScheduledTick,
@@ -33,6 +17,8 @@ from dynamo.planner.core.types import (
 from dynamo.planner.offline.replay_adapter import (
     ReplayPlannerAdapter,
     _build_fpm_from_dict,
+    _merge_traffic,
+    _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.replay.main import _engine_caps
@@ -63,10 +49,11 @@ def _agg_config_sla() -> PlannerConfig:
     )
 
 
-def _snap(worker_id: str, wall_time: float) -> dict:
-    """A bridge FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
+def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
+    """A replay FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
         "worker_id": worker_id,
+        "dp_rank": dp_rank,
         "wall_time": wall_time,
         "num_prefill_requests": 0,
         "sum_prefill_tokens": 0,
@@ -84,43 +71,70 @@ def _snap(worker_id: str, wall_time: float) -> dict:
     }
 
 
-def _adapter_for_psm(
-    cfg: PlannerConfig, caps: WorkerCapabilities
-) -> ReplayPlannerAdapter:
-    """Build just enough of a ReplayPlannerAdapter to exercise
-    ``_feed_extra_fpm_to_regression`` without a full replay harness.
-
-    The method only touches ``_config`` (mode / optimization_target via
-    ``_is_easy_mode``) and ``_get_regression`` (which on the PSM path reads
-    ``_use_orchestrator`` + ``_sm``)."""
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._config = cfg
-    adapter._use_orchestrator = False
-    adapter._sm = PlannerStateMachine(cfg, caps)
-    return adapter
-
-
-def test_feed_extra_fpm_to_regression_does_not_crash_psm_sla():
-    """Two decode snapshots for the same worker → one is non-excluded and
-    flows into the regression. Pre-fix this raised AttributeError on the
-    PlannerEnginePerfModel slot."""
-    cfg = _agg_config_sla()
-    adapter = _adapter_for_psm(cfg, _agg_caps())
-
-    decode_snaps = [
-        _snap("w1", wall_time=1.0),
-        _snap("w1", wall_time=2.0),  # last-per-worker → excluded; the first feeds
+def test_fpm_cache_keeps_all_ranks_for_each_active_worker():
+    cache = {}
+    snapshots = [
+        _snap("0", wall_time=1.0, dp_rank=0),
+        _snap("0", wall_time=1.0, dp_rank=1),
+        _snap("1", wall_time=1.0, dp_rank=0),
+        _snap("1", wall_time=1.0, dp_rank=1),
     ]
-    # Pre-fix:
-    #   AttributeError: 'PlannerEnginePerfModel' object has no attribute
-    #   'add_observation'
-    adapter._feed_extra_fpm_to_regression(decode_snaps=decode_snaps, prefill_snaps=[])
+
+    _update_fpm_cache(cache, snapshots, active_worker_ids=[0, 1])
+
+    assert set(cache) == {("0", 0), ("0", 1), ("1", 0), ("1", 1)}
+
+    _update_fpm_cache(cache, [], active_worker_ids=[0])
+
+    assert set(cache) == {("0", 0), ("0", 1)}
+
+
+def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
+    cache = {}
+    _update_fpm_cache(
+        cache,
+        [_snap("0", wall_time=1.0), _snap("1", wall_time=1.0)],
+        active_worker_ids=[0, 1],
+    )
+
+    _update_fpm_cache(
+        cache,
+        [_snap("2", wall_time=2.0)],
+        active_worker_ids=[0, 2],
+    )
+
+    assert set(cache) == {("0", 0), ("2", 0)}
 
 
 def _orch_agg_config_sla() -> PlannerConfig:
-    cfg = _agg_config_sla()
-    cfg.scheduling.use_orchestrator = True
-    return cfg
+    return _agg_config_sla()
+
+
+def test_replay_adapter_uses_injected_engine_protocol_and_owns_cleanup():
+    class _Engine:
+        def __init__(self):
+            self.closed = False
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 5.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("tick is not needed by this ownership test")
+
+        async def shutdown(self):
+            self.closed = True
+
+    engine = _Engine()
+    adapter = ReplayPlannerAdapter(
+        PlannerConfig(mode="agg"),
+        capabilities=_agg_caps(),
+        engine=engine,
+    )
+
+    with adapter:
+        assert adapter.initial_tick_ms() == 5_000.0
+
+    assert engine.closed
 
 
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
@@ -128,13 +142,11 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     regressions. ``ReplayPlannerAdapter.install_benchmark_fpms`` routes to
     ``OrchestratorEngineAdapter.install_regressions_from_fpms`` so
     ``get_regression`` is non-None afterwards. Pre-fix, replay/main.py only
-    fed ``adapter._sm`` (None under use_orchestrator), so the orchestrator
-    regression stayed empty and replay diverged from PSM."""
+    bypassed the orchestrator engine, so the orchestrator regression stayed empty and
+    replay diverged from live planner behavior."""
     cfg = _orch_agg_config_sla()
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
     adapter._config = cfg
-    adapter._use_orchestrator = True
-    adapter._sm = None
     adapter._engine = OrchestratorEngineAdapter(cfg, _agg_caps())
 
     # Before: no regression installed on the orchestrator path.
@@ -146,9 +158,22 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     assert adapter._engine._orchestrator.get_regression("agg") is not None
 
 
-class _TrafficBridge:
-    def drain_traffic(self):
-        return {
+def test_build_tick_input_maps_replay_accept_length():
+    # The Rust simulation drains the per-tick traffic window into
+    # ``result["traffic"]``; a need_traffic_metrics tick maps it onto
+    # ``TickInput.traffic`` (accept_length, isl/osl, kv-hit, latency).
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._prefill_fpm_cache = {}
+    adapter._decode_fpm_cache = {}
+
+    tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
+    result = {
+        "now_ms": 1_000.0,
+        "active_prefill_count": 0,
+        "active_decode_count": 0,
+        "active_prefill_ids": [],
+        "active_decode_ids": [],
+        "traffic": {
             "duration_s": 60.0,
             "num_req": 4,
             "avg_isl": 512.0,
@@ -157,15 +182,9 @@ class _TrafficBridge:
             "avg_accept_length": 2.5,
             "avg_ttft_ms": 10.0,
             "avg_itl_ms": 5.0,
-        }
-
-
-def test_build_tick_input_maps_replay_accept_length():
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._bridge = _TrafficBridge()
-
-    tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
-    ti = adapter._build_tick_input(tick, {"now_ms": 1_000.0})
+        },
+    }
+    ti = adapter._build_tick_input(tick, result)
 
     assert ti.now_s == 60.0
     assert ti.traffic is not None
@@ -173,78 +192,162 @@ def test_build_tick_input_maps_replay_accept_length():
     assert adapter._last_traffic.accept_length == 2.5
 
 
-def test_planner_bridge_drains_mtp_accept_length(tmp_path):
-    trace_path = tmp_path / "mtp_trace.jsonl"
-    records = [
+def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
+    cfg = PlannerConfig(mode="agg", optimization_target="throughput")
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = cfg
+    adapter._is_disagg = False
+    adapter._prefill_fpm_cache = {}
+    adapter._decode_fpm_cache = {}
+    adapter._scaling_target_prefill = None
+    adapter._scaling_target_decode = None
+
+    no_fpm_tick = ScheduledTick(
+        at_s=1.0,
+        need_worker_states=True,
+        need_worker_fpm=False,
+    )
+    first = adapter._build_tick_input(
+        no_fpm_tick,
         {
-            "timestamp": 0.0,
-            "session_id": f"req-{i}",
-            "input_length": 128,
-            "output_length": 12,
-            "hash_ids": [100 + i * 2, 101 + i * 2],
-        }
-        for i in range(2)
-    ]
-    trace_path.write_text(
-        "\n".join(json.dumps(record) for record in records) + "\n",
-        encoding="utf-8",
+            "now_ms": 1_000.0,
+            "active_prefill_count": 0,
+            "active_decode_count": 1,
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
+            "decode_fpm_snapshots": [
+                _snap("0", wall_time=1.0, dp_rank=0),
+                _snap("0", wall_time=1.0, dp_rank=1),
+                _snap("0", wall_time=2.0, dp_rank=0),
+                _snap("0", wall_time=2.0, dp_rank=1),
+            ],
+            "prefill_fpm_snapshots": [],
+        },
     )
-    agg_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        aic_nextn=2,
-        aic_nextn_accept_rates="1,1",
+    assert first.fpm_observations is None
+    assert set(adapter._decode_fpm_cache) == {("0", 0), ("0", 1)}
+    assert adapter._decode_fpm_cache[("0", 0)].wall_time == 2.0
+    assert adapter._decode_fpm_cache[("0", 1)].wall_time == 2.0
+
+    fpm_tick = ScheduledTick(
+        at_s=7.0,
+        need_worker_states=True,
+        need_worker_fpm=True,
+    )
+    second = adapter._build_tick_input(
+        fpm_tick,
+        {
+            "now_ms": 7_000.0,
+            "active_prefill_count": 0,
+            "active_decode_count": 1,
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
+            "decode_fpm_snapshots": [],
+            "prefill_fpm_snapshots": [],
+        },
     )
 
-    bridge = PlannerReplayBridge(
-        trace_file=trace_path,
-        extra_engine_args=agg_args,
-        num_workers=1,
-        trace_block_size=64,
-    )
-    bridge.advance_to(1000.0)
-
-    traffic = bridge.drain_traffic()
-    assert traffic["avg_osl"] == 12.0
-    assert traffic["avg_accept_length"] == pytest.approx(3.0)
-
-    prefill_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        worker_type="prefill",
-    )
-    decode_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        worker_type="decode",
-        aic_nextn=2,
-        aic_nextn_accept_rates="1,1",
-    )
-    bridge = PlannerReplayBridge.create_disagg(
-        trace_file=trace_path,
-        prefill_engine_args=prefill_args,
-        decode_engine_args=decode_args,
-        num_prefill_workers=1,
-        num_decode_workers=1,
-        trace_block_size=64,
-    )
-    bridge.advance_to(1000.0)
-
-    traffic = bridge.drain_traffic()
-    assert traffic["avg_osl"] == 12.0
-    assert traffic["avg_accept_length"] == pytest.approx(3.0)
+    assert second.fpm_observations is not None
+    assert set(second.fpm_observations.decode) == {("0", 0), ("0", 1)}
+    assert second.fpm_observations.decode[("0", 0)].wall_time == 2.0
+    assert second.fpm_observations.decode[("0", 1)].wall_time == 2.0
 
 
 def test_replay_engine_caps_exposes_aic_nextn():
     caps = _engine_caps(MockEngineArgs(aic_nextn=2))
 
     assert caps.speculative_nextn == 2
+
+
+def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
+    caps = _engine_caps(
+        MockEngineArgs(
+            num_gpu_blocks=100,
+            block_size=16,
+            dp_size=4,
+            aic_tp_size=2,
+        )
+    )
+
+    assert caps.max_kv_tokens == 100 * 16 * 4
+    assert caps.num_gpu == 2 * 4
+
+
+def test_replay_engine_caps_keeps_single_rank_defaults():
+    caps = _engine_caps(MockEngineArgs(num_gpu_blocks=100, block_size=16))
+
+    assert caps.max_kv_tokens == 100 * 16
+    assert caps.num_gpu == 1
+
+
+def test_merge_traffic_weights_ratio_fields_by_native_counts():
+    # kv_hit_rate and accept_length must merge by their true denominators
+    # (hit_rate_count / accept_length_forward_count), not num_req, so a window
+    # whose ratio-sample count is disproportionate to its request count still
+    # contributes its exact share. Here num_req-weighting would give the wrong
+    # answer (0.9 and 1.2); count-weighting reconstructs the exact mean.
+    a = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 0.0,
+        "hit_rate_count": 90,
+        "avg_accept_length": 3.0,
+        "accept_length_forward_count": 90,
+    }
+    b = {
+        "num_req": 9,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 1.0,
+        "hit_rate_count": 10,
+        "avg_accept_length": 1.0,
+        "accept_length_forward_count": 10,
+    }
+    merged = _merge_traffic(a, b)
+    assert merged["avg_kv_hit_rate"] == pytest.approx(
+        (0.0 * 90 + 1.0 * 10) / 100
+    )  # 0.1
+    assert merged["avg_accept_length"] == pytest.approx(
+        (3.0 * 90 + 1.0 * 10) / 100
+    )  # 2.8
+    assert merged["num_req"] == 10
+    assert merged["hit_rate_count"] == 100
+    assert merged["accept_length_forward_count"] == 100
+    assert merged["avg_isl"] == pytest.approx(100.0)
+
+
+def test_merge_traffic_keeps_offered_count_separate_from_completion_samples():
+    a = {
+        "num_req": 100,
+        "duration_s": 1.0,
+        "avg_isl": 10.0,
+        "avg_osl": 20.0,
+        "shape_count": 1,
+        "avg_ttft_ms": 1_000.0,
+        "ttft_count": 1,
+        "avg_itl_ms": 10.0,
+        "itl_count": 1,
+    }
+    b = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 200.0,
+        "shape_count": 9,
+        "avg_ttft_ms": 2_000.0,
+        "ttft_count": 9,
+        "avg_itl_ms": 20.0,
+        "itl_count": 9,
+    }
+
+    merged = _merge_traffic(a, b)
+
+    assert merged["num_req"] == 101
+    assert merged["shape_count"] == 10
+    assert merged["avg_isl"] == pytest.approx(91.0)
+    assert merged["avg_osl"] == pytest.approx(182.0)
+    assert merged["avg_ttft_ms"] == pytest.approx(1_900.0)
+    assert merged["avg_itl_ms"] == pytest.approx(19.0)

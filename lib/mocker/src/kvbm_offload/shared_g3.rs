@@ -13,19 +13,31 @@ use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
 
+use super::KvbmDriveMode;
 use super::capacity_reservation::CapacityReservations;
 use super::config::KvbmOffloadConfig;
-use super::worker::{DrainResult, SharedDrainCounts, TransferState};
+use super::worker::{
+    CompletedTransfer, CompletionAction, DeferredOwnerDrain, DrainResult, SharedDrainCounts,
+    TransferDirection, TransferState, fire_completion_actions_with,
+};
+
+struct DeferredOwnerCompletions {
+    actions: Vec<CompletionAction>,
+    deadline_ms: f64,
+    offload_registration_baseline: Option<u64>,
+}
 
 /// Shared process-local G3 resource. All mock workers in the process share
 /// this block manager and this G2↔G3 PS model.
 pub(crate) struct SharedG3Pool {
     config: KvbmOffloadConfig,
+    drive_mode: KvbmDriveMode,
     manager: Arc<BlockManager<G3>>,
     state: Arc<Mutex<TransferState>>,
     pending_tracker: Arc<PendingTracker>,
     capacity_reservations: Arc<CapacityReservations>,
-    pending_owner_drains: Mutex<HashMap<u64, SharedDrainCounts>>,
+    pending_owner_drains: Mutex<HashMap<u64, DeferredOwnerDrain>>,
+    pending_owner_completions: Mutex<HashMap<u64, DeferredOwnerCompletions>>,
 }
 
 static SHARED_G3_POOL: OnceLock<Mutex<Option<Weak<SharedG3Pool>>>> = OnceLock::new();
@@ -34,7 +46,15 @@ static SHARED_G3_POOL: OnceLock<Mutex<Option<Weak<SharedG3Pool>>>> = OnceLock::n
 static SHARED_G3_TEST_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
 impl SharedG3Pool {
+    #[cfg(test)]
     pub(crate) fn get_or_create(config: &KvbmOffloadConfig) -> Result<Option<Arc<Self>>> {
+        Self::get_or_create_with_mode(config, KvbmDriveMode::Live)
+    }
+
+    pub(crate) fn get_or_create_with_mode(
+        config: &KvbmOffloadConfig,
+        drive_mode: KvbmDriveMode,
+    ) -> Result<Option<Arc<Self>>> {
         let Some(block_count) = config.num_g3_blocks else {
             return Ok(None);
         };
@@ -42,7 +62,7 @@ impl SharedG3Pool {
         let mut pool_slot = pool_slot.lock().expect("shared G3 pool registry poisoned");
 
         if let Some(existing) = pool_slot.as_ref().and_then(Weak::upgrade) {
-            existing.validate_config(config)?;
+            existing.validate_config(config, drive_mode)?;
             return Ok(Some(existing));
         }
 
@@ -62,6 +82,7 @@ impl SharedG3Pool {
         );
         let pool = Arc::new(Self {
             config: config.clone(),
+            drive_mode,
             manager,
             state: Arc::new(Mutex::new(TransferState::new(
                 config.bandwidth_g2_to_g3_gbps,
@@ -70,19 +91,23 @@ impl SharedG3Pool {
             pending_tracker: Arc::new(PendingTracker::new()),
             capacity_reservations: Arc::new(CapacityReservations::default()),
             pending_owner_drains: Mutex::new(HashMap::new()),
+            pending_owner_completions: Mutex::new(HashMap::new()),
         });
         *pool_slot = Some(Arc::downgrade(&pool));
         Ok(Some(pool))
     }
 
-    fn validate_config(&self, config: &KvbmOffloadConfig) -> Result<()> {
+    fn validate_config(&self, config: &KvbmOffloadConfig, drive_mode: KvbmDriveMode) -> Result<()> {
         if self.config.num_g3_blocks != config.num_g3_blocks
             || self.config.block_size_tokens != config.block_size_tokens
             || self.config.block_size_bytes.unwrap_or(0) != config.block_size_bytes.unwrap_or(0)
             || self.config.bandwidth_g2_to_g3_gbps != config.bandwidth_g2_to_g3_gbps
             || self.config.bandwidth_g3_to_g2_gbps != config.bandwidth_g3_to_g2_gbps
+            || self.drive_mode != drive_mode
         {
-            bail!("process-local shared G3 pool already exists with a different shape/bandwidth");
+            bail!(
+                "process-local shared G3 pool already exists with a different shape, bandwidth, or drive mode"
+            );
         }
         Ok(())
     }
@@ -113,7 +138,7 @@ impl SharedG3Pool {
         let drained = state.drain_completions(now_ms, "shared-g3");
         drop(state);
 
-        self.record_drained(drained, registrations_before, Some(owner_id))
+        self.record_drained(drained, registrations_before, Some(owner_id), now_ms)
     }
 
     pub(crate) fn drain_completions_to_pending(&self, now_ms: f64) {
@@ -122,7 +147,89 @@ impl SharedG3Pool {
         let drained = state.drain_completions(now_ms, "shared-g3");
         drop(state);
 
-        self.record_drained(drained, registrations_before, None);
+        self.record_drained(drained, registrations_before, None, now_ms);
+    }
+
+    pub(crate) fn drain_completions_ordered(
+        &self,
+        now_ms: f64,
+        owner_id: u64,
+        after_pipeline_completion: impl FnMut(CompletedTransfer),
+    ) -> SharedDrainCounts {
+        let registrations_before = self.manager.metrics().snapshot().registrations;
+        self.defer_due_completions(now_ms, registrations_before);
+        let pending = self
+            .pending_owner_completions
+            .lock()
+            .expect("shared G3 ordered completion map poisoned")
+            .remove(&owner_id);
+        let Some(pending) = pending else {
+            return SharedDrainCounts::default();
+        };
+        let result = fire_completion_actions_with(pending.actions, after_pipeline_completion);
+        SharedDrainCounts {
+            counts: result.by_owner.get(&owner_id).copied().unwrap_or_default(),
+            // Ordered actions fire only at this owner's boundary, so onboard
+            // blocks are current rather than already-published deferred work.
+            deferred_onboard_blocks: 0,
+            offload_registration_baseline: pending.offload_registration_baseline,
+        }
+    }
+
+    pub(crate) fn defer_completions_ordered(&self, now_ms: f64) {
+        let registrations_before = self.manager.metrics().snapshot().registrations;
+        self.defer_due_completions(now_ms, registrations_before);
+    }
+
+    fn defer_due_completions(&self, now_ms: f64, registrations_before: u64) {
+        let actions = {
+            let mut state = self.state.lock().expect("shared G3 state poisoned");
+            state.take_completion_actions(now_ms, "shared-g3")
+        };
+        if actions.is_empty() {
+            return;
+        }
+
+        let mut by_owner: HashMap<u64, Vec<CompletionAction>> = HashMap::new();
+        for action in actions {
+            let owner_id = action
+                .owner_id()
+                .expect("shared G3 completion must have an owner");
+            by_owner.entry(owner_id).or_default().push(action);
+        }
+
+        let mut pending = self
+            .pending_owner_completions
+            .lock()
+            .expect("shared G3 ordered completion map poisoned");
+        for (owner_id, actions) in by_owner {
+            let has_offload = actions
+                .iter()
+                .any(|action| action.completed_transfer().direction == TransferDirection::G2ToG3);
+            match pending.entry(owner_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let pending = entry.get_mut();
+                    pending.actions.extend(actions);
+                    pending.deadline_ms = pending.deadline_ms.min(now_ms);
+                    if has_offload {
+                        pending.offload_registration_baseline = Some(
+                            pending
+                                .offload_registration_baseline
+                                .map_or(registrations_before, |baseline| {
+                                    baseline.min(registrations_before)
+                                }),
+                        );
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(DeferredOwnerCompletions {
+                        actions,
+                        deadline_ms: now_ms,
+                        offload_registration_baseline: has_offload.then_some(registrations_before),
+                    });
+                }
+            }
+        }
     }
 
     fn record_drained(
@@ -130,13 +237,8 @@ impl SharedG3Pool {
         drained: DrainResult,
         registrations_before: u64,
         owner_id: Option<u64>,
+        now_ms: f64,
     ) -> SharedDrainCounts {
-        // G2->G3 completions release shared G3 capacity when the global
-        // queue is drained, regardless of which engine owns the completion.
-        if drained.total.offload_blocks > 0 {
-            self.release_capacity_reservations(drained.total.offload_blocks);
-        }
-
         let mut owner_result = SharedDrainCounts::default();
         let mut pending = self
             .pending_owner_drains
@@ -145,7 +247,7 @@ impl SharedG3Pool {
         if let Some(owner_id) = owner_id
             && let Some(record) = pending.remove(&owner_id)
         {
-            owner_result.add_deferred_record(record);
+            owner_result.add_deferred_record(record.counts);
         }
         for (owner, counts) in drained.by_owner {
             let record = SharedDrainCounts {
@@ -157,7 +259,16 @@ impl SharedG3Pool {
             if Some(owner) == owner_id {
                 owner_result.add_record(record);
             } else {
-                pending.entry(owner).or_default().add_record(record);
+                pending
+                    .entry(owner)
+                    .and_modify(|pending| {
+                        pending.counts.add_record(record);
+                        pending.deadline_ms = pending.deadline_ms.min(now_ms);
+                    })
+                    .or_insert(DeferredOwnerDrain {
+                        counts: record,
+                        deadline_ms: now_ms,
+                    });
             }
         }
         owner_result
@@ -166,6 +277,22 @@ impl SharedG3Pool {
     pub(crate) fn earliest_finish(&self) -> Option<f64> {
         let state = self.state.lock().expect("shared G3 state poisoned");
         state.earliest_finish()
+    }
+
+    pub(crate) fn pending_owner_deadline(&self, owner_id: u64) -> Option<f64> {
+        let drained = self
+            .pending_owner_drains
+            .lock()
+            .expect("shared G3 owner drain map poisoned")
+            .get(&owner_id)
+            .map(|pending| pending.deadline_ms);
+        let completions = self
+            .pending_owner_completions
+            .lock()
+            .expect("shared G3 ordered completion map poisoned")
+            .get(&owner_id)
+            .map(|pending| pending.deadline_ms);
+        drained.into_iter().chain(completions).reduce(f64::min)
     }
 
     pub(crate) fn earliest_offload_finish(&self) -> Option<f64> {

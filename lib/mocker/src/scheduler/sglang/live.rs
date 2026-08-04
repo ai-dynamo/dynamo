@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -10,27 +9,18 @@ use tokio_util::sync::CancellationToken;
 use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
-use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, DeferredFpmBuffer, MockerMetrics, RouterEventVisibility, SchedulerHandle,
-    capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
+    LiveBoundaryCore, LivePassExecution, LiveSchedulerState, MockerMetrics,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEffects,
+    SchedulerCommandEnvelope, SchedulerEventSender, SchedulerHandle, SchedulerLifecycleEvent,
+    SchedulerOutputSender, spawn_live_scheduler,
 };
 
 use super::core::SglangCore;
 
 #[derive(Clone)]
 pub struct SglangScheduler {
-    request_tx: mpsc::UnboundedSender<DirectRequest>,
-    metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
-    _cancel_guard: Arc<CancelGuard>,
-}
-
-struct CancelGuard(CancellationToken);
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
+    inner: LiveSchedulerState,
 }
 
 impl SglangScheduler {
@@ -42,160 +32,124 @@ impl SglangScheduler {
         cancellation_token: Option<CancellationToken>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        Self::new_with_output_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerOutputSender::from),
             kv_event_publishers,
             cancellation_token,
-            None,
             fpm_publisher,
         )
     }
 
-    pub(crate) fn new_with_admission(
+    pub(crate) fn new_with_output_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        output_tx: Option<SchedulerOutputSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
     ) -> Self {
-        Self::new_internal(
+        let (scheduler, actor) = Self::spawn_with_event_sender(
             args,
             dp_rank,
-            output_tx,
+            output_tx.map(SchedulerEventSender::from),
             kv_event_publishers,
             cancellation_token,
-            admission_tx,
             fpm_publisher,
-        )
+        );
+        drop(actor);
+        scheduler
     }
 
-    fn new_internal(
+    pub(crate) fn spawn_with_event_sender(
         args: MockEngineArgs,
         dp_rank: u32,
-        output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
+        event_tx: Option<SchedulerEventSender>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
-        admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
         fpm_publisher: FpmPublisher,
-    ) -> Self {
-        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
-        let total_blocks = args.num_gpu_blocks as u64;
-        let initial_metrics = MockerMetrics::new(dp_rank, 0, total_blocks);
-        let (metrics_tx, metrics_rx) =
-            tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
-
-        let cancel_token = cancellation_token.unwrap_or_default();
-        let cancel_token_clone = cancel_token.clone();
-        let cancel_guard = Arc::new(CancelGuard(cancel_token));
-
-        tokio::spawn(async move {
-            let (deferred_kv_events, buffering_publishers) =
-                capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
-            let deferred_fpm = DeferredFpmBuffer::default();
-            let mut core = SglangCore::new_with_sink(args, dp_rank, buffering_publishers);
-
-            loop {
-                if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)
-                    .await
-                    .is_none()
-                {
-                    break;
-                }
-
-                let iteration_start = Instant::now();
-                let pass = core.execute_pass_internal(None, 0.0);
-                if let Some(admission_tx) = admission_tx.as_ref() {
-                    for admission in &pass.admissions {
-                        let _ = admission_tx.send(admission.clone());
-                    }
-                }
-                if let Some(fpm) = pass.fpm {
-                    deferred_fpm.push(fpm);
-                }
-                if pass.router_event_visibility == RouterEventVisibility::PassStart {
-                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                }
-                let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
-                if total_time > std::time::Duration::ZERO {
-                    sleep_until_precise(iteration_start + total_time).await;
-                }
-                if pass.router_event_visibility == RouterEventVisibility::PassEnd {
-                    publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                }
-                let metrics = pass.mocker_metrics.clone();
-                flush_output_signals(&output_tx, pass.output_signals);
-                publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
-                publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
-                let _ = metrics_tx.send(metrics);
-            }
-        });
-
-        Self {
-            request_tx,
-            metrics_rx,
-            _cancel_guard: cancel_guard,
-        }
+    ) -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (inner, actor) = spawn_live_scheduler(
+            args,
+            dp_rank,
+            event_tx,
+            kv_event_publishers,
+            cancellation_token,
+            fpm_publisher,
+            SglangCore::new_with_sink,
+        );
+        (Self { inner }, actor)
     }
 }
 
 impl SchedulerHandle for SglangScheduler {
     fn receive(&self, request: DirectRequest) {
-        let _ = self.request_tx.send(request);
+        self.inner.receive(request);
     }
 
     fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
-        self.request_tx.clone()
+        self.inner.request_sender()
     }
 
     fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
-        self.metrics_rx.clone()
+        self.inner.metrics_receiver()
+    }
+
+    fn command_sender(&self) -> mpsc::Sender<SchedulerCommandEnvelope> {
+        self.inner.command_sender()
+    }
+
+    fn cancellation_sender(&self) -> mpsc::Sender<SchedulerCancellationEnvelope> {
+        self.inner.cancellation_sender()
+    }
+
+    fn take_lifecycle_receiver(&mut self) -> Option<mpsc::Receiver<SchedulerLifecycleEvent>> {
+        self.inner.take_lifecycle_receiver()
     }
 }
 
-async fn receive_requests(
-    core: &mut SglangCore,
-    request_rx: &mut mpsc::UnboundedReceiver<DirectRequest>,
-    cancel_token: &CancellationToken,
-) -> Option<()> {
-    if cancel_token.is_cancelled() {
-        return None;
+impl LiveBoundaryCore for SglangCore {
+    fn live_is_empty(&self) -> bool {
+        self.is_empty()
     }
 
-    if core.is_empty() {
-        tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return None,
-            result = request_rx.recv() => {
-                let request = result?;
-                core.receive(request);
-            }
-        }
+    fn receive_live_request(&mut self, request: DirectRequest) {
+        self.receive(request);
     }
 
-    while let Ok(request) = request_rx.try_recv() {
-        core.receive(request);
+    fn apply_live_command(
+        &mut self,
+        command: SchedulerCommand,
+        allow_destination_admission: bool,
+        _now_ms: f64,
+    ) -> anyhow::Result<SchedulerCommandEffects> {
+        self.apply_command_effects(command, allow_destination_admission)
     }
 
-    Some(())
-}
-
-fn flush_output_signals(
-    output_tx: &Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
-    output_signals: Vec<OutputSignal>,
-) {
-    let Some(tx) = output_tx.as_ref() else {
-        return;
-    };
-
-    if output_signals.is_empty() {
-        return;
+    fn retry_live_destinations(&mut self, _now_ms: f64) -> Vec<SchedulerLifecycleEvent> {
+        self.retry_pending_destinations()
     }
 
-    let _ = tx.send(output_signals);
+    fn live_metrics(&self) -> MockerMetrics {
+        self.mocker_metrics()
+    }
+
+    fn pass_boundary_metrics(&self, mut pass_metrics: MockerMetrics) -> MockerMetrics {
+        let current = self.mocker_metrics();
+        pass_metrics.active_decode_blocks = current.active_decode_blocks;
+        pass_metrics.gpu_cache_usage_perc = current.gpu_cache_usage_perc;
+        pass_metrics.running_requests = current.running_requests;
+        pass_metrics.waiting_requests = current.waiting_requests;
+        pass_metrics
+    }
+
+    fn execute_live_pass(
+        &mut self,
+        _scheduler_start: &Instant,
+    ) -> anyhow::Result<LivePassExecution> {
+        let pass = self.try_execute_pass_internal(None, 0.0)?;
+        let duration = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
+        Ok(LivePassExecution { pass, duration })
+    }
 }

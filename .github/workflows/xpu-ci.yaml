@@ -151,6 +151,7 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           ref: ${{ env.SOURCE_REF }}
+          lfs: true
 
       - name: Pre-cleanup Pytest Containers
         shell: bash
@@ -177,9 +178,57 @@ jobs:
       - name: Run XPU tests
         uses: ./.github/actions/pytest
         with:
-          pytest_marks: ${{ inputs.pytest_markers }}
+          pytest_marks: '${{ inputs.pytest_markers }} and xpu_1'
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-${{ env.FRAMEWORK }}'
+          test_type: 'e2e'
+          platform_arch: 'amd64'
+          device: 'xpu'
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          start_minio: 'false'
+
+      - name: Cleanup Pytest Containers
+        if: always()
+        shell: bash
+        run: |
+          echo "🧹 Stopping and removing pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+          echo "✓ Pytest container cleanup finished"
+
+  # ============================================================================
+  # XPU 2-CARD TESTS
+  # ============================================================================
+
+  test-xpu-2card:
+    needs: [build-xpu]
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    runs-on: xpu-2
+    env:
+      FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
+      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          lfs: true
+
+      - name: Pre-cleanup Pytest Containers
+        shell: bash
+        run: |
+          echo "🧹 Removing any leftover pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+
+      - name: Run XPU 2-card tests
+        uses: ./.github/actions/pytest
+        with:
+          pytest_marks: '${{ inputs.pytest_markers }} and xpu_2'
+          image_tag: ${{ env.TEST_IMAGE_TAG }}
+          test_suite_name: 'xpu-2card-${{ env.FRAMEWORK }}'
           test_type: 'e2e'
           platform_arch: 'amd64'
           device: 'xpu'
@@ -201,7 +250,7 @@ jobs:
   # ============================================================================
 
   cleanup-xpu:
-    needs: [build-xpu, test-xpu]
+    needs: [build-xpu, test-xpu, test-xpu-2card]
     if: ${{ always() }}
     runs-on: xpu
     env:

@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex as StdMutex},
+    sync::{Arc, LazyLock, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -15,6 +15,7 @@ use futures::StreamExt;
 use rand::Rng;
 
 use crate::component::{Endpoint, Instance};
+use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::traits::DistributedRuntimeProvider;
 
@@ -31,6 +32,13 @@ impl RoutingOccupancyState {
             .entry(instance_id)
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.load(id))
+            .copied()
     }
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
@@ -61,6 +69,35 @@ impl RoutingOccupancyState {
         let id = selected?;
         self.increment(id);
         Some(id)
+    }
+
+    /// Least-loaded selection without the increment. Same tie-break policy as
+    /// [`Self::select_exact_min_and_increment`] so peek and select share a
+    /// distribution.
+    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        selected
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {
@@ -106,7 +143,31 @@ pub(crate) async fn get_or_create_routing_occupancy_state(
 }
 
 /// Default interval for periodic reconciliation of instance_avail with instance_source
-const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_INHIBITED_DURATION_SECS: u64 = 5;
+
+/// Process-wide inhibited duration, resolved from the environment on first client construction.
+static INHIBITED_DURATION: LazyLock<Duration> =
+    LazyLock::new(|| inhibited_duration_from_env(|name| std::env::var(name).ok()));
+
+fn inhibited_duration_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -> Duration {
+    let seconds = match lookup(env_runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS) {
+        None => DEFAULT_INHIBITED_DURATION_SECS,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) => seconds,
+            Err(err) => {
+                tracing::warn!(
+                    value = raw,
+                    %err,
+                    "invalid {}; using the default of {} seconds",
+                    env_runtime::DYN_RUNTIME_INHIBITED_DURATION_SECS,
+                    DEFAULT_INHIBITED_DURATION_SECS,
+                );
+                DEFAULT_INHIBITED_DURATION_SECS
+            }
+        },
+    };
+    Duration::from_secs(seconds)
+}
 
 /// Shared endpoint discovery state for a single endpoint query.
 ///
@@ -258,6 +319,19 @@ impl RoutingInstances {
         )
     }
 
+    /// Add a single instance to the overloaded set (immediate
+    /// backpressure mark). Short-lived: the next metric-driven
+    /// `set_overloaded` recompute overwrites the whole set.
+    fn mark_overloaded(&self, instance_id: u64) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.insert(instance_id);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
         let mut overloaded_ids = self.overloaded_ids.clone();
         overloaded_ids.retain(|id| !removed_ids.contains(id));
@@ -331,7 +405,6 @@ impl RoutingInstancesState {
         self.snapshot().routable_ids().to_vec()
     }
 
-    #[cfg(test)]
     fn free_ids(&self) -> Vec<u64> {
         self.snapshot().free_ids.clone()
     }
@@ -366,6 +439,15 @@ impl RoutingInstancesState {
         let next = Arc::new(current.set_overloaded(overloaded_ids));
         self.snapshot.store(next);
         true
+    }
+
+    fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.update(
+            move |current| current.mark_overloaded(instance_id),
+            // Routable set is unchanged — only the derived free set shrinks —
+            // so there's no need to republish routable_ids.
+            false,
+        );
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -405,13 +487,14 @@ pub struct Client {
     routing_instances: Arc<RoutingInstancesState>,
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
+    /// A zero value disables local worker inhibition.
     reconcile_interval: Duration,
 }
 
 impl Client {
     // Client with auto-discover instances using key-value store
     pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
-        Self::with_reconcile_interval(endpoint, DEFAULT_RECONCILE_INTERVAL).await
+        Self::with_reconcile_interval(endpoint, *INHIBITED_DURATION).await
     }
 
     /// Create a client with a custom reconcile interval.
@@ -462,8 +545,9 @@ impl Client {
         self.routing_instances.routable_ids()
     }
 
-    #[cfg(test)]
-    pub(crate) fn instance_ids_free(&self) -> Vec<u64> {
+    /// Routable instance ids excluding those currently flagged overloaded — the set used
+    /// for load-aware (random / round-robin) worker selection.
+    pub fn instance_ids_free(&self) -> Vec<u64> {
         self.routing_instances.free_ids()
     }
 
@@ -517,6 +601,14 @@ impl Client {
 
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: u64) {
+        if self.reconcile_interval.is_zero() {
+            tracing::debug!(
+                instance_id,
+                "local worker inhibition is disabled; leaving instance routable"
+            );
+            return;
+        }
+
         self.routing_instances.report_instance_down(instance_id);
         tracing::debug!("inhibiting instance {instance_id}");
     }
@@ -526,6 +618,19 @@ impl Client {
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
+    }
+
+    /// Mark an instance overloaded immediately. A worker returning
+    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
+    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
+    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    pub fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.routing_instances
+            .mark_overloaded_immediate(instance_id);
+        tracing::debug!(
+            instance_id,
+            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+        );
     }
 
     pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -569,6 +674,7 @@ impl Client {
                 }
 
                 tokio::select! {
+                    _ = cancel_token.cancelled() => break,
                     result = rx.changed() => {
                         if let Err(err) = result {
                             tracing::error!(
@@ -577,7 +683,7 @@ impl Client {
                             cancel_token.cancel();
                         }
                     }
-                    _ = tokio::time::sleep(reconcile_interval) => {
+                    _ = tokio::time::sleep(reconcile_interval), if !reconcile_interval.is_zero() => {
                         tracing::trace!(
                             "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
                         );
@@ -686,6 +792,26 @@ mod tests {
     use super::*;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
+    #[test]
+    fn test_inhibited_duration_from_env() {
+        assert_eq!(
+            inhibited_duration_from_env(|_| None),
+            Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
+        );
+        assert_eq!(
+            inhibited_duration_from_env(|_| Some("17".to_string())),
+            Duration::from_secs(17)
+        );
+        assert_eq!(
+            inhibited_duration_from_env(|_| Some("0".to_string())),
+            Duration::ZERO
+        );
+        assert_eq!(
+            inhibited_duration_from_env(|_| Some("invalid".to_string())),
+            Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
+        );
+    }
+
     /// Test that instances removed via report_instance_down are restored after
     /// the reconciliation interval elapses.
     #[tokio::test]
@@ -728,6 +854,35 @@ mod tests {
         assert!(
             client.instance_ids_avail().is_empty(),
             "After reconciliation, instance_avail should match instance_source"
+        );
+
+        rt.shutdown();
+    }
+
+    /// A zero inhibited duration disables local worker inhibition.
+    #[tokio::test]
+    async fn test_zero_inhibited_duration_leaves_instance_routable() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_disabled_inhibition".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint, Duration::ZERO)
+            .await
+            .unwrap();
+
+        client.override_instance_avail(vec![1, 2, 3]);
+        client.report_instance_down(2);
+
+        assert_eq!(
+            client.instance_ids_avail(),
+            vec![1, 2, 3],
+            "a zero inhibited duration should leave the reported instance routable"
         );
 
         rt.shutdown();

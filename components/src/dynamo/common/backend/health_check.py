@@ -28,6 +28,7 @@ __all__ = [
     "HEALTH_CHECK_KEY",
     "bos_token_id_or",
     "build_health_check_payload",
+    "build_raw_health_check_payload",
     "is_probe",
     "parse_health_check_payload_cli",
 ]
@@ -52,6 +53,16 @@ def build_health_check_payload(
     if extras:
         payload.update(extras)
     return _finalize(payload)
+
+
+def build_raw_health_check_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Raw (non-token) canary payload for RawEngine / DiffusionEngine workers.
+
+    ``payload`` is the OpenAI-shaped request body the canary sends through
+    ``generate`` (e.g. an image-generation request). Applies the
+    ``DYN_HEALTH_CHECK_PAYLOAD`` env override and stamps the ``_HEALTH_CHECK``
+    marker, mirroring :func:`build_health_check_payload` for the token path."""
+    return _finalize(dict(payload))
 
 
 def _finalize(payload: dict[str, Any]) -> dict[str, Any]:

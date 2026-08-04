@@ -69,7 +69,7 @@ export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
 #   nixl  — NIXL RDMA transfer. Required for cross-node deployments.
 # Set DYNAMO_DISABLE_NIXL_MM=1 to disable the transfer channel entirely; the
 # backend then re-downloads + reprocesses the image from the original URL.
-# See docs/features/multimodal/multimodal-kv-routing.md for details.
+# See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for details.
 export DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
 
 # Extra args (word-splitting is intentional for shell-style overrides)
@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: $0 [--model NAME] [--num-workers N] [--single-gpu] [EXTRA_VLLM_ARGS...]
 
-See docs/features/multimodal/multimodal-kv-routing.md for env vars.
+See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for env vars.
 EOF
             exit 0
             ;;
@@ -170,17 +170,45 @@ COMMON_ENV=(
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 )
 
+# ZE_AFFINITY_MASK is expected to be provided by the caller. For multi-worker
+# launches, pass a comma-separated list (for example: 0,1).
+# Default to empty so the single-worker path doesn't error under set -euo pipefail.
+IFS=',' read -r -a ZE_AFFINITY_MASK_LIST <<< "${ZE_AFFINITY_MASK:-}"
+# Validate that ZE_AFFINITY_MASK has at least NUM_WORKERS non-empty entries when
+# multi-worker.
+if (( NUM_WORKERS > 1 )); then
+    if [[ ${#ZE_AFFINITY_MASK_LIST[@]} -lt ${NUM_WORKERS} ]]; then
+        echo "ERROR: ZE_AFFINITY_MASK must have at least ${NUM_WORKERS} comma-separated values (got ${#ZE_AFFINITY_MASK_LIST[@]})" >&2
+        exit 1
+    fi
+    for i in $(seq 1 "${NUM_WORKERS}"); do
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_LIST[$((i - 1))]-}"
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_VALUE#${ZE_AFFINITY_MASK_VALUE%%[![:space:]]*}}"
+        ZE_AFFINITY_MASK_VALUE="${ZE_AFFINITY_MASK_VALUE%${ZE_AFFINITY_MASK_VALUE##*[![:space:]]}}"
+        if [[ -z "${ZE_AFFINITY_MASK_VALUE}" ]]; then
+            echo "ERROR: ZE_AFFINITY_MASK entry ${i} must not be empty or whitespace-only" >&2
+            exit 1
+        fi
+    done
+fi
+# Align single-worker fallback with VLLM_SYSTEM_PORT_BASE (18081).
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18081}
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) - otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    if (( NUM_WORKERS > 1 )); then
+        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
+        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+    else
+        WORKER_PORT="${DYN_SYSTEM_PORT}"
+    fi
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
 
-    if [[ "${SINGLE_GPU}" == "true" ]]; then
-        GPU_ID=0
+    if (( NUM_WORKERS > 1 )); then
+        GPU_ID="${ZE_AFFINITY_MASK_LIST[$((i - 1))]}"
     else
-        GPU_ID=$((i - 1))
+        GPU_ID="${ZE_AFFINITY_MASK:-0}"
     fi
 
     echo
@@ -201,7 +229,12 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    if (( NUM_WORKERS > 1 )); then
+        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
+        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+    else
+        WORKER_PORT="${DYN_SYSTEM_PORT}"
+    fi
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 
@@ -223,12 +256,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
     FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
-    # Only reset states on the first replica to avoid wiping shared state.
-    RESET_ARGS=""
-    if [[ "$f" -eq 1 ]]; then
-        RESET_ARGS="--router-reset-states"
-    fi
-
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
     if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
@@ -245,7 +272,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
             --dyn-chat-processor vllm \
             --router-mode kv \
             --kv-cache-block-size "${BLOCK_SIZE}" \
-            ${RESET_ARGS} \
             ${SYNC_ARGS} \
             --model-name "${MODEL}" \
             ${FRONTEND_EXTRA_ARGS} &
@@ -278,7 +304,13 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    if (( NUM_WORKERS > 1 )); then
+        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
+        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+    else
+        WORKER_PORT="${DYN_SYSTEM_PORT}"
+    fi
+    echo "Worker $i: http://127.0.0.1:${WORKER_PORT}/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"

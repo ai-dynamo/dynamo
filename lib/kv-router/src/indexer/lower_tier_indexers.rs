@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::indexer::{
-    LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
+    KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails,
 };
 use crate::protocols::{LocalBlockHash, StorageTier};
@@ -27,13 +27,28 @@ use crate::protocols::{LocalBlockHash, StorageTier};
 /// non-device [`StorageTier`] that has received at least one event.
 #[derive(Clone)]
 pub struct LowerTierIndexers {
+    metrics: Option<Arc<KvIndexerMetrics>>,
     num_threads: usize,
     block_size: u32,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
 impl LowerTierIndexers {
+    /// Metrics-less constructor for call sites without a `KvIndexerMetrics` handle.
+    /// Router production assembly should use [`new_with_metrics`](Self::new_with_metrics)
+    /// so lower-tier traffic is included in `kv_cache_events_applied`.
     pub fn new(num_threads: usize, block_size: u32) -> Self {
+        Self::new_with_metrics(num_threads, block_size, None)
+    }
+
+    /// Same as [`new`](Self::new) but wires `kv_cache_events_applied`
+    /// counters into every lazily created per-tier indexer, matching the
+    /// observability of the device-tier path.
+    pub fn new_with_metrics(
+        num_threads: usize,
+        block_size: u32,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> Self {
         assert!(
             num_threads > 0,
             "lower-tier indexer threads must be non-zero"
@@ -41,6 +56,7 @@ impl LowerTierIndexers {
         Self {
             num_threads,
             block_size,
+            metrics,
             indexers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -60,10 +76,11 @@ impl LowerTierIndexers {
             .unwrap()
             .entry(storage_tier)
             .or_insert_with(|| {
-                Arc::new(ThreadPoolIndexer::new(
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
                     LowerTierIndexer::new(),
                     self.num_threads,
                     self.block_size,
+                    self.metrics.clone(),
                 ))
             })
             .clone()

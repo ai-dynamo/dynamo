@@ -92,6 +92,12 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    /// Reset KVBM-managed prefix cache state.
+    ///
+    /// Returns `Ok(false)` when KVBM rejects the reset so vLLM can propagate
+    /// connector reset failure through its `reset_cache` boolean contract.
+    fn reset_cache(&mut self) -> anyhow::Result<bool>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -634,6 +640,20 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
+
+    fn reset_cache(&mut self) -> anyhow::Result<bool> {
+        match self.slot_manager().reset_prefix_cache() {
+            Ok(()) => {
+                self.inflight_requests.clear();
+                self.onboarding_slots.clear();
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!("failed to reset KVBM connector prefix cache: {error:?}");
+                Ok(false)
+            }
+        }
+    }
 }
 
 #[pyclass]
@@ -659,9 +679,8 @@ impl PyKvConnectorLeader {
         // Initialize logging for the vLLM connector
         dynamo_runtime::logging::init();
 
-        let enable_kvbm_record = std::env::var(env_kvbm::DYN_KVBM_ENABLE_RECORD)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let enable_kvbm_record =
+            dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_ENABLE_RECORD);
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
@@ -728,12 +747,15 @@ impl PyKvConnectorLeader {
             .create_slot(request, tokens)
             .map_err(to_pyerr)
     }
+
+    fn reset_cache(&mut self, py: Python<'_>) -> PyResult<bool> {
+        py.allow_threads(|| self.connector_leader.reset_cache())
+            .map_err(to_pyerr)
+    }
 }
 
 pub fn kvbm_metrics_endpoint_enabled() -> bool {
-    std::env::var(env_kvbm::DYN_KVBM_METRICS)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_kvbm::DYN_KVBM_METRICS)
 }
 
 pub fn parse_kvbm_metrics_port() -> u16 {

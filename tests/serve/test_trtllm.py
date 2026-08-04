@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
+import yaml
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
@@ -16,12 +17,14 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_image_payload_cached_tokens
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    image_token_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -40,6 +43,17 @@ class TRTLLMConfig(EngineConfig):
 
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
+)
+qwen3_vl_engine_config_dir = os.path.join(
+    WORKSPACE_DIR,
+    "examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct",
+)
+qwen3_vl_engine_config_files = (
+    "agg.yaml",
+    "agg_kv_router.yaml",
+    "decode.yaml",
+    "encode.yaml",
+    "prefill.yaml",
 )
 
 # TensorRT-LLM test configurations
@@ -81,29 +95,6 @@ trtllm_configs = {
             ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
-        ],
-    ),
-    "aggregated_unified": TRTLLMConfig(
-        name="aggregated_unified",
-        directory=trtllm_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.trtllm,
-            pytest.mark.profiled_vram_gib(3.9),
-            pytest.mark.requested_trtllm_kv_tokens(2592),
-            pytest.mark.timeout(600),  # 3x ~200s (trtllm gpu_1 log)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        frontend_port=DefaultPort.FRONTEND.value,
-        delayed_start=5,
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -221,13 +212,36 @@ trtllm_configs = {
             router_selection_chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
+                    r"Selected worker .*worker_id=\d+ worker_type=\w+ dp_rank=\d+ logit=",
                 ]
             ),
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+            # Disable ANSI so structured tracing fields render as plain
+            # `key=value` (color codes otherwise split `worker_id`/`=`/value and
+            # break the expected_log regex).
+            "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
         },
+    ),
+    "aggregated_router_approx": TRTLLMConfig(
+        name="aggregated_router_approx",
+        directory=trtllm_dir,
+        script_name="agg_router_approx.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(3.6),  # actual nvidia-smi peak
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[chat_payload_default()],
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -256,7 +270,12 @@ trtllm_configs = {
             pytest.mark.multimodal,
             pytest.mark.nightly,
         ],
-        model="Qwen/Qwen2-VL-7B-Instruct",
+        # Must match the disagg engine configs shipped in disagg_multimodal.sh
+        # (engine_configs/qwen3-vl-2b-instruct/{prefill,decode}.yaml). Qwen2-VL-7B
+        # only ships an agg.yaml, so loading it against the 2B disagg configs
+        # crashes the worker during multimodal KV-cache profiling
+        # ("Number of mm_embeds does not match expected total").
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,
@@ -267,22 +286,25 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_multimodal_router.sh",
         marks=[
-            pytest.mark.skip(
-                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2608"
-            ),
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(12.0),
+            pytest.mark.requested_trtllm_kv_tokens(32768),
+            pytest.mark.timeout(960),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
-            multimodal_payload_default(
-                text="Describe what you see in this image.",
-                expected_response=["mountain", "rock", "trees", "road"],
+            make_image_payload_cached_tokens(
+                ["green"],
+                repeat_count=2,
+                require_rust_processor_init=True,
+                min_avg_kv_hit_rate=0.5,
             )
         ],
     ),
@@ -579,7 +601,8 @@ trtllm_configs = {
             multimodal_payload_default(
                 text="Describe what you see in this image.",
                 expected_response=["mountain", "rock", "trees", "road"],
-            )
+            ),
+            image_token_metrics_payload(),
         ],
         env={
             "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
@@ -632,6 +655,7 @@ def test_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """
     Test dynamo deployments with different configurations.
@@ -653,6 +677,30 @@ def test_deployment(
         }
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.unit
+@pytest.mark.trtllm
+@pytest.mark.multimodal
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("config_file", qwen3_vl_engine_config_files)
+def test_qwen3_vl_multimodal_engine_configs_set_torch_dtype(config_file):
+    config_path = os.path.join(qwen3_vl_engine_config_dir, config_file)
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    model_kwargs = config.get("model_kwargs")
+    assert isinstance(model_kwargs, dict), f"{config_path} missing model_kwargs"
+    assert (
+        model_kwargs.get("torch_dtype") is not None
+    ), f"{config_path} missing model_kwargs.torch_dtype"
+
+    text_config = model_kwargs.get("text_config")
+    assert isinstance(text_config, dict), f"{config_path} missing text_config"
+    assert (
+        text_config.get("torch_dtype") is not None
+    ), f"{config_path} missing model_kwargs.text_config.torch_dtype"
 
 
 # TODO make this a normal guy

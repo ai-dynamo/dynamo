@@ -57,6 +57,8 @@ pub enum EventMirror {
         block_size: i32,
         #[serde(default)]
         lora_name: Option<String>,
+        #[serde(default, rename = "cache_salt")]
+        cache_namespace: Option<String>,
         #[serde(default)]
         medium: Option<String>,
     },

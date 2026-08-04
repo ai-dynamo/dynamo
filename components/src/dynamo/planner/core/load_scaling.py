@@ -4,8 +4,8 @@
 
 """Load-based scaling logic (FPM-driven, reactive).
 
-Mixin consumed by ``PlannerStateMachine``.  All methods access state
-via ``self._config``, ``self._capabilities``, and perf models.
+Mixin consumed by ``PlannerScalingState``.  All methods access state via
+``self._config``, ``self._capabilities``, and perf models.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ _DECODE_LATENCY_SCALE_DOWN = 0.1  # util < 10%
 class LoadScalingMixin:
     """FPM-driven load-based scaling decisions."""
 
-    # Scratch fields owned by PlannerStateMachine, declared here for mypy
+    # Scratch fields owned by PlannerScalingState, declared here for mypy
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]

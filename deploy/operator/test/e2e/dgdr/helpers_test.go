@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,11 +33,48 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// getenvFloat64 returns the float64 value of the named environment variable,
+// or def when the variable is unset, empty, or not a valid float. A parse
+// failure logs a warning to GinkgoWriter and falls back to def so a typo in an
+// env override never silently passes a zero value into a test.
+func getenvFloat64(name string, def float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"WARNING: %s=%q is not a valid float64, using default %v\n", name, v, def)
+		return def
+	}
+	return parsed
+}
+
+// getenvInt32 returns the int32 value of the named environment variable, or def
+// when the variable is unset, empty, or not a valid int32. See getenvFloat64
+// for the parse-failure behaviour.
+func getenvInt32(name string, def int32) int32 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	parsed, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"WARNING: %s=%q is not a valid int32, using default %d\n", name, v, def)
+		return def
+	}
+	return int32(parsed)
+}
 
 // Default hardware for mocker mode (AIC simulation needs hardware metadata).
 // Use H100_SXM because AIC has complete perf data for all backends (vllm, sglang, trtllm)
@@ -133,6 +172,32 @@ func withFeatures(f v1beta1.FeaturesSpec) func(*v1beta1.DynamoGraphDeploymentReq
 	}
 }
 
+func withOverrides(o v1beta1.OverridesSpec) func(*v1beta1.DynamoGraphDeploymentRequest) {
+	return func(d *v1beta1.DynamoGraphDeploymentRequest) {
+		if d.Spec.Overrides == nil {
+			d.Spec.Overrides = &o
+		} else {
+			// Merge: only set fields that the caller provided, so
+			// injectRecipeOverrides can still fill in ProfilingJob.
+			if o.DGD != nil {
+				d.Spec.Overrides.DGD = o.DGD
+			}
+			if o.ProfilingJob != nil {
+				d.Spec.Overrides.ProfilingJob = o.ProfilingJob
+			}
+		}
+	}
+}
+
+// dgdOverrideRawExtension builds a RawExtension containing a partial DGD manifest
+// suitable for OverridesSpec.DGD. The map should follow the DGD spec structure,
+// e.g. map[string]interface{}{"spec": map[string]interface{}{"services": ...}}.
+func dgdOverrideRawExtension(m map[string]interface{}) *k8sruntime.RawExtension {
+	raw, err := json.Marshal(m)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to marshal DGD override")
+	return &k8sruntime.RawExtension{Raw: raw}
+}
+
 // injectRecipeOverrides applies CLI-provided real-GPU overrides to a DGDR:
 // PVC model cache, totalGpus, and HF token secret env injection on the profiling job.
 // Existing user-set values on the DGDR are preserved.
@@ -219,9 +284,57 @@ func uniqueName(prefix string) string {
 }
 
 // createAndCleanup creates a DGDR and registers it for cleanup via DeferCleanup.
+// Cleanup deletes both the DGDR and its child DGD, then waits for all associated
+// pods to terminate so the next test starts with a clean slate (no GPU contention).
 func createAndCleanup(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
 	Expect(k8sClient.Create(ctx, dgdr)).To(Succeed(), "failed to create DGDR %s", dgdr.Name)
 	DeferCleanup(func() {
+		// Fetch the DGDR to discover its child DGD name before deleting.
+		var current v1beta1.DynamoGraphDeploymentRequest
+		if err := k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: dgdr.Namespace,
+			Name:      dgdr.Name,
+		}, &current); err == nil && current.Status.DGDName != "" {
+			dgdName := current.Status.DGDName
+
+			// Delete the DGD (it is not owned by the DGDR, so it won't be
+			// garbage-collected automatically).
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: dgdr.Namespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, dgd)
+
+			// Wait for the DGD object to be fully removed.
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: dgdr.Namespace,
+					Name:      dgdName,
+				}, &v1alpha1.DynamoGraphDeployment{})
+				return apierrors.IsNotFound(err)
+			}, 5*time.Minute, 5*time.Second).Should(BeTrue(),
+				"DGD %s should be fully deleted", dgdName)
+
+			// Wait for all pods belonging to this DGD to terminate.
+			dgdLabel := labels.SelectorFromSet(labels.Set{
+				"nvidia.com/dynamo-graph-deployment-name": dgdName,
+			})
+			Eventually(func() int {
+				var pods corev1.PodList
+				if err := k8sClient.List(ctx, &pods,
+					client.InNamespace(dgdr.Namespace),
+					client.MatchingLabelsSelector{Selector: dgdLabel},
+				); err != nil {
+					return -1
+				}
+				return len(pods.Items)
+			}, 5*time.Minute, 5*time.Second).Should(Equal(0),
+				"all pods for DGD %s should be terminated", dgdName)
+		}
+
+		// Delete the DGDR itself.
 		_ = k8sClient.Delete(ctx, dgdr)
 	})
 }
@@ -398,6 +511,83 @@ func verifyDGDServices(dgdName string, expectations map[string]ServiceExpectatio
 				Expect(*svcStatus.ReadyReplicas).To(Equal(svcStatus.Replicas),
 					"service %q readyReplicas should match replicas", svcName)
 			}
+		}
+	}
+}
+
+// verifyInference runs a smoke test against the DGD's frontend service to confirm
+// the model is actually serving. It checks v1/models and sends a short
+// v1/chat/completions request.
+func verifyInference(dgdName, model string) {
+	frontendURL := fmt.Sprintf("http://%s-frontend.%s.svc.cluster.local:8000", dgdName, flagNamespace)
+
+	// Build a short suffix for ephemeral pod names.
+	suffix := dgdName
+	if len(suffix) > 12 {
+		suffix = suffix[:12]
+	}
+
+	// v1/models — verify the model is listed
+	By("Checking v1/models endpoint")
+	modelsOut, modelsErr, err := kubectl("run", "inference-models-"+suffix,
+		"--rm", "-i", "--restart=Never",
+		"-n", flagNamespace,
+		"--image=curlimages/curl:latest",
+		"--", "curl", "-sf", "--max-time", "10",
+		frontendURL+"/v1/models",
+	)
+	Expect(err).NotTo(HaveOccurred(),
+		"v1/models request failed: stdout=%s stderr=%s", modelsOut, modelsErr)
+	Expect(modelsOut).To(ContainSubstring(model),
+		"v1/models response should contain model %s, got: %s", model, modelsOut)
+
+	// v1/chat/completions — verify the model can generate a response
+	By("Sending a chat completion request")
+	chatBody := fmt.Sprintf(
+		`{"model":"%s","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":16}`,
+		model)
+	chatOut, chatErr, err := kubectl("run", "inference-chat-"+suffix,
+		"--rm", "-i", "--restart=Never",
+		"-n", flagNamespace,
+		"--image=curlimages/curl:latest",
+		"--", "curl", "-sf", "--max-time", "60",
+		"-H", "Content-Type: application/json",
+		"-d", chatBody,
+		frontendURL+"/v1/chat/completions",
+	)
+	Expect(err).NotTo(HaveOccurred(),
+		"v1/chat/completions request failed: stdout=%s stderr=%s", chatOut, chatErr)
+	Expect(chatOut).To(ContainSubstring("choices"),
+		"chat response should contain 'choices', got: %s", chatOut)
+}
+
+// are Running with all containers ready. This catches cases where the DGD status
+// reports Ready/Successful but the underlying pods are not actually healthy.
+func verifyDGDPodsReady(dgdName string) {
+	dgdLabel := labels.SelectorFromSet(labels.Set{
+		"nvidia.com/dynamo-graph-deployment-name": dgdName,
+	})
+	var pods corev1.PodList
+	Expect(k8sClient.List(ctx, &pods,
+		client.InNamespace(flagNamespace),
+		client.MatchingLabelsSelector{Selector: dgdLabel},
+	)).To(Succeed(), "failed to list pods for DGD %s", dgdName)
+
+	Expect(pods.Items).NotTo(BeEmpty(),
+		"DGD %s should have at least one pod", dgdName)
+
+	for _, pod := range pods.Items {
+		// Skip completed pods (e.g. profiling jobs)
+		if pod.Status.Phase == corev1.PodSucceeded {
+			continue
+		}
+		By(fmt.Sprintf("Verifying pod %s is Running and Ready", pod.Name))
+		Expect(pod.Status.Phase).To(Equal(corev1.PodRunning),
+			"pod %s should be Running but is %s", pod.Name, pod.Status.Phase)
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			Expect(cs.Ready).To(BeTrue(),
+				"container %s in pod %s should be ready", cs.Name, pod.Name)
 		}
 	}
 }

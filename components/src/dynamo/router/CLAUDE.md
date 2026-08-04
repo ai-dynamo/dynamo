@@ -74,7 +74,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
 
 - Do not confuse router scheduler state with `RequestTracker`. KV overlap
   selection, active-request booking, output-block tracking, and cleanup can
-  work while response timing, worker attribution, and agent traces are
+  work while response timing, worker attribution, and enriched request traces are
   missing.
 
 - In the integrated Rust frontend, `DeltaGenerator` creates an
