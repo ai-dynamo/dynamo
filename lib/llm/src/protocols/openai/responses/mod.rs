@@ -5,11 +5,16 @@ pub mod stream_converter;
 
 use std::collections::HashMap;
 
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::{FromRequest, Request, rejection::MissingJsonContentType};
+use axum::http::{HeaderMap, header};
+use axum::response::{IntoResponse, Response as AxumResponse};
 use dynamo_protocols::types::responses::{
-    AssistantRole, CreateResponse, FunctionCallOutput, FunctionToolCall, IncludeEnum,
-    IncompleteDetails, InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
+    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
+    Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
+    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
     Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
     TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
@@ -38,7 +43,7 @@ use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`.
-#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.).
     ///
@@ -53,38 +58,79 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(Deserialize)]
-struct NvCreateResponseWire {
-    #[serde(flatten)]
-    inner: CreateResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nvext: Option<NvExt>,
-}
+/// Extract a Responses request through the typed fast path. Codex
+/// `agent_message` items are the sole fallback because they are not yet part
+/// of the released `dynamo-protocols` input type.
+pub struct NvCreateResponseJson(pub NvCreateResponse);
 
-impl<'de> Deserialize<'de> for NvCreateResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut value = serde_json::Value::deserialize(deserializer)?;
-        normalize_codex_agent_messages(&mut value).map_err(serde::de::Error::custom)?;
-        let wire = NvCreateResponseWire::deserialize(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            inner: wire.inner,
-            nvext: wire.nvext,
-        })
+impl<S> FromRequest<S> for NvCreateResponseJson
+where
+    S: Send + Sync,
+{
+    type Rejection = AxumResponse;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !is_json_content_type(request.headers()) {
+            return Err(MissingJsonContentType::default().into_response());
+        }
+        let bytes = Bytes::from_request(request, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        parse_nv_create_response(&bytes)
+            .map(Self)
+            .map_err(|response| *response)
     }
 }
 
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json"
+        || (media_type.starts_with("application/") && media_type.ends_with("+json"))
+}
+
+fn parse_nv_create_response(bytes: &[u8]) -> Result<NvCreateResponse, Box<AxumResponse>> {
+    let direct_error = match Json::<NvCreateResponse>::from_bytes(bytes) {
+        Ok(Json(request)) => return Ok(request),
+        Err(error) => error,
+    };
+
+    let Ok(mut body) = serde_json::from_slice(bytes) else {
+        return Err(Box::new(direct_error.into_response()));
+    };
+    let is_agent_message = normalize_codex_agent_messages(&mut body).map_err(|error| {
+        Box::new((axum::http::StatusCode::UNPROCESSABLE_ENTITY, error).into_response())
+    })?;
+    if !is_agent_message {
+        return Err(Box::new(direct_error.into_response()));
+    }
+
+    let normalized = serde_json::to_vec(&body).expect("serde_json::Value always serializes");
+    Json::<NvCreateResponse>::from_bytes(&normalized)
+        .map(|Json(request)| request)
+        .map_err(|error| Box::new(error.into_response()))
+}
+
 /// Convert Codex's task envelope into a standard input message.
-fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), String> {
+fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<bool, String> {
     let Some(items) = body
         .get_mut("input")
         .and_then(serde_json::Value::as_array_mut)
     else {
-        return Ok(());
+        return Ok(false);
     };
 
+    let mut is_agent_message = false;
     for item in items {
         let Some(message) = item.as_object() else {
             continue;
@@ -92,6 +138,7 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), St
         if message.get("type").and_then(serde_json::Value::as_str) != Some("agent_message") {
             continue;
         }
+        is_agent_message = true;
 
         let author = message
             .get("author")
@@ -143,7 +190,7 @@ fn normalize_codex_agent_messages(body: &mut serde_json::Value) -> Result<(), St
         });
     }
 
-    Ok(())
+    Ok(is_agent_message)
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -782,15 +829,14 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             )?,
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    match tool {
-                        NamespaceToolParamTool::Function(f) => push_function(
+                    if let NamespaceToolParamTool::Function(f) = tool {
+                        push_function(
                             &f.name,
                             &f.description,
                             &f.parameters,
                             f.strict,
                             format!("namespace '{}'", namespace.name),
-                        )?,
-                        _ => {}
+                        )?;
                     }
                 }
             }
@@ -3216,7 +3262,8 @@ thinking
             }],
         });
 
-        let req: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let body = serde_json::to_vec(&body).unwrap();
+        let req = parse_nv_create_response(&body).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let [ChatCompletionRequestMessage::User(message)] = &chat_req.inner.messages[..] else {
             panic!("expected one user message");
@@ -3241,7 +3288,8 @@ thinking
             }],
         });
 
-        let req: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let body = serde_json::to_vec(&body).unwrap();
+        let req = parse_nv_create_response(&body).unwrap();
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let [ChatCompletionRequestMessage::User(message)] = &chat_req.inner.messages[..] else {
             panic!("expected one user message");
@@ -3257,7 +3305,7 @@ thinking
 
     #[test]
     fn test_nvcreate_response_rejects_encrypted_codex_agent_message() {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": "m",
             "input": [{
                 "type": "agent_message",
@@ -3265,12 +3313,8 @@ thinking
             }],
         });
 
-        let error = serde_json::from_value::<NvCreateResponse>(body).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("encrypted content is unsupported")
-        );
+        let error = normalize_codex_agent_messages(&mut body).unwrap_err();
+        assert!(error.contains("encrypted content is unsupported"));
     }
 
     #[test]

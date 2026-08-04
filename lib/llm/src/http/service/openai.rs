@@ -2920,7 +2920,7 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    NvCreateResponseJson(mut request): NvCreateResponseJson,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
