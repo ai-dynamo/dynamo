@@ -9,9 +9,9 @@ import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
 var (
 	// CanaryHealthChecks gates the canary health-check rendering defaults
-	// introduced for Dynamo runtime 1.4.0.
+	// introduced for Dynamo runtime 1.5.0.
 	CanaryHealthChecks = Gate{
 		Name:              "CanaryHealthChecks",
-		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 4, Patch: 0},
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 5, Patch: 0},
 	}
 )

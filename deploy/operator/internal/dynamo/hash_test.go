@@ -297,6 +297,7 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 }
 
 func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) {
+	t.Log("define worker DGD construction from runtime image and override inputs")
 	newDGD := func(image, override string) *v1beta1.DynamoGraphDeployment {
 		dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -313,6 +314,7 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 		return dgd
 	}
 
+	t.Log("define runtime version worker hash comparisons")
 	tests := []struct {
 		name          string
 		leftImage     string
@@ -353,8 +355,11 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("compute worker hashes for both runtime version inputs")
 			left := mustComputeBetaDGDWorkersSpecHash(t, newDGD(tt.leftImage, tt.leftOverride))
 			right := mustComputeBetaDGDWorkersSpecHash(t, newDGD(tt.rightImage, tt.rightOverride))
+
+			t.Log("compare the worker hash behavior")
 			if tt.wantEqual {
 				assert.Equal(t, left, right)
 			} else {
