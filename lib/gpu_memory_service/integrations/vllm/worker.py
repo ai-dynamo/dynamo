@@ -100,8 +100,15 @@ if os.environ.get("MX_ENABLED", "0") == "1":
         ) from e
 
 
-# Import Worker after patches are applied
-from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
+# Import the correct base Worker class for the active platform.
+# XPUWorker provides XPU device init, oneCCL, and XPUModelRunner;
+# Worker (gpu_worker) is the CUDA default.
+from vllm.platforms import current_platform as _cp  # noqa: E402
+
+if _cp.is_xpu():
+    from vllm.v1.worker.xpu_worker import XPUWorker as _BaseWorker  # noqa: E402
+else:
+    from vllm.v1.worker.gpu_worker import Worker as _BaseWorker  # noqa: E402
 
 
 def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
@@ -142,7 +149,7 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
-class GMSWorker(Worker):
+class GMSWorker(_BaseWorker):
     """vLLM Worker subclass with GMS integration."""
 
     def init_device(self) -> None:
