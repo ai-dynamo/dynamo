@@ -62,6 +62,30 @@ fi
 # https://github.com/vllm-project/vllm-omni/commit/17cf60a63d240608653c4532084a4c00d6f02216
 VLLM_OMNI_CHERRY_PICK_COMMIT="17cf60a63d240608653c4532084a4c00d6f02216"
 
+# Releases from v0.26.0rc1 include the fix (with further surrounding changes,
+# so the reverse-apply probe below cannot detect it). Recognize the fixed
+# signature shape directly -- OmniRequest.__init__ declaring *args as its only
+# positional parameter after self -- and skip the cherry-pick.
+if python3 - <<'PY'
+import ast
+import importlib.util
+import pathlib
+import sys
+
+path = pathlib.Path(importlib.util.find_spec("vllm_omni.request").origin)
+for node in ast.walk(ast.parse(path.read_text())):
+    if isinstance(node, ast.ClassDef) and node.name == "OmniRequest":
+        for fn in node.body:
+            if isinstance(fn, ast.FunctionDef) and fn.name == "__init__":
+                fixed = fn.args.vararg is not None and len(fn.args.args) == 1
+                sys.exit(0 if fixed else 1)
+sys.exit(1)
+PY
+then
+  echo "vllm-omni OmniRequest already forwards *args first; skipping cherry-pick ${VLLM_OMNI_CHERRY_PICK_COMMIT}"
+  exit 0
+fi
+
 omni_site="$(python3 -c 'import importlib.util, os; print(os.path.dirname(os.path.dirname(importlib.util.find_spec("vllm_omni").origin)))')"
 full_patch="$(mktemp /tmp/vllm-omni-commit.XXXXXX.patch)"
 cherry_pick_patch="$(mktemp /tmp/vllm-omni-cherry-pick.XXXXXX.patch)"
