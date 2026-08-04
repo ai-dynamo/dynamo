@@ -27,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import get_lora_manager
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.input_params import InputParamManager
@@ -900,6 +901,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     "with a built-in route"
                 )
 
+        register_model_taint_route(runtime, self.generate_endpoint)
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
         for path, configured_handler in configured_routes:

@@ -11,6 +11,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
@@ -132,6 +133,7 @@ async def init_omni(
         await shutdown_event.wait()
         return
 
+    register_model_taint_route(runtime, generate_endpoint)
     model_type = get_output_modalities(config.output_modalities, config.model)
     if model_type is None:
         model_type = ModelType.Images

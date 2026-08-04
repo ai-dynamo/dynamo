@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.prometheus import register_embedding_cache_metrics
 from dynamo.llm import (
     ModelInput,
@@ -78,6 +79,7 @@ async def init_multimodal_encode_worker(
 
     ready_event = asyncio.Event()
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -172,6 +174,7 @@ async def init_multimodal_worker(
         readiness_worker_type = WorkerType.Aggregated
         readiness_needs = [[WorkerType.Encode]]
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -223,6 +226,7 @@ async def init_multimodal_prefill_worker(
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
+    register_model_taint_route(runtime, generate_endpoint)
     # No OpenAI surface (ModelType.Empty): internal prefill worker, reached via
     # the decode worker / prefill router, never by the frontend. Registers a
     # topology card so the serving-readiness gate counts it.
