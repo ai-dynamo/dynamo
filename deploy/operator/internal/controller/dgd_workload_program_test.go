@@ -60,6 +60,13 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 			provider:    workloadProviderGrove,
 			wantProgram: &groveProgram{},
 		},
+		{
+			name: "explicit DisaggregatedSet opt-in selects DS program",
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationEnableDisaggregatedSet: commonconsts.KubeLabelValueTrue,
+			},
+			wantProgram: &disaggregatedSetProgram{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -90,6 +97,13 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.workloads)
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
+			}
+			if ds, ok := got.(*disaggregatedSetProgram); ok {
+				assert.NotNil(t, ds.sharedResources)
+				assert.NotNil(t, ds.rollout)
+				assert.NotNil(t, ds.restart)
+				assert.NotNil(t, ds.workloads)
+				assert.NotNil(t, ds.scalingAdapters)
 			}
 		})
 	}

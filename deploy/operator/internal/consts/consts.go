@@ -40,7 +40,8 @@ const (
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
-	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	KubeAnnotationEnableGrove            = "nvidia.com/enable-grove"
+	KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
 	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"
