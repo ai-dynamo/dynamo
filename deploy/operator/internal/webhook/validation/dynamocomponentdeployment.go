@@ -159,10 +159,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCD updates preserve direct replica modification.
-	const (
-		canModifyReplicas                = true
-		validateGPUMemoryServiceNewState = false // ValidateUpdate already runs the stateless new-state traversal.
-	)
+	const canModifyReplicas = true
 
 	allErrs := field.ErrorList{}
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -180,7 +177,6 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		fldPath,
 		canModifyReplicas,
 		nvidiacomv1beta1.DynamoComponentDeploymentGVK.GroupKind(),
-		validateGPUMemoryServiceNewState,
 	)...)
 	return allErrs
 }
