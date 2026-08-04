@@ -12,17 +12,19 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS, `file://`, `data:` | Yes, H.264/H.265 | Yes, H.264/H.265 | Hardware-decoded on NVDEC, then encoded to embeddings |
+| **Video** | HTTP/HTTPS, `file://`, `data:` | Yes, H.264/H.265 | Yes, H.264/H.265 | Decoded on NVDEC; the vision encoder then produces embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
 > [!IMPORTANT]
 > **Video input is limited to H.264 and H.265, and requires a separate encode
-> worker.** The runtime image ships no software video decoder, so these codecs are
-> decoded on the GPU by NVDEC and no other codec (VP8, VP9, AV1) has a decoder
-> available.
+> worker.** The runtime image ships no software video decoder, so H.264 and H.265
+> video is decoded on the GPU by NVDEC. Video in any other format (VP8, VP9, AV1)
+> cannot be decoded at all.
 >
-> Hardware decode is wired into the encode worker
-> (`--disaggregation-mode encode`, as used by `multimodal_epd.sh`). In an
+> "Encode worker" here means Dynamo's `--disaggregation-mode encode` component,
+> which runs the model's vision encoder to turn frames into embeddings. It does
+> not encode video — nothing in this path produces a video stream. Hardware
+> decode is wired into that worker (as used by `multimodal_epd.sh`). In an
 > aggregated deployment SGLang resolves and decodes the media URL itself, so
 > Dynamo never sees the bytes and cannot route them to NVDEC — video input is
 > therefore unavailable in aggregated deployments of this image.
