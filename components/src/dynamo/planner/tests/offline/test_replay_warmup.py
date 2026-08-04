@@ -51,6 +51,9 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         def _is_easy_mode(self):
             return True
 
+        def set_bootstrap_metadata(self, metadata):
+            captured["bootstrap_metadata"] = metadata
+
     adapter = FakeAdapter()
 
     def fake_create_replay_planner_adapter(*, warmup_observations, **_kwargs):
@@ -87,3 +90,4 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         (1.0, 64.0, 4.0),
         (1.0, 128.0, 5.0),
     ]
+    assert captured["bootstrap_metadata"] == {"status": "not_required"}

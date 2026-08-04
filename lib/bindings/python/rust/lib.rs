@@ -189,6 +189,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     m.add_class::<DistributedRuntime>()?;
+    m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;

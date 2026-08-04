@@ -196,6 +196,8 @@ mod tests {
 /// consistent post-settlement snapshot (matching the old advance-then-tick ordering).
 #[derive(Debug)]
 pub struct ReplayScalingSnapshot {
+    /// Runtime-owned ordinal for this scaling callback.
+    pub tick_ordinal: u64,
     /// Simulated clock at this tick (equals the scheduled tick time).
     pub now_ms: f64,
     /// Latest prefill FPM snapshot per worker/rank observed since the previous tick (empty in

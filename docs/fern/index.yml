@@ -993,6 +993,8 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: pages/reference/components/runtime-configuration.mdx
+          - page: TLS Configuration
+            path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
           - page: Planner Configuration

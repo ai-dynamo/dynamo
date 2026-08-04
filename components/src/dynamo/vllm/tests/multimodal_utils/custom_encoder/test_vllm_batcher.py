@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.vllm.multimodal_utils.threaded_micro_batcher.
+"""Unit tests for the custom encoder threaded micro-batcher.
 
 Pin the execution contract: on_start + every fn call (+ on_stop) run on one
 dedicated thread (so CUDA-graph capture/replay share a thread), concurrent submits
@@ -19,7 +19,7 @@ from typing import Callable
 
 import pytest
 
-from dynamo.vllm.multimodal_utils.threaded_micro_batcher import ThreadedMicroBatcher
+from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
 
 pytestmark = [
     pytest.mark.unit,
