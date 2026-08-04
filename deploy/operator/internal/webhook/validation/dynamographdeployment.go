@@ -268,21 +268,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
-		if powerLimitValue, hasPowerLimit := dgdPowerLimit(component); hasPowerLimit {
-			powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
-			if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
-				allErrs = append(allErrs, err)
-			}
-			if draPath := dgdDRAPath(component, componentPath); draPath != nil {
-				allErrs = append(allErrs, field.Forbidden(
-					draPath,
-					fmt.Sprintf(
-						"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
-						consts.KubeAnnotationGPUPowerLimit,
-					),
-				))
-			}
-		}
+		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
@@ -727,4 +713,32 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyUpdate(
 		newPolicy,
 		"is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy",
 	)}
+}
+
+// validateDGDComponentPowerAnnotation validates the power-limit annotation value and
+// its incompatibility with DRA-backed GPU allocation on a single component.
+// component and componentPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+) field.ErrorList {
+	powerLimitValue, hasPowerLimit := dgdPowerLimit(component)
+	if !hasPowerLimit {
+		return nil
+	}
+	var allErrs field.ErrorList
+	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
+	if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
+		allErrs = append(allErrs, err)
+	}
+	if draPath := dgdDRAPath(component, componentPath); draPath != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			draPath,
+			fmt.Sprintf(
+				"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
+				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	}
+	return allErrs
 }
