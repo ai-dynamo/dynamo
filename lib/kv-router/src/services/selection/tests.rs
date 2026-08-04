@@ -5,9 +5,12 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tower::ServiceExt;
 
@@ -17,11 +20,14 @@ use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier,
-    WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
+use crate::scheduling::selector::WorkerSelector;
+use crate::scheduling::{KvSchedulerError, RoutingEligibility, SchedulingRequest};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -36,6 +42,44 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
+}
+
+struct HighestWorkerSelector {
+    calls: Arc<AtomicUsize>,
+    invalid_first: bool,
+}
+
+impl WorkerSelector<SelectionWorkerConfig> for HighestWorkerSelector {
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
+        _request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        _block_size: u32,
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.invalid_first && call == 0 {
+            return Ok(WorkerSelectionResult {
+                worker: WorkerWithDpRank::from_worker_id(WorkerId::MAX),
+                required_blocks: u64::MAX,
+                effective_overlap_blocks: f64::NAN,
+                cached_tokens: usize::MAX,
+                potential_decode_blocks: usize::MAX,
+            });
+        }
+        let mut selected = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            selected = selected.max(Some(worker));
+        });
+        let worker = selected.ok_or(KvSchedulerError::NoEndpoints)?;
+        Ok(WorkerSelectionResult {
+            worker,
+            required_blocks: u64::MAX,
+            effective_overlap_blocks: f64::NAN,
+            cached_tokens: usize::MAX,
+            potential_decode_blocks: usize::MAX,
+        })
+    }
 }
 
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
@@ -128,6 +172,152 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
         body["max_num_batched_tokens"] = serde_json::json!(max_tokens);
     }
     post(app, "/workers", &body.to_string()).await
+}
+
+#[derive(Default)]
+struct FactoryRendezvous {
+    arrivals: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl FactoryRendezvous {
+    fn wait_for_peer(&self) {
+        let mut arrivals = self.arrivals.lock().unwrap();
+        *arrivals += 1;
+        if *arrivals == 2 {
+            self.ready.notify_all();
+            return;
+        }
+
+        let (arrivals, _) = self
+            .ready
+            .wait_timeout_while(arrivals, Duration::from_secs(2), |arrivals| *arrivals < 2)
+            .unwrap();
+        assert_eq!(*arrivals, 2, "selector factories did not run concurrently");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_selector_factory_is_per_partition_and_books_selected_worker() {
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let factory_rendezvous = Arc::new(FactoryRendezvous::default());
+    let selector_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&factory_calls);
+    let rendezvous = Arc::clone(&factory_rendezvous);
+    let selections = Arc::clone(&selector_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            rendezvous.wait_for_peer();
+            Box::new(HighestWorkerSelector {
+                calls: Arc::clone(&selections),
+                invalid_first: false,
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+
+    let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
+    let other_app = app.clone();
+    let other_registration = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "worker_id": 3,
+            "model_name": "other-model",
+            "endpoint": "http://worker-3:8000",
+            "block_size": 4
+        });
+        post(other_app, "/workers", &body.to_string()).await
+    });
+    assert_eq!(
+        model_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        other_registration.await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+
+    let reserved = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"custom-selector"}"#,
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+    let reserved = response_json(reserved).await;
+    assert_eq!(reserved["worker_id"], 2);
+    assert_eq!(reserved["effective_prefill_tokens"], 4);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 1);
+
+    let loads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads?model_name=model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads).await;
+    let selected = loads[0]["loads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|load| load["worker_id"] == 2)
+        .unwrap();
+    assert_eq!(selected["active_requests"], 1);
+
+    assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn invalid_custom_selection_does_not_stop_partition() {
+    let selector_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&selector_calls);
+    let service = SelectionServiceBuilder::new(test_config())
+        .indexer_threads(1)
+        .worker_selector_factory(Box::new(move || {
+            Box::new(HighestWorkerSelector {
+                calls: Arc::clone(&calls),
+                invalid_first: true,
+            }) as Box<dyn WorkerSelector<SelectionWorkerConfig> + Send>
+        }))
+        .build()
+        .await
+        .expect("build selection service");
+    let app = create_router(Arc::new(AppState {
+        service: Arc::new(service),
+    }));
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let disallowed_pin = r#"{"model_name":"model","token_ids":[1,2,3,4],"pinned_worker":{"worker_id":1,"dp_rank":0},"allowed_worker_ids":[2]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", disallowed_pin).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 0);
+
+    let body = r#"{"model_name":"model","token_ids":[1,2,3,4]}"#;
+    assert_eq!(
+        post(app.clone(), "/select", body).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(post(app, "/select", body).await.status(), StatusCode::OK);
+    assert_eq!(selector_calls.load(Ordering::Relaxed), 2);
 }
 
 #[test]

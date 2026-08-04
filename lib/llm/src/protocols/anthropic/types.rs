@@ -132,9 +132,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 stream: Some(true), // Always stream internally
+                // Request cumulative usage on every chunk (not just the final
+                // one) so the Anthropic stream converter can stamp an
+                // authoritative per-chunk usage triple onto each
+                // `content_block_delta` and still report a token count if the
+                // client aborts mid-stream. Mirrors the running-usage behaviour
+                // of the OpenAI DeltaGenerator.
                 stream_options: Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                     include_usage: true,
-                    continuous_usage_stats: false,
+                    continuous_usage_stats: true,
                 }),
                 ..Default::default()
             },

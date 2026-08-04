@@ -1670,6 +1670,7 @@ dependencies = [
  "fastrand",
  "flume",
  "indexmap 2.14.0",
+ "once_cell",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
