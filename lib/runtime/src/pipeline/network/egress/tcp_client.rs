@@ -678,11 +678,26 @@ impl TcpConnection {
                     }
                     return Err(e.into());
                 }
+                // Flush after the batch write. `write_half` may be a tokio-rustls
+                // TLS stream, whose `poll_write` copies plaintext into the session
+                // buffer and can return Ready(Ok(n)) with encrypted records still
+                // buffered when the socket would block; without this flush the batch
+                // can stall under write back-pressure until the next request is
+                // written, hanging its callers until the request timeout. For a
+                // plaintext TCP write half this is a no-op.
+                if let Err(e) = write_half.flush().await {
+                    write_buf.clear();
+                    let err_msg = format!("Flush failed: {}", e);
+                    for tx in response_batch.drain(..) {
+                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    }
+                    return Err(e.into());
+                }
                 TCP_BYTES_SENT_TOTAL.inc_by(bytes_to_write as f64);
                 debug_assert!(write_buf.is_empty());
 
-                // Phase 3: write_all succeeded — data is committed to the wire.
-                // NOW push response_txs to response_queue so the reader can
+                // Phase 3: write_all + flush succeeded — data is committed to the
+                // wire. NOW push response_txs to response_queue so the reader can
                 // match them with incoming responses.
                 for tx in response_batch.drain(..) {
                     response_queue.push(tx);
