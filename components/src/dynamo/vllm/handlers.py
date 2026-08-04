@@ -98,6 +98,8 @@ from .multimodal_utils.custom_encoder import (
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
+    CUSTOM_ENCODER_DATA_KEY,
+    CUSTOM_ENCODER_DATA_VARIANT_KEY,
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
     MissingMultimodalHandoffError,
@@ -3037,7 +3039,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> tuple[EmbedsPrompt | TokensPrompt | None, Dict[str, Any] | None]:
         """Run the in-process CustomEncoder and prepare its engine prompt.
 
-        The CustomEncoder consumes image URLs directly and emits artifacts. Returns
+        The CustomEncoder consumes opaque inputs (or legacy image URLs) and emits
+        artifacts. Returns
         ``(prepared_prompt, error)``:
         - images present: ``(prepared_prompt, None)``,
         - no image content: ``(None, None)`` — text-only request, nothing
@@ -3055,37 +3058,86 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             raise RuntimeError(
                 "_assemble_custom_encoder_prompt called without an adapter"
             )
-        mm_map = request.get("multi_modal_data") or {}
-        # CustomEncoder handles images only. Reject any non-image modality
-        # (video/audio/...) explicitly instead of silently dropping it.
-        unsupported = sorted(k for k in mm_map if k != IMAGE_URL_KEY and mm_map.get(k))
+        raw_mm_map = request.get("multi_modal_data")
+        if raw_mm_map is not None and not isinstance(raw_mm_map, dict):
+            msg = "CustomEncoder multi_modal_data must be an object"
+            logger.error("Request %s: %s", request_id, msg)
+            return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+        mm_map = raw_mm_map or {}
+        # The custom encoder owns one image-like modality at a time. Reject
+        # unknown or mixed variants instead of silently dropping inputs.
+        supported_keys = {IMAGE_URL_KEY, CUSTOM_ENCODER_DATA_KEY}
+        unsupported = sorted(
+            k for k in mm_map if k not in supported_keys and mm_map.get(k)
+        )
         if unsupported:
             msg = (
-                "CustomEncoder supports image inputs only; got "
+                "CustomEncoder supports image-like inputs only; got "
                 f"unsupported multimodal data: {unsupported}"
             )
             logger.error("Request %s: %s", request_id, msg)
             return None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
-        image_items = mm_map.get(IMAGE_URL_KEY) or []
-        image_urls = [
-            item[URL_VARIANT_KEY]
-            for item in image_items
-            if isinstance(item, dict) and URL_VARIANT_KEY in item
-        ]
-        if len(image_urls) != len(image_items):
-            # At least one image item was malformed — not a dict with a 'Url'
-            # key (e.g. a pre-'Decoded' variant the CustomEncoder can't take).
-            # Reject the whole request instead of silently dropping images.
-            msg = (
-                "CustomEncoder received image multimodal data but only "
-                f"{len(image_urls)} of {len(image_items)} item(s) had a usable "
-                "'Url'; each item must be a dict with a 'Url' key"
-            )
+        raw_custom_items = mm_map.get(CUSTOM_ENCODER_DATA_KEY)
+        raw_image_items = mm_map.get(IMAGE_URL_KEY)
+        for modality, items in (
+            (CUSTOM_ENCODER_DATA_KEY, raw_custom_items),
+            (IMAGE_URL_KEY, raw_image_items),
+        ):
+            if items is not None and not isinstance(items, list):
+                msg = f"CustomEncoder {modality} must be a list"
+                logger.error("Request %s: %s", request_id, msg)
+                return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+        custom_items = raw_custom_items or []
+        image_items = raw_image_items or []
+        if custom_items and image_items:
+            msg = "CustomEncoder cannot combine custom_encoder_data with image_url"
             logger.error("Request %s: %s", request_id, msg)
             return None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
-        if not image_urls:
+        raw_inputs: list[Any] = []
+        if custom_items:
+            for index, item in enumerate(custom_items):
+                variant = (
+                    item.get(CUSTOM_ENCODER_DATA_VARIANT_KEY)
+                    if isinstance(item, dict)
+                    else None
+                )
+                if not isinstance(variant, dict) or "payload" not in variant:
+                    msg = (
+                        f"CustomEncoder input {index} must be a "
+                        f"'{CUSTOM_ENCODER_DATA_VARIANT_KEY}' object with a payload"
+                    )
+                    logger.error("Request %s: %s", request_id, msg)
+                    return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+                modality = variant.get("modality")
+                if modality != "image":
+                    msg = (
+                        f"CustomEncoder input {index} has unsupported modality "
+                        f"{modality!r}; only 'image' is currently supported"
+                    )
+                    logger.error("Request %s: %s", request_id, msg)
+                    return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+                raw_inputs.append(variant["payload"])
+        else:
+            image_urls = [
+                item[URL_VARIANT_KEY]
+                for item in image_items
+                if isinstance(item, dict) and URL_VARIANT_KEY in item
+            ]
+            if len(image_urls) != len(image_items):
+                # At least one image item was malformed — not a dict with a
+                # 'Url' key the legacy CustomEncoder path can consume.
+                msg = (
+                    "CustomEncoder received image multimodal data but only "
+                    f"{len(image_urls)} of {len(image_items)} item(s) had a usable "
+                    "'Url'; each item must be a dict with a 'Url' key"
+                )
+                logger.error("Request %s: %s", request_id, msg)
+                return None, {"finish_reason": f"error: {msg}", "token_ids": []}
+            raw_inputs = image_urls
+
+        if not raw_inputs:
             # No image items at all — and non-image modalities were already
             # rejected above — so there is nothing to assemble → text-only.
             return None, None
@@ -3097,7 +3149,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         try:
             # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
             # coalesces concurrent calls onto one dedicated actor thread.
-            artifacts = await self._custom_encoder.encode(image_urls)
+            artifacts = await self._custom_encoder.encode(raw_inputs)
             prepared = self._custom_encoder_adapter.prepare_prompt(
                 token_ids,
                 artifacts,
@@ -3139,8 +3191,30 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
-        has_mm_data = request.get("multi_modal_data") is not None
+        raw_mm_data = request.get("multi_modal_data")
+        has_mm_data = raw_mm_data is not None
+        if has_mm_data and not isinstance(raw_mm_data, dict):
+            msg = "multi_modal_data must be an object"
+            logger.error("Request %s: %s", request_id, msg)
+            yield {"finish_reason": f"error: {msg}", "token_ids": []}
+            return
+        raw_custom_items = (raw_mm_data or {}).get(CUSTOM_ENCODER_DATA_KEY)
+        if raw_custom_items is not None and not isinstance(raw_custom_items, list):
+            msg = "custom_encoder_data must be a list"
+            logger.error("Request %s: %s", request_id, msg)
+            yield {"finish_reason": f"error: {msg}", "token_ids": []}
+            return
+        has_custom_encoder_data = bool(raw_custom_items)
         custom_prompt: EmbedsPrompt | TokensPrompt | None = None
+
+        if has_custom_encoder_data and self._custom_encoder is None:
+            msg = (
+                "custom_encoder_data requires a worker configured with "
+                "--custom-encoder-class"
+            )
+            logger.error("Request %s: %s", request_id, msg)
+            yield {"finish_reason": f"error: {msg}", "token_ids": []}
+            return
 
         if (
             mode == DisaggregationMode.AGGREGATED
