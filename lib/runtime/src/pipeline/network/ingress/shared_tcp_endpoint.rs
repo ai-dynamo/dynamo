@@ -1260,4 +1260,82 @@ mod tests {
         );
         cancellation_token.cancel();
     }
+
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    #[tokio::test]
+    async fn new_no_tls_env_is_plaintext() {
+        let token = CancellationToken::new();
+        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
+            let server =
+                SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+            assert!(server.tls_acceptor.is_none());
+        });
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_partial_tls_config_errors() {
+        let (cert, key) = make_cert_files();
+        let cert_str = cert.path().to_str().unwrap();
+        let key_str = key.path().to_str().unwrap();
+        let token = CancellationToken::new();
+        // only cert set -> returns Err (must not panic)
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert_str)),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        // only key set -> returns Err
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key_str)),
+            ],
+            || {
+                assert!(
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).is_err()
+                );
+            },
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn new_both_paths_enables_tls() {
+        let (cert, key) = make_cert_files();
+        let token = CancellationToken::new();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+            ],
+            || {
+                let server =
+                    SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), token.clone()).unwrap();
+                assert!(server.tls_acceptor.is_some());
+            },
+        );
+        token.cancel();
+    }
 }
