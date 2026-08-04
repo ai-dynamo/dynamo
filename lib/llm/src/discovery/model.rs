@@ -15,6 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -94,6 +95,15 @@ pub(crate) struct AmbiguousPrefillRouterTopology {
     namespace: String,
     prefill_endpoints: Vec<String>,
     decode_endpoints: Vec<String>,
+}
+
+/// A generate engine and the routing metadata advertised by the same WorkerSet.
+#[derive(Clone)]
+pub struct GenerateEngineSelection {
+    pub engine: GenerateStreamingEngine,
+    pub kv_cache_block_size: u32,
+    pub lora_name: Option<String>,
+    pub supports_exact_mm_routing: bool,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -713,9 +723,27 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
-    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.generate_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    /// Select a generate engine and its routing metadata atomically from the
+    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
+    /// identity advertised by the worker set that will route the request.
+    pub fn get_generate_engine(&self) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|engine| GenerateEngineSelection {
+                    engine,
+                    kv_cache_block_size: ws.card().kv_cache_block_size,
+                    lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                    supports_exact_mm_routing: ws
+                        .card()
+                        .runtime_config
+                        .runtime_data
+                        .get(VLLM_EXACT_MM_ROUTING_CAPABILITY)
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -736,17 +764,6 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
-    }
-
-    pub fn get_generate_engine_with_parsing(
-        &self,
-    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.generate_engine
-                .clone()
-                .map(|e| (e, ws.parsing_options()))
-        })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -882,8 +899,27 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_card::ModelDeploymentCard;
+    use crate::model_card::{LoraInfo, ModelDeploymentCard};
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
+    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use async_trait::async_trait;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
     use tokio::sync::watch;
+
+    struct StubGenerateEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for StubGenerateEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unimplemented!("stub for generate engine selection tests only")
+        }
+    }
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
         Arc::new(WorkerSet::new(
@@ -891,6 +927,37 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
+    }
+
+    fn make_generate_worker_set(
+        namespace: &str,
+        block_size: u32,
+        lora_name: Option<&str>,
+        supports_exact_mm_routing: bool,
+    ) -> (
+        Arc<WorkerSet>,
+        GenerateStreamingEngine,
+        watch::Sender<Vec<u64>>,
+    ) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.kv_cache_block_size = block_size;
+        card.lora = lora_name.map(|name| LoraInfo {
+            name: name.to_string(),
+            max_gpu_lora_count: None,
+        });
+        card.runtime_config.runtime_data.insert(
+            VLLM_EXACT_MM_ROUTING_CAPABILITY.to_string(),
+            supports_exact_mm_routing.into(),
+        );
+
+        let engine: GenerateStreamingEngine = Arc::new(StubGenerateEngine);
+        let mut worker_set =
+            WorkerSet::new(namespace.to_string(), format!("{namespace}-checksum"), card);
+        worker_set.generate_engine = Some(engine.clone());
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), engine, worker_tx)
     }
 
     /// Create a WorkerSet backed by a watch channel so worker_count reflects the vec length.
@@ -1039,6 +1106,38 @@ mod tests {
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
         assert!(model.get_realtime_engine().is_err());
+        assert!(model.get_generate_engine().is_err());
+    }
+
+    #[test]
+    fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
+        let model = Model::new("generate-model".to_string());
+        let (worker_set_a, engine_a, worker_tx_a) =
+            make_generate_worker_set("ns-a", 16, None, false);
+        let (worker_set_b, engine_b, worker_tx_b) =
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true);
+        worker_tx_b.send(vec![]).expect("disable worker set B");
+        model.add_worker_set("ns-a".to_string(), worker_set_a);
+        model.add_worker_set("ns-b".to_string(), worker_set_b);
+
+        let selection_a = model
+            .get_generate_engine()
+            .expect("select live worker set A");
+        assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
+        assert_eq!(selection_a.kv_cache_block_size, 16);
+        assert_eq!(selection_a.lora_name, None);
+        assert!(!selection_a.supports_exact_mm_routing);
+
+        worker_tx_a.send(vec![]).expect("disable worker set A");
+        worker_tx_b.send(vec![2]).expect("enable worker set B");
+
+        let selection_b = model
+            .get_generate_engine()
+            .expect("select live worker set B");
+        assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
+        assert_eq!(selection_b.kv_cache_block_size, 32);
+        assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
+        assert!(selection_b.supports_exact_mm_routing);
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
