@@ -9,16 +9,6 @@ subtitle: Connect RL orchestrators to Dynamo inference and engine administration
 
 Dynamo can add value to RL rollout serving when the rollout plane needs more than a static inference endpoint. Advanced routing can steer rollout traffic across heterogeneous workers, weight synchronization with Model Express can help move updated checkpoints into serving quickly, fault tolerance can keep rollout generation available across worker failures, and autoscaling can match serving capacity to changing rollout demand during training.
 
-## Framework Integrations
-
-Use Dynamo as the rollout-serving plane behind an RL framework. The framework remains responsible for the training loop, reward pipeline, and policy update logic; Dynamo serves rollout generation, exposes backend-specific RL control surfaces, and provides production serving capabilities around the rollout workers.
-
-| Framework or example | Dynamo integration path | Status |
-|---|---|---|
-| [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Use the upstream verl recipe to run Dynamo as an async rollout backend with KV-aware routing, rollout token data, and weight-update control. | Available recipe |
-| [prime-rl Dynamo training recipes](https://github.com/PrimeIntellect-ai/prime-rl/pull/3180) | Train against an external Dynamo/vLLM rollout-serving stack using Dynamo worker discovery and weight-update control. The PR includes Dynamo example configs for Qwen3 0.6B Math, Qwen3 30B Thinking, and GLM-5.2 FP8 R2E. | Open PR |
-| [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint for `/generate` and per-worker `/engine` controls for pause, resume, cache flush, and NCCL weight updates. | Open PR |
-
 ## What This Page Covers
 
 | User need | Dynamo surface | Status |
