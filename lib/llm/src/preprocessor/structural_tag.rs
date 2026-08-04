@@ -43,6 +43,16 @@ impl OpenAIPreprocessor {
             return Ok(false);
         }
 
+        if should_skip_tool_call_ban(
+            self.runtime_config.exclude_tools_when_tool_choice_none,
+            tool_choice,
+        ) {
+            // The prompt formatter already omits tools for this request. Avoid
+            // sending a redundant AnyTokens structural tag: vLLM cannot
+            // validate token-string exclusions without tokenizer metadata.
+            return Ok(false);
+        }
+
         let Some(parser_name) = parser_name else {
             tracing::warn!(
                 "Structural tag is enabled but --dyn-tool-call-parser is not set; \
@@ -54,16 +64,6 @@ impl OpenAIPreprocessor {
         let Some(builder) = Self::structural_tag_builder_for_parser(parser_name) else {
             return Ok(false);
         };
-
-        if should_skip_tool_call_ban(
-            self.runtime_config.exclude_tools_when_tool_choice_none,
-            tool_choice,
-        ) {
-            // The prompt formatter already omits tools for this request. Avoid
-            // sending a redundant AnyTokens structural tag: vLLM cannot
-            // validate token-string exclusions without tokenizer metadata.
-            return Ok(false);
-        }
 
         if matches!(tool_choice, ToolChoice::None) {
             if tools.is_empty() {
