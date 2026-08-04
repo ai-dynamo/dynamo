@@ -160,8 +160,7 @@ impl AnthropicStreamConverter {
                 AnthropicStreamEvent::ContentBlockStart {
                     index: block_index,
                     content_block: AnthropicResponseContentBlock::ToolUse {
-                        // Minted at emission, not in `ToolCallState`: the dedup
-                        // above keys on the backend id, which must stay intact.
+                        // Generated at emission: the dedup above keys on the backend id.
                         id: new_tool_use_id(),
                         name: tool_call.name.clone(),
                         input: serde_json::json!({}),
@@ -1061,8 +1060,6 @@ mod tests {
             event_types(&finish),
             vec!["content_block_start", "content_block_stop"]
         );
-        // The backend id `call-1` must not reach the client: the emitted block
-        // carries a minted Anthropic-native id instead.
         assert!(matches!(
             &finish[0].data,
             AnthropicStreamEvent::ContentBlockStart {

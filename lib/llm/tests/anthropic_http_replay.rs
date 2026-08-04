@@ -153,9 +153,6 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
             .iter()
             .find(|event| event.event == "content_block_start")
             .expect("missing tool block start");
-        // The fixture's backend id is `call_list_directory`. Anthropic clients
-        // expect the native `toolu_` shape, so the emitted id is minted and the
-        // backend id must not appear on the wire.
         let block_id = start.data["content_block"]["id"].as_str().unwrap();
         assert!(
             block_id.starts_with("toolu_") && block_id.len() > "toolu_".len(),
@@ -311,9 +308,6 @@ async fn parallel_tools_preserve_identity_and_arguments() {
                 )
             })
             .collect();
-        // The fixture's two backend ids are `call_read_a` and `call_read_b`.
-        // Each emitted block must carry its own minted Anthropic-native id, so
-        // parallel calls stay individually addressable by the client.
         assert_eq!(
             starts
                 .iter()
@@ -329,7 +323,7 @@ async fn parallel_tools_preserve_identity_and_arguments() {
         }
         assert_ne!(
             starts[0].1, starts[1].1,
-            "parallel tool calls must receive distinct minted ids"
+            "parallel tool calls must receive distinct generated ids"
         );
 
         let mut arguments = BTreeMap::<u64, String>::new();
@@ -403,16 +397,14 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
         let prior_blocks = prior_content.as_array().expect("content must be an array");
         assert!(prior_blocks.iter().any(|block| block["type"] == "thinking"));
 
-        // The non-streamed path must also mint an Anthropic-native id: the
-        // fixture's backend id is `call_list_directory`.
         let tool_use = prior_blocks
             .iter()
             .find(|block| block["type"] == "tool_use")
             .expect("missing tool_use block");
-        let minted_id = tool_use["id"].as_str().unwrap().to_string();
+        let generated_id = tool_use["id"].as_str().unwrap().to_string();
         assert!(
-            minted_id.starts_with("toolu_") && minted_id.len() > "toolu_".len(),
-            "non-streamed tool_use id must be Anthropic-native, got {minted_id:?}"
+            generated_id.starts_with("toolu_") && generated_id.len() > "toolu_".len(),
+            "non-streamed tool_use id must be Anthropic-native, got {generated_id:?}"
         );
         assert_eq!(tool_use["name"], "list_directory");
         assert_eq!(tool_use["input"], json!({"path": "/tmp"}));
@@ -427,11 +419,9 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
                 "messages": [
                     {"role": "user", "content": "List /tmp"},
                     {"role": "assistant", "content": prior_content},
-                    // A real client echoes back the id it was handed, so the
-                    // second turn carries the minted id, not the backend one.
                     {"role": "user", "content": [{
                         "type": "tool_result",
-                        "tool_use_id": minted_id,
+                        "tool_use_id": generated_id,
                         "content": "a.txt"
                     }]}
                 ]
@@ -468,15 +458,12 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
                         .to_flat_string(),
                     "I should inspect the directory."
                 );
-                // The echoed id passes through to the engine unrewritten, and —
-                // the invariant that actually matters — the assistant call and
-                // its tool result still agree, so no id map is needed.
                 let calls = assistant.tool_calls.as_deref().expect("tool calls missing");
                 assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].id, minted_id);
+                assert_eq!(calls[0].id, generated_id);
                 assert_eq!(calls[0].function.name, "list_directory");
                 assert_eq!(calls[0].function.arguments, r#"{"path":"/tmp"}"#);
-                assert_eq!(tool_result.tool_call_id, minted_id);
+                assert_eq!(tool_result.tool_call_id, generated_id);
                 assert!(matches!(
                     &tool_result.content,
                     ChatCompletionRequestToolMessageContent::Text(text) if text == "a.txt"
