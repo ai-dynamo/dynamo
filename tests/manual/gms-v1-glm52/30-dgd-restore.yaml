@@ -89,7 +89,7 @@ spec:
             - name: main
               # Frontend can use the plain runtime image - it is not a CRIU target.
               # Using the placeholder too keeps the tag set to one value.
-              # TODO: confirm this matches the tag produced by build-on-demand.
+              # Verified present in ACR (build-on-demand run 30895328284).
               # Keep in lockstep with 20-dynamocheckpoint.yaml - the restore
               # container must be the SAME image the checkpoint was captured
               # from. The `&image` anchor covers the frontend, the restored
@@ -98,7 +98,7 @@ spec:
               # /usr/local/bin/nsrestore from its filesystem
               # (executor/restore.go:206-210, snapshot values.yaml:176).
               # See 06-placeholder-image.md.
-              image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-placeholder
+              image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-584202bf08bc11a71484cfaac28ba99683db881f-vllm-placeholder
               imagePullPolicy: Always
 
     # ---------------------------------------------------------------

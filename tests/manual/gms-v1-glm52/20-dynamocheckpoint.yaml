@@ -202,7 +202,7 @@ spec:
         # =================================================================
         initContainers:
           - name: gms-server
-            # TODO: confirm this matches the tag produced by build-on-demand.
+            # Verified present in ACR (build-on-demand run 30895328284).
             # The `&image` anchor sets the image for ALL THREE containers
             # (gms-server, main, gms-saver). Change it here only.
             # MUST be -vllm-placeholder, NOT -vllm-runtime: with 8 GPUs the
@@ -217,7 +217,7 @@ spec:
             # The tag below assumes the dispatched branch head is 05dac0c7...;
             # otherwise use the ACR tag printed in the run's step summary.
             # See 06-placeholder-image.md.
-            image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-placeholder
+            image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-584202bf08bc11a71484cfaac28ba99683db881f-vllm-placeholder
             imagePullPolicy: Always
             restartPolicy: Always
             command: ["python3", "-m", "gpu_memory_service.cli.server"]
