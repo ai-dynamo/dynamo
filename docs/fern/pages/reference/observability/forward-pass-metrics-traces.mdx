@@ -17,7 +17,6 @@ publication.
 | `DYN_FPM_OUTPUT_PATH` | `/tmp/dynamo-fpm` | Output prefix. Files use `<prefix>.<producer-id>.<index>.jsonl.gz`. |
 | `DYN_FPM_MODE` | `sampled` | `sampled` keeps the latest changed record per worker and data-parallel rank; `full` captures every valid payload. |
 | `DYN_FPM_SAMPLE_INTERVAL_MS` | `5000` | Positive sampling interval. Validated in both modes and used only in `sampled` mode. |
-| `OTEL_TRACES_SAMPLE_RATIO` | unset | Optional `[0.0, 1.0]` ratio shared with runtime spans and request traces. It filters FPM rows after mode and interval selection, using a stable source, worker, rank, and counter key. |
 | `DYN_FPM_JSONL_GZ_ROLL_BYTES` | `268435456` | Positive uncompressed-byte threshold. Dynamo rolls before the next JSONL row would exceed it. |
 | `DYN_FPM_MAX_SEGMENTS` | `4` | Positive number of segments retained per producer, including the active segment. |
 
@@ -53,9 +52,6 @@ graceful shutdown.
 In `full` mode, Dynamo writes every valid payload, including idle heartbeats. Each writer flushes a
 non-empty batch every second and can flush sooner when its 1 MiB buffer fills. Producer enqueueing is
 nonblocking in both modes; a bounded queue drops trace records instead of delaying inference.
-
-When `OTEL_TRACES_SAMPLE_RATIO` is set, Dynamo filters selected FPM rows after this mode-specific
-selection. It does not change `DYN_FPM_MODE` or `DYN_FPM_SAMPLE_INTERVAL_MS`.
 
 ## File and Retention Semantics
 

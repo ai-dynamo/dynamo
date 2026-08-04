@@ -15,6 +15,7 @@ one or more sinks. For the capture and replay workflow, see
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool` | Comma-separated record types. Setting the variable enables only the listed types. |
+| `DYN_REQUEST_TRACE_SAMPLE_RATIO` | unset | `[0.0, 1.0]` | Deterministic record ratio applied before sink fan-out. Agent records use the session ID; other records use the request ID. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
@@ -33,10 +34,11 @@ Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 `DYN_REQUEST_TRACE_JSONL_*` remain migration aliases. `DYN_AUDIT_*` variables are migration shims,
 not wire-compatibility aliases. Prefer `DYN_REQUEST_TRACE_*` for new deployments.
 
-`OTEL_TRACES_SAMPLE_RATIO` also applies to request-trace records before fan-out. Dynamo uses the
-agent session ID for agent request and tool rows, and a stable request ID for other request-end and
-payload rows. A selected record is written to every configured sink and a rejected record is written
-to none. Legacy payload capture enabled by `DYN_AUDIT_FORCE_LOGGING` remains unsampled.
+`DYN_REQUEST_TRACE_SAMPLE_RATIO` applies to request-trace records before fan-out. Dynamo uses the
+agent session ID for agent request, payload, and tool rows, and a stable request ID for other
+request-end and payload rows. A selected record is written to every configured sink and a rejected
+record is written to none. Legacy payload capture enabled by `DYN_AUDIT_FORCE_LOGGING` remains
+unsampled.
 
 ## Sink Behavior
 

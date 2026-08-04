@@ -21,7 +21,6 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
-    from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
     from dynamo.profiler.utils.defaults import (
         DYNAMO_RUN_DEFAULT_PORT,
         EngineType,

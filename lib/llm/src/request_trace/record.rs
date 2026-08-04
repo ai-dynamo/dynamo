@@ -14,7 +14,6 @@ use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
 use super::RequestTraceSchema;
-use super::publish;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()
@@ -54,6 +53,9 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
+    if !super::config::should_emit_request(None, &request_id) {
+        return;
+    }
     let request_received_ms = tracker.request_received_epoch_ms();
     let event_time_unix_ms = tracker
         .total_time_ms()
@@ -82,7 +84,7 @@ pub(crate) fn emit_request_end(
         finish_reason_metadata: None,
     };
 
-    publish(RequestTraceRecord {
+    super::publish_selected(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
         event_type: RequestTraceEventType::RequestEnd,
         event_time_unix_ms,
@@ -98,8 +100,11 @@ pub(crate) fn emit_agent_request_end(
     agent_context: AgentContext,
     mut request: RequestTraceMetrics,
 ) {
+    if !super::config::should_emit_request(Some(&agent_context.session_id), &request.request_id) {
+        return;
+    }
     sanitize_request(&mut request);
-    publish(RequestTraceRecord {
+    super::publish_selected(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
         event_type: RequestTraceEventType::RequestEnd,
         event_time_unix_ms: event_time_unix_ms_from_request(&request),
@@ -111,8 +116,12 @@ pub(crate) fn emit_agent_request_end(
     });
 }
 
-pub(crate) fn emit_request_payload(payload: RequestTracePayload, event_time_unix_ms: u64) {
-    publish(RequestTraceRecord {
+pub(crate) fn emit_request_payload(
+    payload: RequestTracePayload,
+    event_time_unix_ms: u64,
+    sampled: bool,
+) {
+    let record = RequestTraceRecord {
         schema: RequestTraceSchema::V1,
         event_type: RequestTraceEventType::RequestPayload,
         event_time_unix_ms,
@@ -121,7 +130,10 @@ pub(crate) fn emit_request_payload(payload: RequestTracePayload, event_time_unix
         request: None,
         tool: None,
         payload: Some(payload),
-    });
+    };
+    if sampled {
+        super::publish_selected(record);
+    }
 }
 
 pub(crate) fn publish_tool_record(record: RequestTraceRecord) {
@@ -138,7 +150,15 @@ pub(crate) fn publish_tool_record(record: RequestTraceRecord) {
         return;
     }
 
-    publish(record);
+    if super::config::should_emit_request(
+        record
+            .agent_context
+            .as_ref()
+            .map(|context| context.session_id.as_str()),
+        "",
+    ) {
+        super::publish_selected(record);
+    }
 }
 
 pub(crate) fn validate_tool_record(record: &RequestTraceRecord) -> anyhow::Result<()> {
