@@ -22,6 +22,10 @@ fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &To
     is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_))
 }
 
+fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
+    exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
+}
+
 impl OpenAIPreprocessor {
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
@@ -50,6 +54,16 @@ impl OpenAIPreprocessor {
         let Some(builder) = Self::structural_tag_builder_for_parser(parser_name) else {
             return Ok(false);
         };
+
+        if should_skip_tool_call_ban(
+            self.runtime_config.exclude_tools_when_tool_choice_none,
+            tool_choice,
+        ) {
+            // The prompt formatter already omits tools for this request. Avoid
+            // sending a redundant AnyTokens structural tag: vLLM cannot
+            // validate token-string exclusions without tokenizer metadata.
+            return Ok(false);
+        }
 
         if matches!(tool_choice, ToolChoice::None) {
             if tools.is_empty() {
@@ -197,5 +211,12 @@ mod tests {
             Some("hermes"),
             &ToolChoice::Named("get_weather".to_string())
         ));
+    }
+
+    #[test]
+    fn tool_choice_none_skips_structural_tag_when_tools_are_excluded() {
+        assert!(should_skip_tool_call_ban(true, &ToolChoice::None));
+        assert!(!should_skip_tool_call_ban(false, &ToolChoice::None));
+        assert!(!should_skip_tool_call_ban(true, &ToolChoice::Required));
     }
 }
