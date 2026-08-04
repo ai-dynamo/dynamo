@@ -14,9 +14,7 @@ MODEL_TAINT_ROUTE = "update/model_taints"
 TOPOLOGY_TAINT_PREFIX = "dynamo.topology/"
 
 
-def register_model_taint_route(
-    runtime: DistributedRuntime, endpoint: Endpoint
-) -> None:
+def register_model_taint_route(runtime: DistributedRuntime, endpoint: Endpoint) -> None:
     """Register POST /engine/update/model_taints on the system status server."""
 
     async def _update_model_taints(body: dict[str, Any]) -> dict[str, Any]:
@@ -36,20 +34,11 @@ def register_model_taint_route(
                 f"taint '{reserved}' uses reserved prefix '{TOPOLOGY_TAINT_PREFIX}'"
             )
 
-        lora_name = body.get("lora_name")
-        if lora_name is not None and not isinstance(lora_name, str):
-            raise ValueError("'lora_name' must be a string or null")
-
         unique_taints = set(taints)
-        await update_model_taints(
-            endpoint,
-            unique_taints,
-            lora_name=lora_name,
-        )
+        await update_model_taints(endpoint, unique_taints)
         return {
             "status": "ok",
             "taints": sorted(unique_taints),
-            "lora_name": lora_name,
         }
 
     runtime.register_engine_route(MODEL_TAINT_ROUTE, _update_model_taints)

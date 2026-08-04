@@ -485,7 +485,6 @@ pub async fn register_model_card(
 pub async fn update_model_taints(
     endpoint: &Endpoint,
     taints: HashSet<String>,
-    lora_name: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(taint) = taints
         .iter()
@@ -496,7 +495,6 @@ pub async fn update_model_taints(
 
     let endpoint_id = endpoint.id();
     let instance_id = endpoint.drt().connection_id();
-    let model_suffix = derive_lora_suffix(lora_name);
     let discovery = endpoint.drt().discovery();
     let existing = discovery
         .list(DiscoveryQuery::EndpointModels {
@@ -513,16 +511,12 @@ pub async fn update_model_taints(
                     instance_id: candidate_instance_id,
                     model_suffix: candidate_suffix,
                     ..
-                } if *candidate_instance_id == instance_id && candidate_suffix == &model_suffix
+                } if *candidate_instance_id == instance_id && candidate_suffix.is_none()
             )
         })
         .with_context(|| {
-            let suffix = model_suffix
-                .as_deref()
-                .map(|suffix| format!("/{suffix}"))
-                .unwrap_or_default();
             format!(
-                "model discovery record {}/{}/{}/{instance_id:x}{suffix} is not registered",
+                "base model discovery record {}/{}/{}/{instance_id:x} is not registered",
                 endpoint_id.namespace, endpoint_id.component, endpoint_id.name
             )
         })?;
@@ -539,7 +533,7 @@ pub async fn update_model_taints(
         endpoint_id.component,
         endpoint_id.name,
         &card,
-        model_suffix,
+        None,
     )?;
     discovery.update_model(spec).await?;
     Ok(())
