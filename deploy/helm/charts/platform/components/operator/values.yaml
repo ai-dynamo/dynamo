@@ -208,8 +208,9 @@ webhook:
   caBundle: ""
 
   # Webhook failure policy
-  # Fail: Reject requests if webhook is unavailable (recommended for production)
-  # Ignore: Allow requests if webhook is unavailable
+  # Fail: Reject requests if webhook is unavailable (required for normal operation)
+  # Ignore: Emergency-only bypass. Pause Dynamo resource writes, restore Fail
+  # immediately after recovery, and audit every resource changed during the bypass.
   failurePolicy: Fail
   # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook.
   # Defaults to Ignore so a webhook outage falls back to cold-start instead of

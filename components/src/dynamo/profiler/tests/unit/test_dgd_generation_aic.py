@@ -19,11 +19,13 @@ try:
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
     )
+    from dynamo.profiler.utils.dgd_template import load_dgd_template
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         MockerSpec,
     )
+    from dynamo.profiler.utils.profile_common import needs_profile_data
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
 
@@ -38,6 +40,7 @@ def _dgdr(
     planner: PlannerConfig | None = None,
     model: str = "Qwen/Qwen3-32B",
     mocker_enabled: bool = False,
+    search_strategy: str = "rapid",
 ) -> DynamoGraphDeploymentRequestSpec:
     features = None
     if planner is not None or mocker_enabled:
@@ -45,7 +48,11 @@ def _dgdr(
             planner=planner,
             mocker=MockerSpec(enabled=True) if mocker_enabled else None,
         )
-    return DynamoGraphDeploymentRequestSpec(model=model, features=features)
+    return DynamoGraphDeploymentRequestSpec(
+        model=model,
+        features=features,
+        searchStrategy=search_strategy,
+    )
 
 
 class TestBuildAICInterpolationSpec:
@@ -198,6 +205,46 @@ class TestBuildAICInterpolationSpec:
         )
         assert isinstance(spec, AICInterpolationSpec)
         assert spec.backend == "trtllm"
+
+    def test_mocker_only_rapid_produces_spec(self):
+        """Mocker-only rapid requests use the DGDR search strategy."""
+        dgdr = _dgdr(mocker_enabled=True)
+        pick = PickedParallelConfig(tp=1, dp=8, moe_ep=8)
+
+        spec = build_aic_interpolation_spec(
+            dgdr,
+            best_prefill_pick=pick,
+            best_decode_pick=pick,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            resolved_backend="trtllm",
+            system="h200_sxm",
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+        )
+
+        assert isinstance(spec, AICInterpolationSpec)
+
+    def test_mocker_only_thorough_returns_none(self):
+        """Mocker-only thorough requests consume generated NPZ data."""
+        dgdr = _dgdr(mocker_enabled=True, search_strategy="thorough")
+        pick = PickedParallelConfig(tp=1, dp=8, moe_ep=8)
+
+        spec = build_aic_interpolation_spec(
+            dgdr,
+            best_prefill_pick=pick,
+            best_decode_pick=pick,
+            isl=1000,
+            osl=100,
+            sweep_max_context_length=4096,
+            resolved_backend="trtllm",
+            system="h200_sxm",
+            prefill_interpolation_granularity=8,
+            decode_interpolation_granularity=4,
+        )
+
+        assert spec is None
 
 
 class TestInjectMockerAicArgs:
@@ -360,10 +407,18 @@ class TestBuildPlannerConfigEmbedsAicSpec:
 
 
 class TestNeedsProfileDataRapid:
+    def test_mocker_only_rapid_returns_false(self):
+        """Mocker-only rapid uses AIC directly instead of profile files."""
+        dgdr = _dgdr(mocker_enabled=True)
+        assert needs_profile_data(dgdr) is False
+
+    def test_mocker_only_thorough_returns_true(self):
+        """Mocker-only thorough still consumes generated profile files."""
+        dgdr = _dgdr(mocker_enabled=True, search_strategy="thorough")
+        assert needs_profile_data(dgdr) is True
+
     def test_rapid_planner_only_returns_false(self):
         """Planner-only rapid: no files needed; planner will use aic_spec."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -375,8 +430,6 @@ class TestNeedsProfileDataRapid:
 
     def test_thorough_planner_returns_true(self):
         """Thorough still needs files."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -388,8 +441,6 @@ class TestNeedsProfileDataRapid:
 
     def test_none_planner_only_returns_false(self):
         """Planner-only none mode can warm from native AIC or live FPMs."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -401,8 +452,6 @@ class TestNeedsProfileDataRapid:
 
     def test_mocker_rapid_returns_false(self):
         """Mocker + rapid: mocker pulls AIC perf data at runtime; no NPZ files."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -414,8 +463,6 @@ class TestNeedsProfileDataRapid:
 
     def test_mocker_thorough_returns_true(self):
         """Mocker + thorough: mocker consumes real-GPU NPZ."""
-        from dynamo.profiler.utils.profile_common import needs_profile_data
-
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -426,8 +473,31 @@ class TestNeedsProfileDataRapid:
         assert needs_profile_data(dgdr) is True
 
 
-def _benchmark_mode(svc: dict) -> str | None:
-    env = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("env", [])
+def _component(name: str, component_type: str, **container_fields) -> dict:
+    return {
+        "name": name,
+        "type": component_type,
+        "podTemplate": {
+            "spec": {
+                "containers": [{"name": "main", **container_fields}],
+            }
+        },
+    }
+
+
+def _component_map(config: dict) -> dict[str, dict]:
+    return {
+        component["name"]: component
+        for component in config.get("spec", {}).get("components", [])
+    }
+
+
+def _main_container(component: dict) -> dict:
+    return component["podTemplate"]["spec"]["containers"][0]
+
+
+def _benchmark_mode(component: dict) -> str | None:
+    env = _main_container(component).get("env", [])
     for e in env:
         if isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE":
             return e.get("value")
@@ -438,91 +508,100 @@ class TestEnableVllmBenchmarkMode:
     def test_disagg_sets_prefill_and_decode(self):
         cfg = {
             "spec": {
-                "services": {
-                    "Frontend": {},
-                    "VllmPrefillWorker": {},
-                    "VllmDecodeWorker": {},
-                }
+                "components": [
+                    _component("Frontend", "frontend"),
+                    _component("VllmPrefillWorker", "prefill"),
+                    _component("VllmDecodeWorker", "decode"),
+                ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        services = cfg["spec"]["services"]
-        assert _benchmark_mode(services["VllmPrefillWorker"]) == "prefill"
-        assert _benchmark_mode(services["VllmDecodeWorker"]) == "decode"
-        # Frontend service is untouched — no env list injected.
-        assert "env" not in services["Frontend"].get("extraPodSpec", {}).get(
-            "mainContainer", {}
-        )
+        components = _component_map(cfg)
+        assert _benchmark_mode(components["VllmPrefillWorker"]) == "prefill"
+        assert _benchmark_mode(components["VllmDecodeWorker"]) == "decode"
+        assert "env" not in _main_container(components["Frontend"])
 
     def test_agg_sets_single_worker(self):
-        cfg = {"spec": {"services": {"Frontend": {}, "VllmWorker": {}}}}
+        cfg = {
+            "spec": {
+                "components": [
+                    _component("Frontend", "frontend"),
+                    _component("VllmWorker", "worker"),
+                ]
+            }
+        }
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(cfg["spec"]["services"]["VllmWorker"]) == "agg"
+        assert _benchmark_mode(_component_map(cfg)["VllmWorker"]) == "agg"
+
+    def test_agg_template_sets_single_generic_worker(self):
+        cfg = load_dgd_template("vllm", "agg")
+
+        enable_vllm_benchmark_mode(cfg)
+
+        worker = next(
+            component
+            for component in cfg["spec"]["components"]
+            if component["type"] == "worker"
+        )
+        assert worker["name"] == "VllmDecodeWorker"
+        assert _benchmark_mode(worker) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
         # incorrect role; the helper must overwrite with the canonical value.
         cfg = {
             "spec": {
-                "services": {
-                    "VllmDecodeWorker": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "env": [
-                                    {"name": "SOMETHING_ELSE", "value": "keep"},
-                                    {"name": "DYN_BENCHMARK_MODE", "value": "wrong"},
-                                ]
-                            }
-                        }
-                    }
-                }
+                "components": [
+                    _component(
+                        "VllmDecodeWorker",
+                        "decode",
+                        env=[
+                            {"name": "SOMETHING_ELSE", "value": "keep"},
+                            {"name": "DYN_BENCHMARK_MODE", "value": "wrong"},
+                        ],
+                    )
+                ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        env = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-            "mainContainer"
-        ]["env"]
+        component = _component_map(cfg)["VllmDecodeWorker"]
+        env = _main_container(component)["env"]
         names = [e["name"] for e in env]
         assert names.count("DYN_BENCHMARK_MODE") == 1
-        assert _benchmark_mode(cfg["spec"]["services"]["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(component) == "decode"
         # Unrelated env vars are preserved.
         assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
 
-    def test_non_vllm_services_unchanged(self):
+    def test_non_vllm_components_unchanged(self):
         cfg = {
             "spec": {
-                "services": {
-                    "prefill": {},
-                    "decode": {},
-                    "Frontend": {},
-                }
+                "components": [
+                    _component("prefill", "prefill"),
+                    _component("decode", "decode"),
+                    _component("Frontend", "frontend"),
+                ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        for svc in cfg["spec"]["services"].values():
-            assert _benchmark_mode(svc) is None
+        for component in cfg["spec"]["components"]:
+            assert _benchmark_mode(component) is None
 
-    def test_preserves_unrelated_service_keys(self):
+    def test_preserves_unrelated_component_keys(self):
         cfg = {
             "spec": {
-                "services": {
-                    "VllmPrefillWorker": {
-                        "extraPodSpec": {
-                            "mainContainer": {
-                                "image": "nvcr.io/foo:1.0",
-                                "args": ["--model-path", "x"],
-                            }
-                        }
-                    }
-                }
+                "components": [
+                    _component(
+                        "VllmPrefillWorker",
+                        "prefill",
+                        image="nvcr.io/foo:1.0",
+                        args=["--model-path", "x"],
+                    )
+                ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        mc = cfg["spec"]["services"]["VllmPrefillWorker"]["extraPodSpec"][
-            "mainContainer"
-        ]
+        component = _component_map(cfg)["VllmPrefillWorker"]
+        mc = _main_container(component)
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]
-        assert (
-            _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
-        )
+        assert _benchmark_mode(component) == "prefill"

@@ -2113,9 +2113,8 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
 }
 
-// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
 // cliqueParams groups the context needed to build a single PodClique template
-// from a ServiceRole. All fields come from the enclosing GenerateGrovePodCliqueSet
+// from a ServiceRole. All fields come from the enclosing Grove render
 // loop iteration and are read-only.
 type cliqueParams struct {
 	r                           ServiceRole
@@ -2137,8 +2136,7 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	kubeClient                  ctrlclient.Client
-	ctx                         context.Context
+	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 }
 
@@ -2164,9 +2162,15 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
 	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
-		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
-			p.operatorConfig.Checkpoint.Storage,
+		if p.checkpointInfo != nil &&
+			p.checkpointInfo.Enabled &&
+			p.checkpointInfo.Ready &&
+			p.checkpointRestore == nil {
+			return nil, fmt.Errorf("resolved checkpoint restore is required for role %s", p.r.Name)
+		}
+		if err := checkpoint.InjectResolvedCheckpointIntoPodSpec(
+			podSpec,
+			p.checkpointRestore,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
@@ -2285,16 +2289,16 @@ func applyRestartAnnotation(annotations map[string]string, componentName string,
 	return annotations
 }
 
-func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclient.Client, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
+func resolveGroveClusterTopologyDomains(ctx context.Context, reader ctrlclient.Reader, kvt *v1beta1.KvTransferPolicy) ([]v1beta1.TopologyDomain, error) {
 	if kvt == nil || kvt.ClusterTopologyName == "" {
 		return nil, nil
 	}
-	if kubeClient == nil {
+	if reader == nil {
 		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
 	ct := &grovev1alpha1.ClusterTopologyBinding{}
-	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
@@ -2329,7 +2333,11 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 	return false
 }
 
-func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
+func resolveGroveSchedulerQueue(
+	ctx context.Context,
+	annotations map[string]string,
+	runtimeConfig *controller_common.RuntimeConfig,
+) (string, error) {
 	if runtimeConfig.Gate.Enabled(features.Grove) && runtimeConfig.Gate.Enabled(features.KaiScheduler) && runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
 	}
@@ -2344,17 +2352,30 @@ func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]stri
 	return queueName, nil
 }
 
+// GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
+// desired PodCliqueSet. Resolved domain values stay local and are passed to
+// the leaf rendering helpers that consume them.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Client,
+	reader ctrlclient.Reader,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
+	if dynamoDeployment == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
+	}
+	if operatorConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without operator configuration")
+	}
+	if runtimeConfig == nil {
+		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without runtime configuration")
+	}
+
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Components)
 	gangSet.Namespace = dynamoDeployment.Namespace
@@ -2401,7 +2422,7 @@ func GenerateGrovePodCliqueSet(
 	var groveClusterTopologyDomains []v1beta1.TopologyDomain
 	if dynamoDeployment.Spec.Experimental != nil {
 		var err error
-		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, kubeClient, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+		groveClusterTopologyDomains, err = resolveGroveClusterTopologyDomains(ctx, reader, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -2433,6 +2454,22 @@ func GenerateGrovePodCliqueSet(
 		if checkpointInfoByComponent != nil {
 			checkpointInfo = checkpointInfoByComponent[componentName]
 		}
+		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
+		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
+			checkpointInfo != nil &&
+			checkpointInfo.StartupPolicy != "" &&
+			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
+			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
+				ctx,
+				reader,
+				dynamoDeployment.Namespace,
+				checkpointInfo,
+				operatorConfig.Checkpoint.Storage,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)
+			}
+		}
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
@@ -2463,8 +2500,7 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				kubeClient:                  kubeClient,
-				ctx:                         ctx,
+				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 			})
 			if err != nil {
