@@ -27,6 +27,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -539,6 +540,11 @@ impl State {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -1273,6 +1279,13 @@ impl HttpServiceConfigBuilder {
             .get_or_insert_with(FrontendApiConfig::default)
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
         self
     }
 

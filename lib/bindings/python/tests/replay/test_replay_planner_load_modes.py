@@ -53,6 +53,7 @@ def test_synthetic_agg_load_modes(load_controller):
         replay_mode="offline",
         **load_controller,
     )
+    report = report.summary
     assert {
         key: report[key]
         for key in (
@@ -82,7 +83,7 @@ def test_synthetic_shared_prefix_closed_loop():
         shared_prefix_ratio=0.5,
         num_prefix_groups=2,
     )
-    assert report["completed_requests"] == 8
+    assert report.summary["completed_requests"] == 8
 
 
 def test_trace_closed_loop(tmp_path):
@@ -96,7 +97,7 @@ def test_trace_closed_loop(tmp_path):
         replay_concurrency=2,
         replay_mode="offline",
     )
-    assert report["completed_requests"] == 2
+    assert report.summary["completed_requests"] == 2
 
 
 def test_planner_callback_error_preserves_python_exception_type():
@@ -135,7 +136,7 @@ class _DisabledScalingPolicy:
 
 
 def _canonical_report(report):
-    report = copy.deepcopy(report)
+    report = copy.deepcopy(report.summary)
     for key in (
         "wall_time_ms",
         "processed_tokens_per_s",
