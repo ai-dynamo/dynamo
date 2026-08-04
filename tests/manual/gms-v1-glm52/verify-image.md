@@ -71,16 +71,34 @@ R 'python3 -c "import gpu_memory_service.v1.integrations.vllm.worker as w; print
 # then backend.py:64-65 raises "GPU Memory Service allocator extension is not built"
 # only once a GPU worker starts - i.e. 30+ minutes into a run.
 R 'python3 -c "
+import ctypes
 from gpu_memory_service.core.client.torch.extensions import _allocator_ext
 assert _allocator_ext is not None, \"FAIL: _allocator_ext is None (extension not built)\"
 print(\"OK\", _allocator_ext.__file__)
-print(\"has my_malloc:\", hasattr(_allocator_ext, \"my_malloc\"))
-print(\"has init_module:\", hasattr(_allocator_ext, \"init_module\"))
+
+# init_module IS a Python-level method (PyMethodDef in allocator.cpp:140).
+assert hasattr(_allocator_ext, \"init_module\"), \"FAIL: init_module missing\"
+
+# my_malloc/my_free are extern \"C\" symbols (allocator.cpp:50-89). They are
+# resolved by torch via dlsym on the .so path, NOT as Python attributes.
+# hasattr(_allocator_ext, \"my_malloc\") is EXPECTED to be False - that is
+# not a failure. Check dlsym resolution instead.
+lib = ctypes.CDLL(_allocator_ext.__file__)
+for sym in (\"my_malloc\", \"my_free\"):
+    getattr(lib, sym)  # raises AttributeError if dlsym cannot resolve it
+    print(\"dlsym OK:\", sym)
 "'
 ```
 
-`backend.py:64-70` requires `_allocator_ext.__file__`, `my_malloc` and `my_free`
-to build the `torch.cuda.CUDAPluggableAllocator`.
+> [!WARNING]
+> **Do NOT assert `hasattr(_allocator_ext, "my_malloc")`.** `my_malloc`/`my_free`
+> are `extern "C"` symbols (`allocator.cpp:50-89`), consumed by
+> `torch.cuda.CUDAPluggableAllocator(_allocator_ext.__file__, "my_malloc", "my_free")`
+> (`backend.py:67-71`) which resolves them **by dlsym on the shared object**.
+> Only `init_module` is exported as a Python method (`allocator.cpp:140`).
+> So the module's `dict_keys` legitimately contains just
+> `init_module` + dunders. A previous run aborted the whole experiment on this
+> false negative — the image was fine.
 
 ## 3. GMS V1 server CLI accepts `--use-v1`
 
