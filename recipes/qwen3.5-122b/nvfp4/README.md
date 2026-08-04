@@ -36,7 +36,7 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
    see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
 2. **NGC/nvcr image pull access** — an NGC pull secret named `nvcr-secret`
    attached to the namespace's default service account (the deploy manifests pull
-   from `nvcr.io/nvstaging/ai-dynamo`).
+   from `nvcr.io/nvidia/ai-dynamo`).
 3. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`, stored
    as `hf-token-secret` — used by both the model-download Job and the serving
    workers.
@@ -58,7 +58,7 @@ kubectl create secret generic hf-token-secret \
 ```
 
 > [!NOTE]
-> The deploy manifests pull the runtime image from `nvcr.io/nvstaging/ai-dynamo`
+> The deploy manifests pull the runtime image from `nvcr.io/nvidia/ai-dynamo`
 > and do not set `imagePullSecrets`, so the target namespace must already have
 > nvcr/NGC pull access. If the cluster does not inject a default pull secret,
 > create one and attach it to the namespace's default service account:
