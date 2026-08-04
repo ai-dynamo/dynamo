@@ -47,7 +47,7 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 
 ## Use Case Examples
 
-- **[Riva Cascaded Voice Pipeline](riva_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for Riva speech NIMs
+- **[Nemotron Speech Cascaded Pipeline](nemotron_speech_cascaded_pipeline/README.md)** - OpenAI-compatible realtime ASR and streaming TTS adapters for NVIDIA Speech NIMs serving Nemotron models
 
 ## Deployment Examples
 

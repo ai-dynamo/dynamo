@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Launch Dynamo model endpoints for the Nemotron Voice Agent Blueprint.
-# ASR and TTS NIMs must already be reachable over Riva gRPC.
+# ASR and TTS NIMs must already be reachable over their gRPC APIs.
 
 set -euo pipefail
 
@@ -23,8 +23,8 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../common/launch_utils.sh"
 
-ASR_RIVA_SERVER="${ASR_RIVA_SERVER:-localhost:50152}"
-TTS_RIVA_SERVER="${TTS_RIVA_SERVER:-localhost:50151}"
+ASR_NIM_SERVER="${ASR_NIM_SERVER:-localhost:50152}"
+TTS_NIM_SERVER="${TTS_NIM_SERVER:-localhost:50151}"
 ASR_MODEL_NAME="${ASR_MODEL_NAME:-nemotron-asr-streaming}"
 TTS_MODEL_NAME="${TTS_MODEL_NAME:-nvidia/magpie-tts-multilingual}"
 LLM_MODEL_PATH="${LLM_MODEL_PATH:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8}"
@@ -43,11 +43,11 @@ print_launch_banner --no-curl \
   "LLM:          http://localhost:${HTTP_PORT}/v1/chat/completions" \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
-python -m riva_nim.asr_worker \
-  --riva-server "$ASR_RIVA_SERVER" --model-name "$ASR_MODEL_NAME" &
+python -m nemotron_speech.asr_worker \
+  --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
 
-python -m riva_nim.tts_worker \
-  --riva-server "$TTS_RIVA_SERVER" --model-name "$TTS_MODEL_NAME" \
+python -m nemotron_speech.tts_worker \
+  --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 
 # Word splitting is intentional for optional CLI argument strings.

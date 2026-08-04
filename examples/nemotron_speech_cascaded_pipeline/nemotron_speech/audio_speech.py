@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenAI audio/speech adapter for Riva online text-to-speech synthesis."""
+"""OpenAI audio/speech adapter for Speech NIM text-to-speech synthesis."""
 
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ from dynamo.common.protocols.audio_protocol import (
 from dynamo.runtime import dynamo_endpoint
 
 
-class RivaAudioSpeechBackend:
-    """Stream Riva TTS audio through Dynamo's OpenAI audio response contract."""
+class SpeechNimAudioSpeechBackend:
+    """Stream Speech NIM TTS audio through Dynamo's OpenAI audio response contract."""
 
     def __init__(
         self,
@@ -59,18 +59,18 @@ class RivaAudioSpeechBackend:
         if request.model not in (None, self.model_name):
             raise ValueError(f"model must be '{self.model_name}'")
         if request.response_format not in (None, "pcm"):
-            raise ValueError("Riva TTS currently supports response_format='pcm'")
+            raise ValueError("Speech NIM TTS currently supports response_format='pcm'")
         if request.data_source not in (None, "b64_json"):
-            raise ValueError("Riva TTS currently supports data_source='b64_json'")
+            raise ValueError("Speech NIM TTS currently supports data_source='b64_json'")
         if request.speed not in (None, 1.0):
-            raise ValueError("Riva TTS does not support the speed parameter")
+            raise ValueError("Speech NIM TTS does not support the speed parameter")
         if request.instructions:
-            raise ValueError("Riva TTS does not support instructions")
+            raise ValueError("Speech NIM TTS does not support instructions")
 
     async def generate(
         self, request: NvCreateAudioSpeechRequest
     ) -> AsyncGenerator[NvAudioSpeechResponse, None]:
-        """Yield each Riva ``SynthesizeOnline`` response as one PCM chunk."""
+        """Yield each Riva SDK ``SynthesizeOnline`` response as one PCM chunk."""
         self._validate(request)
         output: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
         stopped = threading.Event()

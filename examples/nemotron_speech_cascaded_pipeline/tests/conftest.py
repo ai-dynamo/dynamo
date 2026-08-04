@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# RIVA NIM Python client used by the cascaded voice pipeline workers.
-# Pure-Python wheel; pinned for reproducible image builds.
-nvidia-riva-client==2.26.0
+import os
+import sys
+
+# Put the example root on sys.path so `import nemotron_speech` resolves to the local
+# package. The package is deliberately NOT named `riva`, so it does not shadow
+# the nvidia-riva-client package (imported as top-level `riva`).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
