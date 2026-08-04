@@ -542,6 +542,46 @@ jobs:
           echo "Updated docs.yml versions section:"
           yq '.versions' "$DOCS_FILE"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api
+
+      - name: Validate release snapshot
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION_FILE="fern/versions/$TAG.yml"
+
+          # Every navigation target must resolve before anything reaches
+          # docs-website. Versioned pages belong to this release and must exist;
+          # the shared Digest syncs independently from main, so a frozen nav can
+          # drift there without this cut being wrong: report it, do not block.
+          while IFS= read -r path; do
+            case "$path" in
+              ../pages-$TAG/*)
+                if [ ! -e "fern/versions/$path" ]; then
+                  echo "::error::Version navigation target does not exist: $path"
+                  exit 1
+                fi
+                ;;
+              ../digest/*)
+                if [ ! -e "fern/versions/$path" ]; then
+                  echo "::warning::Shared Digest navigation target does not exist in docs-website: $path"
+                fi
+                ;;
+            esac
+          done < <(yq -r '(.. | select(has("path")).path)' "$VERSION_FILE")
+
+          # Fern's own structural validation. docs-website carries historical
+          # broken-link debt, so link checking stays scoped to the release
+          # navigation above rather than failing on unrelated versions.
+          fern check
+
       - name: Commit and push changes
         run: |
           TAG="${{ steps.version.outputs.tag }}"
@@ -562,14 +602,6 @@ jobs:
           git push origin docs-website
 
           echo "Successfully released documentation for $TAG on docs-website branch"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install Fern CLI
-        run: npm install -g fern-api
 
       - name: Publish Docs
         env:
