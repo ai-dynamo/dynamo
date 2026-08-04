@@ -124,17 +124,25 @@ def get_request_logs(process, request_id: str) -> List[Dict[str, Any]]:
 
 
 def assert_lifecycle_logs(req_logs, expected_status="success"):
-    """Assert received/completed/http_sent exist and return them."""
+    """Assert received/completed/http_sent exist and return them.
+
+    Requires a DEBUG-level log stream: 'request received' and 'request
+    completed' are emitted at DEBUG, so callers must use a fixture built on
+    JSONL_ENV (which sets DYN_LOG=debug), not JSONL_ENV_INFO.
+    """
     received = [e for e in req_logs if e.get("message") == "request received"]
     completed = [e for e in req_logs if e.get("message") == "request completed"]
     http_sent = [e for e in req_logs if e.get("message") == "http response sent"]
     msgs = [e.get("message") for e in req_logs]
+    # A zero count here is far more often a log-level problem than a missing
+    # event, so say so rather than leaving a bare count mismatch.
+    lifecycle_hint = " (DEBUG-level event: does the fixture env set DYN_LOG=debug?)"
     assert (
         len(received) == 1
-    ), f"Expected 1 'request received', got {len(received)}: {msgs}"
+    ), f"Expected 1 'request received', got {len(received)}: {msgs}{lifecycle_hint}"
     assert (
         len(completed) == 1
-    ), f"Expected 1 'request completed', got {len(completed)}: {msgs}"
+    ), f"Expected 1 'request completed', got {len(completed)}: {msgs}{lifecycle_hint}"
     assert (
         len(http_sent) == 1
     ), f"Expected 1 'http response sent', got {len(http_sent)}: {msgs}"
@@ -172,8 +180,12 @@ def assert_error_completion(req_logs):
     return completed
 
 
-# Routine per-request lifecycle events are logged at DEBUG, so the lifecycle
-# assertions below need an opted-in debug stream to observe them.
+# DYN_LOG=debug here is load-bearing, not incidental. Routine per-request
+# lifecycle events ('request received' / 'request completed') are emitted at
+# DEBUG, so every fixture using this env feeds tests whose assertions in
+# assert_lifecycle_logs() above depend on the debug stream. Resetting this to
+# "info" makes those assertions fail with a count mismatch, not a level error.
+# Use JSONL_ENV_INFO below for tests that need the default operational level.
 JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "debug"}
 
 # The default operational level, used to pin that the routine lifecycle events
