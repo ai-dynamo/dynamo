@@ -64,9 +64,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	type workerTemplate struct {
-		Labels      map[string]string                     `json:"labels,omitempty"`
-		Annotations map[string]string                     `json:"annotations,omitempty"`
-		Spec        v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
+		Labels         map[string]string                     `json:"labels,omitempty"`
+		Annotations    map[string]string                     `json:"annotations,omitempty"`
+		RuntimeVersion string                                `json:"runtimeVersion,omitempty"`
+		Spec           v1beta1.DynamoComponentDeploymentSpec `json:"spec"`
 	}
 
 	workerDCDs := make(map[string]workerTemplate, len(dcds))
@@ -80,9 +81,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
 			workerDCDs[componentName] = workerTemplate{
-				Labels:      GetDCDKubeLabels(dcd),
-				Annotations: GetDCDKubeAnnotations(dcd),
-				Spec:        workerHashSpec(dcd),
+				Labels:         GetDCDKubeLabels(dcd),
+				Annotations:    GetDCDKubeAnnotations(dcd),
+				RuntimeVersion: resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+				Spec:           workerHashSpec(dcd),
 			}
 		}
 	}
@@ -105,8 +107,8 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
-	// Hash the canonical resolved version, not the raw optional override.
-	spec.RuntimeVersionOverride = resolvedRuntimeVersionForHash(&spec.DynamoComponentDeploymentSharedSpec)
+	// The resolved version is hashed separately in workerTemplate.
+	spec.RuntimeVersionOverride = ""
 
 	return *spec
 }
