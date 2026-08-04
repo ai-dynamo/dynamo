@@ -96,17 +96,22 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 # memo above rules out.
 ENV UV_CACHE_DIR=/home/${USERNAME}/.cache/uv
 
-# `usermod -u` above re-chowns only files owned by the OLD uid, so anything under
-# /home/$USERNAME that the base image left root-owned survives the remap — and `chmod`
-# on it then fails with EPERM because we are no longer root. The trtllm dev image ships
-# /home/dynamo/.cache/uv exactly this way. Group-write is what we actually need, so set
-# it where we own the directory and assert the result either way.
+# Prepare the cache dirs while we are still root. `usermod -u` above re-chowns only
+# files owned by the OLD uid, so whatever the base image left root-owned survives the
+# remap: the trtllm dev image ships /home/dynamo/.cache/uv as root:0 because its runtime
+# template chowns /home/dynamo/.cache but not the uv dir beneath it. As the remapped user
+# we could neither chmod that dir nor mkdir inside a root-owned parent, so doing this
+# after the USER switch turns any base that ships 0755 into a hard build failure.
+# Shallow chown only — the permissions memo above rules out -R, and a root-owned entry
+# already inside the cache stays as it is; uv only needs to create new entries.
+USER root
 RUN set -eux; \
     for d in /home/$USERNAME/.cache /home/$USERNAME/.cache/pre-commit /home/$USERNAME/.cache/uv; do \
         mkdir -p "$d"; \
-        if [ "$(stat -c %u "$d")" = "$(id -u)" ]; then chmod g+w "$d"; fi; \
-        test -w "$d"; \
+        chown "$USERNAME:$USER_GID" "$d"; \
+        chmod g+rwx "$d"; \
     done
+USER $USERNAME
 
 {% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
