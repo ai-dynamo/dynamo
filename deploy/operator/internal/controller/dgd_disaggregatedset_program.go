@@ -74,7 +74,6 @@ func (p *disaggregatedSetProgram) Reconcile(
 
 	useDS, fallbackReason := p.workloads.owner.shouldUseDisaggregatedSet(req.DGD)
 	if !useDS {
-		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
 		fallbackProgram := p.workloads.owner.newComponentProgram()
 		programResult, retErr = fallbackProgram.Reconcile(ctx, req)
 		if fallbackReason != "" {
