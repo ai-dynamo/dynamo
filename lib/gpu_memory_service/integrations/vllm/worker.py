@@ -469,6 +469,15 @@ class GMSWorker(Worker):
             used_bytes / (1 << 30),
         )
 
+    def gms_kv_reattached(self) -> bool:
+        """Whether the last wake reattached a prior engine's KV rather than allocating.
+
+        Queried by ``EngineCore.wake_up`` via ``collective_rpc``: the prefix-index replay
+        must happen in the scheduler's process, which at TP>1 is not this one, so the
+        takeover signal has to cross the process boundary.
+        """
+        return bool(getattr(self, "_gms_kv_reattached", False))
+
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
         if tags is None:
@@ -538,8 +547,11 @@ class GMSWorker(Worker):
                     len(existing_kv),
                 )
                 kv_cache_manager.remap_all_vas()
-                # Bytes are back; arm the prefix-index rehydration so the first
-                # cache lookup after wake replays the persisted index onto them.
+                # Bytes are back. Record it so EngineCore.wake_up -- which runs in the
+                # scheduler's process at any TP, and is the only place that can replay
+                # the index before serving resumes -- knows this was a takeover and not
+                # a fresh allocation. It reads this via collective_rpc.
+                self._gms_kv_reattached = True
                 _mark_kv_index_rehydrate_pending()
                 # DECISIVE PROBE: before ANY forward pass, compare this reattached KV to
                 # the winner's stable-point dump, position-sensitively. Tells reattach
@@ -653,6 +665,9 @@ class GMSWorker(Worker):
                     except Exception as _e:
                         logger.warning("[GMS][dbg] KV sample failed: %s", _e)
             else:
+                # Fresh pool: these bytes are NOT a prior engine's, so the index must
+                # not be replayed onto them.
+                self._gms_kv_reattached = False
                 kv_cache_manager.reallocate_all_handles(tag="kv_cache")
                 kv_cache_manager.remap_all_vas()
                 if os.getenv("GMS_KV_DEBUG"):

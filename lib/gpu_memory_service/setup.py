@@ -111,7 +111,16 @@ setup(
         "console_scripts": [
             "gpu-memory-service=gpu_memory_service.cli.runner:main",
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
-        ]
+        ],
+        # vLLM loads general plugins from EngineCore.__init__, so this installs the
+        # failover prefix-index hooks in whichever process owns the scheduler. Importing
+        # the GMS worker module is not enough: at TP>1 that only happens in the worker
+        # child processes, leaving the scheduler's BlockPool unpatched. Self-disables
+        # unless GMS_KV_INDEX_PATH is set.
+        "vllm.general_plugins": [
+            "gms_kv_index_persist="
+            "gpu_memory_service.integrations.vllm.kv_index_persist:enable_kv_index_persistence",
+        ],
     },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},

@@ -339,7 +339,9 @@ def compare_to_winner_target(kv_caches, mappings):
 def _path() -> str | None:
     global _log_path
     if _log_path is None:
-        _log_path = os.getenv("GMS_KV_INDEX_PATH")
+        # Treat empty as unset so the feature can be switched off by exporting an empty
+        # value, without having to unset a variable a launcher already exported.
+        _log_path = os.getenv("GMS_KV_INDEX_PATH") or None
     return _log_path
 
 
@@ -348,34 +350,93 @@ def is_enabled() -> bool:
 
 
 def mark_rehydrate_pending() -> None:
-    """Called by the standby's wake path once its KV bytes are reattached.
+    """Called by the standby's worker wake path once its KV bytes are reattached.
 
-    Rehydrate EAGERLY here if the ``BlockPool`` is reachable. Deferring the replay to the
-    first cache lookup is a correctness bug, not just a latency one: the standby starts
-    serving as soon as it registers with discovery, and until the index is replayed every
-    reattached block still looks *free and unhashed*. Any request that arrives in that
-    window is handed blocks straight off the head of the free queue -- i.e. the reused
-    prefix's own blocks -- and overwrites the KV we just restored. The later replay then
-    installs the winner's hashes onto those clobbered blocks, producing a full prefix HIT
-    that reads the wrong bytes.
-
-    ``REHYDRATE_PENDING`` remains as a fallback for the case where no ``BlockPool`` has
-    been constructed yet.
+    This runs in the WORKER process, which is only the same process as the ``BlockPool``
+    at TP=1 (``UniProcExecutor``). The authoritative replay is driven from
+    ``EngineCore.wake_up`` instead -- see ``_install_engine_core_hook`` -- which runs in
+    the scheduler's process at any TP. This remains only as a same-process fallback for
+    the case where that hook could not be installed.
     """
     global REHYDRATE_PENDING
     if not is_enabled():
         return
-    if _block_pool is not None:
-        try:
-            rehydrate_block_pool(_block_pool)
-            logger.info("[GMS] KV index rehydrated eagerly at wake (failover takeover)")
-            return
-        except Exception as e:
-            logger.warning(
-                "[GMS] eager KV index rehydrate failed (%s); falling back to lazy", e
-            )
     REHYDRATE_PENDING = True
-    logger.info("[GMS] KV index rehydrate armed (failover takeover)")
+
+
+def rehydrate_after_wake(engine_core) -> bool:
+    """Replay the index into the scheduler's ``BlockPool`` before serving resumes.
+
+    Called from the patched ``EngineCore.wake_up`` -- the one point that satisfies all
+    three requirements at any TP: it runs in the process that owns the ``BlockPool``,
+    *after* ``model_executor.wake_up()`` has returned (a blocking collective, so every
+    rank has finished reattaching its shard), and *before* the engine can schedule
+    anything.
+
+    Deferring the replay past this point is a correctness bug, not a latency one: until
+    the index is replayed every reattached block still looks *free and unhashed*, so the
+    first request served is handed blocks off the head of the free queue -- the reused
+    prefix's own blocks -- and overwrites the KV that was just restored.
+    """
+    global REHYDRATE_PENDING
+    if not is_enabled():
+        return False
+
+    # Only replay when the workers actually reattached a prior engine's KV. On a fresh
+    # allocation the bytes are NOT the primary's, so installing its hashes would point
+    # the index at memory that never held that prefix.
+    try:
+        reattached = engine_core.collective_rpc("gms_kv_reattached")
+    except Exception as e:
+        logger.warning(
+            "[GMS] could not query workers for KV reattach state (%s); skipping replay",
+            e,
+        )
+        return False
+    if not reattached or not all(reattached):
+        REHYDRATE_PENDING = False
+        return False
+
+    try:
+        block_pool = engine_core.scheduler.kv_cache_manager.block_pool
+    except Exception as e:
+        logger.warning("[GMS] no BlockPool reachable from EngineCore (%s)", e)
+        return False
+
+    rehydrate_block_pool(block_pool)
+    REHYDRATE_PENDING = False
+    logger.info(
+        "[GMS] KV index rehydrated at wake, before serving resumed (%d rank(s) reattached)",
+        len(reattached),
+    )
+    return True
+
+
+def _install_engine_core_hook() -> None:
+    """Patch ``EngineCore.wake_up`` to replay the index before the engine serves again.
+
+    Installed from ``enable_kv_index_persistence``, which vLLM invokes as a
+    ``vllm.general_plugins`` entry point. ``EngineCore.__init__`` loads general plugins,
+    so this lands in the scheduler's process regardless of TP -- unlike importing the GMS
+    worker module, which at TP>1 only happens in the worker child processes.
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    if getattr(EngineCore, "_gms_kv_index_patched", False):
+        return
+
+    orig_wake_up = EngineCore.wake_up
+
+    def wake_up(self, *args, **kwargs):
+        out = orig_wake_up(self, *args, **kwargs)
+        try:
+            rehydrate_after_wake(self)
+        except Exception as e:
+            logger.warning("[GMS] KV index rehydrate at wake failed: %s", e)
+        return out
+
+    EngineCore.wake_up = wake_up
+    EngineCore._gms_kv_index_patched = True
 
 
 def _append_records(records: list) -> None:
@@ -593,6 +654,19 @@ def enable_kv_index_persistence() -> None:
             "[GMS] KV index persistence requires the Scheduler step barrier; "
             f"could not install it: {e}"
         ) from e
+
+    # Replay at wake, from the process that owns the BlockPool (see the hook's docstring).
+    try:
+        _install_engine_core_hook()
+    except Exception as e:
+        # Not fatal: at TP=1 the worker-side fallback still replays (late, but the
+        # engine is single-process there). At TP>1 this would silently lose the index,
+        # so make the degradation loud.
+        logger.warning(
+            "[GMS] could not install the EngineCore wake hook (%s); falling back to "
+            "lazy replay. This is only safe at TP=1.",
+            e,
+        )
     logger.info("[GMS] KV index persistence enabled (log=%s)", _path())
 
 
