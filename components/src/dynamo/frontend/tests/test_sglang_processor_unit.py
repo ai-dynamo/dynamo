@@ -287,6 +287,22 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
         assert result["routing"] == {"priority_jump": 2.5}
 
+    @pytest.mark.parametrize(
+        "latency_sensitivity", [10**400, float("inf"), float("nan")]
+    )
+    def test_invalid_latency_sensitivity_hint_is_ignored(self, latency_sensitivity):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {"agent_hints": {"latency_sensitivity": latency_sensitivity}},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+        )
+
+        assert result["routing"] is None
+
     @pytest.mark.parametrize("priority", [2**40, 10**400])
     def test_out_of_range_priority_hint_is_ignored(self, priority):
         result = _build_dynamo_preproc(

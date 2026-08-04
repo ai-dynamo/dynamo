@@ -8,6 +8,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import AsyncGenerator
@@ -99,6 +100,16 @@ def _is_u32(value: Any) -> bool:
     )
 
 
+def _finite_float(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) else None
+
+
 def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     agent_hints = nvext.get("agent_hints")
     if not isinstance(agent_hints, dict):
@@ -110,11 +121,9 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
         routing["priority"] = priority
         routing["priority_jump"] = float(max(priority, 0))
     else:
-        latency_sensitivity = agent_hints.get("latency_sensitivity")
-        if isinstance(latency_sensitivity, (int, float)) and not isinstance(
-            latency_sensitivity, bool
-        ):
-            routing["priority_jump"] = float(latency_sensitivity)
+        latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))
+        if latency_sensitivity is not None:
+            routing["priority_jump"] = latency_sensitivity
 
     strict_priority = agent_hints.get("strict_priority")
     if _is_u32(strict_priority):
