@@ -77,7 +77,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         **Supports:** Text-to-image and text-to-video.
 
-        **Main limitation:** Not recommended for production. Video output requires an NVENC-capable NVIDIA GPU.
+        **Main limitation:** Not recommended for production.
       </Card>
       <Card title="FastVideo">
         <Badge intent="success" minimal>Kubernetes</Badge>
@@ -165,7 +165,7 @@ The built-in backends expose OpenAI-compatible endpoints for images (`/v1/images
 
         <AccordionGroup>
           <Accordion title="Configure MP4 video encoding">
-            Text-to-video output requires `imageio`, ffmpeg, and an NVENC-capable NVIDIA GPU. Dynamo's TensorRT-LLM runtime image includes an ffmpeg build with `h264_nvenc`.
+            Text-to-video output requires `imageio` and ffmpeg. Dynamo's runtime images include an ffmpeg build that encodes VP9 (`libvpx-vp9`), so `.mp4` output is a VP9 stream in an MP4 container and no GPU encoder is needed.
 
             Outside the container, install the Python wrapper without its bundled binary and point it to your ffmpeg:
 

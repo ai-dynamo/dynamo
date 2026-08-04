@@ -12,7 +12,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS, `file://`, `data:` | Yes, H.264/H.265 | Yes, H.264/H.265 | Decoded on NVDEC; the vision encoder then produces embeddings |
+| **Video** | HTTP/HTTPS, `file://`, `data:` | No | Yes, H.264/H.265, Qwen2-family only | Needs the encode worker; decoded on NVDEC, then the vision encoder produces embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
 > [!IMPORTANT]
