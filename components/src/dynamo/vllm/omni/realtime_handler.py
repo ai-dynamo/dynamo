@@ -43,6 +43,7 @@ import asyncio
 import base64
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any, AsyncGenerator, Optional, Sequence
 
 import numpy as np
@@ -180,15 +181,20 @@ class Turn(RealtimeTurn):
         """Extract per-step audio deltas from an engine output.
 
         Audio lives in ``output.multimodal_output['audio'|'model_outputs']`` as a
-        float32 waveform (or list of them). Some engine paths emit a growing
-        cumulative waveform; ``waveform_to_deltas`` reconciles both shapes
-        against ``self.audio_ref`` so the client never hears duplicates.
+        float32 waveform (or list of them). Read it only through the ``Mapping``
+        API: ``OmniRequestOutput.multimodal_output`` yields a
+        ``MultimodalPayload`` when a stage attached a non-empty one and a plain
+        ``dict`` otherwise -- its fallback field defaults to ``{}``, which is what
+        every stage-0 step returns -- so ``.tensors`` is not always present. Some
+        engine paths emit a growing cumulative waveform; ``waveform_to_deltas``
+        reconciles both shapes against ``self.audio_ref`` so the client never
+        hears duplicates.
         """
         mm = getattr(output, "multimodal_output", None)
-        if mm is None:
+        if not isinstance(mm, Mapping):
             return []
 
-        raw_audio = mm.tensors["audio"] if "audio" in mm.tensors.keys() else None
+        raw_audio = mm.get("audio" if "audio" in mm else "model_outputs")
         if raw_audio is None:
             return []
 
