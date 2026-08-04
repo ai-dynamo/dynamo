@@ -16,7 +16,7 @@ Use Dynamo as the rollout-serving plane behind an RL framework. The framework re
 | Framework or example | Dynamo integration path | Status |
 |---|---|---|
 | [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Use the upstream verl recipe to run Dynamo as an async rollout backend with KV-aware routing, rollout token data, weight-update control, and an optional ThunderAgent variant. | Available recipe |
-| UniAgent / ThunderAgent router example | Use Dynamo's [ThunderAgent Program Scheduler](/dynamo/dev/agents/thunder-agent-program-scheduler) as a reference for integrating framework-level trajectory identity, routing, and lifecycle control with Dynamo's router. | Available example |
+| UniAgent / ThunderAgent router example | Use Dynamo's [ThunderAgent Program Scheduler](../agents/thunderagent-program-scheduler.md) as a reference for integrating framework-level trajectory identity, routing, and lifecycle control with Dynamo's router. | Available example |
 | [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint for `/generate` and per-worker `/engine` controls for pause, resume, cache flush, and NCCL weight updates. | Open PR |
 | [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | NeMo RL can use Dynamo as an external rollout-serving endpoint through the same OpenAI-compatible request path and RL control surfaces. Dynamo-specific integration docs are not published in NeMo RL yet. | Integration target |
 
@@ -146,7 +146,7 @@ The OpenAI-compatible completion routes provide the current token-in/token-out i
 | Raw engine metadata | Add `"engine_data"` to `nvext.extra_fields`. | `nvext.engine_data` | Backend-specific and not a stable cross-backend schema. Prefer named fields when available. |
 | SGLang `meta_info` upload | Set `nvext.metadata_upload.url`. | Out-of-band object per choice | Requires an RL-enabled SGLang worker and fsspec support. |
 
-See [NVIDIA Request Extensions](/dynamo/dev/additional-resources/nvidia-request-extensions-nvext) for the complete `nvext` reference.
+See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` reference.
 
 Backend RL flags also select engine-specific behavior:
 

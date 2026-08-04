@@ -40,7 +40,7 @@ Dynamo sits between the RL orchestrator and inference backends such as vLLM, SGL
 5. Pause selected workers, refresh weights, validate the update, and resume generation.
 6. Use Dynamo's routing, autoscaling, and fault-tolerance features to keep rollout serving aligned with training demand.
 
-For the concrete API shapes, environment variables, and command examples, see the [RL Implementation Guide](/dynamo/dev/reinforcement-learning/rl-implementation-guide).
+For the concrete API shapes, environment variables, and command examples, see the [RL Implementation Guide](implementation-guide.md).
 
 ## Framework Integrations
 
@@ -49,7 +49,7 @@ Use Dynamo as the rollout-serving plane behind an RL framework. The framework re
 | Framework or example | Dynamo integration path | Status |
 |---|---|---|
 | [verl Dynamo rollout backend recipe](https://github.com/verl-project/verl-recipe/blob/main/dynamo/README.md) | Run Dynamo as an async rollout backend with KV-aware routing, rollout token data, weight-update control, and an optional ThunderAgent variant. | Available recipe |
-| UniAgent / ThunderAgent router example | Use Dynamo's [ThunderAgent Program Scheduler](/dynamo/dev/agents/thunder-agent-program-scheduler) as a reference for framework-level trajectory identity, routing, and lifecycle control. | Available example |
+| UniAgent / ThunderAgent router example | Use Dynamo's [ThunderAgent Program Scheduler](../agents/thunderagent-program-scheduler.md) as a reference for framework-level trajectory identity, routing, and lifecycle control. | Available example |
 | [Slime external rollout endpoint](https://github.com/Aphoh/slime/pull/1) | Use Slime's external SGLang-compatible engine path with a shared Dynamo rollout endpoint and direct per-worker controls. | Open PR |
 | [NeMo RL](https://github.com/NVIDIA-NeMo/RL) | Use Dynamo as an external rollout-serving endpoint through the same OpenAI-compatible request path and RL control surfaces. Dynamo-specific integration docs are not published in NeMo RL yet. | Integration target |
 
@@ -67,7 +67,7 @@ Use Dynamo as the rollout-serving plane behind an RL framework. The framework re
 
 ## Start Here
 
-Use the [RL Implementation Guide](/dynamo/dev/reinforcement-learning/rl-implementation-guide) when you are ready to wire an orchestrator to Dynamo. It covers:
+Use the [RL Implementation Guide](implementation-guide.md) when you are ready to wire an orchestrator to Dynamo. It covers:
 
 - The vLLM happy path for token-in rollouts, worker discovery, and weight updates.
 - NVIDIA request extensions for token IDs, log probabilities, routed expert data, and SGLang metadata uploads.
