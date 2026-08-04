@@ -12,17 +12,25 @@ LIST_DIRECTORY_PROMPT = (
 )
 
 
-def write_codex_config(codex_home: Path, frontend_port: int) -> None:
+def write_codex_config(
+    codex_home: Path, frontend_port: int, *, enable_multi_agent: bool = False
+) -> None:
     """Emit a minimal ~/.codex/config.toml pointing Codex at Dynamo."""
     codex_home.mkdir(parents=True, exist_ok=True)
+    multi_agent_config = (
+        """[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 2
+non_code_mode_only = false
+"""
+        if enable_multi_agent
+        else ""
+    )
     (codex_home / "config.toml").write_text(
         f"""
 model_max_output_tokens = 4096
 
-[features.multi_agent_v2]
-enabled = true
-max_concurrent_threads_per_session = 2
-non_code_mode_only = false
+{multi_agent_config}
 
 [model_providers.local]
 name = "local-dynamo"
