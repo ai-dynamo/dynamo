@@ -1523,6 +1523,23 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
         "__init__",
         fake_parent_init,
     )
+
+    class _SchedulerWithHashBlockSize:
+        def __init__(
+            self,
+            vllm_config,
+            kv_cache_config,
+            structured_output_manager,
+            block_size,
+            hash_block_size=None,
+        ):
+            pass
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "Scheduler",
+        _SchedulerWithHashBlockSize,
+    )
     monkeypatch.setattr(
         instrumented_scheduler_module,
         "_FpmPublisherThread",
@@ -1573,6 +1590,68 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     assert scheduler._bench_hash_block_size == 16
     assert scheduler._bench_block_hasher is block_hasher
     block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
+
+
+def test_hash_block_size_not_forwarded_to_legacy_scheduler(monkeypatch, tmp_path):
+    parent_init_args = {}
+
+    def fake_parent_init(self, **kwargs):
+        parent_init_args.update(kwargs)
+        self.block_size = kwargs["block_size"]
+        self.cache_config = SimpleNamespace(
+            enable_prefix_caching=False,
+            prefix_caching_hash_algo="builtin",
+        )
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "__init__",
+        fake_parent_init,
+    )
+
+    class _LegacyScheduler:
+        def __init__(
+            self,
+            vllm_config,
+            kv_cache_config,
+            structured_output_manager,
+            block_size,
+        ):
+            pass
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "Scheduler",
+        _LegacyScheduler,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "_FpmPublisherThread",
+        MagicMock(),
+    )
+    monkeypatch.delenv(
+        instrumented_scheduler_module.ENV_FPM_BENCHMARK_OUTPUT_PATH,
+        raising=False,
+    )
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
+        additional_config={},
+    )
+    scheduler = InstrumentedScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=object(),
+        structured_output_manager=object(),
+        block_size=32,
+        hash_block_size=16,
+    )
+
+    assert "hash_block_size" not in parent_init_args
+    assert scheduler._bench_hash_block_size == 16
 
 
 def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):

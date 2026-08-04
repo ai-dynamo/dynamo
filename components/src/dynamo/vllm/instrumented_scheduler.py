@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -101,6 +102,7 @@ from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.request import Request, RequestStatus
 
@@ -1204,12 +1206,17 @@ class InstrumentedScheduler(AsyncScheduler):
         hash_block_size: int | None = None,
         **kwargs,
     ) -> None:
+        # vLLM builds that predate the hash_block_size scheduler parameter
+        # (e.g. the dottxt overlay) reject it, so forward it only when the
+        # base Scheduler accepts it. AsyncScheduler's signature is *args/
+        # **kwargs, so inspect Scheduler itself.
+        if "hash_block_size" in inspect.signature(Scheduler.__init__).parameters:
+            kwargs["hash_block_size"] = hash_block_size
         super().__init__(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=structured_output_manager,
             block_size=block_size,
-            hash_block_size=hash_block_size,
             **kwargs,
         )
         self._bench_hash_block_size = (

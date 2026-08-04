@@ -252,6 +252,7 @@ STUB_MODULES = [
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.async_scheduler",
     "vllm.v1.core.sched.output",
+    "vllm.v1.core.sched.scheduler",
     "vllm.v1.engine",
     "vllm.v1.engine.async_llm",
     "vllm.v1.engine.exceptions",
