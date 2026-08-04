@@ -10,6 +10,7 @@ import {
   CURRENT_VERSION,
   CURRENT_WHEEL,
   MAIN_TOT,
+  NIGHTLY_BUILDS,
   RELEASES,
   type BackendPins,
 } from "./releases.data";
@@ -21,6 +22,7 @@ export type InstallForm = "container" | "wheel";
 export type InstallEntry = {
   backend_version: string;
   dynamo?: string;
+  date?: string;
   latest?: boolean;
   source?: boolean;
   note?: string;
@@ -63,6 +65,10 @@ function stableWheelCommand(backend: Backend, version: string): string {
   return `uv pip install ${prerelease}"ai-dynamo[${backend.extra}]==${wheel}"`;
 }
 
+function nightlyWheelCommand(backend: Backend, version: string): string {
+  return `uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[${backend.extra}]==${version}"`;
+}
+
 function stableEntries(backend: Backend): InstallEntry[] {
   return RELEASES.filter(
     (release) =>
@@ -89,15 +95,33 @@ function nightlyEntries(backend: Backend): InstallEntry[] {
   const backendVersion = pin(MAIN_TOT, backend.id);
   if (!backendVersion) return [];
 
-  return [
-    {
-      backend_version: backendVersion,
-      latest: true,
-      commands: {
-        container: dockerCommand(`${backend.image}-runtime-nightly`, "latest"),
+  if (!backend.extra) {
+    return [
+      {
+        backend_version: backendVersion,
+        latest: true,
+        note: "Nightly TensorRT-LLM installs use the rolling runtime container; no pinned nightly wheel extra is published.",
+        commands: {
+          container: dockerCommand(`${backend.image}-runtime-nightly`, "latest"),
+        },
       },
+    ];
+  }
+
+  return NIGHTLY_BUILDS.slice(0, 3).map((build, index) => ({
+    backend_version: backendVersion,
+    dynamo: build.version,
+    date: build.date,
+    latest: index === 0,
+    note:
+      index === 0
+        ? "Nightly containers are rolling latest tags; pinned versions apply to wheels."
+        : "Pinned nightly wheel build. Use latest for the rolling runtime container.",
+    commands: {
+      ...(index === 0 ? { container: dockerCommand(`${backend.image}-runtime-nightly`, "latest") } : {}),
+      wheel: nightlyWheelCommand(backend, build.version),
     },
-  ];
+  }));
 }
 
 function sourceEntries(backend: Backend): InstallEntry[] {
