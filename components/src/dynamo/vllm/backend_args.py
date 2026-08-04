@@ -416,6 +416,58 @@ class DynamoVllmArgGroup(ArgGroup):
                 "(default: /tmp/benchmark_results.json)."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-collect-imbalanced",
+            env_var="DYN_BENCHMARK_COLLECT_IMBALANCED",
+            default=False,
+            help=(
+                "Also measure batches whose requests differ in length. With an "
+                "explicit --benchmark-points-file, the manifest's imbalanced "
+                "points are skipped unless this is set. Without one, the "
+                "generated sweep is expanded: each coordinate additionally gets "
+                "the spreads planned around it, the resulting manifest is "
+                "written next to --benchmark-output-path, and that file is what "
+                "runs. Off by default -- the spreads exist to calibrate an "
+                "intra-batch work-delta correction and cost several forward "
+                "passes per coordinate."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-imbalance-repeats",
+            env_var="DYN_BENCHMARK_IMBALANCE_REPEATS",
+            default=5,
+            arg_type=int,
+            help=(
+                "Repeats per constructed shape (default: 5). The label is a "
+                "difference between two measured batches, so its noise is the "
+                "pair's rather than one run's."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-imbalance-topk",
+            env_var="DYN_BENCHMARK_IMBALANCE_TOPK",
+            default=None,
+            arg_type=int,
+            help=(
+                "Index budget above which a request takes the sparse-attention "
+                "path, which is what decides the regime each constructed batch "
+                "measures. Default probes the model config; a model with no "
+                "such bound needs nothing here."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-imbalance-manifest-path",
+            env_var="DYN_BENCHMARK_IMBALANCE_MANIFEST_PATH",
+            default=None,
+            help=(
+                "Where to write the constructed imbalance manifest "
+                "(default: alongside --benchmark-output-path)."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-timeout",
@@ -486,6 +538,18 @@ class DynamoVllmConfig(ConfigBase):
     decode_max_kv_read_token_samples_explicit: bool = False
     decode_max_batch_size_samples_explicit: bool = False
     prefix_max_batch_size_samples_explicit: bool = False
+    # Whether to measure the manifest's imbalanced prefill points (those
+    # carrying explicit rows or a partition). Off by default: an imbalanced
+    # point costs a forward pass but only pays off for work-delta calibration,
+    # and a manifest written for that purpose is still useful without them --
+    # its uniform points are an ordinary sweep. Leaving them out therefore
+    # means "collect less", never "collect something different".
+    benchmark_collect_imbalanced: bool = False
+    benchmark_imbalance_repeats: int = 5
+    # None -> probe the model config for a sparse-attention index budget.
+    benchmark_imbalance_topk: Optional[int] = None
+    # None -> a sibling of --benchmark-output-path.
+    benchmark_imbalance_manifest_path: Optional[str] = None
     benchmark_prefill_granularity: Optional[int] = None
     benchmark_prefill_kv_read_granularity: Optional[int] = None
     benchmark_prefill_batch_granularity: Optional[int] = None
