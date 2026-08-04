@@ -1440,7 +1440,7 @@ where
             "Selected worker is overloaded, please retry later".into(),
         );
         Err(DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
+            .error_type(ErrorType::WorkerOverloaded)
             .message("Selected worker is overloaded, please retry later")
             .cause(cause)
             .build()
@@ -1545,8 +1545,11 @@ where
                             "Reporting instance {instance_id} down due to error: {err}"
                         );
                         self.client.report_instance_down(instance_id);
-                    } else if match_error_chain(err.as_ref(), &[ErrorType::ResourceExhausted], &[])
-                    {
+                    } else if match_error_chain(
+                        err.as_ref(),
+                        &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+                        &[],
+                    ) {
                         // Backpressure: worker said "my queue is full,
                         // retry later". Mark overloaded so this FE skips it on
                         // the next selection; the next ActiveLoad event from the
@@ -2381,9 +2384,12 @@ mod tests {
             .await
             .unwrap_err();
 
+        // A *selected* worker being overloaded is single-worker overload, distinct
+        // from pool-wide exhaustion: migration may retry elsewhere. Previously
+        // both collapsed to ResourceExhausted, which blocked that retry.
         assert!(match_error_chain(
             error.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
         assert!(

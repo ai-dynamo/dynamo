@@ -219,14 +219,19 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
-    if !error.is_overload() {
-        return error.into();
-    }
+    // Keep the two overload cases apart. A single overloaded worker can be
+    // retried elsewhere; a pool with no free worker cannot, and migrating it
+    // would just bounce the request around. Both remain HTTP 529 to the client.
+    let error_type = match error {
+        scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => ErrorType::WorkerOverloaded,
+        scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => ErrorType::ResourceExhausted,
+        _ => return error.into(),
+    };
 
     let message = error.to_string();
     let cause = PipelineError::ServiceOverloaded(message.clone());
     DynamoError::builder()
-        .error_type(ErrorType::ResourceExhausted)
+        .error_type(error_type)
         .message(message)
         .cause(cause)
         .build()

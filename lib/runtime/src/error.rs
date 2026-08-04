@@ -55,8 +55,13 @@ pub enum ErrorType {
     ResponseTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
-    /// The system does not have enough resources to handle the request.
+    /// The whole eligible worker pool is out of capacity. Retrying elsewhere
+    /// will not help, so this must not trigger migration.
     ResourceExhausted,
+    /// One selected worker is out of capacity while others may still have room.
+    /// Distinct from [`Self::ResourceExhausted`] so migration can retry on a
+    /// different worker; both surface as HTTP 529 to the client.
+    WorkerOverloaded,
     /// No backend worker is currently available to handle the request.
     Unavailable,
     /// Error originating from a backend engine.
@@ -74,6 +79,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
+            ErrorType::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorType::Unavailable => write!(f, "Unavailable"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }

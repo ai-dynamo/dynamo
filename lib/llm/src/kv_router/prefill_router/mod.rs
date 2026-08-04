@@ -379,7 +379,11 @@ impl
             Ok(result) => result,
             Err(error) => {
                 use dynamo_runtime::error::{ErrorType, match_error_chain};
-                if match_error_chain(error.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+                if match_error_chain(
+                    error.as_ref(),
+                    &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+                    &[],
+                ) {
                     tracing::warn!(
                         error = %error,
                         "request rejected by prefill worker (at capacity)"

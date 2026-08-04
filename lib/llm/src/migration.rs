@@ -68,6 +68,9 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::Backend(BackendError::EngineShutdown),
         // A truncated stream from a departed worker is recoverable by failover.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // One overloaded worker: another may have room. Pool-wide exhaustion is
+        // ResourceExhausted below and stays non-migratable.
+        ErrorType::WorkerOverloaded,
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
@@ -779,6 +782,33 @@ mod tests {
     }
 
     /// Test case 1: No migration needed
+    /// The two overload cases must migrate differently: one busy worker can be
+    /// retried elsewhere, a pool with no free worker cannot.
+    ///
+    /// Collapsing them — as a single `ResourceExhausted` did — either strands a
+    /// request that had a healthy worker available, or bounces a pool-wide
+    /// rejection around until retries run out.
+    #[test]
+    fn worker_overload_migrates_but_pool_exhaustion_does_not() {
+        let worker_busy = DynamoError::builder()
+            .error_type(ErrorType::WorkerOverloaded)
+            .message("Selected worker is overloaded, please retry later")
+            .build();
+        assert!(
+            is_migratable(&worker_busy),
+            "one overloaded worker must fail over to another"
+        );
+
+        let pool_exhausted = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("All workers are busy, please retry later")
+            .build();
+        assert!(
+            !is_migratable(&pool_exhausted),
+            "pool-wide exhaustion must not migrate; no worker has room"
+        );
+    }
+
     /// Tests the normal case where the RetryManager successfully processes all responses
     /// from a single stream without any failures or need for retries/migration.
     /// Expected behavior: All 10 responses should be received successfully.

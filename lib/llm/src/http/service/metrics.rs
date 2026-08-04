@@ -36,7 +36,12 @@ use dynamo_runtime::error::ErrorType as DynamoErrorType;
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
-    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    // Both overload flavors are client-visible rejections (HTTP 529). They differ
+    // only in whether migration may retry elsewhere.
+    const REJECTION: &[DynamoErrorType] = &[
+        DynamoErrorType::ResourceExhausted,
+        DynamoErrorType::WorkerOverloaded,
+    ];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
