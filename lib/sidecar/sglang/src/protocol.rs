@@ -327,6 +327,13 @@ fn json_value_to_string(value: &Value) -> String {
     }
 }
 
+/// Tokens appended since the previous chunk. SGLang streams `output_ids`
+/// cumulatively, so each chunk carries the full sequence so far; `offset` is the
+/// previous chunk's total length. Guards against a non-growing chunk.
+pub(crate) fn new_output_ids(output_ids: &[i32], offset: usize) -> &[i32] {
+    output_ids.get(offset..).unwrap_or(&[])
+}
+
 pub(crate) fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
     ids.iter()
         .map(|id| {
@@ -550,7 +557,7 @@ mod tests {
 
     use super::{
         build_generate_request, disaggregated_params_to_json, engine_data_from_meta,
-        extract_logprobs, terminal_from_meta,
+        extract_logprobs, new_output_ids, terminal_from_meta,
     };
 
     fn request() -> PreprocessedRequest {
@@ -641,6 +648,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(decode.disaggregated_params, Some(handoff));
+    }
+
+    #[test]
+    fn new_output_ids_slices_the_cumulative_stream() {
+        // SGLang re-sends the whole sequence each chunk; only the tail is new.
+        assert_eq!(new_output_ids(&[1, 2, 3], 0), &[1, 2, 3]);
+        assert_eq!(new_output_ids(&[1, 2, 3], 2), &[3]);
+        assert_eq!(new_output_ids(&[1, 2, 3], 3), &[] as &[i32]);
+        // A chunk that did not grow (or an over-large offset) yields nothing.
+        assert_eq!(new_output_ids(&[1, 2, 3], 5), &[] as &[i32]);
+    }
+
+    #[test]
+    fn cumulative_offset_never_rewinds_on_regression() {
+        // Mirror the engine loop: emit the new tail, then advance the offset
+        // monotonically (token_offset.max(len)) so a regressive chunk can't cause
+        // re-emission when the sequence later grows again.
+        let mut offset = 0usize;
+        let mut step = |ids: &[i32]| -> Vec<i32> {
+            let new = new_output_ids(ids, offset).to_vec();
+            offset = offset.max(ids.len());
+            new
+        };
+        assert_eq!(step(&[1, 2, 3]), vec![1, 2, 3]);
+        // Regressive chunk: emits nothing and leaves the offset at 3.
+        assert_eq!(step(&[1, 2]), Vec::<i32>::new());
+        // Growth resumes: only the genuinely-new tail is emitted, not 1..3 again.
+        assert_eq!(step(&[1, 2, 3, 4]), vec![4]);
     }
 
     #[test]
