@@ -444,6 +444,36 @@ jobs:
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
 
+      - name: Snapshot translation mirrors
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # This branch keeps translations as .zh-CN siblings of the English
+          # page rather than a translations/<lang>/pages tree, so build the
+          # mirror by stripping the .zh-CN infix. Path and extension otherwise
+          # match the English page, which is what pairs the mirror with
+          # fern/pages-$TAG. Snapshot from the tagged source, not the
+          # docs-website dev mirror, whose links are already rewritten to dev
+          # URLs. No-op when the tag carries no translations.
+          LANG_CODE=zh-CN
+          DEST="fern/translations/$LANG_CODE/pages-$TAG"
+          count=0
+          rm -rf "$DEST"
+          while IFS= read -r src; do
+            rel="${src#source-checkout/docs/}"
+            out="$DEST/$(printf '%s' "$rel" | sed "s|\.$LANG_CODE\.|.|")"
+            mkdir -p "$(dirname "$out")"
+            cp "$src" "$out"
+            count=$((count + 1))
+          done < <(find source-checkout/docs -name "*.$LANG_CODE.md" -o -name "*.$LANG_CODE.mdx")
+
+          if [ "$count" = "0" ]; then
+            echo "No $LANG_CODE pages at $TAG; skipping the mirror."
+            rm -rf "$DEST"
+          else
+            echo "Snapshotted $count $LANG_CODE page(s) to $DEST"
+          fi
+
       - name: Update GitHub links to 'main' to version tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
