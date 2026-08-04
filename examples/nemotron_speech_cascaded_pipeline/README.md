@@ -131,10 +131,11 @@ export NAMESPACE=voice-agent
 export DYNAMO_RUNTIME_VERSION=<compatible-published-version>
 export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
-export CUSTOM_SPEECH_ADAPTER_IMAGE="<registry-host>/<project>/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
-export DYNAMO_REGISTRY=<registry-host>
-export DYNAMO_REGISTRY_USER=<username>
-export DYNAMO_REGISTRY_PASSWORD=<password>
+export CUSTOM_IMAGE_REGISTRY=<registry-host>
+export CUSTOM_IMAGE_REPOSITORY=<project>
+export CUSTOM_SPEECH_ADAPTER_IMAGE="${CUSTOM_IMAGE_REGISTRY}/${CUSTOM_IMAGE_REPOSITORY}/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_IMAGE_REGISTRY_USER=<username>
+export CUSTOM_IMAGE_REGISTRY_PASSWORD=<password>
 export NGC_API_KEY=<ngc-api-key>
 export HF_TOKEN=<hugging-face-token>
 export RWX_STORAGE_CLASS=<rwx-storage-class>
@@ -142,7 +143,8 @@ export RWX_STORAGE_CLASS=<rwx-storage-class>
 
 Use the same Dynamo runtime version for the two published images and the custom
 adapter image. Its semantic tag lets the Dynamo operator derive compatibility
-directly from each component's main image.
+directly from each component's main image. The custom image can use any OCI
+registry; the published Dynamo images are pulled directly from NVCR.
 
 ### 1. Build and push the adapter image
 
@@ -165,11 +167,11 @@ validating changes that have not reached a published release.
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
   | kubectl apply -f -
 
-kubectl create secret docker-registry dynamo-image-pull-secret \
+kubectl create secret docker-registry custom-adapter-image-pull-secret \
   --namespace "${NAMESPACE}" \
-  --docker-server "${DYNAMO_REGISTRY}" \
-  --docker-username "${DYNAMO_REGISTRY_USER}" \
-  --docker-password "${DYNAMO_REGISTRY_PASSWORD}" \
+  --docker-server "${CUSTOM_IMAGE_REGISTRY}" \
+  --docker-username "${CUSTOM_IMAGE_REGISTRY_USER}" \
+  --docker-password "${CUSTOM_IMAGE_REGISTRY_PASSWORD}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl create secret docker-registry ngc-secret \
@@ -189,6 +191,10 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="${HF_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+The custom registry credentials are only needed for a private adapter image.
+For a public image, omit that secret and remove
+`custom-adapter-image-pull-secret` from the speech worker pod templates.
 
 ### 3. Create the shared model cache
 
