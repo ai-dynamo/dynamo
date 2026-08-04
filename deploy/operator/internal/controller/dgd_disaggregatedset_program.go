@@ -114,7 +114,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 	}
 	setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionTrue, "Selected", "DisaggregatedSet pathway selected")
 
-	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+	if err := p.reconcileWorkerRollout(ctx, req.DGD); err != nil {
 		return programResult, err
 	}
 
@@ -166,7 +166,6 @@ func setDisaggregatedSetEligibilityCondition(
 func (p *disaggregatedSetProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
