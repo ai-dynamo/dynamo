@@ -8,27 +8,39 @@ A prefix-cache HIT also needs the *index* (``block_hash -> block_id``), which li
 in the scheduler's ``BlockPool`` process RAM and cannot be regenerated from the bytes
 (the hash is over token ids). This module carries the index across the crash:
 
-  * write-through: after ``BlockPool.cache_full_blocks`` runs, append each newly
-    cached ``(block_hash_with_group_id, block_id, num_tokens)`` to a shared,
-    append-only log beside the KV region.
-  * rehydrate: on the first cache lookup after a failover wake, replay the log into
-    the standby's ``BlockPool`` so the re-sent prefix HITs the reattached bytes.
-    Because both engines share identical, pinned geometry, ``block_id`` N on the
-    standby is the same reattached physical block as on the primary, so the
-    ``hash -> block_id`` map transfers verbatim.
+  * write-through: ``BlockPool.cache_full_blocks`` stages an ADD record per newly
+    cached block; ``BlockPool._maybe_evict_cached_block`` appends a DEL when a
+    mapping is retired. Records go to a shared, append-only log beside the KV region.
+  * rehydrate: on a failover wake, replay the log into the standby's ``BlockPool``
+    so the re-sent prefix HITs the reattached bytes. Because both engines share
+    identical, pinned geometry, ``block_id`` N on the standby is the same reattached
+    physical block as on the primary, so the ``hash -> block_id`` map transfers
+    verbatim.
+
+Two rules keep the log from ever describing memory that does not back it. Both follow
+from the same asymmetry: **publishing late is fail-safe -- a missing record is just a
+MISS and a recompute -- while publishing early is silently wrong.**
+
+  * Step barrier. ``cache_full_blocks`` runs at SCHEDULE time, before the step's
+    forward pass writes any KV, so an ADD published there could claim bytes that were
+    never written. ADDs are staged and flushed from ``Scheduler.update_from_output``,
+    once that step's model output exists. No explicit GPU sync is needed: the KV
+    writes precede the sampler on the same stream, so observing the output means the
+    writes landed. DELs are never staged -- retiring a mapping is always safe.
+  * Ordered replay. Events are applied in order rather than reduced to the last record
+    per block, which is what makes cache/evict/re-cache cycles reconstruct the
+    primary's final index. A DEL only retires a mapping if that block still owns the
+    hash, so an older block's tombstone cannot cancel a newer ADD elsewhere.
 
 Determinism (B3): both engines must hash identically, so the launcher pins
 ``PYTHONHASHSEED`` -- otherwise vLLM's ``NONE_HASH`` (root of the hash chain) is
-``os.urandom(32)`` per process and no hash would ever match.
+``os.urandom(32)`` per process and no hash would ever match. A mismatch is fail-safe:
+nothing matches, so the standby MISSES and re-prefills.
 
-POC simplifications (documented, deferred):
-  * Eager write-through (not gated on the KV-write barrier) is safe for the North
-    Star because the test warms the prefix and only *then* crashes, so every
-    persisted block's bytes are already durable. A production build would stage
-    records and publish them at the step barrier (B2).
-  * Evictions/tombstones are not tracked; the pinned pool never evicts during the
-    test. On replay we keep the LAST record per block_id, which reconstructs each
-    block's final cached content.
+Remaining simplifications (documented, deferred): the log is unbounded and never
+compacted; it carries no generation id tying it to the allocation set it describes;
+and records are ``pickle``-framed. Durability is process-crash-safe (records reach the
+page cache on write) but not machine-crash-safe (no fsync).
 
 Enabled only when ``GMS_KV_INDEX_PATH`` is set (opt-in; no effect otherwise).
 """
@@ -43,6 +55,16 @@ logger = logging.getLogger(__name__)
 
 _log_path: str | None = None
 _log_lock = threading.Lock()
+
+# Log record opcodes. ADD installs a hash -> block mapping; DEL retires one. Records are
+# replayed in order, so a DEL after an ADD for the same hash cancels it.
+_OP_ADD = 0
+_OP_DEL = 1
+
+# ADD records awaiting the step barrier (see _stage_records / flush_staged_records).
+# DELs are never staged -- dropping a mapping is always safe, so they publish immediately.
+_staged: list = []
+_staged_lock = threading.Lock()
 
 # Set by GMSWorker.wake_up when it reattaches a prior engine's KV (a failover
 # takeover). Read by the patched BlockPool lookup, which rehydrates once then clears
@@ -368,6 +390,39 @@ def _append_records(records: list) -> None:
             f.write(buf)
 
 
+def _stage_records(records: list) -> None:
+    """Hold ADD records until the forward pass that writes their bytes has completed.
+
+    ``cache_full_blocks`` runs at SCHEDULE time -- before the step's forward pass writes
+    any KV -- so publishing there would let the log claim "block N holds hash H" while
+    block N does not yet hold H's bytes. A standby replaying that record gets a prefix
+    HIT on memory that was never written.
+
+    Publishing LATE is fail-safe (a missing record is just a MISS -> recompute);
+    publishing EARLY is silently wrong. So we stage here and flush at the step barrier.
+    """
+    if records:
+        with _staged_lock:
+            _staged.extend(records)
+
+
+def flush_staged_records() -> None:
+    """Publish staged ADDs. Called after a step's forward pass has completed.
+
+    No explicit GPU sync is needed: the KV writes for a step precede the sampler on the
+    same CUDA stream, so having observed that step's model output means those writes have
+    landed.
+    """
+    with _staged_lock:
+        if not _staged:
+            return
+        records, _staged[:] = list(_staged), []
+    try:
+        _append_records(records)
+    except Exception as e:  # never let persistence break serving
+        logger.warning("[GMS] KV index flush failed: %s", e)
+
+
 def enable_kv_index_persistence() -> None:
     """Monkey-patch ``BlockPool`` for write-through persist + lazy rehydrate.
 
@@ -385,12 +440,40 @@ def enable_kv_index_persistence() -> None:
     orig_cache_full_blocks = BlockPool.cache_full_blocks
     orig_get_cached_block = BlockPool.get_cached_block
     orig_init = BlockPool.__init__
+    orig_evict = BlockPool._maybe_evict_cached_block
 
     def __init__(self, *args, **kwargs):
         global _block_pool
         orig_init(self, *args, **kwargs)
         # Capture the pool so the wake path can rehydrate before serving begins.
         _block_pool = self
+
+    def _maybe_evict_cached_block(self, block, *args, **kwargs):
+        """Record evictions so replay does not resurrect a retired mapping.
+
+        When the pool reclaims a cached block its content becomes something else, but an
+        insert-only log would still tell a standby that block N holds the old hash --
+        a HIT on bytes that have since been overwritten. DELs publish immediately rather
+        than staging: dropping a mapping can only cost a recompute, never correctness.
+        """
+        hashes = []
+        try:
+            bh = block.block_hash
+            if bh is not None:
+                hashes.append(bytes(bh))
+            hashes.extend(
+                bytes(h)
+                for h in self.cached_block_hashes_by_block.get(block.block_id, ())
+            )
+        except Exception:
+            hashes = []
+        evicted = orig_evict(self, block, *args, **kwargs)
+        if evicted and hashes:
+            try:
+                _append_records([(_OP_DEL, h, block.block_id, None) for h in hashes])
+            except Exception as e:
+                logger.warning("[GMS] KV index tombstone failed: %s", e)
+        return evicted
 
     def cache_full_blocks(
         self, request, blocks, num_cached_blocks, num_full_blocks, *args, **kwargs
@@ -403,8 +486,10 @@ def enable_kv_index_persistence() -> None:
             for blk in blocks[num_cached_blocks:num_full_blocks]:
                 bh = blk.block_hash
                 if bh is not None:
-                    records.append((bytes(bh), blk.block_id, blk.block_hash_num_tokens))
-            _append_records(records)
+                    records.append(
+                        (_OP_ADD, bytes(bh), blk.block_id, blk.block_hash_num_tokens)
+                    )
+            _stage_records(records)
         except Exception as e:  # never let persistence break serving
             logger.warning("[GMS] KV index persist failed: %s", e)
         if os.getenv("GMS_KV_DEBUG") and _kv_caches:
@@ -482,7 +567,32 @@ def enable_kv_index_persistence() -> None:
     BlockPool.__init__ = __init__
     BlockPool.cache_full_blocks = cache_full_blocks
     BlockPool.get_cached_block = get_cached_block
+    BlockPool._maybe_evict_cached_block = _maybe_evict_cached_block
     BlockPool._gms_kv_index_patched = True
+
+    # Step barrier: publish staged ADDs once the step's forward pass has completed.
+    # update_from_output runs in the scheduler's process, after the model output for that
+    # step exists, so the KV writes it describes are guaranteed to have landed.
+    try:
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        if not getattr(Scheduler, "_gms_kv_index_patched", False):
+            orig_update_from_output = Scheduler.update_from_output
+
+            def update_from_output(self, *args, **kwargs):
+                out = orig_update_from_output(self, *args, **kwargs)
+                flush_staged_records()
+                return out
+
+            Scheduler.update_from_output = update_from_output
+            Scheduler._gms_kv_index_patched = True
+    except Exception as e:
+        # Without the barrier the log could claim bytes a crash never wrote; refuse to
+        # run in that mode rather than silently persisting unpublished records.
+        raise RuntimeError(
+            "[GMS] KV index persistence requires the Scheduler step barrier; "
+            f"could not install it: {e}"
+        ) from e
     logger.info("[GMS] KV index persistence enabled (log=%s)", _path())
 
 
@@ -498,33 +608,56 @@ def rehydrate_block_pool(block_pool) -> None:
     with open(path, "rb") as f:
         data = f.read()
 
-    # Keep the LAST record per block_id -> each block's final cached content.
-    latest: dict[int, tuple[bytes, int | None]] = {}
+    # Apply events IN ORDER: an ADD installs hash -> block, a DEL (eviction tombstone)
+    # retires it. Order matters -- a block can be cached, evicted, then cached again under
+    # a different hash, and only sequential application reconstructs the primary's final
+    # index. A truncated tail record (crash mid-write) is dropped.
+    live: dict[bytes, tuple[int, int | None]] = {}  # hash -> (block_id, num_tokens)
+    n_add = n_del = n_rec = 0
     off, total = 0, len(data)
     while off + 4 <= total:
         (ln,) = struct.unpack_from("<I", data, off)
         off += 4
         if off + ln > total:
             break
-        hash_bytes, block_id, num_tokens = pickle.loads(data[off : off + ln])
+        op, hash_bytes, block_id, num_tokens = pickle.loads(data[off : off + ln])
         off += ln
-        latest[block_id] = (hash_bytes, num_tokens)
+        n_rec += 1
+        if op == _OP_ADD:
+            live[hash_bytes] = (block_id, num_tokens)
+            n_add += 1
+        elif op == _OP_DEL:
+            # Only retire the mapping if this block still owns the hash; a later ADD that
+            # re-cached the same hash elsewhere must survive an older block's tombstone.
+            cur = live.get(hash_bytes)
+            if cur is not None and cur[0] == block_id:
+                del live[hash_bytes]
+            n_del += 1
+
+    # One block can legitimately hold several hashes; keep them all, but a block may only
+    # be requeued once.
+    latest: dict[bytes, tuple[int, int | None]] = live
 
     null_id = block_pool.null_block.block_id
     n = 0
     rehydrated = []
-    for block_id, (hash_bytes, num_tokens) in latest.items():
+    seen_blocks = set()
+    for hash_bytes, (block_id, num_tokens) in latest.items():
         if block_id == null_id or block_id < 0 or block_id >= len(block_pool.blocks):
             continue
         block = block_pool.blocks[block_id]
-        if block.block_hash is not None or block.ref_cnt != 0:
-            # Only rehydrate blocks that are free and unhashed on the standby;
-            # never disturb a block the standby is already using.
+        if block.ref_cnt != 0:
+            # Never disturb a block the standby is already using.
+            continue
+        if block.block_hash is not None and block.block_id not in seen_blocks:
+            # Hashed by the standby itself (not by us this pass): leave it alone.
             continue
         block_pool._insert_block_hash(
             BlockHashWithGroupId(hash_bytes), block, num_tokens
         )
-        rehydrated.append(block)
+        if block.block_id not in seen_blocks:
+            seen_blocks.add(block.block_id)
+            rehydrated.append(block)
         n += 1
 
     # Restore vLLM's free-queue ordering invariant. A cached-but-free block must sit at
@@ -550,9 +683,14 @@ def rehydrate_block_pool(block_pool) -> None:
                 logger.warning("[GMS] KV index requeue failed for a block: %s", e)
 
     logger.info(
-        "[GMS] KV index rehydrated: replayed %d block entries into BlockPool "
-        "(%d records on log); requeued %d to free-queue tail (%d failed)",
+        "[GMS] KV index rehydrated: installed %d hashes over %d blocks "
+        "(log: %d records = %d add / %d del, %d live); "
+        "requeued %d to free-queue tail (%d failed)",
         n,
+        len(rehydrated),
+        n_rec,
+        n_add,
+        n_del,
         len(latest),
         moved,
         move_failed,

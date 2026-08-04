@@ -183,6 +183,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5601 DYN_VLLM_KV_EVENT_PORT=20081 \
 python3 -m dynamo.vllm --model "$MODEL_NAME" -tp "$TP_SIZE" \
     --gpu-memory-utilization "${GPU_UTIL:-0.4}" \
     --num-gpu-blocks-override "${KV_BLOCKS:-8192}" \
+    ${MAX_MODEL_LEN:+--max-model-len "$MAX_MODEL_LEN"} \
     --load-format gms --gms-shadow-mode > "$ENGINE_B_LOG" 2>&1 &
 ENGINE_B_PID=$!
 echo "Engine B PID: $ENGINE_B_PID — waiting 20s"
@@ -202,6 +203,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5600 DYN_VLLM_KV_EVENT_PORT=20080 \
 python3 -m dynamo.vllm --model "$MODEL_NAME" -tp "$TP_SIZE" \
     --gpu-memory-utilization "${GPU_UTIL:-0.4}" \
     --num-gpu-blocks-override "${KV_BLOCKS:-8192}" \
+    ${MAX_MODEL_LEN:+--max-model-len "$MAX_MODEL_LEN"} \
     --load-format gms --gms-shadow-mode > "$ENGINE_A_LOG" 2>&1 &
 ENGINE_A_PID=$!
 echo "Engine A PID: $ENGINE_A_PID"
@@ -290,6 +292,23 @@ echo "  winner cold out='${REF_OUT}' | winner hot out='${WH_OUT}'"
 [ "${WARM_HOT%%|*}" -lt "${WARM_COLD%%|*}" ] 2>/dev/null \
     && pass "KV-reuse calibration: prefix caching works within the winner (hot < cold TTFT)" \
     || echo "  NOTE: hot TTFT not clearly < cold — small-model prefill may be too cheap to time crisply"
+
+# ---- Phase 4c (optional): eviction pressure ----
+# EVICTION_PRESSURE=1 (pair with a small KV_BLOCKS) sends a SECOND distinct long prompt so
+# the pool must reclaim blocks the warm prefix had cached. That exercises the tombstone
+# path: the primary evicts, logs DELs, and the standby's replay must NOT resurrect those
+# retired mappings. Correct behaviour post-failover is a MISS with correct output -- a HIT
+# here would mean reading bytes that were overwritten.
+if [ "${EVICTION_PRESSURE:-0}" = "1" ]; then
+    echo ""; echo "=== Phase 4c: Eviction pressure (second distinct long prompt) ==="
+    PRESSURE_PROMPT=""
+    for i in $(seq 1 240); do
+        PRESSURE_PROMPT+="Chapter $i: a wholly different passage about tidal charts and harbor bells. "
+    done
+    PR=$(timed_completion "$PRESSURE_PROMPT")
+    echo "  pressure prompt ~${#PRESSURE_PROMPT} chars | TTFT=${PR%%|*} ms | http=${PR##*|}"
+    echo "  winner prefix_hits after pressure=$(prefix_hits "$WINNER_PORT")"
+fi
 
 # ---- Phase 5: Failover ----
 echo ""; echo "=== Phase 5: Failover ==="
