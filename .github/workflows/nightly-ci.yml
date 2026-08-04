@@ -605,13 +605,13 @@ jobs:
 
   deploy-test-vllm:
     name: vLLM Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, vllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -619,13 +619,13 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, sglang-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
+      image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -633,13 +633,13 @@ jobs:
 
   deploy-test-trtllm:
     name: TensorRT-LLM Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, trtllm-build, trtllm-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, trtllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
+      image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
