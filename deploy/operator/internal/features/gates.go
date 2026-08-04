@@ -215,7 +215,8 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 	disaggregatedSetAvailable := detectAPIGroup(ctx, mgr, "disaggregatedset.x-k8s.io", "v1")
 	// The DS pathway lists and watches the LWS children created by the DS
 	// controller. Do not register those watches when the LWS API is absent.
-	gates.DisaggregatedSet = lwsAvailable && disaggregatedSetAvailable
+	lwsOptedOut := config.Orchestrators.LWS.Enabled != nil && !*config.Orchestrators.LWS.Enabled
+	gates.DisaggregatedSet = !lwsOptedOut && lwsAvailable && disaggregatedSetAvailable
 	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
 		if !lwsAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
