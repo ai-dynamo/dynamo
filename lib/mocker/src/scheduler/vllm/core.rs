@@ -1675,7 +1675,7 @@ impl VllmCore {
             admissions,
             lifecycle_events: std::mem::take(&mut self.lifecycle_events),
             mocker_metrics: self.mocker_metrics(),
-            router_event_visibility: RouterEventVisibility::PassStart,
+            router_event_visibility: RouterEventVisibility::PassEnd,
             kv_events: self
                 .kv_event_buffer
                 .as_ref()
