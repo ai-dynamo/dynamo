@@ -216,6 +216,21 @@ impl SharedTcpServer {
                             "Failed to build TCP request plane TLS config — check cert/key paths",
                         )?;
                     tracing::info!("TCP request plane: TLS enabled");
+                    // Warn if the client side is not configured for TLS — peers
+                    // dialing this server without a CA (or insecure) will fail the
+                    // handshake with no obvious diagnostic.
+                    let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
+                        || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+                    if !client_tls_set {
+                        tracing::warn!(
+                            "TCP request plane server has TLS enabled but client TLS env vars are \
+                             not set. Set {} (or {}) so clients can connect, or unset {}/{}.",
+                            env::DYN_TCP_TLS_CA_CERT_PATH,
+                            env::DYN_TCP_TLS_INSECURE,
+                            env::DYN_TCP_TLS_CERT_PATH,
+                            env::DYN_TCP_TLS_KEY_PATH,
+                        );
+                    }
                     Some(Arc::new(TlsAcceptor::from(Arc::new(config))))
                 }
                 (Some(_), None) | (None, Some(_)) => {
@@ -225,7 +240,22 @@ impl SharedTcpServer {
                         env::DYN_TCP_TLS_KEY_PATH,
                     );
                 }
-                (None, None) => None,
+                (None, None) => {
+                    // Warn on the reverse mismatch: server plaintext but client TLS
+                    // env is set (mirrors the call-home server warning).
+                    let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
+                        || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+                    if client_tls_set {
+                        tracing::warn!(
+                            "TCP request plane server is running in plaintext mode but client TLS \
+                             env vars are set. Set {} and {} to enable server-side TLS, or unset \
+                             client TLS vars.",
+                            env::DYN_TCP_TLS_CERT_PATH,
+                            env::DYN_TCP_TLS_KEY_PATH,
+                        );
+                    }
+                    None
+                }
             }
         };
 

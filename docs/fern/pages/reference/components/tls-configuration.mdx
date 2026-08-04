@@ -150,8 +150,10 @@ encrypted:
 
 ## Design notes
 
-- TLS configuration is cached after the first connection via `OnceCell`.
-  Certificate rotation requires a process restart.
+- Client TLS connectors are built once and cached via `OnceCell` on the first
+  outbound connection; the request-plane and response-stream servers build their
+  TLS acceptor eagerly at startup. Either way, certificate rotation requires a
+  process restart.
 - The TLS handshake is spawned per-connection on both the request plane and
   response stream servers so the accept loop is never blocked.
 - Invalid TLS configuration on the request plane (e.g. bad cert path) prevents
