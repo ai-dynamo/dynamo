@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-agg
+  name: sglang-agg-logging
 spec:
   components:
   - name: Frontend

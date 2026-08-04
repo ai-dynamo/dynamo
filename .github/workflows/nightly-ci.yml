@@ -611,7 +611,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
+      image_tag: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -624,8 +624,8 @@ jobs:
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
+      profiles: '["agg", "agg_logging"]'
+      image_tag: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -639,7 +639,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg"]'
-      image_suffix: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
+      image_tag: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
