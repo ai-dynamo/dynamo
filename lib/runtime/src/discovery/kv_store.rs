@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
-    EventSourceInstanceId, ModelCardInstanceId, encode_event_segment,
-    validate_event_source_reregistration,
+    EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
+    reconcile_discovery_snapshot, validate_event_source_reregistration,
 };
 use crate::storage::kv;
 
@@ -247,8 +247,23 @@ impl KVStoreDiscovery {
 
                 match Self::parse_instance(kv.value()) {
                     Ok(instance) => {
-                        known_instances.insert(instance.id(), instance.clone());
-                        vec![DiscoveryEvent::Added(instance)]
+                        let id = instance.id();
+                        match classify_discovery_change(known_instances.get(&id), &instance) {
+                            Ok(Some(event)) => {
+                                known_instances.insert(id, instance);
+                                vec![event]
+                            }
+                            Ok(None) => vec![],
+                            Err(error) => {
+                                tracing::error!(
+                                    key = %kv.key_str(),
+                                    ?id,
+                                    %error,
+                                    "Rejecting immutable discovery model-card mutation"
+                                );
+                                vec![]
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -308,29 +323,17 @@ impl KVStoreDiscovery {
                     }
                 }
 
-                let mut events = Vec::new();
-                for id in known_instances.keys() {
-                    if !next_instances.contains_key(id) {
-                        events.push(DiscoveryEvent::Removed(id.clone()));
-                    }
-                }
-
-                for (id, instance) in &next_instances {
-                    if known_instances.get(id) != Some(instance) {
-                        // Added is an upsert event here: a resync can discover
-                        // either a new instance or changed data for an existing id.
-                        events.push(DiscoveryEvent::Added(instance.clone()));
-                    }
-                }
+                let (events, reconciled) =
+                    reconcile_discovery_snapshot(known_instances, next_instances);
 
                 tracing::warn!(
                     old_count = known_instances.len(),
-                    new_count = next_instances.len(),
+                    new_count = reconciled.len(),
                     emitted_events = events.len(),
                     "KVStoreDiscovery::list_and_watch resynced discovery state"
                 );
 
-                *known_instances = next_instances;
+                *known_instances = reconciled;
                 events
             }
         }
@@ -492,9 +495,9 @@ impl Discovery for KVStoreDiscovery {
         Ok(instance)
     }
 
-    async fn update_model_internal(&self, instance: DiscoveryInstance) -> Result<()> {
+    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
         let DiscoveryInstanceId::Model(id) = instance.id() else {
-            anyhow::bail!("update_model_internal requires a model discovery instance")
+            anyhow::bail!("update_model_taints_internal requires a model discovery instance")
         };
         let bucket = self
             .store
@@ -707,8 +710,11 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
-    use crate::discovery::{EventChannelQuery, EventSourceQuery, EventTransport};
+    use crate::discovery::{
+        EventChannelQuery, EventSourceQuery, EventTransport, ModelTaintsUpdate,
+    };
     use crate::protocols::EndpointId;
+    use std::collections::HashSet;
 
     fn endpoint_instance(instance_id: u64) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -800,6 +806,43 @@ mod tests {
         assert!(events.is_empty());
         assert_eq!(known_instances.len(), 1);
         assert_eq!(known_instances.get(&first.id()), Some(&first));
+    }
+
+    #[test]
+    fn resync_changed_model_taints_emits_scoped_event() {
+        let prefix = format!("{}/{}/{}/{}", MODELS_BUCKET, "ns", "worker", "generate");
+        let old = model_spec("first").into_instance(7);
+        let updated = model_spec("second").into_instance(7);
+        let DiscoveryInstanceId::Model(id) = updated.id() else {
+            unreachable!()
+        };
+        let mut known_instances = HashMap::from([(old.id(), old)]);
+        let snapshot = HashMap::from([(
+            kv::Key::new(id.to_path()),
+            serde_json::to_vec(&updated).unwrap().into(),
+        )]);
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(snapshot),
+            &prefix,
+            MODELS_BUCKET,
+            &mut known_instances,
+        );
+
+        assert_eq!(
+            events,
+            vec![DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: id.clone(),
+                taints: vec![
+                    "dynamo.topology/zone=west".to_string(),
+                    "second".to_string(),
+                ],
+            })]
+        );
+        assert_eq!(
+            known_instances.get(&DiscoveryInstanceId::Model(id)),
+            Some(&updated)
+        );
     }
 
     #[test]
@@ -1136,7 +1179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_taint_updates_replace_existing_value_and_emit_added() {
+    async fn model_taint_updates_replace_existing_value_and_emit_scoped_event() {
         let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
         let query = DiscoveryQuery::EndpointModels {
             namespace: "ns".to_string(),
@@ -1150,20 +1193,37 @@ mod tests {
             panic!("expected initial model addition");
         };
 
+        let DiscoveryInstanceId::Model(id) = first.id() else {
+            unreachable!()
+        };
         for taint in ["second", "third"] {
-            let updated = client.update_model(model_spec(taint)).await.unwrap();
-            tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
-                loop {
-                    if stream.next().await.unwrap().unwrap()
-                        == DiscoveryEvent::Added(updated.clone())
-                    {
-                        break;
-                    }
-                }
-            })
+            client
+                .update_model_taints(id.clone(), HashSet::from([taint.to_string()]))
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                event,
+                DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                    id: id.clone(),
+                    taints: vec!["dynamo.topology/zone=west".to_string(), taint.to_string(),],
+                })
+            );
+        }
+
+        client
+            .update_model_taints(id, HashSet::from(["third".to_string()]))
             .await
             .unwrap();
-        }
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
 
         let listed = client.list(query).await.unwrap();
         assert_eq!(listed.len(), 1);

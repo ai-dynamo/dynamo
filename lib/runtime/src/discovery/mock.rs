@@ -3,7 +3,8 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, validate_event_source_reregistration,
+    DiscoverySpec, DiscoveryStream, reconcile_discovery_snapshot,
+    validate_event_source_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -208,7 +209,7 @@ impl Discovery for MockDiscovery {
         Ok(instance)
     }
 
-    async fn update_model_internal(&self, instance: DiscoveryInstance) -> Result<()> {
+    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
         let target_id = instance.id();
         let mut instances = self.registry.instances.lock().unwrap();
         let existing = instances
@@ -263,25 +264,13 @@ impl Discovery for MockDiscovery {
                         .collect()
                 };
 
-                // Added is an upsert event: emit it for new identities and
-                // for changed values under an existing identity.
-                for (id, instance) in &current {
-                    if known_instances.get(id) != Some(instance) {
-                        yield Ok(DiscoveryEvent::Added(instance.clone()));
-                    }
+                let (events, reconciled) =
+                    reconcile_discovery_snapshot(&known_instances, current);
+                for event in events {
+                    yield Ok(event);
                 }
 
-                // Emit Removed events for instances that are gone
-                for id in known_instances
-                    .keys()
-                    .filter(|id| !current.contains_key(*id))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    yield Ok(DiscoveryEvent::Removed(id));
-                }
-
-                known_instances = current;
+                known_instances = reconciled;
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         };

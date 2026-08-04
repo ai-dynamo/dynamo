@@ -17,7 +17,7 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
-    diff_discovery_instances, endpoint_instances,
+    reconcile_discovery_snapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -25,23 +25,6 @@ use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-fn diff_instances(
-    known: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
-    current: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
-) -> (Vec<DiscoveryInstance>, Vec<DiscoveryInstanceId>) {
-    let added = current
-        .iter()
-        .filter(|(id, instance)| known.get(*id) != Some(*instance))
-        .map(|(_, instance)| instance.clone())
-        .collect();
-    let removed = known
-        .keys()
-        .filter(|id| !current.contains_key(*id))
-        .cloned()
-        .collect();
-    (added, removed)
-}
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -238,9 +221,9 @@ impl Discovery for KubeDiscoveryClient {
         Ok(instance)
     }
 
-    async fn update_model_internal(&self, instance: DiscoveryInstance) -> Result<()> {
+    async fn update_model_taints_internal(&self, instance: DiscoveryInstance) -> Result<()> {
         if !matches!(&instance, DiscoveryInstance::Model { .. }) {
-            anyhow::bail!("update_model_internal requires a model discovery instance")
+            anyhow::bail!("update_model_taints_internal requires a model discovery instance")
         }
 
         // Hold the local metadata lock through server-side apply so concurrent
@@ -479,11 +462,10 @@ impl Discovery for KubeDiscoveryClient {
                             "Watch received snapshot update"
                         );
 
-                        // Emit upserts for new and changed model/endpoint values.
-                        let (upserted, removed) = diff_instances(&known, &current);
+                        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
                         // Log diff results (even if empty, for debugging)
-                        if upserted.is_empty() && removed.is_empty() {
+                        if events.is_empty() {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
@@ -493,44 +475,26 @@ impl Discovery for KubeDiscoveryClient {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
-                                upserted = upserted.len(),
-                                removed = removed.len(),
-                                total = current.len(),
+                                emitted_events = events.len(),
+                                total = reconciled.len(),
                                 "Watch detected changes"
                             );
                         }
 
-                        // Emit Added events for new and changed values.
-                        for instance in upserted {
+                        for event in events {
                             tracing::info!(
                                 stream_id = %stream_id,
-                                instance_id = format!("{:x}", instance.instance_id()),
-                                "Emitting Added event"
+                                ?event,
+                                "Emitting discovery event"
                             );
-                            if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
-                                tracing::debug!(
-                                    stream_id = %stream_id,
-                                    "Watch receiver dropped"
-                                );
-                                return;
-                            }
-                        }
-
-                        // Emit Removed events
-                        for id in removed {
-                            tracing::info!(
-                                stream_id = %stream_id,
-                                id = ?id,
-                                "Emitting Removed event"
-                            );
-                            if event_tx.send(Ok(DiscoveryEvent::Removed(id))).is_err() {
+                            if event_tx.send(Ok(event)).is_err() {
                                 tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
                                 return;
                             }
                         }
 
                         // Update known values.
-                        known = current;
+                        known = reconciled;
                     }
                     Err(_) => {
                         tracing::info!(
@@ -553,7 +517,7 @@ impl Discovery for KubeDiscoveryClient {
 mod tests {
     use super::*;
     use crate::component::TransportType;
-    use crate::discovery::{EventScope, EventTransport};
+    use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -580,13 +544,11 @@ mod tests {
         let updated = endpoint_instance(1, "127.0.0.1:9000");
         let known = HashMap::from([(original.id(), original)]);
         let current = HashMap::from([(updated.id(), updated.clone())]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert_eq!(upserted, vec![updated]);
-        assert!(removed.is_empty());
+        assert_eq!(events, vec![DiscoveryEvent::Added(updated.clone())]);
+        assert_eq!(reconciled.get(&updated.id()), Some(&updated));
     }
 
     #[test]
@@ -601,33 +563,34 @@ mod tests {
         };
         let original = event_channel("tcp://127.0.0.1:8000");
         let updated = event_channel("tcp://127.0.0.1:9000");
-        let known = HashMap::from([(original.id(), original)]);
+        let known = HashMap::from([(original.id(), original.clone())]);
         let current = HashMap::from([(updated.id(), updated)]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert!(upserted.is_empty());
-        assert!(removed.is_empty());
+        assert!(events.is_empty());
+        assert_eq!(reconciled.get(&original.id()), Some(&original));
     }
 
     #[test]
     fn snapshot_diff_emits_added_and_removed_instances() {
         let removed_instance = endpoint_instance(1, "127.0.0.1:8000");
         let added_instance = endpoint_instance(2, "127.0.0.1:9000");
-        let known = HashMap::from([(removed_instance.id(), removed_instance.clone())]);
-        let current = HashMap::from([(added_instance.id(), added_instance.clone())]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
+        let removed_id = removed_instance.id();
+        let added_id = added_instance.id();
+        let known = HashMap::from([(removed_id.clone(), removed_instance)]);
+        let current = HashMap::from([(added_id.clone(), added_instance.clone())]);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert_eq!(upserted, vec![added_instance]);
-        assert_eq!(removed, vec![removed_instance.id()]);
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&DiscoveryEvent::Removed(removed_id.clone())));
+        assert!(events.contains(&DiscoveryEvent::Added(added_instance.clone())));
+        assert!(!reconciled.contains_key(&removed_id));
+        assert_eq!(reconciled.get(&added_id), Some(&added_instance));
     }
     #[test]
-    fn changed_model_value_is_an_added_upsert() {
+    fn changed_model_taints_emit_scoped_event() {
         let model = |taint: &str| DiscoveryInstance::Model {
             namespace: "ns".to_string(),
             component: "worker".to_string(),
@@ -643,9 +606,18 @@ mod tests {
         let known = HashMap::from([(old.id(), old)]);
         let current = HashMap::from([(updated.id(), updated.clone())]);
 
-        let (added, removed) = diff_instances(&known, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert_eq!(added, vec![updated]);
-        assert!(removed.is_empty());
+        let DiscoveryInstanceId::Model(id) = updated.id() else {
+            unreachable!()
+        };
+        assert_eq!(
+            events,
+            vec![DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id,
+                taints: vec!["updated".to_string()],
+            })]
+        );
+        assert_eq!(reconciled.get(&updated.id()), Some(&updated));
     }
 }
