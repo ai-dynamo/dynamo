@@ -941,6 +941,8 @@ navigation:
         path: pages/reference/general/examples.md
       - page: Release Artifacts
         path: pages/reference/general/release-artifacts.mdx
+      - page: Nightly Release Info
+        path: pages/reference/general/nightly-release-info.md
       - section: Releases
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
