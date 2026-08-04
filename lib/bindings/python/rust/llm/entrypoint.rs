@@ -29,6 +29,7 @@ use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
@@ -567,7 +568,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -598,6 +599,7 @@ impl EntrypointArgs {
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
+        reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
@@ -632,6 +634,12 @@ impl EntrypointArgs {
                     .map_err(PyValueError::new_err)
             })
             .transpose()?;
+        let reasoning_field = reasoning_field_name
+            .map(|name| {
+                name.parse::<ReasoningField>()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))
+            })
+            .transpose()?;
 
         let mut runtime_config = runtime_config.unwrap_or_default();
         if let Some(tokenizer_backend) = tokenizer_backend {
@@ -658,6 +666,7 @@ impl EntrypointArgs {
                 strip_anthropic_preamble,
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
+                reasoning_field,
             ),
             tls_cert_path,
             tls_key_path,

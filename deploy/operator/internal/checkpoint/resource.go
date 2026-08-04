@@ -59,7 +59,7 @@ func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
 
 func FindCheckpointByCheckpointID(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	checkpointID string,
 	excludeName string,
@@ -125,7 +125,7 @@ func FindCheckpointByCheckpointID(
 
 func FindCheckpointByIdentityHash(
 	ctx context.Context,
-	c client.Client,
+	c client.Reader,
 	namespace string,
 	hash string,
 	excludeName string,
