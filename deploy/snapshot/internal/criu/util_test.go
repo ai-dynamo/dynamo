@@ -185,6 +185,34 @@ func TestApplyCommonSettings(t *testing.T) {
 	})
 }
 
+func TestOverrideLibDir(t *testing.T) {
+	t.Run("replaces existing libdir line", func(t *testing.T) {
+		conf := "log-level 4\nlibdir /usr/local/lib/snapshot/criu-plugins\nshell-job\n"
+		got := overrideLibDir(conf, "/tmp/snapshot-binaries/criu-plugins")
+		if strings.Contains(got, "/usr/local/lib/snapshot/criu-plugins") {
+			t.Error("old libdir should have been replaced")
+		}
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("new libdir not found in output: %q", got)
+		}
+	})
+
+	t.Run("appends libdir when absent", func(t *testing.T) {
+		conf := "log-level 4\nshell-job\n"
+		got := overrideLibDir(conf, "/tmp/snapshot-binaries/criu-plugins")
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("libdir not appended: %q", got)
+		}
+	})
+
+	t.Run("handles empty config", func(t *testing.T) {
+		got := overrideLibDir("", "/tmp/snapshot-binaries/criu-plugins")
+		if !strings.Contains(got, "libdir /tmp/snapshot-binaries/criu-plugins") {
+			t.Errorf("libdir not appended to empty config: %q", got)
+		}
+	})
+}
+
 func TestBuildRestoreExtMounts(t *testing.T) {
 	t.Run("normal manifest with ExtMnt", func(t *testing.T) {
 		m := &types.CheckpointManifest{

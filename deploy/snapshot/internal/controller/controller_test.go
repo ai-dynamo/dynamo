@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/injection"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -62,19 +62,19 @@ func (r *fakeRuntime) Close() error { return nil }
 // reached by a test that was previously relying on Phase 1 failing first.
 type noopInjector struct{}
 
-func (noopInjector) Inject(_ context.Context, _ int) (injection.InjectionHandle, error) {
+func (noopInjector) Inject(_ context.Context, _ int) (nsmountinjector.Handle, error) {
 	return noopInjectionHandle{}, nil
 }
 
 type noopInjectionHandle struct{}
 
-func (noopInjectionHandle) BinPath(name string) string    { return "/noop/" + name }
-func (noopInjectionHandle) Cleanup(_ context.Context) error { return nil }
+func (noopInjectionHandle) BinPath(name string) (string, error) { return "/noop/" + name, nil }
+func (noopInjectionHandle) Cleanup(_ context.Context) error      { return nil }
 
 // errorInjector always returns the wrapped error from Inject.
 type errorInjector struct{ err error }
 
-func (e errorInjector) Inject(_ context.Context, _ int) (injection.InjectionHandle, error) {
+func (e errorInjector) Inject(_ context.Context, _ int) (nsmountinjector.Handle, error) {
 	return nil, e.err
 }
 

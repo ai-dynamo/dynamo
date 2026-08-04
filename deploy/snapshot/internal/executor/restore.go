@@ -17,8 +17,8 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/injection"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -45,7 +45,7 @@ type RestoreRequest struct {
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
 // without re-resolving via the runtime.
-func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, injector injection.Injector) (int, error) {
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest, injector nsmountinjector.Injector) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -76,7 +76,11 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}()
 
 	// Phase 3: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace.
-	result, err := execNSRestore(ctx, log, req, snap, handle.BinPath("nsrestore"))
+	nsRestorePath, err := handle.BinPath("nsrestore")
+	if err != nil {
+		return 0, fmt.Errorf("resolve nsrestore path: %w", err)
+	}
+	result, err := execNSRestore(ctx, log, req, snap, nsRestorePath)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}

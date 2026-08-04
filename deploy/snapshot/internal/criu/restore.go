@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -66,12 +67,28 @@ func ExecuteRestore(
 		criuOpts.WorkDirFd = proto.Int32(workDirFD)
 	}
 
-	c := criulib.MakeCriu()
-	if _, err := os.Stat(settings.BinaryPath); err != nil {
-		cleanup()
-		return 0, nil, fmt.Errorf("criu binary not found at %s: %w", settings.BinaryPath, err)
+	// Rewrite libdir in criu.conf to the injected bundle path — the dump-time path
+	// (/usr/local/lib/snapshot/criu-plugins) only exists on the agent, not in the
+	// placeholder namespace. Write the override to the work dir (runtime state).
+	if criuOpts.ConfigFile != nil && settings.WorkDir != "" {
+		if data, err := os.ReadFile(criuOpts.GetConfigFile()); err == nil {
+			conf := overrideLibDir(string(data), filepath.Join(nsmountinjector.SnapshotBinDir, "criu-plugins"))
+			overridePath := filepath.Join(settings.WorkDir, "criu-restore.conf")
+			if err := os.WriteFile(overridePath, []byte(conf), 0644); err == nil {
+				criuOpts.ConfigFile = proto.String(overridePath)
+			}
+		}
 	}
-	c.SetCriuPath(settings.BinaryPath)
+
+	c := criulib.MakeCriu()
+	// criu is always sourced from the injected binary bundle — never from the
+	// checkpoint-time BinaryPath, which refers to the agent filesystem.
+	criuBin := filepath.Join(nsmountinjector.SnapshotBinDir, "criu")
+	if _, err := os.Stat(criuBin); err != nil {
+		cleanup()
+		return 0, nil, fmt.Errorf("criu binary not found at %s (injected from agent): %w", criuBin, err)
+	}
+	c.SetCriuPath(criuBin)
 
 	netNsFile, err := os.Open(netNsPath)
 	if err != nil {
@@ -177,6 +194,23 @@ func registerInheritFDs(c *criulib.Criu, stdioFDs []string, log logr.Logger) []*
 
 	log.V(1).Info("Registered inherited stdio pipes", "count", len(openFiles))
 	return openFiles
+}
+
+// overrideLibDir rewrites or appends the libdir line in a criu.conf so that
+// CRIU loads plugins from the injected bundle rather than the dump-time path.
+func overrideLibDir(conf, libDir string) string {
+	lines := strings.Split(conf, "\n")
+	replaced := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "libdir ") {
+			lines[i] = "libdir " + libDir
+			replaced = true
+		}
+	}
+	if !replaced {
+		lines = append(lines, "libdir "+libDir)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func closeFiles(files []*os.File) {

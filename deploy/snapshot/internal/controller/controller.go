@@ -34,8 +34,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/injection"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsbindmount"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/nsmountinjector"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -52,7 +51,7 @@ type NodeController struct {
 	client       client.Client
 	dynClient    dynamic.Interface
 	runtime      snapshotruntime.Runtime
-	injector     injection.Injector
+	injector     nsmountinjector.Injector
 	log          logr.Logger
 	holderID     string
 	checkpointFn func(ctx context.Context, params CheckpointParams) error
@@ -115,11 +114,7 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
-	mounter, err := nsbindmount.New(log)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ns-bind-mount helper: %w", err)
-	}
-	injector, err := injection.New(injection.Config{}.WithDefaults(), mounter, log)
+	injector, err := nsmountinjector.New(nsmountinjector.Config{}, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create binary injector: %w", err)
 	}
