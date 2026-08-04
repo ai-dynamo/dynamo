@@ -2149,6 +2149,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
+        let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
 
@@ -2202,6 +2203,7 @@ async fn chat_completions(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
+                    reasoning_field,
                 );
 
                 // Side-channel events come first, then the regular data event.
@@ -2269,7 +2271,11 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
-        Ok(Json(response).into_response())
+        Ok(Json(crate::reasoning_field::RoutedReasoning::new(
+            response,
+            state.reasoning_field(),
+        ))
+        .into_response())
     }
 }
 

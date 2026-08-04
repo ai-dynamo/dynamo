@@ -99,6 +99,7 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
+    "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
@@ -108,6 +109,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
 }
 
 
@@ -127,9 +129,9 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
@@ -158,7 +160,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 

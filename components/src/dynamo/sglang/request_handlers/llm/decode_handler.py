@@ -15,6 +15,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.llm import HttpError
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
@@ -46,10 +47,11 @@ BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
     if BYPASS_REMOTE_PREFILL_ANNOTATION not in (request.get("annotations") or []):
         return
-    raise RuntimeError(
+    raise HttpError(
+        400,
         f"Detected request annotation {BYPASS_REMOTE_PREFILL_ANNOTATION!r}, but "
         "SGLang backend does not support conditional disaggregation yet. "
-        "Use vLLM or TensorRT-LLM for conditional disaggregation."
+        "Use vLLM or TensorRT-LLM for conditional disaggregation.",
     )
 
 

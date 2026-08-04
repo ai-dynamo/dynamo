@@ -360,6 +360,10 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// OpenAI-compatible response field used for emitted reasoning content.
+    /// Accepted values: "reasoning_content" (default) or "reasoning".
+    pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
+
     /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
     /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
     /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
@@ -677,6 +681,35 @@ pub mod tcp_response_stream {
     /// Host/interface for the TCP response stream server.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
+
+    /// TCP request-plane TLS configuration
+    pub mod tls {
+        /// Path to the PEM certificate used by the TCP server.
+        /// When set together with DYN_TCP_TLS_KEY_PATH, TLS is enabled on the
+        /// TCP server. To enable TLS on the client side, also set
+        /// DYN_TCP_TLS_CA_CERT_PATH (or DYN_TCP_TLS_INSECURE for dev).
+        pub const DYN_TCP_TLS_CERT_PATH: &str = "DYN_TCP_TLS_CERT_PATH";
+
+        /// Path to the PEM private key for the TCP server certificate.
+        pub const DYN_TCP_TLS_KEY_PATH: &str = "DYN_TCP_TLS_KEY_PATH";
+
+        /// Path to the PEM CA certificate used by TCP clients to verify the server.
+        /// Required on the client side when the server uses a self-signed or internal CA.
+        pub const DYN_TCP_TLS_CA_CERT_PATH: &str = "DYN_TCP_TLS_CA_CERT_PATH";
+
+        /// Disable TLS certificate verification on the TCP client. Set to "true" to skip.
+        /// WARNING: Only for local development. Never use in production.
+        pub const DYN_TCP_TLS_INSECURE: &str = "DYN_TCP_TLS_INSECURE";
+
+        /// Override the TLS server name (SNI) used by TCP clients when verifying the
+        /// server certificate. When unset, the hostname extracted from the connection
+        /// address is used. Useful when connecting by IP to a server whose certificate
+        /// uses a DNS SAN.
+        pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// TLS handshake timeout in seconds (default: 3).
+        pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
+    }
 }
 
 /// Event Plane transport environment variables
@@ -865,6 +898,7 @@ mod tests {
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
@@ -928,6 +962,12 @@ mod tests {
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
+            tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
