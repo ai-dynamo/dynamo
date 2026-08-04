@@ -27,6 +27,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -105,6 +106,7 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -115,6 +117,52 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
+    sse_keep_alive: Option<Duration>,
+}
+
+fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            return None;
+        }
+    };
+
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if std::time::Instant::now().checked_add(interval).is_some() {
+                Some(interval)
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                    value,
+                    "ignoring SSE keep-alive interval outside the platform range"
+                );
+                None
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid SSE keep-alive interval"
+            );
+            None
+        }
+    }
+}
+
+fn sse_keep_alive_from_env() -> Option<Duration> {
+    parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
 }
 
 /// Lifecycle stage for the HTTP frontend.
@@ -381,6 +429,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            sse_keep_alive: config.sse_keep_alive,
         }
     }
 
@@ -452,9 +501,13 @@ impl State {
         &self.cancel_token
     }
 
-    // TODO
+    /// Interval for SSE comment frames while the response stream is idle.
+    ///
+    /// Disabled by default because some OpenAI-compatible clients do not
+    /// ignore SSE comments. Provider-facing deployments can opt in with
+    /// `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS`.
     pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
+        self.sse_keep_alive
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -487,6 +540,11 @@ impl State {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    /// Response field used for emitted OpenAI-compatible reasoning content.
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
     }
 }
 
@@ -607,6 +665,11 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Interval for SSE comment frames while a streaming response is idle.
+    /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
+    #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
+    sse_keep_alive: Option<Duration>,
 }
 
 fn default_rl_port() -> u16 {
@@ -968,7 +1031,6 @@ impl HttpServiceConfigBuilder {
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
         let admin_api_enabled =
             config.enable_admin_api && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_ADMIN_API);
-
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -977,6 +1039,7 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 nvext_enabled,
+                sse_keep_alive: config.sse_keep_alive,
             },
         ));
         state
@@ -1216,6 +1279,13 @@ impl HttpServiceConfigBuilder {
             .get_or_insert_with(FrontendApiConfig::default)
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn reasoning_field(mut self, reasoning_field: ReasoningField) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_reasoning_field(reasoning_field);
         self
     }
 
@@ -1797,6 +1867,39 @@ mod tests {
                 "builder=false wins even if disable is unset"
             );
         });
+    }
+
+    #[test]
+    fn test_sse_keep_alive_env_var() {
+        assert_eq!(
+            parse_sse_keep_alive(Err(std::env::VarError::NotPresent)),
+            None
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("0".to_string())), None);
+        assert_eq!(
+            parse_sse_keep_alive(Ok("5000".to_string())),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_sse_keep_alive(Ok("invalid".to_string())), None);
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                parse_sse_keep_alive(Err(std::env::VarError::NotUnicode(OsString::from_vec(
+                    vec![0xff]
+                ),))),
+                None
+            );
+        }
+
+        let interval = Duration::from_millis(u64::MAX);
+        let expected = std::time::Instant::now()
+            .checked_add(interval)
+            .map(|_| interval);
+        assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
     }
 
     #[test]

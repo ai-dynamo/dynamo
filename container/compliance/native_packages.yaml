@@ -87,7 +87,7 @@ packages:
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).
   - name: UCX
-    version: v1.20.x
+    version: v1.21.0
     license: BSD-3-Clause
     source: https://github.com/openucx/ucx
     images:

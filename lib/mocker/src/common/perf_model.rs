@@ -14,7 +14,6 @@ use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use ndarray_interp::interp2d::{Bilinear, Interp2DBuilder};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Trait to abstract over 1D interpolation for prefill timing
 pub trait PrefillInterpolator: Send + Sync {
@@ -27,7 +26,7 @@ pub trait DecodeInterpolator: Send + Sync {
 }
 
 /// Callback trait for direct AIC SDK calls.
-/// Implementors call the Python AIC SDK via PyO3 GIL.
+/// Implementors call the Rust AIC core API.
 pub trait AicCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
@@ -83,17 +82,14 @@ pub enum PerfModel {
     #[default]
     Polynomial,
     /// Interpolation-based model using profiler data
-    /// Decode axes: (active_kv_tokens, context_length)
+    /// Decode axes: (scheduled logical KV tokens, mean context length)
     Interpolated {
         prefill_interp: Arc<dyn PrefillInterpolator>,
         decode_interp: Arc<dyn DecodeInterpolator>,
     },
-    /// AI Configurator SDK calls via Python callback.
+    /// AI Configurator SDK calls through the configured callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
-    Aiconfigurator {
-        callback: Arc<dyn AicCallback>,
-        fallback_warned: Arc<AtomicBool>,
-    },
+    Aiconfigurator { callback: Arc<dyn AicCallback> },
 }
 
 impl Clone for PerfModel {
@@ -107,12 +103,8 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => PerfModel::Aiconfigurator {
+            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
                 callback: Arc::clone(callback),
-                fallback_warned: Arc::clone(fallback_warned),
             },
         }
     }
@@ -134,7 +126,7 @@ impl PerfModel {
     /// Expected arrays in NPZ file:
     /// - prefill_isl: 1D array of input sequence lengths
     /// - prefill_ttft_ms: 1D array of time to first token in milliseconds
-    /// - decode_active_kv_tokens: 1D array of active KV token counts
+    /// - decode_active_kv_tokens: 1D array of scheduled logical KV token counts
     /// - decode_context_length: 1D array of context lengths
     /// - decode_itl: 2D array of inter-token latencies in milliseconds
     pub fn from_npz(path: &Path) -> Result<Self> {
@@ -222,10 +214,7 @@ impl PerfModel {
 
     /// Create an Aiconfigurator perf model from a callback.
     pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
-        PerfModel::Aiconfigurator {
-            callback,
-            fallback_warned: Arc::new(AtomicBool::new(false)),
-        }
+        PerfModel::Aiconfigurator { callback }
     }
 
     /// Predict prefill time in milliseconds.
@@ -234,10 +223,15 @@ impl PerfModel {
     /// - Polynomial/Interpolated: uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
     /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
-    pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
+    pub fn predict_prefill_time(
+        &self,
+        batch_size: usize,
+        isl: usize,
+        prefix: usize,
+    ) -> Result<f64> {
         let new_tokens_per_req = isl.saturating_sub(prefix);
         if batch_size == 0 || new_tokens_per_req == 0 {
-            return 0.0;
+            return Ok(0.0);
         }
         let time = match self {
             PerfModel::Polynomial => polynomial_prefill_time(batch_size, new_tokens_per_req),
@@ -245,23 +239,21 @@ impl PerfModel {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => callback
+            PerfModel::Aiconfigurator { callback } => callback
                 .predict_prefill(batch_size, new_tokens_per_req, prefix)
-                .unwrap_or_else(|error| {
-                    warn_aic_fallback(fallback_warned, "prefill", &error);
-                    polynomial_prefill_time(batch_size, new_tokens_per_req)
-                }),
+                .context("AIC prefill prediction failed")?,
         };
-        time.max(0.0)
+        Ok(time.max(0.0))
     }
 
     /// Predict decode time in milliseconds.
     ///
+    /// `active_kv_tokens` is the sum of logical context lengths in the scheduled
+    /// batch, not the number of distinct physically resident tokens.
+    ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses (active_kv_tokens, total_kv_tokens) as utilization
+    /// - Polynomial: uses logical active KV tokens relative to total capacity,
+    ///   clamped to full utilization
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
@@ -270,31 +262,25 @@ impl PerfModel {
         active_kv_tokens: usize,
         context_length: usize,
         total_kv_tokens: usize,
-    ) -> f64 {
+    ) -> Result<f64> {
         if batch_size == 0 {
-            return 0.0;
+            return Ok(0.0);
         }
         let time = match self {
             PerfModel::Polynomial => polynomial_decode_time(active_kv_tokens, total_kv_tokens),
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator {
-                callback,
-                fallback_warned,
-            } => callback
+            PerfModel::Aiconfigurator { callback } => callback
                 .predict_decode(batch_size, context_length, 2)
-                .unwrap_or_else(|error| {
-                    warn_aic_fallback(fallback_warned, "decode", &error);
-                    polynomial_decode_time(active_kv_tokens, total_kv_tokens)
-                }),
+                .context("AIC decode prediction failed")?,
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
         tracing::trace!(
             "Decode time prediction: batch_size={batch_size}, active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
-        result
+        Ok(result)
     }
 }
 
@@ -306,22 +292,12 @@ fn polynomial_prefill_time(batch_size: usize, new_tokens_per_request: usize) -> 
 
 fn polynomial_decode_time(active_kv_tokens: usize, total_kv_tokens: usize) -> f64 {
     let active_perc = if total_kv_tokens > 0 {
-        active_kv_tokens as f64 / total_kv_tokens as f64
+        (active_kv_tokens as f64 / total_kv_tokens as f64).min(1.0)
     } else {
         tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
         1.0
     };
     -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
-}
-
-fn warn_aic_fallback(warned: &AtomicBool, phase: &str, error: &anyhow::Error) {
-    if !warned.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            phase,
-            error = %error,
-            "AIC timing prediction failed; falling back to the mocker polynomial model"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -375,29 +351,39 @@ mod tests {
 
     #[test]
     fn fully_cached_prompt_skips_prefill() {
-        assert_eq!(PerfModel::default().predict_prefill_time(1, 128, 128), 0.0);
+        assert_eq!(
+            PerfModel::default()
+                .predict_prefill_time(1, 128, 128)
+                .unwrap(),
+            0.0
+        );
     }
 
     #[test]
     fn aic_forwards_scheduler_local_batch() {
         let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
 
-        assert_eq!(model.predict_prefill_time(7, 128, 0), 7.0);
-        assert_eq!(model.predict_decode_time(9, 0, 128, 0), 9.0);
+        assert_eq!(model.predict_prefill_time(7, 128, 0).unwrap(), 7.0);
+        assert_eq!(model.predict_decode_time(9, 0, 128, 0).unwrap(), 9.0);
     }
 
     #[test]
-    fn aic_prediction_error_falls_back_without_panicking() {
-        let model = PerfModel::from_aic_callback(Arc::new(FailingCallback));
-        let polynomial = PerfModel::default();
+    fn aic_prefill_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_prefill_time(2, 128, 32)
+            .unwrap_err();
 
-        assert_eq!(
-            model.predict_prefill_time(2, 128, 32),
-            polynomial.predict_prefill_time(2, 128, 32)
-        );
-        assert_eq!(
-            model.predict_decode_time(2, 64, 128, 256),
-            polynomial.predict_decode_time(2, 64, 128, 256)
-        );
+        assert_eq!(error.to_string(), "AIC prefill prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC prefill point");
+    }
+
+    #[test]
+    fn aic_decode_prediction_errors_propagate() {
+        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+            .predict_decode_time(2, 64, 128, 1024)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "AIC decode prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIC decode point");
     }
 }
