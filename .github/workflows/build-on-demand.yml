@@ -30,6 +30,10 @@ on:
         description: 'Optional existing ACR vllm-runtime image URI to build the placeholder FROM. When set, the vllm runtime is not rebuilt. Example: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-<sha>-vllm-runtime'
         type: string
         default: ''
+      build_snapshot_agent:
+        description: 'Build and push the snapshot-agent image (CRIU + cuda-checkpoint DaemonSet). Pair this with build_vllm_placeholder so the agent and the workload image come from the same tree.'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -321,6 +325,79 @@ jobs:
             echo "| \`${ACR_BRANCH_IMAGE}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The snapshot-agent is the privileged node DaemonSet that drives
+  # cuda-checkpoint + CRIU. It must come from the SAME tree as the workload
+  # placeholder: an agent older than the workload can miss CUDA processes
+  # during discovery (cf. "enter PID namespace for GPU probe"), which surfaces
+  # as a capture-side CRIU/cuda_plugin failure rather than anything to do with
+  # the workload. Build it alongside the placeholder.
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve snapshot agent image references
+        id: refs
+        shell: bash
+        env:
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          SANITIZED_REF: ${{ needs.init.outputs.sanitized_ref_name }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ACR_IMAGE_BASE="${ACR_HOSTNAME}/ai-dynamo/dynamo"
+          DYNAMO_VERSION=$(sed -n \
+            '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"/\1/p' \
+            Cargo.toml)
+          DYNAMO_VERSION=${DYNAMO_VERSION%%[-+]*}
+          # <sha>-snapshot-agent matches pr.yaml's snapshot-agent tag.
+          echo "image_tag=${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_ci_image=${ACR_IMAGE_BASE}:${DYNAMO_VERSION}-ci-${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_sha_image=${ACR_IMAGE_BASE}:${GIT_SHA}-snapshot-agent" >> "$GITHUB_OUTPUT"
+          echo "acr_branch_image=${ACR_IMAGE_BASE}:${SANITIZED_REF}-snapshot-agent" >> "$GITHUB_OUTPUT"
+
+      # No `target:` — build-deploy-component defaults snapshot to the `agent`
+      # stage and enables inline compliance for it (action.yml:127-140), which
+      # also supplies the `compliance` build context.
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ steps.refs.outputs.image_tag }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ steps.refs.outputs.acr_ci_image }}
+            ${{ steps.refs.outputs.acr_sha_image }}
+            ${{ steps.refs.outputs.acr_branch_image }}
+
+      - name: Summarize snapshot agent images
+        shell: bash
+        env:
+          ACR_CI_IMAGE: ${{ steps.refs.outputs.acr_ci_image }}
+          ACR_SHA_IMAGE: ${{ steps.refs.outputs.acr_sha_image }}
+          ACR_BRANCH_IMAGE: ${{ steps.refs.outputs.acr_branch_image }}
+        run: |
+          {
+            echo "### Snapshot Agent"
+            echo ""
+            echo "| Image URI |"
+            echo "|-----|"
+            echo "| \`${ACR_CI_IMAGE}\` |"
+            echo "| \`${ACR_SHA_IMAGE}\` |"
+            echo "| \`${ACR_BRANCH_IMAGE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ============================================================================
   # CLEANUP
   # ============================================================================
@@ -329,7 +406,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm]
+    needs: [init, vllm-build, sglang-build, trtllm-build, operator, snapshot-placeholder-vllm, snapshot-agent]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
