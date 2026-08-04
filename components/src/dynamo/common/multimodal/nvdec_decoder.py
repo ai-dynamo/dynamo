@@ -24,8 +24,7 @@ metadata dict ``{"fps", "frames_indices", "total_num_frames"}``.
 
 Gating: NVDEC is used when PyNvVideoCodec is importable and ``DYN_DISABLE_NVDEC``
 is not set. When it is unavailable (CPU image, unsupported profile) the caller
-falls back to the software carriers (``DYN_ENABLE_MEDIA_DECODERS``) or surfaces
-the actionable "unsupported codec" error.
+surfaces the actionable "unsupported codec" error.
 """
 
 from __future__ import annotations

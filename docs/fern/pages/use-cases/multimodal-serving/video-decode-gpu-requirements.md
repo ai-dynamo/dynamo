@@ -127,8 +127,8 @@ to the software decode path.
 > [!IMPORTANT]
 > Dynamo's runtime images ship a VP8/VP9-only in-tree FFmpeg, so the software path cannot
 > decode H.264 or H.265. If NVDEC is unavailable in one of these images, those formats
-> have no decoder and the request fails with an unsupported-codec error. Install the
-> optional software decoders (`DYN_ENABLE_MEDIA_DECODERS`) or fix the `video` capability.
+> have no decoder and the request fails with an unsupported-codec error. Grant the
+> container the `video` driver capability so NVDEC can be used.
 
 ## Hardware encode (NVENC)
 
