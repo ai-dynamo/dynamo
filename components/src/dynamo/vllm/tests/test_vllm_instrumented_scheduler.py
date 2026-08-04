@@ -1567,8 +1567,11 @@ def test_decode_grid_uses_common_attention_dp_capacity():
     larger_grid = [point.__dict__ for point in larger_rank._bench_grid]
     smaller_grid = [point.__dict__ for point in smaller_rank._bench_grid]
     assert larger_grid == smaller_grid
-    assert len(larger_grid) == 1_368
-    assert larger_rank._bench_grid[19].total_kv_read_tokens == 351_039
+    # Steady-coordinate normalization merges each batch's sub-2B presets into
+    # one point, so batch=1 keeps 19 ladder entries and its feasibility
+    # boundary sits at index 18.
+    assert len(larger_grid) == 1_266
+    assert larger_rank._bench_grid[18].total_kv_read_tokens == 351_039
 
     # The common grid must remain feasible under each rank's original local
     # capacity when the conservative shared envelope is removed.
