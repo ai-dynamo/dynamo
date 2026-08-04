@@ -808,6 +808,7 @@ shared:
   - diffusion
 - glob: lib/llm/src/request_trace/
   owners:
+  - runtime
   - agents
   - observability
 - glob: lib/runtime/src/health_check.rs
