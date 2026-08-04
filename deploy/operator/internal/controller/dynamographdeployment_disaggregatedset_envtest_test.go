@@ -273,6 +273,37 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 		Expect(modelOwner.Kind).To(Equal("DynamoComponentDeployment"))
 		Expect(replacementDCDNames).To(HaveKey(modelOwner.Name))
 	})
+
+	It("keeps the DisaggregatedSet until fallback workloads are ready", func() {
+		ctx := context.Background()
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-fallback-gating")
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+
+		reconciler, _ := newEnvtestDSReconcilers()
+
+		By("creating a ready DisaggregatedSet")
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		markDisaggregatedSetReady(ctx, current)
+		result, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+
+		By("making the deployment ineligible for DisaggregatedSet while keeping the annotation")
+		current.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		By("reconciling the fallback and keeping the DisaggregatedSet while DCDs are pending")
+		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStatePending))
+		Expect(ownedEnvtestCutoverDCDs(ctx, current)).To(HaveLen(2))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject())).To(Succeed())
+
+		By("deleting the DisaggregatedSet only after the fallback workloads are ready")
+		markEnvtestCutoverDCDsReady(ctx, current)
+		result, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(result.Status.State).To(Equal(nvidiacomv1beta1.DGDStateSuccessful))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+	})
 })
 
 func newEnvtestDSReconcilers() (*DynamoGraphDeploymentReconciler, *DynamoComponentDeploymentReconciler) {
