@@ -113,6 +113,30 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	return *spec
 }
 
+// resolvedRuntimeVersionForHash returns the canonical runtime version included
+// in the v2 worker hash. The hash identifies a worker generation: changing it
+// creates a new generation and triggers a managed rollout. The hash should
+// change exactly when a downstream rendered workload PodSpec changes.
+// Computing that directly would require refactoring this path to construct the
+// full component set and render the final Deployment or Grove PodSpec.
+//
+// An alternative considered was resolving the runtime version, evaluating all
+// runtime feature gates, and hashing those decisions. That would be more
+// precise: upgrading from 1.5.0 to 1.6.0 would preserve the hash when both
+// versions enable the same gates and render the same PodSpec. Hashing the
+// canonical resolved version is simpler and also makes equivalent image-derived
+// and explicit versions hash identically.
+//
+// Runtime versions should normally change together with the image, which already
+// changes the hash. This value matters primarily when runtimeVersionOverride is
+// corrected without changing the image. If that correction changes downstream
+// version-gated rendering, the worker hash changes and triggers the required
+// rollout.
+//
+// Versions before 1.5.0 are omitted. runtimeVersionOverride was introduced in
+// 1.4.0, but runtime-version feature-gated rendering begins in 1.5.0. Hashing
+// 1.4.x versions would change existing worker hashes, triggering a rollout even
+// though their rendered PodSpecs remain unchanged.
 func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentSharedSpec) string {
 	if component == nil {
 		return ""
