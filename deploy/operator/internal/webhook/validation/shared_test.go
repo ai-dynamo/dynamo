@@ -151,6 +151,7 @@ func TestRuntimeVersionImageAbsenceRatcheting(t *testing.T) {
 			field.NewPath("spec"),
 			true,
 			schema.GroupKind{Group: nvidiacomv1beta1.GroupVersion.Group, Kind: "DynamoComponentDeployment"},
+			false,
 		)
 		assertFieldPaths(t, errs, nil)
 	})

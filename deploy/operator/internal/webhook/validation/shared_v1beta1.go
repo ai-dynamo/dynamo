@@ -394,6 +394,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	fldPath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
+	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
@@ -434,10 +435,11 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
 			experimentalSpecUpdateValidationOptions{
-				ownerKind:     ownerKind,
-				componentType: newComponent.ComponentType,
-				resources:     dynamo.GetMainContainerResources(newComponent),
-				containers:    podTemplateContainers(newComponent.PodTemplate),
+				ownerKind:                        ownerKind,
+				componentType:                    newComponent.ComponentType,
+				resources:                        dynamo.GetMainContainerResources(newComponent),
+				containers:                       podTemplateContainers(newComponent.PodTemplate),
+				validateGPUMemoryServiceNewState: validateGPUMemoryServiceNewState,
 			},
 		)...)
 	} else if oldComponent.Experimental != nil {
@@ -496,10 +498,11 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 }
 
 type experimentalSpecUpdateValidationOptions struct {
-	ownerKind     schema.GroupKind
-	componentType nvidiacomv1beta1.ComponentType
-	resources     corev1.ResourceRequirements
-	containers    []corev1.Container
+	ownerKind                        schema.GroupKind
+	componentType                    nvidiacomv1beta1.ComponentType
+	resources                        corev1.ResourceRequirements
+	containers                       []corev1.Container
+	validateGPUMemoryServiceNewState bool
 }
 
 // validateExperimentalSpecUpdate validates an experimental spec update.
@@ -512,7 +515,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
-	if newGMS != nil {
+	if newGMS != nil && options.validateGPUMemoryServiceNewState {
 		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
 			newGMS,
 			fldPath.Child("gpuMemoryService"),
