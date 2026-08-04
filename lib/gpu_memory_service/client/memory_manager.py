@@ -35,10 +35,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from gpu_memory_service.client.session import _GMSClientSession
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 logger = logging.getLogger(__name__)
 

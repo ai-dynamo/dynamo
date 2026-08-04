@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import os
 
-from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
 from gpu_memory_service.common.vmm.device import VMMDevice
+from gpu_memory_service.core.locks import GrantedLockType
 
 try:
     from cuda.bindings import driver as cuda

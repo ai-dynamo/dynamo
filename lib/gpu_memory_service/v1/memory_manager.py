@@ -11,7 +11,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
 from gpu_memory_service.core import device as device_identity
 from gpu_memory_service.core.client.memory_manager import (
@@ -21,7 +20,8 @@ from gpu_memory_service.core.client.memory_manager import (
     reserve_and_install_mapping,
     unmap_mapping,
 )
-from gpu_memory_service.core.client.session import _GMSClientSession
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.v1.session import _GMSClientSession
 
 logger = logging.getLogger(__name__)
 

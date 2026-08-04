@@ -6,7 +6,7 @@
 from typing import List, Optional, Union
 
 import msgspec
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 
 class HandshakeRequest(msgspec.Struct, tag="handshake_request"):

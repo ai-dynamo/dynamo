@@ -9,7 +9,6 @@ import logging
 from typing import List, Optional, Tuple
 
 from gpu_memory_service.client.rpc import _GMSRPCTransport
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
@@ -39,6 +38,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,6 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     CommitRequest,
@@ -25,6 +24,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListRequest,
     MetadataPutRequest,
 )
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
 

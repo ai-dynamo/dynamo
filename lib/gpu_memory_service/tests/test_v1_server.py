@@ -10,11 +10,10 @@ from time import monotonic
 
 import pytest
 from _fake_vmm import FakeVMM
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.core.client.session import _GMSClientSession
-from gpu_memory_service.core.protocol import HandshakeRequest, send_message
-from gpu_memory_service.core.server.gms import GMSServerMemoryManager
-from gpu_memory_service.core.server.rpc import GMSRPCServer
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.v1.protocol import HandshakeRequest, send_message
+from gpu_memory_service.v1.server import GMSRPCServer, GMSServerMemoryManager
+from gpu_memory_service.v1.session import _GMSClientSession
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 

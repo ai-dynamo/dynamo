@@ -23,8 +23,8 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
 )
 from gpu_memory_service.client.torch.module import materialize_module_from_gms
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
 if TYPE_CHECKING:

@@ -28,12 +28,12 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
     is_scratch,
 )
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import (
     GMS_TAGS,
     get_socket_path,
     is_scratch_kv_enabled,
 )
+from gpu_memory_service.core.locks import RequestedLockType
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,

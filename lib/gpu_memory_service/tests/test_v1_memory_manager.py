@@ -8,11 +8,10 @@ from contextlib import ExitStack
 
 import pytest
 from _fake_vmm import FakeVMM
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.core import device as device_identity
-from gpu_memory_service.core.server.gms import GMSServerMemoryManager
-from gpu_memory_service.core.server.rpc import GMSRPCServer
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.v1.server import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.integration, pytest.mark.gpu_0]
 

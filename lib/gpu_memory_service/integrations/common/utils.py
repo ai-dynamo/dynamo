@@ -15,7 +15,7 @@ from gpu_memory_service.client.torch.module import (
     rebind_nonparameter_tensors,
     register_module_tensors,
 )
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.core.locks import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager

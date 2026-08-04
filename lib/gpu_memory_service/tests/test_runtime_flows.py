@@ -40,7 +40,6 @@ from gpu_memory_service.client.memory_manager import (
 )
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     GetEventHistoryRequest,
     GetEventHistoryResponse,
@@ -48,6 +47,7 @@ from gpu_memory_service.common.protocol.messages import (
     GetRuntimeStateResponse,
 )
 from gpu_memory_service.common.vmm import VMMDeviceType
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer

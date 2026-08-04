@@ -145,7 +145,7 @@ STUB_MODULES = [
     "gpu_memory_service.client.torch.module",
     "gpu_memory_service.client.torch.tensor",
     "gpu_memory_service.common",
-    "gpu_memory_service.common.locks",
+    "gpu_memory_service.core.locks",
     "gpu_memory_service.common.vmm",
     "gpu_memory_service.common.vmm.device",
     "gpu_memory_service.common.vmm.cuda_utils",

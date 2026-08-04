@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
-from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import is_scratch_kv_enabled
+from gpu_memory_service.core.locks import GrantedLockType
 
 logger = logging.getLogger(__name__)
 

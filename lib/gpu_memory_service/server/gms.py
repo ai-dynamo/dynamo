@@ -11,7 +11,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
@@ -43,6 +42,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
 )
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 from .allocations import AllocationInfo, GMSAllocationManager
 from .fsm import Connection, ServerState, StateEvent

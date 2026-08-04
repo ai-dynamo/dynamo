@@ -11,8 +11,8 @@ import threading
 import time
 from typing import TypeVar
 
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.core.protocol import (
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.v1.protocol import (
     AbortRequest,
     AllocateRequest,
     CommitRequest,

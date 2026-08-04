@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from gpu_memory_service.common.locks import GrantedLockType
+from gpu_memory_service.core.locks import GrantedLockType
 
 
 class VMMDevice(ABC):

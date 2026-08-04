@@ -8,8 +8,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.vmm import VMMDevice
+from gpu_memory_service.core.locks import GrantedLockType
 
 
 @dataclass(frozen=True)

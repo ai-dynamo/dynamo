@@ -16,8 +16,8 @@ from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.core.locks import RequestedLockType
 from gpu_memory_service.snapshot.disk import (
     DeviceToFileWriter,
     load_manifest_and_metadata,

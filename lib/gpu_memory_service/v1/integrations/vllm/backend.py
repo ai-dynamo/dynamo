@@ -13,10 +13,10 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 import torch
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.core.client.torch.extensions import _allocator_ext
+from gpu_memory_service.core.locks import RequestedLockType
 from gpu_memory_service.v1.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.v1.parameter_storage import (
     copy_non_parameter_tensors_to_default_allocator,

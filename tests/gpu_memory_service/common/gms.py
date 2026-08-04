@@ -12,8 +12,8 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.core.locks import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.common.protocol.messages import (

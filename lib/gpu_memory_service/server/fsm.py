@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional, Set
 
-from gpu_memory_service.common.locks import GrantedLockType
+from gpu_memory_service.core.locks import GrantedLockType
 
 
 class ServerState(str, Enum):

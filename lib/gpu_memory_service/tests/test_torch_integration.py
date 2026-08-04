@@ -39,8 +39,8 @@ from gpu_memory_service.client.torch.module import (
     register_module_tensors,
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import _reset_vmm_singleton
+from gpu_memory_service.core.locks import RequestedLockType
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [

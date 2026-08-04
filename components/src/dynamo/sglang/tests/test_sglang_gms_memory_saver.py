@@ -13,7 +13,7 @@ pytest.importorskip("gpu_memory_service", reason="gpu_memory_service is required
 torch = pytest.importorskip("torch", reason="torch is required")
 
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver  # noqa: E402
-from gpu_memory_service.common.locks import (  # noqa: E402
+from gpu_memory_service.core.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )

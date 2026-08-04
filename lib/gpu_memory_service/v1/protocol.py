@@ -11,7 +11,7 @@ import struct
 from typing import TypeAlias
 
 import msgspec
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.core.locks import GrantedLockType, RequestedLockType
 
 MAX_FRAME = 1 << 20
 _INT_SIZE = struct.calcsize("i")
