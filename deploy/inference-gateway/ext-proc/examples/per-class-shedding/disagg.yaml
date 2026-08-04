@@ -2,59 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # GAIE-managed disaggregated vLLM deployment, tuned for *stability* because used as a Post Merge test
 #
-# Why this configuration looks the way it does (intentional, not a default):
-#
-#   * Disagg requires a vLLM KV connector. The only one available without
-#     a separate KV cache service (KVBM, LMCache, FlexKV) is ``NixlConnector``
-#     -- see components/src/dynamo/vllm/args.py:_validate_disagg_args. We
-#     therefore use NIXL, but configure it for the most boring transport
-#     path possible.
-#
-#   * ``kv_buffer_device: "cpu"`` keeps the KV cache buffer in host RAM
-#     rather than GPU memory. This avoids the GPU-memory-registration code
-#     path in UCX entirely. A previous CI run segfaulted in
-#     ``uct_tcp_ep_am_bcopy`` while UCX tried to do a TCP active-message
-#     buffer copy of GPU memory with ``UCX_TLS=tcp,self`` (which does NOT
-#     include ``cuda_copy``/``cuda_ipc``). Moving the buffer to host RAM
-#     makes the transfer a plain CPU<->CPU memcpy over TCP.
-#
-#   * ``UCX_TLS=tcp,self`` is the lowest-common-denominator UCX transport
-#     set: TCP works everywhere, ``self`` covers intra-process. We deliberately
-#     do NOT include any ``rc_*``/``dc_*`` (RDMA) or ``cuda_*`` transports --
-#     they require hardware we cannot assume in CI.
-#
-#   * ``UCX_RNDV_THRESH=inf`` disables the UCX rendezvous protocol entirely,
-#     forcing every transfer through the eager active-message path. Slower,
-#     but fewer code paths and no zero-copy registration races.
-#
-#   * No ``podAffinity`` is set on the workers. Prefill and decode can land
-#     on the same pod-host or on different hosts -- whatever the scheduler
-#     decides given GPU availability. Stability over locality.
-#
-#   * ``gpu-memory-utilization: 0.50`` leaves enough headroom for prefill
-#     and decode to share a GPU if they happen to co-schedule.
-#
-#   * ``--max-model-len 16384`` caps the context window so vLLM's KV cache
-#     budget fits in the reduced GPU memory available to each worker.
-#     Qwen/Qwen3-0.6B's model default is 40960 tokens, which would require
-#     ~4.4 GiB of KV cache and refuses to start under
-#     ``gpu-memory-utilization=0.50`` (~2.6 GiB available). 16384 leaves
-#     comfortable headroom; raise this only if you also raise
-#     ``gpu-memory-utilization``.
-#
-#   * Registered prefill and decode worker types establish disaggregated
-#     serving. Both roles must be available before the model is ready.
-#
 # Per-class load shedding, added on top of the above. This is
 # `examples/backends/vllm/deploy/gaie/disagg.yaml` in its Rust-EPP form, plus
 # the router policy config that makes the EPP answer HTTP 429 with
 # `Retry-After` — instead of routing — when a request's class is saturated.
 # Every added line is commented.
 #
-# The Epp component carries no `eppConfig`: that block configured the removed
-# Go EPP's GAIE plugin chain, and the Rust EPP is configured entirely by
-# environment, which is why the policy below arrives as a mounted file named
-# by an env var.
+# The Epp component carries no `eppConfig` because Rust EPP does not need it.
 #
 # A request's class is the pair (policy family, uncached-ISL bucket):
 #   - The family comes from the caller. `x-dynamo-meta-policy-class` names one
@@ -92,7 +46,7 @@ kind: ConfigMap
 metadata:
   name: qwen-router-policy
 data:
-  # Mirrors examples/router/policy-class-shedding.yaml, retuned for a demo: a
+  # Mirrors examples/router/policy-class-shedding.yaml. A
   # low bucket boundary and absolute thresholds, so shedding is reachable with
   # one small prefill worker and short prompts.
   #
