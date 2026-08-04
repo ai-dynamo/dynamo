@@ -66,8 +66,7 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
     """
     uuid = _uuid_cache.get(device)
     if uuid is None:
-        from gpu_memory_service.common.vmm import get_vmm_device_type
-        from gpu_memory_service.common.vmm.device import VMMDeviceType
+        from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
 
         if get_vmm_device_type() == VMMDeviceType.XPU:
             from gpu_memory_service.common.vmm import _sycl_vmm
