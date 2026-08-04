@@ -25,8 +25,8 @@ pub type OverloadedWorkerProvider =
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
-    #[error("{0}")]
-    Rejected(String),
+    #[error("worker selection policy failed: {0}")]
+    Failed(String),
 
     #[error("scorer {scorer_index} produced a non-finite cost for candidate row {row}")]
     NonFiniteCost { scorer_index: usize, row: usize },
@@ -38,8 +38,8 @@ pub enum WorkerSelectionPolicyError {
 }
 
 impl WorkerSelectionPolicyError {
-    pub fn rejected(message: impl Into<String>) -> Self {
-        Self::Rejected(message.into())
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
     }
 }
 

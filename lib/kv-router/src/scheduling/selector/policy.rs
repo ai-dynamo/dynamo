@@ -244,6 +244,7 @@ impl<'a> WorkerInputView<'a> {
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
     Default(DefaultWorkerPicker),
+    /// Policy-local state owned and called serially by one scheduler queue actor.
     Custom(RefCell<CustomWorkerSelectionState>),
 }
 
