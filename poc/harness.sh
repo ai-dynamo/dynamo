@@ -26,6 +26,16 @@ LOG_DIR="/tmp/failover_test_$$"
 mkdir -p "$LOG_DIR"
 LOCK_PATH="$LOG_DIR/failover.lock"
 
+# KV-reuse (M2/M3): pin PYTHONHASHSEED so both engines compute identical block
+# hashes (B3 — vLLM's NONE_HASH is otherwise os.urandom(32) per process, so no
+# rehydrated hash would ever match), and point both engines at one shared,
+# per-run prefix-index log that the standby replays on takeover.
+export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+export GMS_KV_INDEX_PATH="$LOG_DIR/kv_index.log"
+# Winner dumps its stable-point L0 KV fingerprint here (at CLEAN_HANDOFF sleep); the
+# standby compares its reattached L0 against it, position-sensitively, before serving.
+export GMS_KV_TARGET_FILE="${GMS_KV_TARGET_FILE:-$LOG_DIR/kv_target.json}"
+
 GMS_W0_LOG="$LOG_DIR/gms_w0.log"   # device-0 weights GMS server (commit marker lives here)
 ENGINE_A_LOG="$LOG_DIR/engine_a.log"; ENGINE_B_LOG="$LOG_DIR/engine_b.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
@@ -68,7 +78,7 @@ build_reuse_prompt() {
 # prefix-cache HIT skips prefill (fast); a MISS re-prefills the whole prompt (slow).
 timed_completion() {
     local prompt="$1" out last t code text ms
-    local body; body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"prompt":sys.argv[2],"max_tokens":1,"temperature":0}))' "$MODEL_NAME" "$prompt")
+    local body; body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"prompt":sys.argv[2],"max_tokens":8,"temperature":0}))' "$MODEL_NAME" "$prompt")
     out=$(curl -s -w '\n%{time_total} %{http_code}' -X POST http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" -d "$body")
     last=$(echo "$out" | tail -1); t=${last% *}; code=${last##* }
@@ -273,8 +283,10 @@ echo "  long prefix ~${#REUSE_PROMPT} chars (~$(echo "$REUSE_PROMPT" | wc -w) wo
 WARM_COLD=$(timed_completion "$REUSE_PROMPT")   # 1st send: cold, full prefill on winner
 WARM_HOT=$(timed_completion "$REUSE_PROMPT")    # 2nd send: should HIT within winner (calibration)
 WIN_HITS=$(prefix_hits "$WINNER_PORT")
-REF_REST=${WARM_COLD#*|}; REF_OUT=${REF_REST%|*}    # reference greedy output (pre-kill)
+REF_REST=${WARM_COLD#*|}; REF_OUT=${REF_REST%|*}    # cold (fresh-prefill) reference output
+WH_REST=${WARM_HOT#*|};   WH_OUT=${WH_REST%|*}      # hot (full-hit) reference output
 echo "  winner cold TTFT=${WARM_COLD%%|*} ms | hot TTFT=${WARM_HOT%%|*} ms | winner prefix_hits=$WIN_HITS"
+echo "  winner cold out='${REF_OUT}' | winner hot out='${WH_OUT}'"
 [ "${WARM_HOT%%|*}" -lt "${WARM_COLD%%|*}" ] 2>/dev/null \
     && pass "KV-reuse calibration: prefix caching works within the winner (hot < cold TTFT)" \
     || echo "  NOTE: hot TTFT not clearly < cold — small-model prefill may be too cheap to time crisply"
@@ -297,6 +309,21 @@ kill_tree() {
     for _c in $(pgrep -P "$_p" 2>/dev/null); do kill_tree "$_c"; done
     kill -9 "$_p" 2>/dev/null
 }
+if [ "${CLEAN_HANDOFF:-0}" = "1" ]; then
+    # Diagnostic: sleep the winner FIRST (control/sleep → GMSWorker.sleep does a clean
+    # unmap_all_vas of the KV; persist-on-abort keeps the allocation), THEN kill it to
+    # release the flock. This tests whether "crash with the KV still mapped" is what
+    # corrupts the physical: if the standby reads correct KV after a clean unmap, the
+    # SIGKILL-with-mapping is the culprit.
+    echo "CLEAN HANDOFF: control/sleep winner (clean KV unmap) BEFORE kill..."
+    curl -s -X POST "http://localhost:$WINNER_PORT/engine/control/sleep" \
+        -H "Content-Type: application/json" -d '{"level":1}'; echo
+    for _w in $(seq 1 20); do
+        have "$WINNER_LOG" "Sleep freed" && { echo "  winner slept (KV unmapped)"; break; }
+        sleep 1
+    done
+    grep -iE "Sleep freed|Unmapped .* allocations" "$WINNER_LOG" | strip_ansi | tail -2
+fi
 kill_tree "$WINNER_PID"; wait "$WINNER_PID" 2>/dev/null
 [ "$WINNER_PID" = "$ENGINE_A_PID" ] && ENGINE_A_PID="" || ENGINE_B_PID=""
 WINNER_PID=""
@@ -360,11 +387,14 @@ fi
 echo "  VERDICT: post-failover prefix reuse => $verdict"
 echo "  (baseline/main expectation: MISS — loser resets its prefix index on wake and the"
 echo "   winner's KV bytes are not reattached; the POC must flip this to HIT)"
-# Correctness gate: greedy output for the same prompt must match the pre-kill reference.
+# Correctness gate: greedy output for the re-sent prompt must match the fresh-prefill
+# reference (winner cold). We also print the winner-hot output (same full-hit regime) to
+# distinguish a real reuse discrepancy from a full-prefix-hit generation quirk.
+echo "  winner cold out='${REF_OUT}' | winner hot out='${WH_OUT}' | failover out='${FO_OUT}'"
 if [ -n "$REF_OUT" ] && [ "$FO_OUT" = "$REF_OUT" ]; then
-    pass "KV-reuse correctness: post-failover greedy output matches pre-kill reference"
+    pass "KV-reuse correctness: post-failover greedy output matches fresh-prefill reference"
 else
-    fail "KV-reuse correctness: output differs (ref='$REF_OUT' vs failover='$FO_OUT')"
+    fail "KV-reuse correctness: output differs (cold='$REF_OUT' hot='$WH_OUT' failover='$FO_OUT')"
 fi
 echo "=========================================="
 
