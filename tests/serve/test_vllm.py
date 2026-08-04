@@ -17,7 +17,7 @@ from tests.serve.common import (
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL
-from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.lora_utils import MinioBaseModelConfig, MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
@@ -46,6 +46,49 @@ from tests.utils.payloads import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_worker_log_dir(config_name: str) -> str:
+    """Collect the worker subprocess log dir contents as a string.
+
+    Returned text is appended to the test failure's exception message — pytest
+    always shows the exception message in the traceback, so this is the most
+    reliable surface for surfacing worker logs in CI output (more reliable
+    than logger.error or print-to-stderr, which xdist + the custom parallel
+    runner may suppress on failure).
+    """
+    try:
+        from tests.utils.test_output import resolve_test_output_path
+
+        log_dir = resolve_test_output_path(config_name)
+        out = [f"\n=== WORKER LOG DUMP: {log_dir} ==="]
+        if not os.path.isdir(log_dir):
+            out.append(f"(log_dir does not exist: {log_dir})")
+            return "\n".join(out)
+        for fname in sorted(os.listdir(log_dir)):
+            fpath = os.path.join(log_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            out.append(f"\n--- {fname} ---")
+            try:
+                with open(fpath, errors="replace") as fh:
+                    body = fh.read()
+                # Cap individual files at 64 KB so an enormous worker log
+                # doesn't blow up pytest's error display.
+                out.append(
+                    body if len(body) <= 65536 else body[-65536:] + "\n[truncated]"
+                )
+            except Exception as e:
+                out.append(f"(failed to read {fpath}: {e})")
+        out.append("=== END WORKER LOG DUMP ===")
+        return "\n".join(out)
+    except Exception as e:
+        return f"\n(_collect_worker_log_dir failed: {e!r})"
+
+
+def _dump_worker_log_dir(config_name: str) -> None:
+    """Backwards-compatible no-op; the new pattern is to use
+    _collect_worker_log_dir and append to the exception message."""
 
 
 def _is_cuda12() -> bool:
@@ -1158,3 +1201,73 @@ def test_embedding_multi_worker_multi_model_dispatch(
         config, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.e2e
+@pytest.mark.vllm
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
+@pytest.mark.timeout(
+    600
+)  # CI under xdist parallel pressure is much slower than local (~30s)
+@pytest.mark.pre_merge
+def test_vllm_aggregated_s3_model(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_base_model_service,
+    dynamo_dynamic_ports,
+):
+    """Aggregated vLLM with --model s3://... — covers the call path that
+    PR #10599 fixed (object-storage URI must route through vLLM's
+    maybe_pull_model_tokenizer_for_runai, not Dynamo's hub.rs/MX).
+
+    The fixture stages Qwen/Qwen3-0.6B (HF cache) into a local MinIO
+    bucket and yields AWS_ENDPOINT_URL + credential env that runai-streamer
+    needs. Launch script is the standard agg.sh.
+    """
+    minio_config: MinioBaseModelConfig = minio_base_model_service
+
+    config = VLLMConfig(
+        name="test_vllm_aggregated_s3_model",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[],
+        # --model s3://my-base-models/Qwen_Qwen3-0.6B
+        # vLLM's ModelConfig.__post_init__ -> maybe_pull_model_tokenizer_for_runai
+        # detects is_runai_obj_uri, pulls *.json/*.py/*.model into a temp dir,
+        # rewrites model_config.model and sets model_weights = <original URI>.
+        model="Qwen/Qwen3-0.6B",
+        # --load-format modelexpress activates the modelexpress vLLM plugin
+        # (gates Dynamo's prefetch skip via uses_modelexpress_load_format AND
+        # enables the runai-streamer weight load path).
+        script_args=[
+            "--model",
+            minio_config.get_s3_uri(),
+            "--load-format",
+            "modelexpress",
+        ],
+        timeout=180,
+        env=minio_config.get_env_vars(),
+        request_payloads=[chat_payload_default()],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    try:
+        run_serve_deployment(
+            config,
+            request,
+            ports=dynamo_dynamic_ports,
+            extra_env=minio_config.get_env_vars(),
+        )
+    except Exception as exc:
+        # Append worker subprocess log to the exception message so it shows
+        # in pytest's traceback in CI. logger.error and print-to-stderr both
+        # got swallowed by the xdist parallel runner; the exception message
+        # is the most reliable surface.
+        worker_log = _collect_worker_log_dir(config.name)
+        raise type(exc)(f"{exc}{worker_log}") from exc
