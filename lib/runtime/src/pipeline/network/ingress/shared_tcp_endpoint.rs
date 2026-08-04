@@ -14,7 +14,7 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
@@ -170,7 +170,10 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+    pub fn new(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<Arc<Self>> {
         let SizingConfig {
             pool_size: worker_pool_size,
             queue_size: work_queue_size,
@@ -209,14 +212,14 @@ impl SharedTcpServer {
             match (cert, key) {
                 (Some(c), Some(k)) => {
                     let config = crate::tls_utils::server_tls_config(c.as_ref(), k.as_ref())
-                        .expect(
+                        .context(
                             "Failed to build TCP request plane TLS config — check cert/key paths",
-                        );
+                        )?;
                     tracing::info!("TCP request plane: TLS enabled");
                     Some(Arc::new(TlsAcceptor::from(Arc::new(config))))
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    panic!(
+                    anyhow::bail!(
                         "Both {} and {} must be set to enable TCP request plane TLS",
                         env::DYN_TCP_TLS_CERT_PATH,
                         env::DYN_TCP_TLS_KEY_PATH,
@@ -226,7 +229,7 @@ impl SharedTcpServer {
             }
         };
 
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
             bind_addr,
             actual_addr: RwLock::new(None),
@@ -235,7 +238,7 @@ impl SharedTcpServer {
             engine_sem,
             queue_capacity: work_queue_size,
             tls_acceptor,
-        })
+        }))
     }
 
     /// Start the worker pool dispatcher that processes requests with bounded concurrency
@@ -894,7 +897,7 @@ mod tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Create SharedTcpServer
-        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         // Create a handler that takes 1s to process requests
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
@@ -1245,7 +1248,7 @@ mod tests {
         // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone()).unwrap();
 
         assert!(
             WORK_HANDLER_POOL_CAPACITY.get() > 0,
