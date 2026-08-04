@@ -6366,30 +6366,34 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
-	podSpec, err := GenerateBasePodSpec(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType: commonconsts.ComponentTypeWorker,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-				Enabled:               true,
-				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"gms-loader"},
-			},
-			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-				MainContainer: &corev1.Container{
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+	t.Log("Set up intra-pod GMS with two declared extra clients")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled:               true,
+			Mode:                  v1alpha1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"gms-loader", "metrics-client"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
-				PodSpec: &corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:  "gms-loader",
-						Image: "loader:latest",
-					}},
+			},
+			PodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "gms-loader", Image: "loader:latest"},
+					{Name: "metrics-client", Image: "metrics:latest"},
 				},
 			},
-		}),
+		},
+	})
+
+	t.Log("Render the pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
 		BackendFrameworkVLLM,
 		&mockSecretsRetriever{},
 		"test-deployment",
@@ -6404,43 +6408,53 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 	)
 	require.NoError(t, err)
 
+	t.Log("Verify every requested container is wired as a GMS client")
 	require.NotNil(t, findInitContainerByName(podSpec, gmsruntime.ServerContainerName))
 	var main *corev1.Container
 	var loader *corev1.Container
+	var metricsClient *corev1.Container
 	for i := range podSpec.Containers {
 		switch podSpec.Containers[i].Name {
 		case commonconsts.MainContainerName:
 			main = &podSpec.Containers[i]
 		case "gms-loader":
 			loader = &podSpec.Containers[i]
+		case "metrics-client":
+			metricsClient = &podSpec.Containers[i]
 		}
 	}
 	require.NotNil(t, main)
 	require.NotNil(t, loader)
+	require.NotNil(t, metricsClient)
 
 	assertGMSClientContainer(t, main)
 	assertGMSClientContainer(t, loader)
+	assertGMSClientContainer(t, metricsClient)
 }
 
-func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(t *testing.T) {
-	podSpec, err := GenerateBasePodSpec(
-		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType: commonconsts.ComponentTypeWorker,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-				Enabled:               true,
-				Mode:                  v1alpha1.GMSModeIntraPod,
-				ExtraClientContainers: []string{"missing"},
-			},
-			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-				MainContainer: &corev1.Container{
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-						},
+func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers(t *testing.T) {
+	t.Log("Set up intra-pod GMS with two unresolved extra clients")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled:               true,
+			Mode:                  v1alpha1.GMSModeIntraPod,
+			ExtraClientContainers: []string{"missing-b", "missing-a"},
+		},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 					},
 				},
 			},
-		}),
+		},
+	})
+
+	t.Log("Render the invalid pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
 		BackendFrameworkVLLM,
 		&mockSecretsRetriever{},
 		"test-deployment",
@@ -6453,20 +6467,13 @@ func TestGenerateBasePodSpec_GPUMemoryServiceMissingExtraClientContainerIgnored(
 		nil,
 		nil,
 	)
-	require.NoError(t, err)
-	var main *corev1.Container
-	var missing *corev1.Container
-	for i := range podSpec.Containers {
-		switch podSpec.Containers[i].Name {
-		case commonconsts.MainContainerName:
-			main = &podSpec.Containers[i]
-		case "missing":
-			missing = &podSpec.Containers[i]
-		}
-	}
-	require.NotNil(t, main)
-	assertGMSClientContainer(t, main)
-	assert.Nil(t, missing)
+
+	t.Log("Verify rendering fails with every unresolved client named")
+	require.Error(t, err)
+	assert.Nil(t, podSpec)
+	assert.Contains(t, err.Error(), "gpuMemoryService.extraClientContainers")
+	assert.Contains(t, err.Error(), "missing-a")
+	assert.Contains(t, err.Error(), "missing-b")
 }
 
 func assertGMSClientContainer(t *testing.T, container *corev1.Container) {

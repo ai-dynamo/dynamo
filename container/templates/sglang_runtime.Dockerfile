@@ -166,6 +166,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+{% if device != "xpu" and target not in ("dev", "local-dev") %}
+# Add generic UCX aliases beside NIXL's private libraries so native consumers
+# use the same implementation without breaking UCX's $ORIGIN-based core and
+# module lookup. The wheel's auditwheel dependency directory is deliberately
+# placed first for every process; it contains only hash-mangled dependencies
+# plus the two generic UCX aliases. No existing wheel file or ELF metadata is
+# modified.
+RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
+    --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+{% endif %}
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
