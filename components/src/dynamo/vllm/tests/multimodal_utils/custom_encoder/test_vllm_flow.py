@@ -15,10 +15,10 @@ one-placeholder-token-per-image positions.
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.embed_assembler import build_mixed_embeds
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+from dynamo.vllm.multimodal_utils.custom_encoder import (
     Preprocessed,
     VisionEncoderBackend,
+    build_mixed_embeds,
 )
 
 pytestmark = [

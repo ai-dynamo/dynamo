@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.vllm.multimodal_utils.vision_encoder_backend.
+"""Unit tests for the custom encoder backend contract.
 
 Pin the author-facing contract surface: the ``Preprocessed`` carrier (item +
 scalar cost, no bucket_key), the hardcoded ``image_token_id`` attribute, the
@@ -12,7 +12,7 @@ the required methods.
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     Preprocessed,
     VisionEncoderBackend,
 )

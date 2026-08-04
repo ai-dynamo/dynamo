@@ -14,7 +14,7 @@ The encoder runs in the **same process** as the aggregated vLLM worker (no
 separate encode worker, no NIXL transfer): it turns image inputs into the
 visual-token embeddings for each image, and Dynamo splices those embeds into a
 mixed ``EmbedsPrompt`` at the placeholder positions (see
-``embed_assembler.build_mixed_embeds``) for a text-only LM.
+``adapter.linear.build_mixed_embeds``) for a text-only LM.
 
 Division of labour (author vs. Dynamo):
 
