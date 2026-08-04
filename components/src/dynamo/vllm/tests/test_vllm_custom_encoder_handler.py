@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.handlers import DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     Qwen3VLImageEncoding,
@@ -137,3 +138,242 @@ async def test_custom_encoder_handler_returns_native_qwen3_vl_prompt():
     image = prompt["multi_modal_data"]["image"]
     assert image["image_embeds"].shape == (1, 8)
     assert image["image_grid_thw"].tolist() == [[1, 2, 2]]
+
+
+async def test_custom_encoder_handler_passes_opaque_image_payloads():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _qwen_adapter()
+    handler._custom_encoder = SimpleNamespace(
+        encode=AsyncMock(
+            return_value=[
+                Qwen3VLImageEncoding(
+                    torch.zeros((1, 8), dtype=torch.bfloat16), (1, 2, 2)
+                ),
+                Qwen3VLImageEncoding(
+                    torch.ones((1, 8), dtype=torch.bfloat16), (1, 2, 2)
+                ),
+            ]
+        )
+    )
+    payloads = [
+        {"kind": "tensor_ref", "uri": "s3://bucket/first"},
+        {"kind": "tensor_ref", "uri": "s3://bucket/second"},
+    ]
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [100, 101, 102, 103],
+            "multi_modal_data": {
+                "custom_encoder_data": [
+                    {
+                        "CustomEncoderData": {
+                            "modality": "image",
+                            "payload": payloads[0],
+                        }
+                    },
+                    {
+                        "CustomEncoderData": {
+                            "modality": "image",
+                            "payload": payloads[1],
+                        }
+                    },
+                ]
+            },
+        },
+        "request-id",
+    )
+
+    assert error is None
+    assert prompt is not None
+    handler._custom_encoder.encode.assert_awaited_once_with(payloads)
+    assert "multi_modal_uuids" not in prompt
+
+
+async def test_custom_encoder_handler_rejects_unsupported_modality():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _qwen_adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [100, 101, 102],
+            "multi_modal_data": {
+                "custom_encoder_data": [
+                    {
+                        "CustomEncoderData": {
+                            "modality": "video",
+                            "payload": {"kind": "tensor_ref"},
+                        }
+                    }
+                ]
+            },
+        },
+        "request-id",
+    )
+
+    assert prompt is None
+    assert error is not None
+    assert "only 'image' is currently supported" in error["finish_reason"]
+    handler._custom_encoder.encode.assert_not_awaited()
+
+
+async def test_custom_encoder_handler_rejects_mixed_custom_and_legacy_inputs():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {
+            "token_ids": [99],
+            "multi_modal_data": {
+                "custom_encoder_data": [
+                    {
+                        "CustomEncoderData": {
+                            "modality": "image",
+                            "payload": {"id": 1},
+                        }
+                    }
+                ],
+                "image_url": [{"Url": "data:image/png;base64,unused"}],
+            },
+        },
+        "request-id",
+    )
+
+    assert prompt is None
+    assert error is not None
+    assert "cannot combine" in error["finish_reason"]
+    handler._custom_encoder.encode.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "multi_modal_data, expected_error",
+    [
+        ([], "multi_modal_data must be an object"),
+        *[
+            ({"custom_encoder_data": value}, "custom_encoder_data must be a list")
+            for value in (0, 1, {}, "")
+        ],
+        *[
+            ({"image_url": value}, "image_url must be a list")
+            for value in (0, 1, {}, "")
+        ],
+    ],
+)
+async def test_custom_encoder_handler_rejects_malformed_modality_containers(
+    multi_modal_data,
+    expected_error,
+):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {"token_ids": [99], "multi_modal_data": multi_modal_data},
+        "request-id",
+    )
+
+    assert prompt is None
+    assert error is not None
+    assert expected_error in error["finish_reason"]
+    handler._custom_encoder.encode.assert_not_awaited()
+
+
+async def test_custom_encoder_handler_leaves_text_only_request_unchanged():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler._custom_encoder_adapter = _adapter()
+    handler._custom_encoder = SimpleNamespace(encode=AsyncMock())
+
+    prompt, error = await handler._assemble_custom_encoder_prompt(
+        {"token_ids": [1, 2, 3]},
+        "request-id",
+    )
+
+    assert prompt is None
+    assert error is None
+    handler._custom_encoder.encode.assert_not_awaited()
+
+
+async def test_custom_encoder_data_requires_configured_worker():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.config = SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED)
+    handler._custom_encoder = None
+
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "custom_encoder_data": [
+                        {
+                            "CustomEncoderData": {
+                                "modality": "image",
+                                "payload": {"id": 1},
+                            }
+                        }
+                    ]
+                },
+            },
+            None,
+            "request-id",
+        )
+    ]
+
+    assert chunks == [
+        {
+            "finish_reason": (
+                "error: custom_encoder_data requires a worker configured with "
+                "--custom-encoder-class"
+            ),
+            "token_ids": [],
+        }
+    ]
+
+
+async def test_token_mode_rejects_non_mapping_multimodal_data():
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.config = SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED)
+    handler._custom_encoder = None
+
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            {"token_ids": [1, 2, 3], "multi_modal_data": []},
+            None,
+            "request-id",
+        )
+    ]
+
+    assert chunks == [
+        {
+            "finish_reason": "error: multi_modal_data must be an object",
+            "token_ids": [],
+        }
+    ]
+
+
+@pytest.mark.parametrize("custom_encoder_data", [0, 1, {}, ""])
+async def test_token_mode_rejects_non_list_custom_encoder_data(custom_encoder_data):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.config = SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED)
+    handler._custom_encoder = None
+
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {"custom_encoder_data": custom_encoder_data},
+            },
+            None,
+            "request-id",
+        )
+    ]
+
+    assert chunks == [
+        {
+            "finish_reason": "error: custom_encoder_data must be a list",
+            "token_ids": [],
+        }
+    ]

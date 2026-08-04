@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
+CUSTOM_ENCODER_DATA_KEY = "custom_encoder_data"
+CUSTOM_ENCODER_DATA_VARIANT_KEY = "CustomEncoderData"
 URL_VARIANT_KEY = "Url"
 
 
