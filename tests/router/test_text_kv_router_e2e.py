@@ -129,16 +129,27 @@ def _wait_for_model(frontend_port: int) -> None:
     )
 
 
-def _completion(frontend_port: int, session_id: str) -> str:
+def _completion(
+    frontend_port: int,
+    session_id: str | None = None,
+    *,
+    user: str | None = None,
+) -> str:
+    headers = {}
+    if session_id is not None:
+        headers["x-dynamo-session-id"] = session_id
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "route this"}],
+        "max_tokens": 1,
+        "stream": True,
+    }
+    if user is not None:
+        payload["user"] = user
     response = requests.post(
         f"http://127.0.0.1:{frontend_port}/v1/chat/completions",
-        headers={"x-dynamo-session-id": session_id},
-        json={
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": "route this"}],
-            "max_tokens": 1,
-            "stream": True,
-        },
+        headers=headers,
+        json=payload,
         stream=True,
         timeout=10,
     )
@@ -273,6 +284,8 @@ def test_text_kv_routes_new_sessions_by_rank_and_reuses_affinity(
         sticky_session = _wait_for_stable_target(
             frontend_port, "worker-b:rank-1", "initial"
         )
+        body_session = f"body-user-{uuid.uuid4().hex}"
+        assert _completion(frontend_port, user=body_session) == "worker-b:rank-1"
 
         concurrent_session = f"concurrent-{uuid.uuid4().hex}"
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -287,8 +300,21 @@ def test_text_kv_routes_new_sessions_by_rank_and_reuses_affinity(
         _set_loads(engine_a_port, [0.01, 0.90])
         _set_loads(engine_b_port, [0.80, 0.99])
         _wait_for_stable_target(frontend_port, "worker-a:rank-0", "changed")
+        changed_body_session = f"changed-body-user-{uuid.uuid4().hex}"
+        assert (
+            _completion(frontend_port, user=changed_body_session) == "worker-a:rank-0"
+        )
 
         assert _completion(frontend_port, sticky_session) == "worker-b:rank-1"
+        assert _completion(frontend_port, user=body_session) == "worker-b:rank-1"
+        assert (
+            _completion(
+                frontend_port,
+                sticky_session,
+                user=changed_body_session,
+            )
+            == "worker-b:rank-1"
+        )
 
 
 def test_text_kv_rebalances_existing_sessions_when_worker_scales_up(

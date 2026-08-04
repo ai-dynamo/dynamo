@@ -43,10 +43,16 @@ class FakeChatHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
         body = json.loads(self.rfile.read(length))
-        session_id = self.headers.get("x-dynamo-session-id")
+        header_session_id = self.headers.get("x-dynamo-session-id")
+        session_id = header_session_id or body.get("user")
         with self.server.lock:
             self.server.requests.append(
-                {"session_id": session_id, "body": body, "failed": False}
+                {
+                    "session_id": session_id,
+                    "header_session_id": header_session_id,
+                    "body": body,
+                    "failed": False,
+                }
             )
             should_fail = session_id == "scale-agent-0" and not self.server.failed_once
             if should_fail:
@@ -79,7 +85,10 @@ class FakeChatHandler(BaseHTTPRequestHandler):
         pass
 
 
-def test_standalone_workload_sends_affinity_sessions_and_retries(tmp_path) -> None:
+@pytest.mark.parametrize("identity_source", ["header", "user"])
+def test_standalone_workload_sends_affinity_sessions_and_retries(
+    tmp_path, identity_source: str
+) -> None:
     server = FakeChatServer()
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -127,6 +136,7 @@ def test_standalone_workload_sends_affinity_sessions_and_retries(tmp_path) -> No
         scale_down_max_retries=1,
         scale_down_retry_delay_ms=1,
         served_model_name="test-model",
+        session_identity_source=identity_source,
     )
 
     try:
@@ -159,3 +169,11 @@ def test_standalone_workload_sends_affinity_sessions_and_retries(tmp_path) -> No
         ]
         assert [len(request["body"]["messages"]) for request in successful] == [1, 3]
         assert all(request["body"]["model"] == "test-model" for request in successful)
+        if identity_source == "header":
+            assert all(
+                request["header_session_id"] == session_id for request in successful
+            )
+            assert all("user" not in request["body"] for request in successful)
+        else:
+            assert all(request["header_session_id"] is None for request in successful)
+            assert all(request["body"]["user"] == session_id for request in successful)

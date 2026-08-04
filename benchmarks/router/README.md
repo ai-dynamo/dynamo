@@ -376,8 +376,10 @@ scale-down for both the `dynamo.sglang` token-input path and the
 `dynamo.openai_backend.sglang` text-input path. With 100 agents and the default
 trigger, worker B starts or stops after every agent finishes turn 3 while the
 remaining 17 turns continue. The workload sends ordinary `/v1/chat/completions`
-requests and assigns each agent a stable
-`x-dynamo-session-id: scale-agent-{agent_id}` header. Scale-down permits one
+requests and assigns each agent a stable affinity ID. By default it sends
+`x-dynamo-session-id: scale-agent-{agent_id}`; pass
+`--session-identity-source user` to put the same ID in the OpenAI body `user`
+field instead. Scale-down permits one
 client retry for a request that races worker shutdown, then verifies that
 bindings to B move to a surviving target and remain sticky. Requests use greedy
 decoding (`--temperature 0`) by default so model sampling randomness does not
