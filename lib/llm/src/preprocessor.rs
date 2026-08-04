@@ -4190,72 +4190,6 @@ impl
 mod strip_tests {
     use super::OpenAIPreprocessor;
 
-    use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
-        CreateChatCompletionStreamResponse, Role,
-    };
-    use dynamo_runtime::protocols::annotated::Annotated;
-    use futures::{StreamExt, stream};
-
-    fn chat_stream_chunk(
-        index: u32,
-        role: Option<Role>,
-    ) -> Annotated<super::NvCreateChatCompletionStreamResponse> {
-        #[allow(deprecated)]
-        let choice = ChatChoiceStream {
-            index,
-            delta: ChatCompletionStreamResponseDelta {
-                role,
-                content: Some(ChatCompletionMessageContent::Text("content".to_string())),
-                tool_calls: None,
-                function_call: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: None,
-            logprobs: None,
-        };
-        Annotated::from_data(super::NvCreateChatCompletionStreamResponse {
-            inner: CreateChatCompletionStreamResponse {
-                id: "test".to_string(),
-                choices: vec![choice],
-                created: 0,
-                model: "test".to_string(),
-                system_fingerprint: None,
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
-            },
-            nvext: None,
-            llm_metrics: None,
-        })
-    }
-
-    #[tokio::test]
-    async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
-        let input = stream::iter(vec![
-            // Mirrors a parser releasing buffered content without the role that
-            // arrived on the original, swallowed chunk.
-            chat_stream_chunk(0, None),
-            chat_stream_chunk(1, None),
-            chat_stream_chunk(0, Some(Role::Assistant)),
-            chat_stream_chunk(1, Some(Role::Assistant)),
-        ]);
-
-        let output: Vec<_> = OpenAIPreprocessor::normalize_chat_stream_roles(input)
-            .collect()
-            .await;
-        let roles: Vec<_> = output
-            .iter()
-            .map(|response| response.data.as_ref().unwrap().inner.choices[0].delta.role)
-            .collect();
-
-        assert_eq!(
-            roles,
-            vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
-        );
-    }
-
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
         let mut messages = serde_json::json!([{
@@ -4315,6 +4249,69 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+
+    fn chat_stream_chunk(
+        index: u32,
+        role: Option<Role>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                role,
+                content: Some(ChatCompletionMessageContent::Text("content".to_string())),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "test".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
+        let input = stream::iter(vec![
+            // Mirrors a parser releasing buffered content without the role that
+            // arrived on the original, swallowed chunk.
+            chat_stream_chunk(0, None),
+            chat_stream_chunk(1, None),
+            chat_stream_chunk(0, Some(Role::Assistant)),
+            chat_stream_chunk(1, Some(Role::Assistant)),
+        ]);
+
+        let output: Vec<_> = OpenAIPreprocessor::normalize_chat_stream_roles(input)
+            .collect()
+            .await;
+        let roles: Vec<_> = output
+            .iter()
+            .map(|response| response.data.as_ref().unwrap().inner.choices[0].delta.role)
+            .collect();
+
+        assert_eq!(
+            roles,
+            vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
 
     #[test]
     fn prompt_invalid_request_maps_to_invalid_argument() {
