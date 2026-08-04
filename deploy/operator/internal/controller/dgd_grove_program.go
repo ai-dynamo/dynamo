@@ -32,6 +32,7 @@ type groveProgram struct {
 	restartProgress *groveRestartProgressResolver
 	workloads       *groveWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
+	legacyCleanup   func(context.Context, *nvidiacomv1beta1.DynamoGraphDeployment) error
 	topology        *dgdGroveTopologyConditionReconciler
 }
 
@@ -61,7 +62,10 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.ScaleClient,
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
-		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
+		legacyCleanup: func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+			return r.cleanupDisaggregatedSetOnLegacyPath(ctx, dgd, false)
+		},
+		topology: newDGDGroveTopologyConditionReconciler(r.Client),
 	}
 }
 
@@ -127,6 +131,11 @@ func (p *groveProgram) Reconcile(
 		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+		}
+	}
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful && p.legacyCleanup != nil {
+		if err := p.legacyCleanup(ctx, req.DGD); err != nil {
+			return programResult, err
 		}
 	}
 
