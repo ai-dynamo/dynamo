@@ -216,8 +216,8 @@ type GPUMemoryServiceSpec struct {
 
 	// extraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
-	// under checkpoint.job.gmsClientContainers. In each rendered pod, only
-	// matching container names are wired; absent names are ignored.
+	// under checkpoint.job.gmsClientContainers. Every name must match a container
+	// in the enclosing component's podTemplate.spec.containers.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
