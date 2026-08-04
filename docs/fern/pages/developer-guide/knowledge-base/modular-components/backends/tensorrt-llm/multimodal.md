@@ -55,13 +55,13 @@ TensorRT-LLM multimodal KV routing uses the Rust frontend to give the router and
 
 1. The frontend computes an `mm_hash` for each image.
 2. It represents the image identity as hash-derived pad-value tokens in the routing view.
-3. The KV router selects the worker with the highest block overlap.
+3. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
 4. The frontend forwards each hash as `multi_modal_uuids`.
 5. The worker associates the UUID with the matching image-token run in its KV events.
 
-For HTTP inputs, routing identity is based on the full image URL by default. Set `--frontend-decoding` to hash decoded image content when different URLs can refer to identical images.
+For HTTP inputs, routing identity is based on the exact full image URL, including the query string, by default. Set `--frontend-decoding` to hash decoded image content when different URLs can refer to identical images.
 
-Workers must enable KV event publishing and block reuse. The provided launcher configures `--publish-events-and-metrics`, `enable_block_reuse: true`, and a KV-routing frontend:
+Workers must enable KV event publishing and block reuse. The provided launcher configures `--publish-kv-events`, `enable_block_reuse: true`, and a KV-routing frontend:
 
 ```bash
 cd $DYNAMO_HOME
