@@ -762,7 +762,7 @@ class WorkerFactory:
         engine re-exposes its persisted switch counters within seconds. Uses a
         dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
         """
-        if config.gms_shadow_mode is not True:
+        if not config.gms_shadow_mode:
             return None
         from gpu_memory_service.failover_lock.failover_metrics import (
             create_failover_metrics,
@@ -792,7 +792,7 @@ class WorkerFactory:
     ) -> bool:
         # Shadow mode: sleep → probe → block on lock → wake. True only for a real
         # (contended) failover, not the initial bootup.
-        if config.gms_shadow_mode is not True:
+        if not config.gms_shadow_mode:
             return False
 
         await handler._pause_controller.pause(1)

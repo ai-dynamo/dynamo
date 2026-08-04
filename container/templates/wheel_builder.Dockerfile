@@ -79,7 +79,15 @@ ADD --checksum=sha256:f60e802b6f41350393e34b24793db888a8be514054769bd17e7a6e9c0c
 
 # Install xpu-smi without explicitly changing the Intel compute runtime stack.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends /tmp/xpu-smi.deb && \
+    if command -v xpu-smi >/dev/null 2>&1; then \
+        echo "xpu-smi already present in base image, skipping install"; \
+    else \
+        if apt-cache show intel-gsc >/dev/null 2>&1; then \
+            apt-get install -y --no-install-recommends /tmp/xpu-smi.deb; \
+        else \
+            echo "WARNING: intel-gsc is not available from configured apt sources; skipping xpu-smi install"; \
+        fi; \
+    fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
