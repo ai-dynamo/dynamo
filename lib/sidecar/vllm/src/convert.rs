@@ -9,6 +9,7 @@ use dynamo_backend_common::{
 use crate::client;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
+use serde::{Deserialize, Serialize};
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 
@@ -202,41 +203,29 @@ fn build_kv_parameters(
     let kv_transfer_params = match mode {
         DisaggregationMode::Aggregated => caller_kv,
         DisaggregationMode::Prefill => {
-            let mut params = match caller_kv {
-                None => serde_json::Map::new(),
-                Some(serde_json::Value::Object(params)) => params,
-                Some(_) => {
-                    return Err(client::invalid_argument(
-                        "extra_args.kv_transfer_params must be a JSON object",
-                    ));
-                }
-            };
-            params.insert(
-                "do_remote_decode".to_string(),
-                serde_json::Value::Bool(true),
-            );
-            Some(serde_json::Value::Object(params))
+            // Type the handoff (see [`KvTransferParams`]) so a caller-supplied
+            // payload is validated and pinned to its wire types before crossing
+            // the `Struct` boundary.
+            let mut params = parse_kv_transfer_params(caller_kv, "extra_args.kv_transfer_params")?;
+            params.do_remote_decode = Some(true);
+            Some(kv_transfer_params_to_value(params)?)
         }
         DisaggregationMode::Decode => {
-            let mut params = prefill_result
+            let disaggregated_params = prefill_result
                 .ok_or_else(|| {
                     client::invalid_argument(
                         "decode request is missing the prefill_result KV payload",
                     )
                 })?
                 .disaggregated_params;
-            // vLLM's NixlConnector builds its handshake socket path with an
-            // f-string (`make_zmq_path` -> f"tcp://{host}:{port}"). This
-            // `kv_transfer_params` handoff crosses the gRPC contract as a
-            // `google.protobuf.Struct`, whose numbers are all IEEE-754 doubles,
-            // and vLLM's gRPC frontend surfaces those to Python as `float`. An
-            // integer `remote_port` (e.g. 7100) therefore arrives on the decode
-            // engine as `7100.0`, yielding the path `tcp://host:7100.0` which
-            // urllib3 rejects with `LocationParseError`. Stringify the port so it
-            // survives the round-trip as an exact, dot-free token (mirrors the
-            // request-plane fix).
-            stringify_remote_port(&mut params);
-            Some(params)
+            // The prefill handoff crosses the gRPC contract as a
+            // `google.protobuf.Struct`, whose numbers all decode to IEEE-754
+            // doubles, so [`KvTransferParams`] pins `remote_port` to a string:
+            // vLLM's NixlConnector builds `tcp://{host}:{port}` from it and would
+            // otherwise dial `tcp://host:7100.0`, which urllib3 rejects.
+            let params =
+                parse_kv_transfer_params(Some(disaggregated_params), "prefill_result KV payload")?;
+            Some(kv_transfer_params_to_value(params)?)
         }
         DisaggregationMode::Encode => {
             return Err(client::invalid_argument(
@@ -252,28 +241,73 @@ fn build_kv_parameters(
     })
 }
 
-/// Rewrite a numeric `remote_port` in a decode handoff to a string so it
-/// survives the `google.protobuf.Struct` round-trip without acquiring a
-/// fractional part. See the call site in [`build_kv_parameters`] for why vLLM's
-/// decode engine cannot tolerate a float port. A missing, already-string, or
-/// non-numeric `remote_port` is left untouched — the field only matters to
-/// NixlConnector, and other connectors ignore it.
-fn stringify_remote_port(params: &mut serde_json::Value) {
-    let Some(port) = params
-        .as_object_mut()
-        .and_then(|map| map.get_mut("remote_port"))
-    else {
-        return;
-    };
-    let as_int = port
-        .as_u64()
-        .map(|value| value.to_string())
-        .or_else(|| port.as_i64().map(|value| value.to_string()))
-        // A whole-valued float (e.g. the Struct decoded `7100.0`) still names an
-        // integer port; render it without the fractional part.
-        .or_else(|| port.as_f64().map(|value| (value as i64).to_string()));
-    if let Some(as_int) = as_int {
-        *port = serde_json::Value::String(as_int);
+/// Typed view of vLLM's `kv_transfer_params` disaggregation handoff. Only fields
+/// with a cross-`google.protobuf.Struct` type-fidelity requirement are modeled
+/// explicitly; every other field round-trips losslessly through `extra`. The
+/// handoff crosses the gRPC contract as a `Struct`, whose numbers all decode to
+/// IEEE-754 doubles, so a field consumed in a non-numeric context on the engine
+/// side must be pinned to its wire type here.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct KvTransferParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    do_remote_decode: Option<bool>,
+
+    /// vLLM's NixlConnector builds `tcp://{host}:{port}` from this, so the decode
+    /// engine needs an exact, dot-free token. The `Struct` round-trip turns an
+    /// integer port into a float; serialize as a string, and accept a number or
+    /// string on input.
+    #[serde(
+        default,
+        deserialize_with = "de_port_as_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    remote_port: Option<String>,
+
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn parse_kv_transfer_params(
+    value: Option<serde_json::Value>,
+    field: &str,
+) -> Result<KvTransferParams, DynamoError> {
+    match value {
+        None => Ok(KvTransferParams::default()),
+        Some(value) => serde_json::from_value(value).map_err(|e| {
+            client::invalid_argument(format!(
+                "{field} is not a valid kv_transfer_params handoff: {e}"
+            ))
+        }),
+    }
+}
+
+fn kv_transfer_params_to_value(params: KvTransferParams) -> Result<serde_json::Value, DynamoError> {
+    serde_json::to_value(params)
+        .map_err(|e| client::protocol_error(format!("failed to serialize kv_transfer_params: {e}")))
+}
+
+/// Deserialize a `remote_port` that may arrive as a number (the common `Struct`
+/// case) or a string into the canonical dot-free string form. A `null` or
+/// missing port yields `None`; the field only matters to NixlConnector.
+fn de_port_as_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(s)),
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(|v| v.to_string())
+            .or_else(|| n.as_i64().map(|v| v.to_string()))
+            // A whole-valued float (the `Struct` decoded `7100.0`) still names an
+            // integer port; render it without the fractional part.
+            .or_else(|| n.as_f64().map(|v| (v as i64).to_string()))
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("remote_port is not a valid port number")),
+        other => Err(serde::de::Error::custom(format!(
+            "remote_port must be a number or string, got {other}"
+        ))),
     }
 }
 
@@ -668,5 +702,31 @@ fn normalize_logprob(logprob: f32) -> f64 {
         f64::from(logprob).max(VLLM_LOGPROB_FLOOR)
     } else {
         VLLM_LOGPROB_FLOOR
+    }
+}
+
+#[cfg(test)]
+mod kv_transfer_tests {
+    use super::{kv_transfer_params_to_value, parse_kv_transfer_params};
+    use serde_json::json;
+
+    #[test]
+    fn decode_handoff_pins_float_port_to_string_and_preserves_extra() {
+        // The `google.protobuf.Struct` round-trip surfaces an integer port as a
+        // float (`7100` -> `7100.0`); the typed boundary must hand the decode
+        // engine an exact, dot-free string while round-tripping every other field.
+        let handoff = json!({
+            "remote_port": 7100.0,
+            "do_remote_prefill": true,
+            "remote_block_ids": [1, 2, 3],
+            "tp_size": 1,
+        });
+        let value =
+            kv_transfer_params_to_value(parse_kv_transfer_params(Some(handoff), "test").unwrap())
+                .unwrap();
+        assert_eq!(value["remote_port"], json!("7100"));
+        assert_eq!(value["remote_block_ids"], json!([1, 2, 3]));
+        assert_eq!(value["tp_size"], json!(1));
+        assert_eq!(value["do_remote_prefill"], json!(true));
     }
 }

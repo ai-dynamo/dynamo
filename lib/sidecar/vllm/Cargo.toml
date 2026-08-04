@@ -33,6 +33,7 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 parking_lot = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

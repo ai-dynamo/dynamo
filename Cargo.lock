@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-direct-frontend"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-direct-register"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3137,6 +3137,7 @@ dependencies = [
  "parking_lot",
  "prost 0.13.5",
  "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
