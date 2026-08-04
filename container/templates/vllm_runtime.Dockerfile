@@ -212,16 +212,14 @@ RUN uv pip uninstall triton && \
 # Install only the ModelExpress client package. --no-deps preserves the upstream
 # vLLM runtime dependency stack. google-crc32c is imported eagerly by the MX
 # vLLM plugin (>=0.5.0) and is not in the XPU base image, so install it
-# alongside; the plugin-load check below runs the exact vllm.general_plugins
-# entry point vLLM executes at every startup, failing the build on any future
-# --no-deps gap.
+# alongside; the plugin-load guard later in this stage fails the build on any
+# remaining --no-deps gap.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     uv pip install {{ pip_target }} --no-deps \
         "modelexpress==${MODELEXPRESS_VERSION}"; \
-    uv pip install {{ pip_target }} "google-crc32c>=1.5.0"; \
-    python3 -c "import modelexpress; modelexpress.register_modelexpress_loaders()"
+    uv pip install {{ pip_target }} "google-crc32c>=1.5.0"
 {% endif %}
 
 {% endif %}
@@ -310,6 +308,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # collection conflicts (duplicate conftest plugin registration) and stale
 # tool scripts referencing files not present in Dynamo's build context.
 RUN rm -rf /workspace/vllm
+
+{% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
+# Regression guard for the --no-deps ModelExpress install above: resolve and
+# invoke the vllm.general_plugins entry points exactly as vLLM does at every
+# startup, so a missing transitive dependency fails the build here instead of
+# at pod startup. Runs after every package/library install in this stage
+# (including the XPU apt step) so the check is order-independent.
+RUN python3 -c "from importlib.metadata import entry_points; \
+eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'modelexpress']; \
+assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
+[ep.load()() for ep in eps]"
+{% endif %}
 
 USER dynamo
 
