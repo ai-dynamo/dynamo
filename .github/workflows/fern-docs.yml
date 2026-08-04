@@ -216,6 +216,11 @@ jobs:
           # shapes would leave the composed file with two version lists.
           yq -i '.products[0].versions = load("/tmp/preserved_versions.yml")' docs.yml
 
+          # The source config points the product at ../docs/index.yml, which is
+          # its own repo layout and does not exist on docs-website. Point it at
+          # the Latest entry the preserved list already carries.
+          yq -i '.products[0].path = .products[0].versions[0].path' docs.yml
+
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
           # external contributors can run `fern docs dev` without an nvidia-org
