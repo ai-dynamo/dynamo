@@ -55,6 +55,15 @@ _kv_caches = None
 _kv_manager = None
 _dbg_persist_calls = 0
 
+# DEBUG: seconds between timeline byte-compares while serving (0 = off).
+_TIMELINE_CMP = float(os.getenv("GMS_KV_TIMELINE_CMP", "0") or 0)
+_last_timeline_cmp = 0.0
+
+# The scheduler's BlockPool, captured at construction. The worker's wake path needs it to
+# rehydrate the index BEFORE the engine starts serving; both run in the same EngineCore
+# process (TP=1, in-process executor), so a module global suffices.
+_block_pool = None
+
 
 def set_kv_caches(kv_caches) -> None:
     global _kv_caches
@@ -275,15 +284,32 @@ def compare_to_winner_target(kv_caches, mappings):
                         break
             diverged.append((w["layer"], fd))
 
-    all_match = matched == len(wlayers) and wlayers
+    all_match = bool(wlayers) and matched == len(wlayers)
+    # Localize the first L0 divergence to an approximate block id: the allocation spans
+    # `num_blocks` blocks over `nchunks` chunks, so chunk i covers blocks
+    # [i*num_blocks/nchunks, (i+1)*num_blocks/nchunks). Prefix blocks are low ids; a
+    # freshly-allocated intervening request (post-requeue-fix) takes high ids.
+    num_blocks = int(os.getenv("GMS_KV_NUM_BLOCKS", "8192") or 8192)
+    bpc = max(1, num_blocks // max(1, nchunks))
+    where = ""
+    for lyr, fd in diverged:
+        if lyr == 0 and isinstance(fd, int):
+            where = " | L0 first divergence at chunk %d => blocks ~%d-%d of %d" % (
+                fd,
+                fd * bpc,
+                (fd + 1) * bpc - 1,
+                num_blocks,
+            )
+            break
     logger.info(
-        "[GMS][dbg] REATTACH BYTE-COMPARE (ALL LAYERS): %d/%d layers byte-identical "
-        "(alloc-not-bound=%d) | ALL_MATCH=%s | diverged=%s",
+        "[GMS][dbg] WINNER BYTE-COMPARE (ALL LAYERS): %d/%d layers byte-identical "
+        "(alloc-not-bound=%d) | ALL_MATCH=%s | diverged(layer,chunk)=%s%s",
         matched,
         len(wlayers),
         alloc_missing,
         all_match,
         diverged[:8],
+        where,
     )
     return all_match
 
@@ -300,11 +326,34 @@ def is_enabled() -> bool:
 
 
 def mark_rehydrate_pending() -> None:
-    """Called by the standby's wake path once its KV bytes are reattached."""
+    """Called by the standby's wake path once its KV bytes are reattached.
+
+    Rehydrate EAGERLY here if the ``BlockPool`` is reachable. Deferring the replay to the
+    first cache lookup is a correctness bug, not just a latency one: the standby starts
+    serving as soon as it registers with discovery, and until the index is replayed every
+    reattached block still looks *free and unhashed*. Any request that arrives in that
+    window is handed blocks straight off the head of the free queue -- i.e. the reused
+    prefix's own blocks -- and overwrites the KV we just restored. The later replay then
+    installs the winner's hashes onto those clobbered blocks, producing a full prefix HIT
+    that reads the wrong bytes.
+
+    ``REHYDRATE_PENDING`` remains as a fallback for the case where no ``BlockPool`` has
+    been constructed yet.
+    """
     global REHYDRATE_PENDING
-    if is_enabled():
-        REHYDRATE_PENDING = True
-        logger.info("[GMS] KV index rehydrate armed (failover takeover)")
+    if not is_enabled():
+        return
+    if _block_pool is not None:
+        try:
+            rehydrate_block_pool(_block_pool)
+            logger.info("[GMS] KV index rehydrated eagerly at wake (failover takeover)")
+            return
+        except Exception as e:
+            logger.warning(
+                "[GMS] eager KV index rehydrate failed (%s); falling back to lazy", e
+            )
+    REHYDRATE_PENDING = True
+    logger.info("[GMS] KV index rehydrate armed (failover takeover)")
 
 
 def _append_records(records: list) -> None:
@@ -335,6 +384,13 @@ def enable_kv_index_persistence() -> None:
 
     orig_cache_full_blocks = BlockPool.cache_full_blocks
     orig_get_cached_block = BlockPool.get_cached_block
+    orig_init = BlockPool.__init__
+
+    def __init__(self, *args, **kwargs):
+        global _block_pool
+        orig_init(self, *args, **kwargs)
+        # Capture the pool so the wake path can rehydrate before serving begins.
+        _block_pool = self
 
     def cache_full_blocks(
         self, request, blocks, num_cached_blocks, num_full_blocks, *args, **kwargs
@@ -400,15 +456,30 @@ def enable_kv_index_persistence() -> None:
                 logger.warning("[GMS][dbg] winner D1 failed: %s", _e)
 
     def get_cached_block(self, *args, **kwargs):
-        global REHYDRATE_PENDING
+        global REHYDRATE_PENDING, _last_timeline_cmp
         if REHYDRATE_PENDING:
             REHYDRATE_PENDING = False
             try:
                 rehydrate_block_pool(self)
             except Exception as e:
                 logger.warning("[GMS] KV index rehydrate failed: %s", e)
+        # TIMELINE probe: re-run the winner byte-compare periodically while serving, so we
+        # can see WHEN the reattached KV diverges from the winner's dump (at reattach? after
+        # an intervening request? only at re-send?) and WHERE (first divergent chunk ->
+        # block region). Time-gated so it costs one compare every few seconds, not per call.
+        if _TIMELINE_CMP and _kv_caches and _kv_manager is not None:
+            import time as _t
+
+            now = _t.monotonic()
+            if now - _last_timeline_cmp > _TIMELINE_CMP:
+                _last_timeline_cmp = now
+                try:
+                    compare_to_winner_target(_kv_caches, _kv_manager.mappings)
+                except Exception as e:
+                    logger.warning("[GMS][dbg] timeline compare failed: %s", e)
         return orig_get_cached_block(self, *args, **kwargs)
 
+    BlockPool.__init__ = __init__
     BlockPool.cache_full_blocks = cache_full_blocks
     BlockPool.get_cached_block = get_cached_block
     BlockPool._gms_kv_index_patched = True
@@ -441,6 +512,7 @@ def rehydrate_block_pool(block_pool) -> None:
 
     null_id = block_pool.null_block.block_id
     n = 0
+    rehydrated = []
     for block_id, (hash_bytes, num_tokens) in latest.items():
         if block_id == null_id or block_id < 0 or block_id >= len(block_pool.blocks):
             continue
@@ -452,10 +524,36 @@ def rehydrate_block_pool(block_pool) -> None:
         block_pool._insert_block_hash(
             BlockHashWithGroupId(hash_bytes), block, num_tokens
         )
+        rehydrated.append(block)
         n += 1
+
+    # Restore vLLM's free-queue ordering invariant. A cached-but-free block must sit at
+    # the TAIL of the free queue so the allocator hands out uncached blocks first:
+    # ``free_blocks`` maintains exactly that (prepend_n(uncached) / append_n(cached))
+    # and ``get_new_blocks`` pops from the head. ``_insert_block_hash`` only marks a
+    # block as cached -- it never moves it -- so without this the rehydrated blocks stay
+    # where they already were. On a freshly woken standby every block is unhashed and
+    # queued in block-id order, which puts the reused prefix at the HEAD: the next
+    # request served is handed those very blocks and overwrites the KV we just restored.
+    #
+    # Append in descending block_id so the prefix's LAST blocks are evicted first,
+    # leaving a usable leading prefix -- mirroring how vLLM frees a request's blocks.
+    moved, move_failed = 0, 0
+    for block in sorted(rehydrated, key=lambda b: b.block_id, reverse=True):
+        try:
+            block_pool.free_block_queue.remove(block)
+            block_pool.free_block_queue.append(block)
+            moved += 1
+        except Exception as e:  # never let requeueing break serving
+            move_failed += 1
+            if move_failed == 1:
+                logger.warning("[GMS] KV index requeue failed for a block: %s", e)
+
     logger.info(
         "[GMS] KV index rehydrated: replayed %d block entries into BlockPool "
-        "(%d records on log)",
+        "(%d records on log); requeued %d to free-queue tail (%d failed)",
         n,
         len(latest),
+        moved,
+        move_failed,
     )
