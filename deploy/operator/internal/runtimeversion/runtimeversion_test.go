@@ -125,10 +125,9 @@ func TestResolve(t *testing.T) {
 			want:     Version{Major: 1, Minor: 4, Patch: 0},
 		},
 		{
-			name:     "does not fall back when the override is invalid",
-			image:    "nvcr.io/nvidia/ai-dynamo/runtime:1.5.0",
-			override: "invalid",
-			wantErr:  true,
+			name:    "returns an error when the image tag is not a semantic version",
+			image:   "nvcr.io/nvidia/ai-dynamo/runtime:latest",
+			wantErr: true,
 		},
 	}
 
