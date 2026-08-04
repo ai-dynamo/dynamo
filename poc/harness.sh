@@ -348,6 +348,17 @@ sleep 3
 # (discovery propagation + scratch->real KV remap + first-token warmup). Retry
 # with backoff instead of a single shot so a transient not-ready doesn't read as
 # a failover regression (kills the single-shot false negative).
+# SKIP_POST_FAILOVER_INFER=1 makes the Phase 6 warm prefix the standby's FIRST request.
+# Diagnostic: this unrelated "capital of France" request (prefill + 20 decode steps) runs
+# BEFORE the reuse probe and allocates blocks from the free queue. The rehydrated prefix
+# blocks are re-indexed at ref_cnt=0 (cached-but-FREE => still allocatable), so this
+# request can be handed those very blocks and overwrite the warm prefix's KV — while the
+# index still reports a HIT. Skipping it isolates that clobber from a genuine reuse bug.
+if [ "${SKIP_POST_FAILOVER_INFER:-0}" = "1" ]; then
+    echo "SKIP_POST_FAILOVER_INFER=1: skipping the intervening inference so the warm"
+    echo "  prefix re-send is the standby's first request (isolates block-clobber)."
+    infer_ok=1; attempt=0
+else
 R=""; infer_ok=0; attempt=0
 for attempt in $(seq 1 10); do
     R=$(infer)
@@ -359,6 +370,7 @@ if [ "$infer_ok" = "1" ]; then
     pass "Inference after failover (attempt $attempt): $(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['choices'][0]['text'])" 2>/dev/null)"
 else
     fail "Inference after failover failed after $attempt attempts: $R"
+fi
 fi
 kill -0 "$LOSER_PID" 2>/dev/null && pass "D7: Exactly one engine alive after failover" || fail "D7: Loser not alive"
 
