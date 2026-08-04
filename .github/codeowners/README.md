@@ -63,11 +63,15 @@ shared:
 
 You do not have to trust that restatement: `shared` rows are co-ownership by
 definition, and the strict gate rejects any shared rule whose owner list drops
-an owner granted by an enclosing rule (the failure names the missing team).
-Forgetting `epp` above is a red X, not a silent takeover. The check compares
-policy rules against each other -- never the live tree -- so output remains a
-pure function of the policy files. Narrowing ownership on purpose belongs in
-an area's `path_globs` (a nested override), not in `shared`.
+an owner another rule grants (the failure names the missing team). That covers
+both directions: the enclosing owners a row must restate, and any
+more-specific rule nested inside the shared glob's subtree -- shared rows
+render last, so an unchecked directory row would otherwise re-clobber the
+nested rule under last-match. Forgetting `epp` above is a red X, not a silent
+takeover. The check compares policy rules against each other -- never the live
+tree -- so output remains a pure function of the policy files. Narrowing
+ownership on purpose belongs in an area's `path_globs` (a nested override),
+not in `shared`.
 
 For an invariant that should not emit another CODEOWNERS row, use
 `required_owners`. The strict gate checks every matching tracked file against
@@ -127,12 +131,15 @@ generated outputs together.
   directory no area claims blocks the PR until `areas.yaml` is updated; or
 - any declared ownership glob matches no tracked file (**stale policy gate**) -
   a PR that deletes or renames a glob's final matching path must prune the
-  declaration in the same PR. Staleness a PR merely inherited from its base
-  is a warning there and blocks only policy PRs and full-tree runs, so base
-  churn never red-Xes unrelated work; or
-- a `shared` rule's owner list drops an owner granted by an enclosing rule
-  (**additivity gate**) - co-ownership rows add owners; they cannot silently
-  take a path over; or
+  declaration in the same PR (that edit makes it a policy change, so the PR
+  is then judged full-tree like any routing change). Staleness a PR merely
+  inherited from its base is a warning there and blocks only policy PRs and
+  full-tree runs, so base churn never red-Xes unrelated work; or
+- a `shared` rule's owner list drops an owner another rule grants
+  (**additivity gate**) - both an enclosing rule's owners and any
+  more-specific rule nested inside the shared glob's subtree, which a shared
+  row would otherwise re-clobber under last-match. Co-ownership rows add
+  owners; they cannot silently take a path over; or
 - final last-match resolution removes an owner promised by `required_owners`,
   or a blocking file-type declaration (**ownership contract gate**) - coverage
   by the wrong team no longer counts as success; or

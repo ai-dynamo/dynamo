@@ -149,21 +149,61 @@ def _probe_path(glob: str) -> str | None:
     return glob
 
 
+def _instantiated_probe(shared_glob: str, base_dir_glob: str) -> str | None:
+    """A concrete path under ``base_dir_glob`` that ``shared_glob`` matches.
+
+    Lets the downward pass test whether a WILDCARD shared row reaches inside
+    a nested base rule's subtree: the shared glob's final segment is
+    instantiated with sentinel characters no real rule matches by accident.
+    ``None`` when instantiation is ambiguous (character classes) or the
+    result does not actually match the shared glob -- skipping is safe
+    (under-enforcement), guessing is not.
+    """
+    last = shared_glob.rsplit("/", 1)[-1]
+    if not last or "[" in last:
+        return None
+    concrete = last.replace("**", "\x00").replace("*", "\x00").replace("?", "\x01")
+    candidate = base_dir_glob + concrete
+    return candidate if match(anchor(shared_glob), candidate) else None
+
+
+def _last_match(
+    rules: list[tuple[str, list[str]]], path: str
+) -> tuple[str, list[str]] | None:
+    """The (pattern, owners) of the LAST rule matching ``path``, or None."""
+    won: tuple[str, list[str]] | None = None
+    for pattern, owners in rules:
+        if match(pattern, path):
+            won = (pattern, owners)
+    return won
+
+
 def shared_additivity_violations(
     model: ResolvedModel,
 ) -> list[SharedAdditivityViolation]:
-    """Shared rules whose owner list drops what an enclosing rule grants.
+    """Shared rules whose owner list drops what another rule grants.
 
     ``shared`` rows are co-ownership by definition, but CODEOWNERS is
     last-match-wins, so each row must restate the owners it keeps. This is
-    the machine check that makes the restatement trustworthy: resolve a
-    representative probe path for each shared glob against everything the
-    emitter renders BEFORE that row (areas, file-type defaults, overrides,
-    and shorter shared rules) and require the row to retain every owner it
-    finds. The catch-all is a default, not a grant, so replacing it is fine.
+    the machine check that makes the restatement trustworthy, in both
+    directions:
 
-    Pure function of the policy -- enclosure is judged against the other
-    rules, never the live tree, so the check cannot flap with base churn.
+    UPWARD -- resolve a representative probe for each shared glob against
+    everything the emitter renders BEFORE that row (areas, file-type
+    defaults, overrides, shorter shared rules) and require the row to retain
+    every owner it finds. The catch-all is a default, not a grant, so
+    replacing it is fine.
+
+    DOWNWARD -- shared rows render LAST, so a shared glob that reaches
+    inside a MORE-SPECIFIC base rule's subtree re-clobbers it under
+    last-match (the upward probe, a direct child of the shared glob, can
+    never see that). Probe each area base rule against the full artifact
+    and flag any shared row that wins while dropping the base team; for
+    wildcard shared rows, additionally probe an instantiated path inside
+    each nested base directory.
+
+    Pure function of the policy -- judged rules-against-rules, never the
+    live tree, so the check cannot flap with base churn.
     """
     label_to_team = model.label_to_team()
     # Render WITHOUT shared rows or the catch-all: what remains is exactly
@@ -176,20 +216,60 @@ def shared_additivity_violations(
         model.shared, key=lambda s: (len(anchor(s["glob"])), anchor(s["glob"]))
     )
     violations: list[SharedAdditivityViolation] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+
+    def flag(glob: str, missing: tuple[str, ...], declared: tuple[str, ...]) -> None:
+        key = (glob, missing)
+        if key not in seen:
+            seen.add(key)
+            violations.append(
+                SharedAdditivityViolation(glob=glob, missing=missing, declared=declared)
+            )
+
+    # Upward pass. Note: a violating shorter row is still appended with its
+    # narrowed (declared) owners, so a longer row resolving against it may
+    # not be flagged in the same run -- the gate blocks on the first
+    # violation either way; the count converges once the author fixes it.
     for rule in ordered:
         declared = [label_to_team.get(o, o) for o in rule["owners"]]
         probe = _probe_path(rule["glob"])
         if probe is not None:
             missing = set(resolve_owners(rules, probe)) - set(declared)
             if missing:
-                violations.append(
-                    SharedAdditivityViolation(
-                        glob=rule["glob"],
-                        missing=tuple(sorted(missing)),
-                        declared=tuple(declared),
-                    )
-                )
+                flag(rule["glob"], tuple(sorted(missing)), tuple(declared))
         rules.append((anchor(rule["glob"]), declared))
+
+    # Downward pass, over the complete artifact.
+    full_lines, _ = render_codeowners(model, group=True, external=[])
+    full_rules = parse_codeowners("\n".join(full_lines))
+    shared_by_anchor = {anchor(s["glob"]): s for s in model.shared}
+    wildcard_shared = [s for s in model.shared if any(c in s["glob"] for c in "*?[")]
+
+    def check_probe(probe: str, base_glob: str, team: str) -> None:
+        won = _last_match(full_rules, probe)
+        if won is None or won[0] == anchor(base_glob):
+            return
+        shared_rule = shared_by_anchor.get(won[0])
+        if shared_rule is None or team in won[1]:
+            return
+        flag(
+            shared_rule["glob"],
+            (team,),
+            tuple(label_to_team.get(o, o) for o in shared_rule["owners"]),
+        )
+
+    for area in model.areas:
+        for base_glob in area.path_globs:
+            probe = _probe_path(base_glob)
+            if probe is None:
+                continue
+            check_probe(probe, base_glob, area.github_team)
+            if not base_glob.endswith("/"):
+                continue
+            for s in wildcard_shared:
+                candidate = _instantiated_probe(s["glob"], base_glob)
+                if candidate is not None:
+                    check_probe(candidate, base_glob, area.github_team)
     return violations
 
 
@@ -235,11 +315,15 @@ def newly_stale_patterns(
     A dead pattern (matches nothing at HEAD) that still matched something at
     the merge-base went stale because this branch deleted or renamed its last
     matching file -- the branch must prune the declaration too, so ``main``
-    never inherits a stale glob from a merged deletion PR. A pattern that was
-    already dead at the merge-base is base staleness this PR did not cause;
-    blocking on it would red-X every open PR the moment the base goes stale
-    (the cascade diff-aware mode exists to prevent), so it stays a warning
-    until a policy PR or full-tree run prunes it.
+    never inherits a stale glob from a merged deletion PR. Note the pruning
+    edit touches areas.yaml, so ``is_policy_change`` then reclassifies the PR
+    and judges it FULL-TREE -- deliberate: a policy edit can re-route any
+    path, and every routing change pays that same tax (it also means the PR
+    needs a green base tree, which the push-to-main full-tree run protects).
+    A pattern that was already dead at the merge-base is base staleness this
+    PR did not cause; blocking on it would red-X every open PR the moment
+    the base goes stale (the cascade diff-aware mode exists to prevent), so
+    it stays a warning until a policy PR or full-tree run prunes it.
 
     Returns ``None`` in full-tree mode (``base_paths is None``), where every
     stale glob blocks and the split is meaningless.

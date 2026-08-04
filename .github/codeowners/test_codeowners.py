@@ -1041,6 +1041,66 @@ class TestSharedAdditivity:
         assert len(violations) == 1
         assert set(violations[0].missing) == {"@ops"}
 
+    def test_shared_dir_clobbering_nested_base_rule_is_flagged(self) -> None:
+        # Downward pass: shared rows render LAST, so a shared dir glob that
+        # restates its enclosing owners can still strip a MORE-SPECIFIC base
+        # rule nested inside its subtree. The upward probe (a direct child
+        # of the shared glob) never matches the nested rule, so this needs
+        # the full-artifact probe of every base rule.
+        spec = self._spec()
+        spec["areas"].append(
+            {
+                "label": "special",
+                "github_team": "@special",
+                "path_globs": ["lib/metrics/special.py"],
+            }
+        )
+        spec["shared"] = [{"glob": "lib/metrics/", "owners": ["runtime", "docs"]}]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/metrics/"
+        assert violations[0].missing == ("@special",)
+
+        # Restating the nested team on the shared row resolves it -- the
+        # author explicitly chose to widen that team to the whole subtree.
+        spec["shared"] = [
+            {"glob": "lib/metrics/", "owners": ["runtime", "docs", "special"]}
+        ]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_wildcard_shared_clobbering_nested_base_rule_is_flagged(self) -> None:
+        # A wildcard shared row reaches INSIDE nested subtrees: probe an
+        # instantiated path (sentinel-filled final segment) under each
+        # nested base directory.
+        spec = self._spec()
+        spec["areas"].append(
+            {"label": "deep", "github_team": "@deep", "path_globs": ["lib/deep/"]}
+        )
+        spec["shared"] = [
+            {"glob": "lib/**/*checkpoint*", "owners": ["runtime", "docs"]}
+        ]
+        violations = shared_additivity_violations(compute_resolution(spec))
+        assert len(violations) == 1
+        assert violations[0].glob == "lib/**/*checkpoint*"
+        assert violations[0].missing == ("@deep",)
+
+        spec["shared"] = [
+            {"glob": "lib/**/*checkpoint*", "owners": ["runtime", "docs", "deep"]}
+        ]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
+    def test_exact_equal_area_and_shared_glob_stays_clean(self) -> None:
+        # An area override with the SAME glob as a shared row is the normal
+        # "specialist dir with co-ownership" idiom; the downward pass must
+        # not flag the shared row for superseding its own glob's area row
+        # (the upward pass already requires the area team be restated).
+        spec = self._spec()
+        spec["areas"].append(
+            {"label": "sub", "github_team": "@sub", "path_globs": ["lib/sub/"]}
+        )
+        spec["shared"] = [{"glob": "lib/sub/", "owners": ["runtime", "sub"]}]
+        assert shared_additivity_violations(compute_resolution(spec)) == []
+
     def test_strict_gate_blocks_on_additivity_violation(self) -> None:
         spec = self._spec()
         spec["shared"] = [{"glob": "lib/metrics/", "owners": ["docs"]}]
@@ -1248,14 +1308,12 @@ class TestDiffAwareStrictGateE2E:
         assert full_tree.returncode == 1
         assert "globs matching no files" in full_tree.stdout
 
-        # Pruning the dead glob in the same change satisfies the gate.
-        areas.write_text(
-            'meta:\n  catch_all: "@root"\n'
-            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
-            "    path_globs: []\n"
-        )
-        pruned = _run_build(repo, areas, "--changed-only", "--base", base)
-        assert pruned.returncode == 0
+        # NOTE: in real CI, pruning the glob edits areas.yaml INSIDE the
+        # repo, which reclassifies the PR as a policy change judged
+        # full-tree -- this fixture keeps areas.yaml outside --repo, so it
+        # cannot model that. The prune-then-pass path is covered where the
+        # reclassification actually fires:
+        # TestPolicyChangeFallback.test_pruning_deletion_pr_is_judged_full_tree.
 
     def test_deleting_required_owner_target_blocks_diff_aware(self, tmp_path) -> None:
         # required_owners contracts go stale the same way: deleting the
@@ -1383,6 +1441,53 @@ class TestPolicyChangeFallback:
         assert result.returncode == 1
         assert "owned/b.txt" in result.stdout
 
+    def test_pruning_deletion_pr_is_judged_full_tree(self, tmp_path) -> None:
+        # The remediation for an orphaned glob -- prune it in the same PR --
+        # edits areas.yaml, which reclassifies the PR as a policy change and
+        # judges it FULL-TREE, exactly like any routing edit (so it also
+        # requires a green base tree). This is the path real CI takes for a
+        # deletion PR that follows the gate's instruction; the unit fixtures
+        # above keep areas.yaml outside --repo and cannot model the
+        # reclassification.
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        areas = repo / ".github" / "codeowners" / "areas.yaml"
+        areas.parent.mkdir(parents=True)
+        policy = (
+            'meta:\n  catch_all: "@root"\n'
+            "areas:\n"
+            '  - label: policy\n    github_team: "@org/policy"\n'
+            '    path_globs: [".github/"]\n'
+            '  - label: owned\n    github_team: "@org/owned"\n'
+            "    path_globs: [{globs}]\n"
+        )
+        areas.write_text(policy.format(globs='"kept/", "doomed/"'))
+        (repo / "kept").mkdir()
+        (repo / "kept" / "a.txt").write_text("x")
+        (repo / "doomed").mkdir()
+        (repo / "doomed" / "last.txt").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+
+        # The deletion alone runs diff-aware and blocks as newly stale.
+        (repo / "doomed" / "last.txt").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "delete the last doomed file")
+        blocked = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert blocked.returncode == 1
+        assert "orphaned by this change" in blocked.stdout
+
+        # The same PR prunes the dead glob: areas.yaml enters the diff, the
+        # run reclassifies to full-tree, and it passes because the remaining
+        # tree is 100% owned.
+        areas.write_text(policy.format(globs='"kept/"'))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "prune the dead glob")
+        pruned = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert pruned.returncode == 0
+        assert "evaluating full-tree" in pruned.stdout
+
 
 # ------------------------------------------------------------------
 # Contributor action matrix -- the common ownership-affecting actions,
@@ -1465,8 +1570,12 @@ class TestContributorActionMatrix:
         assert result.returncode == 1
         assert "orphaned by this change" in result.stdout
 
-        areas.write_text(self.BASE_AREAS)  # ...and the PR prunes the rule
-        assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
+        # ...and the PR prunes the rule. In real CI that areas.yaml edit
+        # reclassifies the PR as a policy change judged FULL-TREE (see
+        # TestPolicyChangeFallback.test_pruning_deletion_pr_is_judged_full_tree
+        # for the reclassification itself), so model that judgement here.
+        areas.write_text(self.BASE_AREAS)
+        assert _run_build(repo, areas).returncode == 0
 
     def test_4_add_shared_ownership_passes_and_routes_both(self, tmp_path) -> None:
         areas, repo, _ = self._fixture(tmp_path)

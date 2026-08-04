@@ -77,8 +77,10 @@ Removals fail the stale-policy gate on the deleting PR itself: when your PR
 removes (or renames away) the final tracked file matched by a declared
 ownership glob, the gate blocks until the same PR prunes the dead declaration.
 Prune it from `areas.yaml`, run step 4, and commit the policy and regenerated
-artifacts with the deletion. Stale globs your PR merely inherited from `main`
-are reported as warnings and never block ordinary PRs.
+artifacts with the deletion. The prune makes your PR a policy change, so the
+gate then judges it against the full tree, like any routing edit. Stale globs
+your PR merely inherited from `main` are reported as warnings and never block
+ordinary PRs.
 
 ## Flow 3: Change review routing
 
