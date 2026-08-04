@@ -33,13 +33,12 @@ def create_custom_encoder_adapter(
 
     if model_config is None:
         raise ValueError("CustomEncoder requires the resolved vLLM ModelConfig")
-    architectures = _model_architectures(model_config)
     if _is_qwen3_vl_model(model_config):
         return Qwen3VLNativeAdapter(model_config)
 
     if _is_multimodal_model(model_config):
         raise ValueError(
             "CustomEncoder does not support this multimodal decoder architecture: "
-            f"{architectures}"
+            f"{_model_architectures(model_config)}"
         )
     return LinearEmbedsAdapter(backend, model_config, engine_args)
