@@ -31,7 +31,9 @@ LOCK_PATH="$LOG_DIR/failover.lock"
 # rehydrated hash would ever match), and point both engines at one shared,
 # per-run prefix-index log that the standby replays on takeover.
 export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
-export GMS_KV_INDEX_PATH="$LOG_DIR/kv_index.log"
+# ${VAR-default} (not :-) so an explicitly-set-but-EMPTY value survives: that is how a
+# control run disables the index mechanism without editing this script.
+export GMS_KV_INDEX_PATH="${GMS_KV_INDEX_PATH-$LOG_DIR/kv_index.log}"
 # Winner dumps its stable-point L0 KV fingerprint here (at CLEAN_HANDOFF sleep); the
 # standby compares its reattached L0 against it, position-sensitively, before serving.
 export GMS_KV_TARGET_FILE="${GMS_KV_TARGET_FILE:-$LOG_DIR/kv_target.json}"
