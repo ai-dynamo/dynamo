@@ -124,6 +124,36 @@ def test_configured_engine_route_cannot_replace_built_in_route():
     assert registered_routes == []
 
 
+def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
+
+    registered_routes = []
+    taint_route_endpoints = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda candidate_runtime, endpoint: taint_route_endpoints.append(
+            (candidate_runtime, endpoint)
+        ),
+    )
+
+    handler.register_engine_routes(runtime)
+
+    assert taint_route_endpoints == [(runtime, handler.generate_endpoint)]
+    assert {path for path, _ in registered_routes} >= {
+        "control/start_profile",
+        "control/stop_profile",
+    }
+
+
 def _make_sglang_config(**overrides):
     config = DynamoSGLangConfig()
     config.use_sglang_tokenizer = False

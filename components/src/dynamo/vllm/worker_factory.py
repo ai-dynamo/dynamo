@@ -685,6 +685,7 @@ class WorkerFactory:
             worker_type=WorkerType.Aggregated,
             needs=[],
         )
+        register_model_taint_route(runtime, generate_endpoint)
 
         metrics_labels = [
             (prometheus_names.labels.MODEL, model_name),
@@ -743,6 +744,7 @@ class WorkerFactory:
                 [WorkerType.Aggregated],
             ],
         )
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -835,6 +837,7 @@ class WorkerFactory:
             model_name=config.served_model_name or config.model
         ).to_dict()
 
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
