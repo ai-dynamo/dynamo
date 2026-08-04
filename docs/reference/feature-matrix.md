@@ -7,7 +7,7 @@ subtitle: Compatibility matrix for Dynamo features across the SGLang, TensorRT-L
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v1.3.0*
+*Updated for Dynamo v1.3.1*
 
 **Legend:**
 *   ✅ : Supported
