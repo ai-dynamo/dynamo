@@ -8,6 +8,7 @@ These tests verify that deployments can be created, become ready, and respond
 to chat completion requests correctly.
 """
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -377,9 +378,7 @@ async def test_gaie_deployment(
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
         logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
-        # The agentgateway controller provisions the backing Service after the
-        # Gateway reaches Programmed — this can lag by tens of seconds. Poll
-        # rather than doing a one-shot lookup.
+        # Gateway Programmed != Service exists; poll until the controller catches up.
         gateway_svcs = []
         for attempt in range(30):
             gateway_svcs = list(
@@ -391,7 +390,8 @@ async def test_gaie_deployment(
                 f"Waiting for inference-gateway service in namespace {namespace}"
                 f" (attempt {attempt + 1}/30)..."
             )
-            time.sleep(10)
+            if attempt < 29:
+                await asyncio.sleep(10)
         assert (
             len(gateway_svcs) > 0
         ), f"inference-gateway service not found in namespace {namespace}"
