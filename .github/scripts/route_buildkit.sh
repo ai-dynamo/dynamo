@@ -11,20 +11,18 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups, one cache domain per dynamo_base image tag):
-#   - Group 0 (frameworks): vLLM & SGLang                    (cuda13.0 base)
-#   - Group 1 (general):    dynamo runtime, planner, frontend,
-#                           operator, snapshot, power-agent  (cuda13.0 base)
-#   - Group 2 (trtllm):     TRT-LLM runtime / dev / efa      (cuda13.1 base)
+# CACHE GROUPS (3 groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (general):     dynamo runtime, planner, frontend,
+#                            operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.1 base)
 #
-# Groups follow the dynamo_base image tag rather than the framework, because
-# that is where the rendered Dockerfiles diverge -- manylinux_${ARCH},
-# wheel_builder_base and runtime_wheel_builder are shared by every build kind.
-# TRT-LLM is the only build on a different base, so pairing it with the general
-# builds (as the previous general-trt-combined group did) put the two heaviest
-# and least cache-compatible sets on the same third of the fleet. vLLM and
-# SGLang share a group because their build filters differ, so a dedicated pool
-# for either would idle whenever only the other changed.
+# Groups follow the dynamo_base image tag, not the framework: that is where the
+# rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
+# runtime_wheel_builder are shared by every build kind. TRT-LLM is the only
+# build on a different base, so it gets its own group. vLLM and SGLang share
+# one because their build filters differ, and a dedicated pool for either would
+# idle whenever only the other changed.
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -38,7 +36,7 @@
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (cksum-based, all pods utilized):
+# LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
 # | Pods | Pool | G0: vLLM/SGLang   | G1: General       | G2: TRT-LLM         |
 # +------+------+-------------------+-------------------+---------------------+
@@ -46,11 +44,11 @@
 # | 2    | 1    | {0}               | {1}               | {1}                 |
 # | 3    | 1    | {2}               | {0}               | {1}                 |
 # | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
-# | 5    | 2    | {4, 3}            | {2, 0}            | {1, 4}              |
-# | 6    | 2    | {5, 4}            | {2, 3}            | {1, 0}              |
-# | 7    | 3    | {5, 4, 3}         | {6, 2, 3}         | {1, 0, 4}           |
-# | 8    | 3    | {5, 4, 3}         | {6, 2, 0}         | {1, 7, 4}           |
-# | 9    | 3    | {5, 4, 3}         | {6, 2, 8}         | {1, 7, 0}           |
+# | 5    | 2    | {4, 0}            | {2, 3}            | {1, 4}              |
+# | 6    | 2    | {4, 0}            | {2, 3}            | {1, 5}              |
+# | 7    | 3    | {4, 2, 0}         | {6, 3, 2}         | {1, 5, 4}           |
+# | 8    | 3    | {7, 4, 0}         | {6, 2, 3}         | {1, 5, 4}           |
+# | 9    | 3    | {7, 4, 8}         | {6, 2, 3}         | {1, 5, 0}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -197,12 +195,11 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("frameworks" "general" "trtllm")
+# Group keys are SHA-256 salt: renaming one reshuffles that group's pod pool and
+# cold-starts its cache.
+GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
-# Map a flavor to a group index (0, 1, or 2). One cache domain per dynamo_base
-# image tag: TRT-LLM builds on cuda13.1 and gets its own group; the cuda13.0
-# family is split so the vLLM/SGLang bursts do not queue behind the dynamo /
-# planner / frontend builds.
+# Map a flavor to a group index (0, 1, or 2).
 flavor_to_group() {
   local flavor=$1
   case "$flavor" in
