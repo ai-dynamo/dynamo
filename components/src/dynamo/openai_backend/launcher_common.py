@@ -55,11 +55,11 @@ def build_worker_command(
     args: argparse.Namespace,
     *,
     priority_multiplier: int | None = None,
-    upstream_port: int | None = None,
 ) -> list[str]:
     served_model_name = args.served_model_name or args.model
-    port = upstream_port if upstream_port is not None else args.engine_port
-    upstream_base_url = f"http://{args.engine_host}:{port}{args.api_prefix.rstrip('/')}"
+    upstream_base_url = (
+        f"http://{args.engine_host}:{args.engine_port}{args.api_prefix.rstrip('/')}"
+    )
     command = [
         sys.executable,
         "-m",
@@ -172,8 +172,6 @@ async def run_launcher(
     engine_command: list[str],
     worker_command: list[str],
     health_url: str,
-    router_command: list[str] | None = None,
-    router_health_url: str | None = None,
 ) -> int:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -182,7 +180,6 @@ async def run_launcher(
         loop.add_signal_handler(signum, stop_event.set)
 
     engine_process = await asyncio.create_subprocess_exec(*engine_command)
-    router_process = None
     worker_process = None
 
     try:
@@ -196,23 +193,11 @@ async def run_launcher(
         if exit_code is not None:
             return exit_code
 
-        watchers = [("engine", engine_wait_task)]
-
-        if router_command is not None:
-            router_process = await asyncio.create_subprocess_exec(*router_command)
-            router_wait_task = asyncio.create_task(router_process.wait())
-            exit_code = await _gate_until_healthy(
-                name="router",
-                health_url=router_health_url or health_url,
-                process_wait_task=router_wait_task,
-                stop_event=stop_event,
-            )
-            if exit_code is not None:
-                return exit_code
-            watchers.append(("router", router_wait_task))
-
         worker_process = await asyncio.create_subprocess_exec(*worker_command)
-        watchers.append(("worker", asyncio.create_task(worker_process.wait())))
+        watchers = [
+            ("engine", engine_wait_task),
+            ("worker", asyncio.create_task(worker_process.wait())),
+        ]
 
         stop_task = asyncio.create_task(stop_event.wait())
         done, pending = await asyncio.wait(
@@ -237,6 +222,4 @@ async def run_launcher(
     finally:
         if worker_process is not None:
             await terminate_process(worker_process, "worker")
-        if router_process is not None:
-            await terminate_process(router_process, "router")
         await terminate_process(engine_process, "engine")

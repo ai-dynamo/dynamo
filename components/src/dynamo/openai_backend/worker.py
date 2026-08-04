@@ -38,7 +38,6 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
 DEFAULT_WRITE_TIMEOUT_SECONDS = 100.0
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 DEFAULT_ABORT_TIMEOUT_SECONDS = 5.0
-ROUTING_KEY_HEADER = "x-smg-routing-key"
 DP_RANK_HEADER = "X-Data-Parallel-Rank"
 
 _SHUTDOWN_EVENT = asyncio.Event()
@@ -57,11 +56,6 @@ def _upstream_headers(request: dict[str, Any]) -> dict[str, str]:
             and 0 <= dp_rank <= 0xFFFFFFFF
         ):
             headers[DP_RANK_HEADER] = str(dp_rank)
-    routing_key = request.get("user")
-    if isinstance(routing_key, str):
-        routing_key = routing_key.strip()
-        if routing_key and routing_key.isascii() and routing_key.isprintable():
-            headers[ROUTING_KEY_HEADER] = routing_key
     return headers
 
 
@@ -820,9 +814,9 @@ async def init(
         # own HTTP endpoint. Federate them onto this worker's metrics so both are
         # served from one scrape target. A no-op when the engine exposes none.
         #
-        # Use the abort URL rather than the upstream one: in router mode the
-        # upstream is the sglang router, which does not emit the engine's series,
-        # while the abort URL always addresses the engine itself.
+        # Prefer the explicit engine origin used for aborts. The forwarding
+        # upstream may be a proxy, while capacity and metrics belong to the
+        # engine itself.
         namespace_name, component_name, generate_name = _split_endpoint_name(
             endpoint_name
         )
