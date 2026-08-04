@@ -10,6 +10,9 @@ outputs:
   core:
     description: 'Whether core files changed'
     value: ${{ steps.filter.outputs.core_any_modified }}
+  dev_images:
+    description: 'Whether dev/local-dev image templates changed'
+    value: ${{ steps.filter.outputs.dev_images_any_modified }}
   operator:
     description: 'Whether operator files changed'
     value: ${{ steps.filter.outputs.operator_any_modified }}
@@ -144,6 +147,7 @@ runs:
         echo "docs: ${{ steps.filter.outputs.docs_any_modified }}"
         echo "ci: ${{ steps.filter.outputs.ci_any_modified }}"
         echo "core: ${{ steps.filter.outputs.core_any_modified }}"
+        echo "dev_images: ${{ steps.filter.outputs.dev_images_any_modified }}"
         echo "operator: ${{ steps.filter.outputs.operator_any_modified }}"
         echo "snapshot: ${{ steps.filter.outputs.snapshot_any_modified }}"
         echo "snapshot_vllm: ${{ steps.filter.outputs.snapshot_vllm_any_modified }}"
@@ -165,7 +169,7 @@ runs:
         echo "=== Files Matching Each Filter ==="
         echo "docs: ${{ steps.filter.outputs.docs_all_modified_files }}"
         echo "ci: ${{ steps.filter.outputs.ci_all_modified_files }}"
-        echo "core: ${{ steps.filter.outputs.core_all_modified_files }}"
+        echo "core: ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.dev_images_all_modified_files }}"
         echo "operator: ${{ steps.filter.outputs.operator_all_modified_files }}"
         echo "snapshot: ${{ steps.filter.outputs.snapshot_all_modified_files }}"
         echo "snapshot_vllm: ${{ steps.filter.outputs.snapshot_vllm_all_modified_files }}"
