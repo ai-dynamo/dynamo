@@ -1130,12 +1130,24 @@ def test_mistral_tokenizer_has_no_chat_template_attribute():
 
 
 def test_ensure_chat_template_mistral_no_crash(vllm_processor_module, tmp_path):
-    """_ensure_chat_template does not raise for a MistralTokenizer."""
+    """_ensure_chat_template leaves a MistralTokenizer untouched (no attribute)."""
     tok = _make_mistral_tokenizer()
 
     vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
 
-    assert tok.chat_template is None
+    assert not hasattr(tok, "chat_template")
+
+
+def test_ensure_chat_template_mistral_ignores_on_disk_template(
+    vllm_processor_module, tmp_path
+):
+    """A chat_template.jinja beside a Mistral model is not attached to it."""
+    (tmp_path / "chat_template.jinja").write_text("{{ messages }}")
+    tok = _make_mistral_tokenizer()
+
+    vllm_processor_module._ensure_chat_template(tok, str(tmp_path), None)
+
+    assert not hasattr(tok, "chat_template")
 
 
 def test_ensure_chat_template_preserves_existing_hf_template(

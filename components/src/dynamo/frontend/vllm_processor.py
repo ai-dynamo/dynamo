@@ -93,10 +93,13 @@ def _ensure_chat_template(
 ) -> None:
     """Set tokenizer.chat_template so vLLM's renderer handles tool calls.
 
-    Uses getattr, not direct access: MistralTokenizer (--tokenizer-mode mistral)
-    has no chat_template attribute. The assignment still works and is inert there.
+    Skipped for MistralTokenizer (--tokenizer-mode mistral): it has no
+    chat_template attribute and renders via mistral_common, so leave it
+    untouched rather than attach an HF template it never uses.
     """
-    if getattr(tokenizer, "chat_template", None) is None:
+    if not hasattr(tokenizer, "chat_template"):
+        return
+    if tokenizer.chat_template is None:
         tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
     if chat_template_flag:
         tokenizer.chat_template = load_chat_template(chat_template_flag)
