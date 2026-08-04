@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dynamo adapters for Riva-compatible ASR and TTS services.
-
-The package is named ``riva_nim`` so it does not shadow the ``riva`` package
-provided by ``nvidia-riva-client``.
-"""
+# Riva Python client used to call the Speech NIM gRPC APIs.
+# Pure-Python wheel; pinned for reproducible image builds.
+nvidia-riva-client==2.26.0

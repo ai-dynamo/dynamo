@@ -16,7 +16,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: riva-cascaded
+  name: nemotron-speech-cascaded
 spec:
   backendFramework: vllm
   components:
@@ -33,17 +33,17 @@ spec:
             - name: ngc-secret
       replicas: 1
       type: frontend
-    - name: RivaAsrWorker
+    - name: SpeechAsrWorker
       podTemplate:
         spec:
           containers:
             - name: main
-              image: ${CUSTOM_RIVA_ADAPTER_IMAGE}
-              command: [python3, -m, riva_nim.asr_worker]
+              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
+              command: [python3, -m, nemotron_speech.asr_worker]
               args:
-                - --riva-server
+                - --nim-server
                 - localhost:50052
-                - --riva-startup-timeout-s
+                - --nim-startup-timeout-s
                 - "3600"
                 - --commit-padding-ms
                 - "1000"
@@ -52,7 +52,7 @@ spec:
               resources:
                 limits: {cpu: "2", memory: 4Gi}
                 requests: {cpu: "1", memory: 2Gi}
-            - name: riva-asr
+            - name: asr-nim
               image: nvcr.io/nim/nvidia/nemotron-asr-streaming:1.2.0
               env:
                 - name: NGC_API_KEY
@@ -85,7 +85,7 @@ spec:
                 periodSeconds: 10
                 timeoutSeconds: 5
               volumeMounts:
-                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: riva-cascaded-asr}
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-asr}
                 - {mountPath: /dev/shm, name: shared-memory}
           imagePullSecrets: *imagePullSecrets
           volumes:
@@ -135,7 +135,7 @@ spec:
                   memory: 32Gi
                   nvidia.com/gpu: "1"
               volumeMounts:
-                - {mountPath: /home/dynamo/.cache/huggingface, name: model-cache, subPath: riva-cascaded-llm}
+                - {mountPath: /home/dynamo/.cache/huggingface, name: model-cache, subPath: nemotron-speech-cascaded-llm}
           imagePullSecrets: *imagePullSecrets
           volumes:
             - name: model-cache
@@ -144,17 +144,17 @@ spec:
       scalingAdapter: {}
       sharedMemorySize: 16Gi
       type: worker
-    - name: RivaTtsWorker
+    - name: SpeechTtsWorker
       podTemplate:
         spec:
           containers:
             - name: main
-              image: ${CUSTOM_RIVA_ADAPTER_IMAGE}
-              command: [python3, -m, riva_nim.tts_worker]
+              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
+              command: [python3, -m, nemotron_speech.tts_worker]
               args:
-                - --riva-server
+                - --nim-server
                 - localhost:50051
-                - --riva-startup-timeout-s
+                - --nim-startup-timeout-s
                 - "3600"
                 - --model-name
                 - nvidia/magpie-tts-multilingual
@@ -163,7 +163,7 @@ spec:
               resources:
                 limits: {cpu: "2", memory: 4Gi}
                 requests: {cpu: "1", memory: 2Gi}
-            - name: riva-tts
+            - name: tts-nim
               image: nvcr.io/nim/nvidia/magpie-tts-multilingual:1.8.0
               env:
                 - name: NGC_API_KEY
@@ -190,7 +190,7 @@ spec:
                 periodSeconds: 10
                 timeoutSeconds: 5
               volumeMounts:
-                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: riva-cascaded-tts}
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-tts}
                 - {mountPath: /dev/shm, name: shared-memory}
           imagePullSecrets: *imagePullSecrets
           volumes:

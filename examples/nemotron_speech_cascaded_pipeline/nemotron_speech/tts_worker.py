@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Expose a Riva TTS NIM through Dynamo's OpenAI audio/speech API."""
+"""Expose a Magpie TTS NIM through Dynamo's OpenAI audio/speech API."""
 
 from __future__ import annotations
 
@@ -27,16 +27,16 @@ from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .audio_speech import RivaAudioSpeechBackend
+from .audio_speech import SpeechNimAudioSpeechBackend
 from .config import (
-    add_riva_connection_args,
+    add_nim_connection_args,
+    nim_connection_config_from_namespace,
     resolve_dynamo_endpoint,
-    riva_connection_config_from_namespace,
 )
 from .riva_client import build_tts_service, wait_for_service_ready
 
 logger = logging.getLogger(__name__)
-configure_dynamo_logging(service_name="riva-tts")
+configure_dynamo_logging(service_name="speech-tts")
 
 DEFAULT_VOICE = "Magpie-Multilingual.EN-US.Aria"
 DEFAULT_LANGUAGE_CODE = "en-US"
@@ -46,8 +46,8 @@ DEFAULT_MODEL_NAME = "nvidia/magpie-tts-multilingual"
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    add_riva_connection_args(parser)
-    parser.add_argument("--voice", default=DEFAULT_VOICE, help="Default Riva voice.")
+    add_nim_connection_args(parser)
+    parser.add_argument("--voice", default=DEFAULT_VOICE, help="Default Magpie voice.")
     parser.add_argument(
         "--language-code",
         default=DEFAULT_LANGUAGE_CODE,
@@ -74,12 +74,12 @@ def _parse_args() -> argparse.Namespace:
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
-    endpoint_name = resolve_dynamo_endpoint(args.endpoint, "riva-tts-audio")
+    endpoint_name = resolve_dynamo_endpoint(args.endpoint, "speech-tts-audio")
     endpoint = runtime.endpoint(endpoint_name)
-    tts_service = build_tts_service(riva_connection_config_from_namespace(args))
-    await wait_for_service_ready(tts_service, args.riva_startup_timeout_s)
+    tts_service = build_tts_service(nim_connection_config_from_namespace(args))
+    await wait_for_service_ready(tts_service, args.nim_startup_timeout_s)
 
-    backend = RivaAudioSpeechBackend(
+    backend = SpeechNimAudioSpeechBackend(
         tts_service=tts_service,
         model_name=args.model_name,
         voice=args.voice,
@@ -94,7 +94,9 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
         model_name=args.model_name,
         worker_type=WorkerType.Aggregated,
     )
-    logger.info("Serving Riva TTS model=%s endpoint=%s", args.model_name, endpoint_name)
+    logger.info(
+        "Serving Magpie TTS model=%s endpoint=%s", args.model_name, endpoint_name
+    )
     await endpoint.serve_endpoint(backend.speech_endpoint)
 
 

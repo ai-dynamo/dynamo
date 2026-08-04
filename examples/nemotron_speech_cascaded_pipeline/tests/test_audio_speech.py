@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the Riva OpenAI audio/speech adapter."""
+"""Unit tests for the Speech NIM OpenAI audio/speech adapter."""
 
 import base64
 from types import SimpleNamespace
 
 import grpc
 import pytest
+from nemotron_speech.audio_speech import SpeechNimAudioSpeechBackend
+from nemotron_speech.riva_client import wait_for_service_ready
 from riva.client import AudioEncoding
-from riva_nim.audio_speech import RivaAudioSpeechBackend
-from riva_nim.riva_client import wait_for_service_ready
 
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 
@@ -55,8 +55,8 @@ class _FakeTtsService:
         return self.call
 
 
-def _backend(service: _FakeTtsService) -> RivaAudioSpeechBackend:
-    return RivaAudioSpeechBackend(
+def _backend(service: _FakeTtsService) -> SpeechNimAudioSpeechBackend:
+    return SpeechNimAudioSpeechBackend(
         tts_service=service,
         model_name=MODEL,
         voice="Magpie-Multilingual.EN-US.Aria",
@@ -65,7 +65,7 @@ def _backend(service: _FakeTtsService) -> RivaAudioSpeechBackend:
     )
 
 
-async def test_streams_each_riva_response_as_pcm():
+async def test_streams_each_speech_nim_response_as_pcm():
     service = _FakeTtsService([b"first", b"second"])
     responses = [
         response
@@ -119,7 +119,7 @@ async def test_rejects_unsupported_openai_parameters(update, message):
         )
 
 
-async def test_closing_output_cancels_riva_call():
+async def test_closing_output_cancels_speech_nim_call():
     service = _FakeTtsService([b"first", b"second"])
     output = _backend(service).generate(
         NvCreateAudioSpeechRequest(
@@ -135,14 +135,16 @@ async def test_closing_output_cancels_riva_call():
     assert service.call.cancelled
 
 
-async def test_waits_for_riva_service_before_registration(monkeypatch):
+async def test_waits_for_speech_nim_before_registration(monkeypatch):
     calls = []
 
     class _Future:
         def result(self, *, timeout):
             calls.append(timeout)
 
-    service = SimpleNamespace(auth=SimpleNamespace(channel=object(), uri="riva:50051"))
+    service = SimpleNamespace(
+        auth=SimpleNamespace(channel=object(), uri="speech-nim:50051")
+    )
     monkeypatch.setattr(grpc, "channel_ready_future", lambda _channel: _Future())
 
     await wait_for_service_ready(service, 0.1)
@@ -150,13 +152,15 @@ async def test_waits_for_riva_service_before_registration(monkeypatch):
     assert calls == [0.1]
 
 
-async def test_riva_readiness_timeout_is_actionable(monkeypatch):
+async def test_speech_nim_readiness_timeout_is_actionable(monkeypatch):
     class _Future:
         def result(self, *, timeout):
             raise grpc.FutureTimeoutError()
 
-    service = SimpleNamespace(auth=SimpleNamespace(channel=object(), uri="riva:50051"))
+    service = SimpleNamespace(
+        auth=SimpleNamespace(channel=object(), uri="speech-nim:50051")
+    )
     monkeypatch.setattr(grpc, "channel_ready_future", lambda _channel: _Future())
 
-    with pytest.raises(TimeoutError, match="riva:50051.*0.1 seconds"):
+    with pytest.raises(TimeoutError, match="speech-nim:50051.*0.1 seconds"):
         await wait_for_service_ready(service, 0.1)

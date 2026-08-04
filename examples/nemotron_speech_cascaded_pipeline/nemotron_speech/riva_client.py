@@ -23,10 +23,10 @@ from typing import Any
 import grpc
 from riva.client import ASRService, Auth, SpeechSynthesisService
 
-from .config import RivaConnectionConfig
+from .config import NimConnectionConfig
 
 
-def build_auth(config: RivaConnectionConfig) -> Auth:
+def build_auth(config: NimConnectionConfig) -> Auth:
     """Create local or NVCF Riva authentication from connection settings."""
     metadata = []
     if config.function_id:
@@ -42,7 +42,7 @@ def build_auth(config: RivaConnectionConfig) -> Auth:
 
 
 async def wait_for_service_ready(service: Any, timeout_s: float) -> None:
-    """Wait until a Riva service's gRPC channel is ready."""
+    """Wait until a Speech NIM's gRPC channel is ready."""
     try:
         await asyncio.to_thread(
             grpc.channel_ready_future(service.auth.channel).result,
@@ -50,16 +50,16 @@ async def wait_for_service_ready(service: Any, timeout_s: float) -> None:
         )
     except grpc.FutureTimeoutError as exc:
         raise TimeoutError(
-            f"Riva gRPC server {service.auth.uri} was not ready after "
+            f"Speech NIM gRPC server {service.auth.uri} was not ready after "
             f"{timeout_s:g} seconds"
         ) from exc
 
 
-def build_tts_service(config: RivaConnectionConfig) -> SpeechSynthesisService:
+def build_tts_service(config: NimConnectionConfig) -> SpeechSynthesisService:
     """Create a Riva speech synthesis client."""
     return SpeechSynthesisService(build_auth(config))
 
 
-def build_asr_service(config: RivaConnectionConfig) -> ASRService:
+def build_asr_service(config: NimConnectionConfig) -> ASRService:
     """Create a Riva ASR client."""
     return ASRService(build_auth(config))

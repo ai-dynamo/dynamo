@@ -1,3 +1,4 @@
+# check=skip=InvalidDefaultArgInFrom
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,10 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
+# Required so callers select an available, runtime-compatible published release.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
 
-# Put the example root on sys.path so `import riva_nim` resolves to the local
-# package. The package is deliberately NOT named `riva`, so it does not shadow
-# the nvidia-riva-client package (imported as top-level `riva`).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ARG RUNTIME_USER=dynamo
+
+USER root
+COPY --chmod=644 requirements.txt /tmp/speech-nim-requirements.txt
+RUN uv pip install \
+    --system \
+    --no-cache \
+    --requirement /tmp/speech-nim-requirements.txt
+
+COPY --chown=${RUNTIME_USER}:root nemotron_speech/ /opt/nemotron-speech-cascaded-pipeline/nemotron_speech/
+ENV PYTHONPATH=/opt/nemotron-speech-cascaded-pipeline
+USER ${RUNTIME_USER}

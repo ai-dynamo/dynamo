@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Connection configuration for RIVA NIM gRPC services."""
+"""Connection configuration for Speech NIM gRPC services."""
 
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ from dataclasses import dataclass
 
 from dynamo.common.utils.namespace import get_worker_namespace
 
-# Default RIVA gRPC target for a local deployment. Shared by the dataclass
+# Default Speech NIM gRPC target for a local deployment. Shared by the dataclass
 # default and the CLI default so the two never drift.
-DEFAULT_RIVA_SERVER = "localhost:50051"
-DEFAULT_RIVA_STARTUP_TIMEOUT_S = 600.0
+DEFAULT_NIM_SERVER = "localhost:50051"
+DEFAULT_NIM_STARTUP_TIMEOUT_S = 600.0
 
 
 def resolve_dynamo_endpoint(endpoint: str | None, component: str) -> str:
@@ -34,11 +34,11 @@ def resolve_dynamo_endpoint(endpoint: str | None, component: str) -> str:
 
 
 @dataclass
-class RivaConnectionConfig:
-    """Connection settings for a RIVA NIM gRPC endpoint.
+class NimConnectionConfig:
+    """Connection settings for a Speech NIM gRPC endpoint.
 
     Attributes:
-        server: ``host:port`` of the RIVA gRPC server. Defaults to a local
+        server: ``host:port`` of the Speech NIM gRPC server. Defaults to a local
             deployment; override for a remote host or the NVCF endpoint
             (``grpc.nvcf.nvidia.com:443``).
         use_ssl: Whether to use a TLS channel. Required for NVCF.
@@ -49,57 +49,57 @@ class RivaConnectionConfig:
         ssl_root_cert: Optional path to a TLS root certificate.
     """
 
-    server: str = DEFAULT_RIVA_SERVER
+    server: str = DEFAULT_NIM_SERVER
     use_ssl: bool = False
     api_key: str | None = None
     function_id: str | None = None
     ssl_root_cert: str | None = None
 
 
-def add_riva_connection_args(parser: argparse.ArgumentParser) -> None:
-    """Add a "RIVA connection" argument group to ``parser``."""
-    group = parser.add_argument_group("RIVA connection")
+def add_nim_connection_args(parser: argparse.ArgumentParser) -> None:
+    """Add a "Speech NIM connection" argument group to ``parser``."""
+    group = parser.add_argument_group("Speech NIM connection")
     group.add_argument(
-        "--riva-server",
-        default=DEFAULT_RIVA_SERVER,
-        help=f"host:port of the RIVA gRPC server (default: {DEFAULT_RIVA_SERVER}).",
+        "--nim-server",
+        default=DEFAULT_NIM_SERVER,
+        help=f"host:port of the Speech NIM gRPC server (default: {DEFAULT_NIM_SERVER}).",
     )
     group.add_argument(
-        "--riva-startup-timeout-s",
+        "--nim-startup-timeout-s",
         type=float,
-        default=DEFAULT_RIVA_STARTUP_TIMEOUT_S,
-        help="Seconds to wait for the Riva gRPC server before registering the model.",
+        default=DEFAULT_NIM_STARTUP_TIMEOUT_S,
+        help="Seconds to wait for the Speech NIM gRPC server before registering the model.",
     )
     group.add_argument(
-        "--riva-use-ssl",
+        "--nim-use-ssl",
         action="store_true",
         help="Use a TLS channel (required for NVCF).",
     )
     group.add_argument(
-        "--riva-api-key",
+        "--nim-api-key",
         default=None,
         help="NVCF API key, sent as an authorization Bearer token.",
     )
     group.add_argument(
-        "--riva-function-id",
+        "--nim-function-id",
         default=None,
         help="NVCF function id, sent as function-id metadata.",
     )
     group.add_argument(
-        "--riva-ssl-root-cert",
+        "--nim-ssl-root-cert",
         default=None,
         help="Path to a TLS root certificate.",
     )
 
 
-def riva_connection_config_from_namespace(
+def nim_connection_config_from_namespace(
     args: argparse.Namespace,
-) -> RivaConnectionConfig:
-    """Build a :class:`RivaConnectionConfig` from args parsed by :func:`add_riva_connection_args`."""
-    return RivaConnectionConfig(
-        server=args.riva_server,
-        use_ssl=args.riva_use_ssl,
-        api_key=args.riva_api_key,
-        function_id=args.riva_function_id,
-        ssl_root_cert=args.riva_ssl_root_cert,
+) -> NimConnectionConfig:
+    """Build a :class:`NimConnectionConfig` from args parsed by :func:`add_nim_connection_args`."""
+    return NimConnectionConfig(
+        server=args.nim_server,
+        use_ssl=args.nim_use_ssl,
+        api_key=args.nim_api_key,
+        function_id=args.nim_function_id,
+        ssl_root_cert=args.nim_ssl_root_cert,
     )

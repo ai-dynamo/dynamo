@@ -15,12 +15,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Riva speech adapters for a cascaded voice agent
+# Nemotron Speech adapters for a cascaded voice agent
 
-This example exposes Riva-compatible speech NIMs through Dynamo's standard
-OpenAI-compatible APIs. A voice application such as Pipecat remains responsible
+This example exposes NVIDIA Speech NIM microservices serving Nemotron models
+through Dynamo's standard OpenAI-compatible APIs. A voice application such as Pipecat remains responsible
 for the ASR -> LLM -> TTS cascade, conversation state, turn taking, tools, and
 barge-in.
+
+NVIDIA documents these containers as
+[NVIDIA Speech NIM microservices](https://docs.nvidia.com/nim/speech/latest/index.html),
+which serve Nemotron Speech models. The adapter intentionally uses `nvidia-riva-client`, which the current Speech
+NIM documentation specifies for gRPC access.
 
 ```mermaid
 flowchart LR
@@ -34,25 +39,25 @@ flowchart LR
         TTSClient["OpenAI-compatible TTS<br/>Streaming HTTP"]
     end
 
-    subgraph DGD["DynamoGraphDeployment: riva-cascaded"]
+    subgraph DGD["DynamoGraphDeployment: nemotron-speech-cascaded"]
         direction LR
 
         subgraph FrontendPod["Kubernetes Pod: Frontend"]
             Frontend["Container: main<br/>Published Dynamo Frontend<br/>OpenAI APIs and routing"]
         end
 
-        subgraph ASRPod["Kubernetes Pod: RivaAsrWorker"]
+        subgraph ASRPod["Kubernetes Pod: SpeechAsrWorker"]
             ASRWorker["Container: main<br/>Custom Dynamo ASR adapter<br/>CPU only"]
-            ASR["Container: riva-asr<br/>Same Nemotron ASR NIM<br/>1 GPU"]
+            ASR["Container: asr-nim<br/>Same Nemotron ASR NIM<br/>1 GPU"]
         end
 
         subgraph LLMPod["Kubernetes Pod: VllmWorker"]
             LLMWorker["Container: main<br/>Published Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
         end
 
-        subgraph TTSPod["Kubernetes Pod: RivaTtsWorker"]
+        subgraph TTSPod["Kubernetes Pod: SpeechTtsWorker"]
             TTSWorker["Container: main<br/>Custom Dynamo TTS adapter<br/>CPU only"]
-            TTS["Container: riva-tts<br/>Same Magpie TTS NIM<br/>1 GPU"]
+            TTS["Container: tts-nim<br/>Same Magpie TTS NIM<br/>1 GPU"]
         end
     end
 
@@ -61,7 +66,7 @@ flowchart LR
     Pipecat --> STTClient
     STTClient -->|"/v1/realtime"| Frontend
     Frontend --> ASRWorker
-    ASRWorker <-->|"Riva streaming gRPC"| ASR
+    ASRWorker <-->|"Speech NIM streaming gRPC"| ASR
 
     Pipecat --> LLMClient
     LLMClient -->|"/v1/chat/completions"| Frontend
@@ -70,7 +75,7 @@ flowchart LR
     Pipecat --> TTSClient
     TTSClient -->|"/v1/audio/speech"| Frontend
     Frontend --> TTSWorker
-    TTSWorker <-->|"Riva online gRPC"| TTS
+    TTSWorker <-->|"Speech NIM online gRPC"| TTS
 
     classDef client fill:#eef6ff,stroke:#2563eb,color:#111827
     classDef dynamo fill:#fff7e6,stroke:#b45309,color:#111827
@@ -104,7 +109,7 @@ Dynamo routing:
 ## Deploy on Kubernetes
 
 The manifest creates a Dynamo frontend, a vLLM worker, and separate ASR and TTS
-worker pods. Each speech worker runs its Riva NIM as a sidecar. The deployment
+worker pods. Each speech worker runs a Speech NIM as a sidecar. The deployment
 uses three GPUs in total, one for each model.
 
 ### Prerequisites
@@ -126,7 +131,7 @@ export NAMESPACE=voice-agent
 export DYNAMO_RUNTIME_VERSION=<compatible-published-version>
 export DYNAMO_FRONTEND_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_VLLM_IMAGE="nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_RUNTIME_VERSION}"
-export CUSTOM_RIVA_ADAPTER_IMAGE="<registry-host>/<project>/dynamo-riva-adapter:${DYNAMO_RUNTIME_VERSION}"
+export CUSTOM_SPEECH_ADAPTER_IMAGE="<registry-host>/<project>/dynamo-nemotron-speech-adapter:${DYNAMO_RUNTIME_VERSION}"
 export DYNAMO_REGISTRY=<registry-host>
 export DYNAMO_REGISTRY_USER=<username>
 export DYNAMO_REGISTRY_PASSWORD=<password>
@@ -146,8 +151,8 @@ the published Dynamo frontend image, which provides the Dynamo runtime without
 vLLM, and adds the Riva client and this example's adapter code:
 
 ```bash
-./examples/riva_cascaded_pipeline/container/build.sh
-docker push "${CUSTOM_RIVA_ADAPTER_IMAGE}"
+./examples/nemotron_speech_cascaded_pipeline/container/build.sh
+docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 ```
 
 The selected published version must contain the Dynamo realtime and streaming
@@ -211,8 +216,8 @@ EOF
 Render the image environment variables while applying the tracked manifest:
 
 ```bash
-envsubst '${DYNAMO_FRONTEND_IMAGE} ${DYNAMO_VLLM_IMAGE} ${CUSTOM_RIVA_ADAPTER_IMAGE}' \
-  < examples/riva_cascaded_pipeline/deploy/agg.yaml \
+envsubst '${DYNAMO_FRONTEND_IMAGE} ${DYNAMO_VLLM_IMAGE} ${CUSTOM_SPEECH_ADAPTER_IMAGE}' \
+  < examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml \
   | kubectl apply --namespace "${NAMESPACE}" -f -
 ```
 
@@ -220,16 +225,16 @@ Watch the model pods start. Initial NIM and LLM downloads can take several
 minutes:
 
 ```bash
-kubectl get dgd riva-cascaded --namespace "${NAMESPACE}"
+kubectl get dgd nemotron-speech-cascaded --namespace "${NAMESPACE}"
 kubectl get pods --namespace "${NAMESPACE}" \
-  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded --watch
+  --selector nvidia.com/dynamo-graph-deployment-name=nemotron-speech-cascaded --watch
 ```
 
 After the pods appear, wait for every container to become ready:
 
 ```bash
 kubectl wait --namespace "${NAMESPACE}" --for=condition=Ready pod \
-  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded \
+  --selector nvidia.com/dynamo-graph-deployment-name=nemotron-speech-cascaded \
   --timeout=45m
 ```
 
@@ -237,10 +242,10 @@ If a pod does not become ready, inspect its events and container logs:
 
 ```bash
 kubectl describe pod --namespace "${NAMESPACE}" \
-  --selector nvidia.com/dynamo-graph-deployment-name=riva-cascaded
+  --selector nvidia.com/dynamo-graph-deployment-name=nemotron-speech-cascaded
 kubectl logs --namespace "${NAMESPACE}" \
-  --selector nvidia.com/dynamo-component=RivaAsrWorker \
-  --container riva-asr --tail=100
+  --selector nvidia.com/dynamo-component=SpeechAsrWorker \
+  --container asr-nim --tail=100
 ```
 
 ### 5. Connect and validate
@@ -249,7 +254,7 @@ Forward the generated frontend service:
 
 ```bash
 kubectl port-forward --namespace "${NAMESPACE}" \
-  service/riva-cascaded-frontend 8000:8000
+  service/nemotron-speech-cascaded-frontend 8000:8000
 ```
 
 The deployment exposes:
@@ -263,7 +268,7 @@ ASR together:
 
 ```bash
 python3 -m pip install aiohttp
-python3 examples/riva_cascaded_pipeline/smoke_speech_loop.py
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py
 ```
 
 The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
@@ -289,16 +294,16 @@ profile; only the service endpoints differ.
 
 ## Tests
 
-The unit tests mock Riva while exercising the public Dynamo event and audio
-contracts:
+The unit tests mock the Speech NIM services while exercising the public Dynamo
+event and audio contracts:
 
 ```bash
-python3 -m pip install -r examples/riva_cascaded_pipeline/requirements.txt \
+python3 -m pip install -r examples/nemotron_speech_cascaded_pipeline/requirements.txt \
   pytest pytest-asyncio
 PYTHONPATH=components/src:lib/bindings/python/src \
-  python3 -m pytest -xvv examples/riva_cascaded_pipeline/tests
-bash -n examples/riva_cascaded_pipeline/{launch_workers.sh,container/build.sh}
-pre-commit run check-yaml --files examples/riva_cascaded_pipeline/deploy/agg.yaml
+  python3 -m pytest -xvv examples/nemotron_speech_cascaded_pipeline/tests
+bash -n examples/nemotron_speech_cascaded_pipeline/{launch_workers.sh,container/build.sh}
+pre-commit run check-yaml --files examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml
 ```
 
 For functional validation, run `smoke_speech_loop.py` and confirm that the

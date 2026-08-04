@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenAI realtime transcription adapter for a Riva streaming ASR service."""
+"""OpenAI realtime transcription adapter for a Speech NIM ASR service."""
 
 from __future__ import annotations
 
@@ -106,22 +106,22 @@ class _AudioTurn(RealtimeTurn):
             yield chunk
 
 
-class RivaRealtimeTranscriptionHandler:
-    """Translate OpenAI transcription events to Riva's streaming gRPC API."""
+class SpeechNimRealtimeTranscriptionHandler:
+    """Translate OpenAI transcription events to the Speech NIM streaming gRPC API."""
 
     def __init__(
         self,
         *,
         asr_service,
         model_name: str,
-        riva_model: str,
+        nim_model: str,
         language_code: str,
         commit_padding_ms: int,
         timeout_s: float,
     ) -> None:
         self.asr_service = asr_service
         self.model_name = model_name
-        self.riva_model = riva_model
+        self.nim_model = nim_model
         self.language_code = language_code
         if commit_padding_ms < 0:
             raise ValueError("commit_padding_ms must be non-negative")
@@ -134,7 +134,7 @@ class RivaRealtimeTranscriptionHandler:
                 encoding=AudioEncoding.LINEAR_PCM,
                 sample_rate_hertz=OPENAI_PCM_SAMPLE_RATE,
                 language_code=self.language_code,
-                model=self.riva_model,
+                model=self.nim_model,
                 max_alternatives=1,
                 enable_automatic_punctuation=True,
             ),
@@ -182,7 +182,7 @@ class RivaRealtimeTranscriptionHandler:
             )
         )
         try:
-            # The turn task starts with the first audio chunk so Riva can emit
+            # The turn task starts with the first audio chunk so the backend can emit
             # interim results. Apply the backend deadline only after commit;
             # otherwise a long but valid utterance would consume the RPC budget.
             await turn.closed_event.wait()
@@ -206,7 +206,7 @@ class RivaRealtimeTranscriptionHandler:
         except Exception:
             turn.close()
             transcription_task.cancel()
-            logger.exception("Riva realtime transcription failed")
+            logger.exception("Speech NIM realtime transcription failed")
             await turn.events.put(
                 input_audio_transcription_failed_event(
                     turn.item_id, "Transcription failed"

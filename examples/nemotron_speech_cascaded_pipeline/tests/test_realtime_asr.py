@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the Riva OpenAI realtime transcription adapter."""
+"""Unit tests for the Speech NIM OpenAI realtime transcription adapter."""
 
 import base64
 from types import SimpleNamespace
 
 import pytest
-from riva.client import AudioEncoding
-from riva_nim.realtime_asr import (
+from nemotron_speech.realtime_asr import (
     OPENAI_PCM_SAMPLE_RATE,
     PCM16_BYTES_PER_SAMPLE,
-    RivaRealtimeTranscriptionHandler,
+    SpeechNimRealtimeTranscriptionHandler,
 )
+from riva.client import AudioEncoding
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -86,11 +86,11 @@ async def _drive(handler, events):
 
 def _handler(
     service: _FakeAsrService, *, commit_padding_ms: int = 0
-) -> RivaRealtimeTranscriptionHandler:
-    return RivaRealtimeTranscriptionHandler(
+) -> SpeechNimRealtimeTranscriptionHandler:
+    return SpeechNimRealtimeTranscriptionHandler(
         asr_service=service,
         model_name=MODEL,
-        riva_model="",
+        nim_model="",
         language_code="en-US",
         commit_padding_ms=commit_padding_ms,
         timeout_s=1.0,
@@ -127,7 +127,7 @@ async def test_streams_pcm_and_emits_canonical_transcription_events():
     assert config.language_code == "en-US"
 
 
-async def test_appends_configured_silence_before_closing_riva_stream():
+async def test_appends_configured_silence_before_closing_speech_nim_stream():
     service = _FakeAsrService()
     pcm = b"\x00\x01" * 320
     padding_ms = 20
@@ -205,7 +205,7 @@ async def test_invalid_audio_returns_recoverable_error(event, message):
     assert message in errors[0]["error"]["message"]
 
 
-async def test_rejects_server_vad_without_starting_riva():
+async def test_rejects_server_vad_without_starting_speech_nim():
     service = _FakeAsrService()
     session = _session()
     session["audio"]["input"]["turn_detection"] = {"type": "server_vad"}
