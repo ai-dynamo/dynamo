@@ -178,10 +178,11 @@ impl EncoderRouter {
     fn should_encode(request: &PreprocessedRequest) -> bool {
         !request.is_probe
             && request.encoder_result.is_none()
-            && request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+            && request.multi_modal_data.as_ref().is_some_and(|media| {
+                media
+                    .iter()
+                    .any(|(kind, items)| kind != "custom_encoder_data" && !items.is_empty())
+            })
     }
 
     async fn consume_encode_stream(
@@ -328,6 +329,28 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn custom_encoder_inputs_bypass_legacy_encoder_router() {
+        let request = PreprocessedRequest::builder()
+            .model("model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .multi_modal_data(Some(HashMap::from([(
+                "custom_encoder_data".to_string(),
+                vec![MultimodalData::CustomEncoderData {
+                    modality: crate::protocols::common::extensions::CustomEncoderModality::Image,
+                    payload: json!({"kind": "tensor_ref"}),
+                }],
+            )])))
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        assert!(!EncoderRouter::should_encode(&request));
+        assert!(EncoderRouter::should_encode(&multimodal_request()));
     }
 
     #[tokio::test]

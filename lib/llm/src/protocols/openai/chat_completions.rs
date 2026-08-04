@@ -538,6 +538,13 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
+        if let Some(custom_data) = self
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.custom_encoder_data.as_ref())
+        {
+            custom_data.validate_chat_messages(&self.inner.messages)?;
+        }
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
@@ -636,6 +643,40 @@ mod tests {
         }))
         .expect("Failed to deserialize request");
         assert!(ValidateRequest::validate(&invalid_request).is_err());
+    }
+
+    #[test]
+    fn custom_encoder_data_is_validated_only_when_present() {
+        let ordinary: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .unwrap();
+        ValidateRequest::validate(&ordinary).unwrap();
+
+        let invalid_version: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Hello"}]
+                }],
+                "nvext": {
+                    "custom_encoder_data": {
+                        "version": 2,
+                        "items": [{
+                            "modality": "image",
+                            "placement": {"message_index": 0, "content_index": 1},
+                            "payload": {"kind": "tensor_ref"}
+                        }]
+                    }
+                }
+            }))
+            .unwrap();
+        let error = ValidateRequest::validate(&invalid_version)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("version must be 1"));
     }
 
     #[test]
