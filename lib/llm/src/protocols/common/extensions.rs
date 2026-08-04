@@ -1078,6 +1078,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_session_id_is_ignored_without_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "codex-run".parse().unwrap());
+        assert!(agent_context_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "codex-thread"
+        );
+    }
+
+    #[test]
     fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
