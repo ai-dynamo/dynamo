@@ -23,6 +23,8 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -72,6 +74,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 
 	useDS, fallbackReason := p.workloads.owner.shouldUseDisaggregatedSet(req.DGD)
 	if !useDS {
+		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
 		fallbackProgram := p.workloads.owner.newComponentProgram()
 		programResult, retErr = fallbackProgram.Reconcile(ctx, req)
 		if fallbackReason != "" {
@@ -85,6 +88,7 @@ func (p *disaggregatedSetProgram) Reconcile(
 		if retErr != nil {
 			return programResult, retErr
 		}
+		setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionFalse, "FallbackToComponentProgram", fallbackReason)
 		if err := p.workloads.owner.restoreDisaggregatedSetServiceOwnershipToDCDs(ctx, req.DGD); err != nil {
 			retErr = fmt.Errorf("failed to restore DisaggregatedSet service ownership: %w", err)
 			return programResult, retErr
@@ -95,12 +99,11 @@ func (p *disaggregatedSetProgram) Reconcile(
 		}
 		return programResult, nil
 	}
+	setDisaggregatedSetEligibilityCondition(&programResult, req.DGD.Generation, metav1.ConditionTrue, "Selected", "DisaggregatedSet pathway selected")
 
-	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
 	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
 		return programResult, err
 	}
-	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
@@ -131,6 +134,22 @@ func (p *disaggregatedSetProgram) Reconcile(
 	return programResult, nil
 }
 
+func setDisaggregatedSetEligibilityCondition(
+	result *workloadProgramResult,
+	generation int64,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) {
+	apiMeta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{
+		Type:               "DisaggregatedSetEligible",
+		Status:             status,
+		ObservedGeneration: generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
+
 func (p *disaggregatedSetProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -141,14 +160,4 @@ func (p *disaggregatedSetProgram) reconcileWorkerRollout(
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
 	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
-}
-
-func (p *disaggregatedSetProgram) recordRollingUpdateTransition(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	previous nvidiacomv1beta1.RollingUpdatePhase,
-	result *workloadProgramResult,
-) {
-	_ = dgd
-	_ = previous
-	_ = result
 }

@@ -63,6 +63,9 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		legacyCleanup: func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+			// Grove takes over the graph-level workload directly, so
+			// there is no DCD owner to restore before removing a stale
+			// DisaggregatedSet.
 			return r.cleanupDisaggregatedSetOnLegacyPath(ctx, dgd, false)
 		},
 		topology: newDGDGroveTopologyConditionReconciler(r.Client),
