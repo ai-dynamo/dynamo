@@ -206,19 +206,6 @@ impl EndpointDiscoverySource {
     }
 }
 
-fn apply_endpoint_discovery_event(instances: &mut HashMap<u64, Instance>, event: DiscoveryEvent) {
-    match event {
-        DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
-            instances.insert(instance.instance_id, instance);
-        }
-        DiscoveryEvent::Added(_) => {}
-        DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(endpoint_id)) => {
-            instances.remove(&endpoint_id.instance_id);
-        }
-        DiscoveryEvent::Removed(_) => {}
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RoutingInstanceCounts {
     pub discovered: usize,
@@ -789,7 +776,17 @@ impl Client {
 
                 discovery_source_task.broadcast_event(&discovery_event);
 
-                apply_endpoint_discovery_event(&mut map, discovery_event);
+                match discovery_event {
+                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                        map.insert(instance.instance_id, instance);
+                    }
+                    DiscoveryEvent::Added(_) => {}
+                    DiscoveryEvent::Removed(id) => {
+                        if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
+                            map.remove(&endpoint_id.instance_id);
+                        }
+                    }
+                }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 if watch_tx.send(instances).is_err() {
@@ -807,37 +804,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::TransportType;
-    use crate::discovery::DiscoveryInstance;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-
-    #[test]
-    fn discovery_update_replaces_endpoint_transport() {
-        let original = Instance {
-            namespace: "ns".to_string(),
-            component: "component".to_string(),
-            endpoint: "endpoint".to_string(),
-            instance_id: 1,
-            transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
-            device_type: None,
-        };
-        let updated = Instance {
-            transport: TransportType::Tcp("127.0.0.1:9000".to_string()),
-            ..original.clone()
-        };
-        let mut instances = HashMap::new();
-
-        apply_endpoint_discovery_event(
-            &mut instances,
-            DiscoveryEvent::Added(DiscoveryInstance::Endpoint(original)),
-        );
-        apply_endpoint_discovery_event(
-            &mut instances,
-            DiscoveryEvent::Added(DiscoveryInstance::Endpoint(updated.clone())),
-        );
-
-        assert_eq!(instances, HashMap::from([(1, updated)]));
-    }
 
     #[test]
     fn test_inhibited_duration_from_env() {

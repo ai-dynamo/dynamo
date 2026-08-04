@@ -17,30 +17,14 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
+    diff_discovery_instances, endpoint_instances,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-fn diff_discovery_instances(
-    known: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
-    current: &HashMap<DiscoveryInstanceId, DiscoveryInstance>,
-) -> (Vec<DiscoveryInstance>, Vec<DiscoveryInstanceId>) {
-    let upserted = current
-        .iter()
-        .filter(|(id, instance)| known.get(*id) != Some(*instance))
-        .map(|(_, instance)| instance.clone())
-        .collect();
-    let removed = known
-        .keys()
-        .filter(|id| !current.contains_key(*id))
-        .cloned()
-        .collect();
-    (upserted, removed)
-}
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -404,13 +388,13 @@ impl Discovery for KubeDiscoveryClient {
                 }
             }
 
-            // Retain the full instance state so same-ID updates are detectable.
-            let mut known = initial;
+            let mut known_endpoints = endpoint_instances(&initial);
+            let mut known_ids: HashSet<DiscoveryInstanceId> = initial.into_keys().collect();
 
             loop {
                 tracing::trace!(
                     stream_id = %stream_id,
-                    known_count = known.len(),
+                    known_count = known_ids.len(),
                     "Watch loop waiting for changes"
                 );
 
@@ -447,11 +431,12 @@ impl Discovery for KubeDiscoveryClient {
                             stream_id = %stream_id,
                             seq = snapshot.sequence,
                             current_count = current.len(),
-                            known_count = known.len(),
+                            known_count = known_ids.len(),
                             "Watch received snapshot update"
                         );
 
-                        let (upserted, removed) = diff_discovery_instances(&known, &current);
+                        let (upserted, removed) =
+                            diff_discovery_instances(&known_ids, &known_endpoints, &current);
 
                         // Log diff results (even if empty, for debugging)
                         if upserted.is_empty() && removed.is_empty() {
@@ -471,7 +456,8 @@ impl Discovery for KubeDiscoveryClient {
                             );
                         }
 
-                        // Emit Added upserts for new and changed instances.
+                        // Endpoint values are mutable, so emit Added for new instances and
+                        // same-ID endpoint updates. Other instance types remain ID-only.
                         for instance in upserted {
                             tracing::info!(
                                 stream_id = %stream_id,
@@ -500,8 +486,8 @@ impl Discovery for KubeDiscoveryClient {
                             }
                         }
 
-                        // Retain the current state for the next diff.
-                        known = current;
+                        known_endpoints = endpoint_instances(&current);
+                        known_ids = current.into_keys().collect();
                     }
                     Err(_) => {
                         tracing::info!(
@@ -524,6 +510,7 @@ impl Discovery for KubeDiscoveryClient {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::{EventScope, EventTransport};
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -549,20 +536,33 @@ mod tests {
         let updated = endpoint_instance(1, "127.0.0.1:9000");
         let known = HashMap::from([(original.id(), original)]);
         let current = HashMap::from([(updated.id(), updated.clone())]);
+        let known_ids = known.keys().cloned().collect();
+        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known, &current);
+        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
 
         assert_eq!(upserted, vec![updated]);
         assert!(removed.is_empty());
     }
 
     #[test]
-    fn snapshot_diff_ignores_unchanged_instances() {
-        let instance = endpoint_instance(1, "127.0.0.1:8000");
-        let known = HashMap::from([(instance.id(), instance.clone())]);
-        let current = HashMap::from([(instance.id(), instance)]);
+    fn snapshot_diff_ignores_same_id_event_channel_changes() {
+        let event_channel = |endpoint: &str| DiscoveryInstance::EventChannel {
+            scope: EventScope::Namespace {
+                name: "ns".to_string(),
+            },
+            topic: "topic".to_string(),
+            instance_id: 1,
+            transport: EventTransport::zmq(endpoint),
+        };
+        let original = event_channel("tcp://127.0.0.1:8000");
+        let updated = event_channel("tcp://127.0.0.1:9000");
+        let known = HashMap::from([(original.id(), original)]);
+        let current = HashMap::from([(updated.id(), updated)]);
+        let known_ids = known.keys().cloned().collect();
+        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known, &current);
+        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
 
         assert!(upserted.is_empty());
         assert!(removed.is_empty());
@@ -574,8 +574,10 @@ mod tests {
         let added_instance = endpoint_instance(2, "127.0.0.1:9000");
         let known = HashMap::from([(removed_instance.id(), removed_instance.clone())]);
         let current = HashMap::from([(added_instance.id(), added_instance.clone())]);
+        let known_ids = known.keys().cloned().collect();
+        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known, &current);
+        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
 
         assert_eq!(upserted, vec![added_instance]);
         assert_eq!(removed, vec![removed_instance.id()]);
