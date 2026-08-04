@@ -42,7 +42,7 @@ pub struct AnthropicStreamConverter {
     usage: AnthropicUsage,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
-    tool_blocks_flushed: bool,
+    tool_blocks_flush_requested: bool,
     // Block index counter
     next_block_index: u32,
     // Stop reason
@@ -53,6 +53,7 @@ struct ToolCallState {
     id: String,
     name: String,
     argument_fragments: Vec<String>,
+    flushed: bool,
 }
 
 impl ToolCallState {
@@ -61,6 +62,19 @@ impl ToolCallState {
     /// emits, so `argument_fragments` is deliberately not part of this check.
     fn is_emit_ready(&self) -> bool {
         !self.id.is_empty() && !self.name.is_empty()
+    }
+
+    fn arguments_are_complete_json(&self) -> bool {
+        let arguments = self.argument_fragments.concat();
+        if arguments.trim().is_empty() {
+            return true;
+        }
+
+        serde_json::from_str::<serde_json::Value>(&arguments).is_ok()
+    }
+
+    fn is_flush_ready(&self) -> bool {
+        self.is_emit_ready() && self.arguments_are_complete_json()
     }
 }
 
@@ -81,7 +95,7 @@ impl AnthropicStreamConverter {
                 ..Default::default()
             },
             tool_call_states: Vec::new(),
-            tool_blocks_flushed: false,
+            tool_blocks_flush_requested: false,
             next_block_index: 0,
             stop_reason: None,
         }
@@ -123,6 +137,7 @@ impl AnthropicStreamConverter {
                 id: String::new(),
                 name: String::new(),
                 argument_fragments: Vec::new(),
+                flushed: false,
             });
         }
 
@@ -141,17 +156,21 @@ impl AnthropicStreamConverter {
     }
 
     fn drain_buffered_tool_events(&mut self) -> Vec<(&'static str, AnthropicStreamEvent)> {
-        if self.tool_blocks_flushed {
-            return Vec::new();
-        }
-        self.tool_blocks_flushed = true;
-
         let mut events = Vec::new();
-        let mut sent_tool_call_ids = HashSet::new();
+        let mut sent_tool_call_ids: HashSet<String> = self
+            .tool_call_states
+            .iter()
+            .filter(|tool_call| tool_call.flushed && !tool_call.id.is_empty())
+            .map(|tool_call| tool_call.id.clone())
+            .collect();
         let mut block_index = self.next_block_index;
 
-        for tool_call in &self.tool_call_states {
-            if !tool_call.is_emit_ready() || !sent_tool_call_ids.insert(tool_call.id.clone()) {
+        for tool_call in &mut self.tool_call_states {
+            if tool_call.flushed || !tool_call.is_flush_ready() {
+                continue;
+            }
+            if !sent_tool_call_ids.insert(tool_call.id.clone()) {
+                tool_call.flushed = true;
                 continue;
             }
 
@@ -184,9 +203,12 @@ impl AnthropicStreamConverter {
                 AnthropicStreamEvent::ContentBlockStop { index: block_index },
             ));
             block_index += 1;
+            tool_call.flushed = true;
         }
 
-        self.next_block_index = block_index;
+        if !events.is_empty() {
+            self.next_block_index = block_index;
+        }
         events
     }
 
@@ -400,12 +422,15 @@ impl AnthropicStreamConverter {
             }
         }
 
-        // A tool-call finish reason is the first explicit guarantee that all
-        // argument fragments in this choice are complete. `JailedStream` rewrites
-        // `Stop` to `ToolCalls` after emitting tool-call chunks; interrupted
-        // `Length`/`ContentFilter` streams use the EOF fallback below. Flush only
-        // after every choice and delta in the terminal chunk has been recorded.
+        // A tool-call finish reason requests flushing buffered tool blocks.
+        // Some streams can still deliver the final argument fragment later, so
+        // the drain path keeps buffering until accumulated arguments are valid
+        // JSON. Interrupted `Length`/`ContentFilter` streams use the EOF
+        // fallback below.
         if should_flush_tool_blocks {
+            self.tool_blocks_flush_requested = true;
+        }
+        if self.tool_blocks_flush_requested {
             self.append_buffered_tool_events(events);
         }
     }
@@ -446,6 +471,7 @@ impl AnthropicStreamConverter {
         // EOF remains a fallback for backends that omit a terminal finish reason.
         // If a finish chunk already flushed these blocks, this is a no-op.
         self.append_buffered_tool_events(events);
+        self.reconcile_tool_stop_reason();
 
         // Emit message_delta with stop_reason and real token usage from engine
         let message_delta = AnthropicStreamEvent::MessageDelta {
@@ -478,6 +504,20 @@ impl AnthropicStreamConverter {
             },
         };
         events.push(make_sse_event("error", &error_event));
+    }
+
+    fn reconcile_tool_stop_reason(&mut self) {
+        if !matches!(self.stop_reason, Some(AnthropicStopReason::ToolUse)) {
+            return;
+        }
+
+        let emitted_tool_block = self
+            .tool_call_states
+            .iter()
+            .any(|tool_call| tool_call.flushed);
+        if !emitted_tool_block {
+            self.stop_reason = Some(AnthropicStopReason::EndTurn);
+        }
     }
 }
 
@@ -654,6 +694,9 @@ impl AnthropicStreamConverter {
         // streams carry a tool-call finish reason, while interrupted streams use
         // the EOF fallback in `emit_end_events_tagged`.
         if should_flush_tool_blocks {
+            self.tool_blocks_flush_requested = true;
+        }
+        if self.tool_blocks_flush_requested {
             for (event_type, event) in self.drain_buffered_tool_events() {
                 events.push(make_tagged_event(event_type, &event));
             }
@@ -693,6 +736,7 @@ impl AnthropicStreamConverter {
         for (event_type, event) in self.drain_buffered_tool_events() {
             events.push(make_tagged_event(event_type, &event));
         }
+        self.reconcile_tool_stop_reason();
 
         let ev = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
@@ -1048,6 +1092,209 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_call_stop_waits_for_complete_json_after_finish() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let first = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":"),
+        ));
+        assert!(first.is_empty());
+
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(
+            finish.is_empty(),
+            "incomplete tool JSON must not emit content_block_stop"
+        );
+
+        let final_fragment = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            None,
+            None,
+            Some("\"/tmp/example.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&final_fragment),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        assert!(matches!(
+            &final_fragment[3].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    #[test]
+    fn test_late_tool_identity_can_flush_after_completed_tool() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("Read"),
+                Some("{\"path\":\"/tmp/a.txt\"}"),
+            ))
+            .is_empty()
+        );
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                1,
+                None,
+                None,
+                Some("{\"path\":\"/tmp/b.txt\"}"),
+            ))
+            .is_empty()
+        );
+
+        let first_flush = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&first_flush),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        assert!(matches!(
+            &first_flush[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                ..
+            } if id == "call-1"
+        ));
+
+        let late_identity =
+            conv.process_chunk_tagged(&tool_call_chunk(1, Some("call-2"), Some("Write"), None));
+        assert_eq!(
+            event_types(&late_identity),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        assert!(matches!(
+            &late_identity[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                index: 1,
+                content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+            } if id == "call-2"
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    #[test]
+    fn test_incomplete_tool_json_is_not_flushed_at_eof() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("Read"),
+            Some("{\"path\":"),
+        ));
+        assert!(tool_events.is_empty());
+
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    #[test]
+    fn test_complete_tool_still_flushes_when_later_tool_json_is_incomplete_at_eof() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("Read"),
+                Some("{\"path\":\"/tmp/a.txt\"}"),
+            ))
+            .is_empty()
+        );
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                1,
+                Some("call-2"),
+                Some("Write"),
+                Some("{\"path\":"),
+            ))
+            .is_empty()
+        );
+
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        assert!(matches!(
+            &end_events[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                ..
+            } if id == "call-1"
+        ));
+    }
+
+    #[test]
+    fn test_tool_use_stop_reason_downgrades_when_no_tool_block_is_emitted() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("Read"),
+                Some("{\"path\":"),
+            ))
+            .is_empty()
+        );
+        assert!(
+            conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls))
+                .is_empty()
+        );
+
+        let end_events = conv.emit_end_events_tagged();
+        assert_eq!(
+            event_types(&end_events),
+            vec!["message_delta", "message_stop"]
+        );
+        assert!(matches!(
+            &end_events[0].data,
+            AnthropicStreamEvent::MessageDelta {
+                delta: AnthropicMessageDeltaBody {
+                    stop_reason: Some(AnthropicStopReason::EndTurn),
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_id_and_name_only_tool_call_is_emitted() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
@@ -1070,6 +1317,38 @@ mod tests {
             event_types(&conv.emit_end_events_tagged()),
             vec!["message_delta", "message_stop"]
         );
+    }
+
+    #[test]
+    fn test_empty_tool_arguments_are_emitted() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        assert!(
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-empty"),
+                Some("Ping"),
+                Some(""),
+            ))
+            .is_empty()
+        );
+
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+            ]
+        );
+        assert!(matches!(
+            &finish[1].data,
+            AnthropicStreamEvent::ContentBlockDelta {
+                delta: AnthropicDelta::InputJsonDelta { partial_json },
+                ..
+            } if partial_json.is_empty()
+        ));
     }
 
     #[test]
