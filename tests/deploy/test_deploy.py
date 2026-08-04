@@ -377,9 +377,21 @@ async def test_gaie_deployment(
         assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
         logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
 
-        gateway_svcs = list(
-            kr8s.get("services", "inference-gateway", namespace=namespace)
-        )
+        # The agentgateway controller provisions the backing Service after the
+        # Gateway reaches Programmed — this can lag by tens of seconds. Poll
+        # rather than doing a one-shot lookup.
+        gateway_svcs = []
+        for attempt in range(30):
+            gateway_svcs = list(
+                kr8s.get("services", "inference-gateway", namespace=namespace)
+            )
+            if gateway_svcs:
+                break
+            logger.info(
+                f"Waiting for inference-gateway service in namespace {namespace}"
+                f" (attempt {attempt + 1}/30)..."
+            )
+            time.sleep(10)
         assert (
             len(gateway_svcs) > 0
         ), f"inference-gateway service not found in namespace {namespace}"

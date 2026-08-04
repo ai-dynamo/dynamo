@@ -99,3 +99,19 @@ EOF
 
 kubectl wait gateway/inference-gateway -n "$AGW_NAMESPACE" \
   --for=condition=Programmed --timeout=180s
+
+# Gateway Programmed does not guarantee the backing Service exists yet.
+# Wait for the agentgateway controller to finish provisioning it.
+echo "Waiting for inference-gateway Service to be provisioned in namespace $NAMESPACE..."
+for i in $(seq 1 36); do
+  if kubectl get service/inference-gateway -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "inference-gateway Service is ready."
+    break
+  fi
+  if [ "$i" -eq 36 ]; then
+    echo "ERROR: inference-gateway Service not found after 180s" >&2
+    exit 1
+  fi
+  echo "  attempt $i/36: Service not yet available, waiting 5s..."
+  sleep 5
+done
