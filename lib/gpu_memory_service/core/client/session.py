@@ -41,9 +41,13 @@ class _GMSClientSession:
         path: str,
         lock_type: RequestedLockType,
         expected_identity: tuple[str, str] | None = None,
+        connect_timeout: float | None = 30.0,
     ):
         self._lock = threading.RLock()
         self._socket: socket.socket | None = None
+        deadline = (
+            None if connect_timeout is None else time.monotonic() + connect_timeout
+        )
         try:
             # Only startup socket availability is retried; handshake failures propagate.
             while True:
@@ -51,10 +55,21 @@ class _GMSClientSession:
                 try:
                     self._socket.connect(path)
                     break
-                except (FileNotFoundError, ConnectionRefusedError):
+                except (FileNotFoundError, ConnectionRefusedError) as cause:
                     self._socket.close()
                     self._socket = None
-                    time.sleep(_STARTUP_CONNECT_RETRY_INTERVAL)
+                    remaining = (
+                        None if deadline is None else deadline - time.monotonic()
+                    )
+                    if remaining is not None and remaining <= 0:
+                        raise ConnectionError(
+                            f"Timed out waiting for GMS sidecar socket at {path}"
+                        ) from cause
+                    time.sleep(
+                        _STARTUP_CONNECT_RETRY_INTERVAL
+                        if remaining is None
+                        else min(_STARTUP_CONNECT_RETRY_INTERVAL, remaining)
+                    )
             send_message(self._socket, HandshakeRequest(lock_type, expected_identity))
             response, received_fd = receive_message(self._socket)
             handshake = self._decode(

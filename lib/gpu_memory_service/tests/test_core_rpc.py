@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+from time import monotonic
 
 import pytest
 from _fake_vmm import FakeVMM
@@ -44,6 +45,33 @@ def _connect_in_thread(path: str, lock_type: RequestedLockType):
     thread = threading.Thread(target=connect, daemon=True)
     thread.start()
     return result, connected, thread
+
+
+@pytest.mark.timeout(10)
+def test_client_waits_for_server_startup_and_deadlines_absent_socket(tmp_path) -> None:
+    path = str(tmp_path / "gms.sock")
+    result, connected, client_thread = _connect_in_thread(path, RequestedLockType.RW)
+    assert not connected.wait(0.1)
+    assert client_thread.is_alive()
+
+    _manager, server, server_thread = _serve(path, FakeVMM(granularity=64))
+    try:
+        assert connected.wait(5)
+        result.pop().close()
+        client_thread.join(timeout=5)
+        assert not client_thread.is_alive()
+    finally:
+        _stop(server, server_thread)
+
+    started_at = monotonic()
+    with pytest.raises(ConnectionError, match="GMS sidecar socket"):
+        _GMSClientSession(
+            str(tmp_path / "absent.sock"),
+            RequestedLockType.RO,
+            connect_timeout=0.05,
+        )
+    elapsed = monotonic() - started_at
+    assert 0.05 <= elapsed < 0.5
 
 
 @pytest.mark.timeout(10)
