@@ -1056,7 +1056,6 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
-        };
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&response.overlap, response.best_worker);
         let router_hint = self.router_hint_for_selection(

@@ -241,6 +241,16 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn data_parallel_start_rank(&self) -> u32 {
+        self.inner.data_parallel_start_rank
+    }
+
+    #[getter]
+    fn data_parallel_size(&self) -> u32 {
+        self.inner.data_parallel_size
+    }
+
+    #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
     }
