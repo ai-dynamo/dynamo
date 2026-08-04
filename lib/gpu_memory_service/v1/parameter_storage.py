@@ -82,7 +82,10 @@ def _containing_mapping(
     storage_start = int(storage.data_ptr())
     storage_end = storage_start + int(storage.nbytes())
     for mapping in mappings:
-        if mapping.base <= storage_start and storage_end <= mapping.end:
+        if (
+            mapping.base <= storage_start
+            and storage_end <= mapping.base + mapping.aligned_size
+        ):
             return mapping
     return None
 

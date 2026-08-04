@@ -16,7 +16,6 @@ from gpu_memory_service.core import device as device_identity
 from gpu_memory_service.core.client.memory_manager import (
     LocalMapping,
     install_mapping,
-    release_mapping,
     reserve_and_install_mapping,
     unmap_mapping,
 )
@@ -146,7 +145,7 @@ class GMSClientMemoryManager:
                     self._session.lock_type is GrantedLockType.RW
                 ):
                     self._session.free(mapping.allocation_id)
-                release_mapping(self._vmm, mapping)
+                self._vmm.address_free(mapping.base, mapping.reservation_size)
                 del self._mappings[va]
             except Exception as exc:
                 raise self._latch("GMS mapping destruction failed", exc) from exc

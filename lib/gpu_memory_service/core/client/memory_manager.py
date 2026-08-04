@@ -22,10 +22,6 @@ class LocalMapping:
     base: int
     reservation_size: int
 
-    @property
-    def end(self) -> int:
-        return self.base + self.aligned_size
-
 
 def install_mapping(
     vmm: VMMDevice,
@@ -91,8 +87,3 @@ def reserve_and_install_mapping(
         vmm.address_free(mapping.base, mapping.reservation_size)
         raise
     return mapping, handle
-
-
-def release_mapping(vmm: VMMDevice, mapping: LocalMapping) -> None:
-    """Release a preserved local VA reservation."""
-    vmm.address_free(mapping.base, mapping.reservation_size)
