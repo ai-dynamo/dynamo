@@ -69,8 +69,8 @@ pub struct EppRouter {
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
         let selector = Arc::new(Selector::new(&cfg).await?);
+        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
         Ok(Self::from_selector_parts(
             cfg,
             renderer,
