@@ -102,7 +102,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.1
     workingDir: /workspace/examples/backends/trtllm
     args:
       - "python3"
@@ -149,7 +149,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.1
 
 # Configure your model and deployment settings
 args:

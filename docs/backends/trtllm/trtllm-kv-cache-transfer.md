@@ -41,7 +41,7 @@ On AWS, UCX uses the **SRD (Scalable Reliable Datagram)** transport over EFA dev
 - **Pre-built EFA image:** A multi-arch EFA image with the EFA SDK baked in is available on NGC:
 
 ```
-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-efa
+nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.1-efa
 ```
 
 See [Release Artifacts](../../reference/release-artifacts.md) for all available EFA images.

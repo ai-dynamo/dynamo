@@ -18,7 +18,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
   topology: aggregated
   techniques:
   - expert-parallel
@@ -44,7 +44,7 @@ targets:
     count: 12
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -72,7 +72,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
   topology: aggregated
   techniques:
   - data-parallel-attention
@@ -100,7 +100,7 @@ targets:
     count: 28
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode

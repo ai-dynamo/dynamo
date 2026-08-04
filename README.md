@@ -127,7 +127,7 @@ See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) f
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &

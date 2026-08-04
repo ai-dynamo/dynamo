@@ -66,7 +66,7 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra 
 <div data-sku="b200">
 
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **4x B200 per aggregated worker** available (8x B200 for the disaggregated fallback).
-- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
+- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
 - A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
 
@@ -75,7 +75,7 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra 
 <div data-sku="h200">
 
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **8x H200 per worker** available.
-- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
+- An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.1-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
 - A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
 
@@ -345,7 +345,7 @@ Treat each row together with its matching recipe, image, trace, and server-shape
 
 ## Compare All Targets
 
-All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedicated dev runtime image `vllm-runtime:1.3.0-nemotron-ultra-dev.1` with KV-aware routing and a 262144 max model length:
+All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedicated dev runtime image `vllm-runtime:1.3.1-nemotron-ultra-dev.1` with KV-aware routing and a 262144 max model length:
 
 | | B200 chat | H200 chat | B200 agentic | H200 agentic | B200 disagg agentic |
 |---|---|---|---|---|---|
@@ -359,7 +359,7 @@ All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedica
 
 ## Notes
 
-- This is a Day-0 recipe on a dedicated dev runtime image (`vllm-runtime:1.3.0-nemotron-ultra-dev.1`); it is functional and benchmarked but not yet promoted to a release runtime image.
+- This is a Day-0 recipe on a dedicated dev runtime image (`vllm-runtime:1.3.1-nemotron-ultra-dev.1`); it is functional and benchmarked but not yet promoted to a release runtime image.
 - The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pass `--no-enable-flashinfer-autotune` on vLLM workers. Do not remove these unless rerunning the benchmark qualification — they select the non-FlashInfer FP8 linear kernel path and avoid a measured vLLM 0.22 FlashInfer FP8 regression.
 - No-MTP fallback manifests are included for every aggregated target at `vllm/agg-<sku>-<usecase>-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix, and their measured rows appear in the performance table above.
 - Reasoning is controlled per request via `chat_template_kwargs` (`enable_thinking`, `force_nonempty_content`) and `nvext.max_thinking_tokens`. Do not send `force_nonempty_content` as a top-level request parameter. Top-level reasoning controls such as `include_reasoning` and `reasoning_effort` are part of shared Dynamo API compatibility work, not Ultra-specific failures.
