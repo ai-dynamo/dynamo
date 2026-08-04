@@ -296,16 +296,72 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_IgnoresRuntimeVersionOverride(t *testing.T) {
-	base := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
-	}))
-	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) {
+	newDGD := func(image, override string) *v1beta1.DynamoGraphDeployment {
+		dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+		}))
+		dgd.Spec.Components[0].RuntimeVersionOverride = override
+		dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: image,
+				}},
+			},
+		}
+		return dgd
+	}
 
-	withOverride := base.DeepCopy()
-	withOverride.Spec.Components[0].RuntimeVersionOverride = "1.4.0"
+	tests := []struct {
+		name          string
+		leftImage     string
+		leftOverride  string
+		rightImage    string
+		rightOverride string
+		wantEqual     bool
+	}{
+		{
+			name:          "omits resolved versions before 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.4.9",
+			wantEqual:     true,
+		},
+		{
+			name:          "canonicalizes equivalent implicit and explicit versions",
+			leftImage:     "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightImage:    "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightOverride: "1.5.0",
+			wantEqual:     true,
+		},
+		{
+			name:          "changes at the 1.5 boundary",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.4.9",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.0",
+		},
+		{
+			name:          "tracks override changes after 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.5.0",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.1",
+		},
+	}
 
-	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, withOverride))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			left := mustComputeBetaDGDWorkersSpecHash(t, newDGD(tt.leftImage, tt.leftOverride))
+			right := mustComputeBetaDGDWorkersSpecHash(t, newDGD(tt.rightImage, tt.rightOverride))
+			if tt.wantEqual {
+				assert.Equal(t, left, right)
+			} else {
+				assert.NotEqual(t, left, right)
+			}
+		})
+	}
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

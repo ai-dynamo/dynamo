@@ -104,3 +104,43 @@ func TestParseImageVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestResolve(t *testing.T) {
+	tests := []struct {
+		name     string
+		image    string
+		override string
+		want     Version
+		wantErr  bool
+	}{
+		{
+			name:  "uses the image tag when the override is empty",
+			image: "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			want:  Version{Major: 1, Minor: 5, Patch: 0},
+		},
+		{
+			name:     "the override is authoritative",
+			image:    "nvcr.io/nvidia/ai-dynamo/runtime:1.5.0",
+			override: "1.4.0",
+			want:     Version{Major: 1, Minor: 4, Patch: 0},
+		},
+		{
+			name:     "does not fall back when the override is invalid",
+			image:    "nvcr.io/nvidia/ai-dynamo/runtime:1.5.0",
+			override: "invalid",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Resolve(tt.image, tt.override)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Resolve(%q, %q) error = %v, wantErr %t", tt.image, tt.override, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("Resolve(%q, %q) = %+v, want %+v", tt.image, tt.override, got, tt.want)
+			}
+		})
+	}
+}

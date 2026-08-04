@@ -25,9 +25,13 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 )
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
+
+// Preserve hashes for runtimes released before version hashing.
+var minimumHashedRuntimeVersion = runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}
 
 // ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash that a
 // pre-v1beta1 controller would compute for the DGD's current spec. Conversion
@@ -101,8 +105,25 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
-	// RuntimeVersionOverride has no rendered Pod effect yet.
-	spec.RuntimeVersionOverride = ""
+	// Hash the canonical resolved version, not the raw optional override.
+	spec.RuntimeVersionOverride = resolvedRuntimeVersionForHash(&spec.DynamoComponentDeploymentSharedSpec)
 
 	return *spec
+}
+
+func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentSharedSpec) string {
+	if component == nil {
+		return ""
+	}
+
+	image := ""
+	if main := GetMainContainer(component); main != nil {
+		image = main.Image
+	}
+	version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride)
+	if err != nil || version.Compare(minimumHashedRuntimeVersion) < 0 {
+		return ""
+	}
+
+	return version.String()
 }
