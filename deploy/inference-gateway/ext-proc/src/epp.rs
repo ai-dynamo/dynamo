@@ -9,15 +9,17 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::scheduling::QueueRejection;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{FindBestMatchOutcome, KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
@@ -75,6 +77,98 @@ fn cache_namespace_with_header_override(
         .filter(|tenant_id| !tenant_id.is_empty())
         .map(str::to_owned)
         .or(body_cache_namespace)
+}
+
+/// Names the router policy-class family to admit this request under, overriding
+/// any retry marker.
+const HEADER_POLICY_CLASS: &str = "x-dynamo-policy-class";
+
+/// Marks a request as a retry. Any non-empty, non-`0` value counts.
+const HEADER_RETRY_ATTEMPT: &str = "x-dynamo-retry-attempt";
+
+/// Envoy's own retry counter, honored so a router retry needs no extra wiring.
+/// Envoy counts the first attempt as `1`, so only values above 1 are retries.
+const HEADER_ENVOY_ATTEMPT_COUNT: &str = "x-envoy-attempt-count";
+
+/// Policy family a retried request is classified under. Must match a
+/// `policy_family` in the router's policy config for per-class limits to apply.
+const POLICY_FAMILY_RETRY: &str = "retry";
+
+/// `Retry-After` value, in seconds, advertised when a policy class sheds a
+/// request. `0` suppresses the header.
+const DYN_EPP_SHED_RETRY_AFTER_SECS: &str = "DYN_EPP_SHED_RETRY_AFTER_SECS";
+const DEFAULT_SHED_RETRY_AFTER_SECS: u64 = 1;
+
+/// The router's rejection carries no timing hint of its own, so the retry delay
+/// is a deployment-wide constant read once at startup.
+static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
+    let secs = match std::env::var(DYN_EPP_SHED_RETRY_AFTER_SECS) {
+        Ok(raw) => raw.trim().parse::<u64>().unwrap_or_else(|_| {
+            tracing::warn!(
+                value = %raw,
+                default = DEFAULT_SHED_RETRY_AFTER_SECS,
+                "Ignoring invalid {DYN_EPP_SHED_RETRY_AFTER_SECS}"
+            );
+            DEFAULT_SHED_RETRY_AFTER_SECS
+        }),
+        Err(_) => DEFAULT_SHED_RETRY_AFTER_SECS,
+    };
+    (secs > 0).then_some(secs)
+});
+
+/// Resolve the router policy-class family for a request from its headers.
+///
+/// The router pairs this family with an uncached-ISL bucket it derives itself, so
+/// the family only carries what the gateway knows and the router cannot see:
+/// whether this is a retry. `None` lets the router apply its configured default
+/// family, which keeps deployments without a policy config unchanged.
+fn policy_class_from_headers(headers: &[(String, String)]) -> Option<String> {
+    if let Some(class) = find_header(headers, HEADER_POLICY_CLASS).filter(|c| !c.is_empty()) {
+        return Some(class.to_owned());
+    }
+    is_retry_attempt(headers).then(|| POLICY_FAMILY_RETRY.to_string())
+}
+
+fn is_retry_attempt(headers: &[(String, String)]) -> bool {
+    if find_header(headers, HEADER_RETRY_ATTEMPT).is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && v != "0"
+    }) {
+        return true;
+    }
+    find_header(headers, HEADER_ENVOY_ATTEMPT_COUNT)
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .is_some_and(|count| count > 1)
+}
+
+/// Turn the decode router's per-class refusal into a shed answer: every eligible
+/// worker was saturated for this class and the class is configured not to queue.
+fn shed_error(rejection: QueueRejection) -> PickError {
+    tracing::info!(
+        policy_class = %rejection.policy_class,
+        limit_kind = %rejection.limit_kind,
+        current = rejection.current,
+        limit = rejection.limit,
+        "Decode router refused admission; shedding request"
+    );
+    PickError::Saturated {
+        policy_class: rejection.policy_class,
+        retry_after_secs: *SHED_RETRY_AFTER_SECS,
+    }
+}
+
+/// Result of a decode routing query. Keeps a policy-class refusal separate from a
+/// routing failure: the former is a deliberate, retryable shed, the latter is an
+/// error.
+#[derive(Debug)]
+pub enum DecodeRouteOutcome {
+    Routed {
+        worker: WorkerWithDpRank,
+        overlap_blocks: u32,
+    },
+    Shed {
+        rejection: QueueRejection,
+    },
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -361,10 +455,13 @@ impl Router {
         }
     }
 
-    /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
+    /// Route a decode request.
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary tier.
+    /// `policy_class` names the policy-class family the request is admitted under;
+    /// `None` uses the router's configured default family.
+    #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
         tokens: &[u32],
@@ -372,31 +469,54 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
-    ) -> Result<(WorkerWithDpRank, u32)> {
+    ) -> Result<DecodeRouteOutcome> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
         }
 
         let config_override = decode_router_config_override(is_disaggregated);
 
-        self.decode_router
-            .find_best_match(
+        // Unlike `find_best_match`, this keeps a policy-class queue rejection
+        // typed instead of collapsing it into an opaque routing error, so the
+        // caller can shed with a retry hint rather than report a 503.
+        let outcome = self
+            .decode_router
+            .find_best_match_details_with_policy_class(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
+                None,
+                None,
                 None,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+
+        Ok(match outcome {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => DecodeRouteOutcome::Routed {
+                worker,
+                overlap_blocks,
+            },
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                DecodeRouteOutcome::Shed { rejection }
+            }
+        })
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -977,17 +1097,29 @@ impl EndpointPicker for Router {
         // with one tracked operation. Propagate booking failures, use an internal
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
-        let (decode_worker, _overlap) = self
+        //
+        // Prefill routing above is advisory and books nothing, and bookkeeping runs
+        // only after this returns, so a shed here leaves no state to roll back.
+        let decode_outcome = self
             .route_decode(
                 &tokens,
                 is_disaggregated,
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                policy_class_from_headers(&req.headers),
                 allowed_worker_ids,
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+
+        let (decode_worker, _overlap) = match decode_outcome {
+            DecodeRouteOutcome::Routed {
+                worker,
+                overlap_blocks,
+            } => (worker, overlap_blocks),
+            DecodeRouteOutcome::Shed { rejection } => return Err(shed_error(rejection)),
+        };
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1159,6 +1291,57 @@ mod tests {
     #[test]
     fn absent_cache_namespace_stays_absent() {
         assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
+
+    /// No retry marker means no explicit class, which leaves the router on its
+    /// configured default family. Deployments with no policy config must be
+    /// unaffected by per-class shedding.
+    #[test]
+    fn absent_retry_marker_leaves_policy_class_unset() {
+        assert_eq!(policy_class_from_headers(&[]), None);
+        assert_eq!(
+            policy_class_from_headers(&[(HEADER_RETRY_ATTEMPT.to_string(), "0".to_string())]),
+            None
+        );
+    }
+
+    /// The retry marker is the one fact the gateway knows and the router cannot
+    /// see, so it must reach the router as a policy family.
+    #[test]
+    fn retry_marker_selects_the_retry_family() {
+        let headers = vec![(HEADER_RETRY_ATTEMPT.to_string(), "1".to_string())];
+
+        assert_eq!(
+            policy_class_from_headers(&headers).as_deref(),
+            Some(POLICY_FAMILY_RETRY)
+        );
+    }
+
+    /// Envoy counts the first attempt as 1, so treating any non-empty value as a
+    /// retry would misclassify every request as a retry.
+    #[test]
+    fn envoy_attempt_count_is_a_retry_only_above_one() {
+        let first = vec![(HEADER_ENVOY_ATTEMPT_COUNT.to_string(), "1".to_string())];
+        let second = vec![(HEADER_ENVOY_ATTEMPT_COUNT.to_string(), "2".to_string())];
+
+        assert_eq!(policy_class_from_headers(&first), None);
+        assert_eq!(
+            policy_class_from_headers(&second).as_deref(),
+            Some(POLICY_FAMILY_RETRY)
+        );
+    }
+
+    #[test]
+    fn explicit_policy_class_header_wins_over_retry_marker() {
+        let headers = vec![
+            (HEADER_POLICY_CLASS.to_string(), "batch".to_string()),
+            (HEADER_RETRY_ATTEMPT.to_string(), "2".to_string()),
+        ];
+
+        assert_eq!(
+            policy_class_from_headers(&headers).as_deref(),
+            Some("batch")
+        );
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
