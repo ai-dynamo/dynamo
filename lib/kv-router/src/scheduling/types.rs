@@ -455,6 +455,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,
