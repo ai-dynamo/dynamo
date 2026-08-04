@@ -431,6 +431,9 @@ pub trait Bucket: Send + Sync {
     /// The Key should be the name of the item, not including the bucket name.
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
+    /// Replace an existing item without creating a missing key.
+    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError>;
+
     /// Delete an item from the bucket
     /// The Key should be the name of the item, not including the bucket name.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;

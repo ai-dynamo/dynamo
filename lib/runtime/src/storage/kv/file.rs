@@ -387,6 +387,14 @@ impl Bucket for Directory {
         Ok(StoreOutcome::Created(revision))
     }
 
+    async fn replace(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        let full_path = self.p.join(key.url_safe().as_ref());
+        if !full_path.exists() {
+            return Err(StoreError::MissingKey(key.to_string()));
+        }
+        self.insert(key, value, 1).await
+    }
+
     /// Read a file from the directory
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let safe_key = key.url_safe();

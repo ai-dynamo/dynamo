@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::DiscoveryInstance;
-use dynamo_runtime::discovery::DiscoverySpec;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -25,7 +24,7 @@ use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 
-use runtime_config::{ModelRuntimeConfig, TokenizerBackend};
+use runtime_config::{ModelRuntimeConfig, TOPOLOGY_TAINT_PREFIX, TokenizerBackend};
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -479,6 +478,70 @@ pub async fn register_model_card(
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
+    Ok(())
+}
+
+/// Replace the caller-managed taints on this worker's existing model card.
+pub async fn update_model_taints(
+    endpoint: &Endpoint,
+    taints: HashSet<String>,
+    lora_name: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(taint) = taints
+        .iter()
+        .find(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+    {
+        anyhow::bail!("taint '{taint}' uses reserved prefix '{TOPOLOGY_TAINT_PREFIX}'")
+    }
+
+    let endpoint_id = endpoint.id();
+    let instance_id = endpoint.drt().connection_id();
+    let model_suffix = derive_lora_suffix(lora_name);
+    let discovery = endpoint.drt().discovery();
+    let existing = discovery
+        .list(DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        })
+        .await?
+        .into_iter()
+        .find(|instance| {
+            matches!(
+                instance,
+                DiscoveryInstance::Model {
+                    instance_id: candidate_instance_id,
+                    model_suffix: candidate_suffix,
+                    ..
+                } if *candidate_instance_id == instance_id && candidate_suffix == &model_suffix
+            )
+        })
+        .with_context(|| {
+            let suffix = model_suffix
+                .as_deref()
+                .map(|suffix| format!("/{suffix}"))
+                .unwrap_or_default();
+            format!(
+                "model discovery record {}/{}/{}/{instance_id:x}{suffix} is not registered",
+                endpoint_id.namespace, endpoint_id.component, endpoint_id.name
+            )
+        })?;
+
+    let mut card: ModelDeploymentCard = existing.deserialize_model()?;
+    card.runtime_config.taints = taints;
+    card.runtime_config.add_topology_taints();
+    card.runtime_config
+        .validate_config()
+        .map_err(anyhow::Error::msg)?;
+
+    let spec = DiscoverySpec::from_model_with_suffix(
+        endpoint_id.namespace,
+        endpoint_id.component,
+        endpoint_id.name,
+        &card,
+        model_suffix,
+    )?;
+    discovery.update_model(spec).await?;
     Ok(())
 }
 

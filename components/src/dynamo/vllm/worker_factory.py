@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
@@ -25,7 +26,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
@@ -1093,7 +1094,12 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
+        self.register_engine_routes(
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=lora_enabled,
+        )
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -1360,7 +1366,10 @@ class WorkerFactory:
 
         # Register engine routes
         self.register_engine_routes(
-            runtime, handler, lora_enabled=config.engine_args.enable_lora
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=config.engine_args.enable_lora,
         )
 
         was_failover = await self._maybe_wait_for_failover_lock(
@@ -1501,6 +1510,7 @@ class WorkerFactory:
     def register_engine_routes(
         self,
         runtime: DistributedRuntime,
+        generate_endpoint: Endpoint,
         handler: BaseWorkerHandler,
         lora_enabled: bool = False,
     ) -> None:
@@ -1508,7 +1518,9 @@ class WorkerFactory:
 
         Args:
             runtime: The DistributedRuntime instance to register routes on.
+            generate_endpoint: Worker endpoint whose model taints can be updated.
         """
+        register_model_taint_route(runtime, generate_endpoint)
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
         runtime.register_engine_route("control/sleep", handler.sleep)
