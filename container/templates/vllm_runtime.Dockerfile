@@ -44,11 +44,16 @@ ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% elif device == "rocm" %}
+ENV NIXL_PREFIX=/opt/amd/amd_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% endif %}
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
+{% if device != "rocm" %}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% endif %}
 {% else %}
 # Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
@@ -94,6 +99,9 @@ COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
 # XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
 COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% elif device == "rocm" %}
+# ROCm NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
+COPY --chown=dynamo:0 --from=wheel_builder /opt/amd/amd_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
 # Copy NIXL Python wheels
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
@@ -129,8 +137,18 @@ RUN apt-get update && \
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
-{% if device != "cuda" %}
+{# ROCm's vllm-openai-rocm base uses the system interpreter (no /opt/venv), so it
+   targets --system like cuda; xpu/cpu bases carry a venv at /opt/venv. #}
+{% set pip_target = "--system" if device in ("cuda", "rocm") else "--python /opt/venv/bin/python" %}
+{# Deliberately skipped on rocm. The wheel_builder emits a real nixl_rocm module
+   (-Dwheel_variant=rocm), so it no longer overwrites nixl_cu12 the way the
+   variant-less build did. Installing the PyPI nixl-cu12 alongside it puts two
+   NIXL pybind11 extensions in one interpreter, and whichever loads second dies
+   with:
+       ImportError: generic_type: type "nixl_thread_sync_t" is already registered!
+   vLLM reaches NIXL through `rixl` on ROCm (see the rixl re-export below), so
+   the meta package is not needed. #}
+{% if device not in ("cuda", "rocm") %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
 #
@@ -153,7 +171,37 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 {% if device != "cuda" %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
+{# On rocm install ONLY the built bindings wheel. The wheelhouse also holds the
+   `nixl` meta wheel, whose loader hunts for a CUDA backend and raises
+   "No NIXL CUDA backend found"; depending on resolver ordering it can also land
+   on top of the real nixl_rocm package and break it. #}
+{% if device == "rocm" %}
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl_rocm-*.whl
+{% else %}
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+{% endif %}
+
+{% if device == "rocm" %}
+{# vllm/distributed/nixl_utils.py imports `rixl._api` when current_platform.is_rocm().
+   RIXL is not the implementation here: this is a name-only namespace that
+   re-exports the upstream nixl_rocm built in wheel_builder. Asserting the
+   re-export resolves keeps a silently-broken KV path from shipping. #}
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    mkdir -p "${SITE_PACKAGES}/rixl" && \
+    printf 'from nixl_rocm import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/__init__.py" && \
+    printf 'from nixl_rocm._api import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_api.py" && \
+    printf 'from nixl_rocm._bindings import *  # noqa: F401,F403\n' > "${SITE_PACKAGES}/rixl/_bindings.py" && \
+    python3 -c "import importlib.util, sys; \
+spec = importlib.util.find_spec('nixl_rocm'); \
+sys.exit('nixl_rocm not importable -- check -Dwheel_variant=rocm in wheel_builder') if spec is None else None" && \
+    python3 -c "import importlib.util, sys; \
+sys.exit('nixl_cu12 must not be co-installed with nixl_rocm: two NIXL pybind11 \
+extensions in one interpreter abort with \'nixl_thread_sync_t is already registered\'') \
+if importlib.util.find_spec('nixl_cu12') is not None else None" && \
+    python3 -c "from rixl._api import nixl_agent; from nixl_rocm._api import nixl_agent as direct; \
+assert nixl_agent is direct, 'rixl shim does not resolve to nixl_rocm'; \
+print('rixl -> nixl_rocm re-export OK')"
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
@@ -190,8 +238,12 @@ RUN set -eux; \
         jq; \
     rm -rf /var/lib/apt/lists/*
 
+{% if device != "rocm" %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
+{# Skipped on rocm: vllm_omni_ref is pinned to a build that monkeypatches
+   vllm.v1.request.Request for vLLM 0.23's positional construction, while the
+   rocm runtime image ships vLLM 0.26. Layering it would break every worker. #}
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -199,6 +251,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -337,13 +390,17 @@ ENTRYPOINT []
 
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
-   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
-{% if target not in ("dev", "local-dev") %}
+   already skips them, and their pre_runtime carries no dynamo venv to scan.
+   Also skipped for rocm, matching the xpu precedent: the third-party accelerator
+   runtime image is not part of an NVIDIA release, and its vendored packages
+   (e.g. triton_kernels, which carries no license metadata) are not covered by
+   this policy's overrides. The publishing vendor runs its own audit. #}
+{% if target not in ("dev", "local-dev") and device != "rocm" %}
 {% include "templates/compliance.Dockerfile" %}
 {% endif %}
 
 
 FROM pre_runtime AS runtime
-{% if target not in ("dev", "local-dev") %}
+{% if target not in ("dev", "local-dev") and device != "rocm" %}
 COPY --from=licenses /legal /legal
 {% endif %}

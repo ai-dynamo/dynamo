@@ -38,7 +38,7 @@ WORKDIR /workspace
 # `COPY --from=wheel_builder /opt/dynamo/rust-licenses` never fails, even for
 # targets that build no wheels. runtime_wheel_builder populates it post-build.
 RUN mkdir -p /opt/dynamo/rust-licenses
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "xpu" or device == "cpu" or device == "rocm" %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim \
@@ -84,7 +84,7 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "xpu" or device == "cpu" or device == "rocm" %}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -210,7 +210,7 @@ ENV PROTOC=/usr/local/bin/protoc
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "xpu" or device == "cpu" or device == "rocm" %}
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}
 {% else %}
 ENV CUDA_PATH=/usr/local/cuda \
@@ -309,7 +309,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
-    if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+    if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ] || [ "$DEVICE" = "rocm" ]; then \
     apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
@@ -407,6 +407,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --with-gdrcopy=/usr/local   \
         --with-efa                  \
         --enable-mt;                 \
+    elif [ "$DEVICE" = "rocm" ]; then \
+     ./contrib/configure-release     \
+        --prefix=/usr/local/ucx     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-rocm=/opt/rocm       \
+        --with-verbs                \
+        --with-dm                   \
+        --without-cuda              \
+        --enable-mt;                 \
     elif [ "$DEVICE" = "cpu" ]; then  \
      ./contrib/configure-release     \
         --prefix=/usr/local/ucx     \
@@ -419,6 +433,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --with-verbs                \
         --without-cuda              \
         --enable-mt;                 \
+    else \
+     echo "UCX: unsupported DEVICE=$DEVICE" >&2; exit 1; \
      fi && \
      make -j &&                      \
      make -j install-strip &&        \
@@ -676,9 +692,16 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "xpu" ]; then \
         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \
+    elif [ "$DEVICE" = "rocm" ]; then \
+        meson setup build/ --prefix=/opt/amd/amd_nixl --buildtype=release \
+            -Ducx_path="/usr/local/ucx" \
+            -Dwheel_variant=rocm \
+            -Denable_plugins="UCX,POSIX"; \
     elif [ "$DEVICE" = "cpu" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
             -Ducx_path="/usr/local/ucx"; \
+    else \
+        echo "NIXL: unsupported DEVICE=$DEVICE" >&2; exit 1; \
     fi && \
     cd build && \
     ninja && \
@@ -694,6 +717,11 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu \
 ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl
+{% elif device == "rocm" %}
+{# ROCm only supports x86_64; no ARCH_ALT ARG needed #}
+ENV NIXL_LIB_DIR=/opt/amd/amd_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/amd/amd_nixl/lib/x86_64-linux-gnu/plugins \
+    NIXL_PREFIX=/opt/amd/amd_nixl
 {% else %}
 ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
@@ -719,7 +747,17 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /workspace/nixl && \
+{% if device == "rocm" %}
+{# Without this the meson-python build re-autodetects the variant from the CUDA
+   major and emits a module literally named nixl_cu12, so `import nixl_rocm`
+   fails even though the build is ROCm. Must match the meson setup above. #}
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION \
+        --config-setting=setup-args=-Dwheel_variant=rocm \
+        --config-setting=setup-args=-Denable_plugins=UCX,POSIX \
+        --config-setting=setup-args=-Ducx_path=/usr/local/ucx
+{% else %}
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+{% endif %}
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
@@ -759,7 +797,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
                 --plat manylinux_2_28_${ARCH_ALT} \
                 --wheel-dir /opt/dynamo/dist \
                 target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ] || [ "$DEVICE" = "rocm" ]; then \
             cp target/wheels/*.whl /opt/dynamo/dist/; \
         fi; \
     fi && \

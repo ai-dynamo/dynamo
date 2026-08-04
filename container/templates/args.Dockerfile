@@ -19,7 +19,15 @@ ARG DEVICE={{ device }}
    propagates to every included template, not just this one. #}
 
 # Python/CUDA configuration
+{# Per-device override, mirroring nixl_ref/enable_kvbm below. The wheel_builder
+   venv is created with this interpreter, so it must match the runtime image or
+   the NIXL wheel it produces is unusable there (e.g. a cp312 wheel cannot install
+   into the Python 3.10 sglang ROCm image). #}
+{% if "python_version" in context[framework].get(device_key, {}) -%}
+ARG PYTHON_VERSION={{ context[framework][device_key].python_version }}
+{% else -%}
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
+{% endif -%}
 {% if device == "cuda" -%}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
@@ -34,7 +42,9 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" or device == "cpu" %}
+{# ROCm builds in its own base so UCX/NIXL compile against the image's /opt/rocm
+   and link the same glibc/Python as the runtime. #}
+{% if device == "xpu" or device == "cpu" or device == "rocm" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
@@ -44,7 +54,12 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
+{# Per-device override wins, mirroring nixl_ref below. #}
+{% if "enable_kvbm" in context[framework].get(device_key, {}) -%}
+ARG ENABLE_KVBM={{ context[framework][device_key].enable_kvbm }}
+{% else -%}
 ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
+{% endif -%}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
