@@ -3,737 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <cuda.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <algorithm>
-#include <array>
 #include <cerrno>
-#include <chrono>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
-#include <vector>
 
-#include "custom_storage_operation.h"
+#include "roundtrip_common.hpp"
+#include "storage.hpp"
+#include "workload.hpp"
 
-namespace {
-
-namespace fs = std::filesystem;
-using Clock = std::chrono::steady_clock;
-namespace compat = cuda_checkpoint_compat;
-namespace custom_storage = cuda_checkpoint_custom_storage;
-
-constexpr size_t kDefaultBytes = 64ULL * 1024ULL * 1024ULL;
-constexpr size_t kCopyChunkBytes = 16ULL * 1024ULL * 1024ULL;
-constexpr unsigned int kLockTimeoutMs = 30'000;
-constexpr unsigned int kWatchdogSeconds = 120;
-constexpr std::string_view kExtentFilename = "checkpoint.bin";
-
-volatile sig_atomic_t g_owned_child_pid = 0;
-
-enum class CorruptionMode {
-  kNone,
-  kTruncate,
-  kSameSize,
-};
-
-struct Options {
-  fs::path artifact_dir;
-  size_t bytes = kDefaultBytes;
-  int device = 0;
-  CorruptionMode corruption = CorruptionMode::kNone;
-};
-
-struct ReadyMessage {
-  uint64_t device_ptr;
-  uint64_t bytes;
-};
-
-struct Extent {
-  int device = 0;
-  std::string device_uuid;
-  uint64_t checkpoint_ptr = 0;
-  uint64_t stream = 0;
-  size_t size = 0;
-};
-
-struct Artifact {
-  uint64_t application_ptr = 0;
-  size_t application_bytes = 0;
-  Extent extent;
-};
-
-[[noreturn]] void
-ThrowErrno(std::string_view operation)
-{
-  throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
-}
-
-std::string
-CudaError(CUresult status)
-{
-  const char* name = nullptr;
-  const char* message = nullptr;
-  (void)cuGetErrorName(status, &name);
-  (void)cuGetErrorString(status, &message);
-  return std::string(name == nullptr ? "CUDA_ERROR_UNKNOWN" : name) + ": " +
-         (message == nullptr ? "unknown CUDA error" : message);
-}
-
-void
-CheckCUDA(CUresult status, std::string_view operation)
-{
-  if (status != CUDA_SUCCESS) {
-    throw std::runtime_error(std::string(operation) + " failed: " + CudaError(status));
-  }
-}
-
-void
-WarnCUDA(CUresult status, const char* operation) noexcept
-{
-  if (status == CUDA_SUCCESS) {
-    return;
-  }
-  const char* name = nullptr;
-  (void)cuGetErrorName(status, &name);
-  std::fprintf(
-      stderr, "warning: %s failed during cleanup: %s (%d)\n", operation, name == nullptr ? "CUDA_ERROR_UNKNOWN" : name,
-      static_cast<int>(status));
-}
-
-std::string
-DeviceUUID(CUdevice device)
-{
-  CUuuid uuid{};
-  CheckCUDA(cuDeviceGetUuid(&uuid, device), "cuDeviceGetUuid");
-  static constexpr char hex[] = "0123456789abcdef";
-  std::string formatted = "GPU-";
-  formatted.reserve(40);
-  for (size_t index = 0; index < sizeof(uuid.bytes); ++index) {
-    if (index == 4 || index == 6 || index == 8 || index == 10) {
-      formatted.push_back('-');
-    }
-    const auto byte = static_cast<unsigned char>(uuid.bytes[index]);
-    formatted.push_back(hex[byte >> 4U]);
-    formatted.push_back(hex[byte & 0x0fU]);
-  }
-  return formatted;
-}
-
-const char*
-ProcessStateName(CUprocessState state)
-{
-  switch (state) {
-    case CU_PROCESS_STATE_RUNNING:
-      return "RUNNING";
-    case CU_PROCESS_STATE_LOCKED:
-      return "LOCKED";
-    case CU_PROCESS_STATE_CHECKPOINTED:
-      return "CHECKPOINTED";
-    case CU_PROCESS_STATE_FAILED:
-      return "FAILED";
-    default:
-      return "UNKNOWN";
-  }
-}
-
-void
-ExpectProcessState(pid_t pid, CUprocessState expected, std::string_view stage)
-{
-  CUprocessState actual{};
-  CheckCUDA(cuCheckpointProcessGetState(pid, &actual), "cuCheckpointProcessGetState");
-  if (actual != expected) {
-    throw std::runtime_error(
-        std::string(stage) + " left process in " + ProcessStateName(actual) + "; expected " +
-        ProcessStateName(expected));
-  }
-  std::cout << "state stage=" << stage << " value=" << ProcessStateName(actual) << '\n';
-}
-
-[[noreturn]] void
-WatchdogExpired(int)
-{
-  static constexpr char message[] = "cuda-custom-storage-roundtrip: 120s watchdog expired\n";
-  const ssize_t ignored = write(STDERR_FILENO, message, sizeof(message) - 1);
-  (void)ignored;
-  const pid_t child = static_cast<pid_t>(g_owned_child_pid);
-  if (child > 0) {
-    (void)kill(child, SIGKILL);
-  }
-  _exit(124);
-}
-
-class Watchdog {
- public:
-  Watchdog()
-  {
-    struct sigaction action {};
-    action.sa_handler = WatchdogExpired;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
-    if (sigaction(SIGALRM, &action, &old_action_) != 0) {
-      ThrowErrno("install watchdog signal handler");
-    }
-    installed_ = true;
-  }
-  Watchdog(const Watchdog&) = delete;
-  Watchdog& operator=(const Watchdog&) = delete;
-  ~Watchdog()
-  {
-    (void)alarm(0);
-    g_owned_child_pid = 0;
-    if (installed_) {
-      (void)sigaction(SIGALRM, &old_action_, nullptr);
-    }
-  }
-  void Arm(pid_t child)
-  {
-    g_owned_child_pid = static_cast<sig_atomic_t>(child);
-    (void)alarm(kWatchdogSeconds);
-  }
-
- private:
-  struct sigaction old_action_ {};
-  bool installed_ = false;
-};
-
-int
-RemainingMilliseconds(Clock::time_point deadline)
-{
-  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-  if (remaining <= 0) {
-    return 0;
-  }
-  return static_cast<int>(std::min<int64_t>(remaining, std::numeric_limits<int>::max()));
-}
-
-void
-WaitReadable(int fd, Clock::time_point deadline, std::string_view operation)
-{
-  struct pollfd descriptor {
-    .fd = fd, .events = POLLIN, .revents = 0,
-  };
-  while (true) {
-    const int timeout_ms = RemainingMilliseconds(deadline);
-    if (timeout_ms == 0) {
-      throw std::runtime_error(std::string(operation) + " timed out");
-    }
-    const int result = poll(&descriptor, 1, timeout_ms);
-    if (result > 0) {
-      if ((descriptor.revents & (POLLIN | POLLHUP)) != 0) {
-        return;
-      }
-      throw std::runtime_error(std::string(operation) + " failed: pipe reported an error");
-    }
-    if (result == 0) {
-      throw std::runtime_error(std::string(operation) + " timed out");
-    }
-    if (errno != EINTR) {
-      ThrowErrno(operation);
-    }
-  }
-}
-
-void
-WriteAll(int fd, const void* data, size_t size)
-{
-  const auto* bytes = static_cast<const unsigned char*>(data);
-  size_t done = 0;
-  while (done < size) {
-    const ssize_t result = write(fd, bytes + done, size - done);
-    if (result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      ThrowErrno("write");
-    }
-    if (result == 0) {
-      throw std::runtime_error("write returned zero bytes");
-    }
-    done += static_cast<size_t>(result);
-  }
-}
-
-void
-ReadAll(int fd, void* data, size_t size, Clock::time_point deadline = Clock::time_point::max())
-{
-  auto* bytes = static_cast<unsigned char*>(data);
-  size_t done = 0;
-  while (done < size) {
-    if (deadline != Clock::time_point::max()) {
-      WaitReadable(fd, deadline, "pipe read");
-    }
-    const ssize_t result = read(fd, bytes + done, size - done);
-    if (result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      ThrowErrno("read");
-    }
-    if (result == 0) {
-      throw std::runtime_error("unexpected EOF");
-    }
-    done += static_cast<size_t>(result);
-  }
-}
-
-void
-PWriteAll(int fd, const void* data, size_t size, size_t offset)
-{
-  const auto* bytes = static_cast<const unsigned char*>(data);
-  size_t done = 0;
-  while (done < size) {
-    const ssize_t result = pwrite(fd, bytes + done, size - done, static_cast<off_t>(offset + done));
-    if (result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      ThrowErrno("pwrite");
-    }
-    if (result == 0) {
-      throw std::runtime_error("pwrite returned zero bytes");
-    }
-    done += static_cast<size_t>(result);
-  }
-}
-
-void
-PReadAll(int fd, void* data, size_t size, size_t offset)
-{
-  auto* bytes = static_cast<unsigned char*>(data);
-  size_t done = 0;
-  while (done < size) {
-    const ssize_t result = pread(fd, bytes + done, size - done, static_cast<off_t>(offset + done));
-    if (result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      ThrowErrno("pread");
-    }
-    if (result == 0) {
-      throw std::runtime_error("artifact extent ended before its declared size");
-    }
-    done += static_cast<size_t>(result);
-  }
-}
-
-std::vector<unsigned char>
-Pattern(size_t size, size_t logical_offset)
-{
-  std::vector<unsigned char> pattern(size);
-  for (size_t index = 0; index < size; ++index) {
-    const uint64_t position = logical_offset + index;
-    pattern[index] = static_cast<unsigned char>(((position * 1315423911ULL) ^ (position >> 7U) ^ 0x5aU) & 0xffU);
-  }
-  return pattern;
-}
-
-class ScopedFd {
- public:
-  explicit ScopedFd(int fd = -1) : fd_(fd) {}
-  ScopedFd(const ScopedFd&) = delete;
-  ScopedFd& operator=(const ScopedFd&) = delete;
-  ScopedFd(ScopedFd&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
-  ~ScopedFd()
-  {
-    if (fd_ >= 0) {
-      (void)close(fd_);
-    }
-  }
-  int get() const { return fd_; }
-
- private:
-  int fd_;
-};
-
-class ChildProcess {
- public:
-  explicit ChildProcess(pid_t pid) : pid_(pid) {}
-  ChildProcess(const ChildProcess&) = delete;
-  ChildProcess& operator=(const ChildProcess&) = delete;
-  ~ChildProcess() { KillAndWait(); }
-
-  pid_t pid() const { return pid_; }
-
-  int Wait(Clock::time_point deadline)
-  {
-    while (true) {
-      sigset_t old_set;
-      BlockWatchdog(&old_set);
-      int status = 0;
-      const pid_t result = waitpid(pid_, &status, WNOHANG);
-      if (result == pid_) {
-        InvalidateWhileBlocked();
-        RestoreSignals(&old_set);
-        return status;
-      }
-      const int saved_errno = errno;
-      RestoreSignals(&old_set);
-      errno = saved_errno;
-      if (result < 0 && errno != EINTR) {
-        ThrowErrno("waitpid");
-      }
-      if (RemainingMilliseconds(deadline) == 0) {
-        throw std::runtime_error("waiting for workload exit timed out");
-      }
-      struct timespec pause {
-        .tv_sec = 0, .tv_nsec = 10'000'000,
-      };
-      (void)nanosleep(&pause, nullptr);
-    }
-  }
-
-  void KillAndWait() noexcept
-  {
-    if (pid_ <= 0) {
-      return;
-    }
-    if (kill(pid_, SIGKILL) != 0 && errno != ESRCH) {
-      std::fprintf(stderr, "warning: failed to kill workload pid %d: %s\n", pid_, std::strerror(errno));
-    }
-    while (true) {
-      sigset_t old_set;
-      BlockWatchdog(&old_set);
-      const pid_t result = waitpid(pid_, nullptr, WNOHANG);
-      const int saved_errno = errno;
-      if (result == pid_ || (result < 0 && saved_errno == ECHILD)) {
-        InvalidateWhileBlocked();
-        RestoreSignals(&old_set);
-        return;
-      }
-      RestoreSignals(&old_set);
-      if (result < 0 && saved_errno != EINTR) {
-        std::fprintf(stderr, "warning: failed to reap workload pid %d: %s\n", pid_, std::strerror(saved_errno));
-        BlockWatchdog(&old_set);
-        InvalidateWhileBlocked();
-        RestoreSignals(&old_set);
-        return;
-      }
-      struct timespec pause {
-        .tv_sec = 0, .tv_nsec = 10'000'000,
-      };
-      (void)nanosleep(&pause, nullptr);
-    }
-  }
-
- private:
-  static void BlockWatchdog(sigset_t* old_set) noexcept
-  {
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGALRM);
-    (void)sigprocmask(SIG_BLOCK, &set, old_set);
-  }
-
-  static void RestoreSignals(const sigset_t* old_set) noexcept { (void)sigprocmask(SIG_SETMASK, old_set, nullptr); }
-
-  void InvalidateWhileBlocked() noexcept
-  {
-    if (g_owned_child_pid == static_cast<sig_atomic_t>(pid_)) {
-      g_owned_child_pid = 0;
-    }
-    pid_ = -1;
-  }
-
-  pid_t pid_ = -1;
-};
-
-void
-CreatePipe(int descriptors[2])
-{
-  if (pipe(descriptors) != 0) {
-    ThrowErrno("pipe");
-  }
-  for (int index = 0; index < 2; ++index) {
-    const int flags = fcntl(descriptors[index], F_GETFD);
-    if (flags < 0 || fcntl(descriptors[index], F_SETFD, flags | FD_CLOEXEC) != 0) {
-      const int saved_errno = errno;
-      (void)close(descriptors[0]);
-      (void)close(descriptors[1]);
-      errno = saved_errno;
-      ThrowErrno("mark pipe close-on-exec");
-    }
-  }
-}
-
-class PinnedBuffer {
- public:
-  explicit PinnedBuffer(size_t size) : size_(size)
-  {
-    CheckCUDA(cuMemHostAlloc(&data_, size_, CU_MEMHOSTALLOC_PORTABLE), "cuMemHostAlloc");
-  }
-  PinnedBuffer(const PinnedBuffer&) = delete;
-  PinnedBuffer& operator=(const PinnedBuffer&) = delete;
-  ~PinnedBuffer()
-  {
-    if (data_ != nullptr) {
-      WarnCUDA(cuMemFreeHost(data_), "cuMemFreeHost");
-    }
-  }
-  void* data() const { return data_; }
-  size_t size() const { return size_; }
-
- private:
-  void* data_ = nullptr;
-  size_t size_ = 0;
-};
-
-class RetainedPrimaryContexts {
- public:
-  explicit RetainedPrimaryContexts(int requested_device)
-  {
-    CheckCUDA(cuDeviceGet(&device_, requested_device), "cuDeviceGet");
-    CheckCUDA(cuDevicePrimaryCtxRetain(&context_, device_), "cuDevicePrimaryCtxRetain");
-  }
-  RetainedPrimaryContexts(const RetainedPrimaryContexts&) = delete;
-  RetainedPrimaryContexts& operator=(const RetainedPrimaryContexts&) = delete;
-  ~RetainedPrimaryContexts()
-  {
-    if (context_ != nullptr) {
-      WarnCUDA(cuDevicePrimaryCtxRelease(device_), "cuDevicePrimaryCtxRelease");
-    }
-  }
-  CUcontext context() const { return context_; }
-  CUdevice device() const { return device_; }
-
- private:
-  CUdevice device_ = 0;
-  CUcontext context_ = nullptr;
-};
-
-void
-ValidateExtentFile(const fs::path& path, size_t expected_size)
-{
-  std::error_code error;
-  const uintmax_t size = fs::file_size(path, error);
-  if (error || size != expected_size) {
-    throw std::runtime_error("checkpoint file has the wrong size");
-  }
-}
-
-void
-CorruptExtentSameSize(const fs::path& path, size_t size)
-{
-  ScopedFd file(open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW));
-  if (file.get() < 0) {
-    ThrowErrno("open artifact extent for corruption");
-  }
-  std::vector<unsigned char> zeros(std::min(kCopyChunkBytes, size), 0);
-  for (size_t offset = 0; offset < size;) {
-    const size_t length = std::min(zeros.size(), size - offset);
-    PWriteAll(file.get(), zeros.data(), length, offset);
-    offset += length;
-  }
-  if (fsync(file.get()) != 0) {
-    ThrowErrno("fsync corrupted artifact extent");
-  }
-}
-
-void
-CopyExtent(const compat::PerDeviceData& device_data, CUcontext context, const fs::path& path, bool checkpoint)
-{
-  CheckCUDA(cuCtxSetCurrent(context), "cuCtxSetCurrent");
-
-  const size_t buffer_size = std::min(kCopyChunkBytes, device_data.size);
-  PinnedBuffer pinned(buffer_size);
-  const int flags = checkpoint ? O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC : O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
-  ScopedFd file(open(path.c_str(), flags, 0600));
-  if (file.get() < 0) {
-    ThrowErrno("open artifact extent");
-  }
-  if (checkpoint && ftruncate(file.get(), static_cast<off_t>(device_data.size)) != 0) {
-    ThrowErrno("size artifact extent");
-  }
-
-  for (size_t offset = 0; offset < device_data.size;) {
-    const size_t length = std::min(pinned.size(), device_data.size - offset);
-    if (checkpoint) {
-      CheckCUDA(
-          cuMemcpyDtoHAsync(pinned.data(), device_data.devPtr + offset, length, device_data.stream),
-          "cuMemcpyDtoHAsync");
-      CheckCUDA(cuStreamSynchronize(device_data.stream), "checkpoint stream synchronization");
-      PWriteAll(file.get(), pinned.data(), length, offset);
-    } else {
-      PReadAll(file.get(), pinned.data(), length, offset);
-      CheckCUDA(
-          cuMemcpyHtoDAsync(device_data.devPtr + offset, pinned.data(), length, device_data.stream),
-          "cuMemcpyHtoDAsync");
-      CheckCUDA(cuStreamSynchronize(device_data.stream), "restore stream synchronization");
-    }
-    offset += length;
-  }
-  if (checkpoint) {
-    if (fsync(file.get()) != 0) {
-      ThrowErrno("fsync artifact extent");
-    }
-  }
-}
-
-void
-ValidateStandaloneStorageInfo(const compat::StorageInfo* info)
-{
-  if (info == nullptr || info->deviceCount != 1 || info->perDeviceData == nullptr ||
-      info->perDeviceData[0].devPtr == 0 || info->perDeviceData[0].size == 0) {
-    throw std::runtime_error("standalone proof requires exactly one valid CustomStorage device extent");
-  }
-}
-
-Artifact
-CheckpointProcess(
-    pid_t pid, const fs::path& directory, uint64_t application_ptr, size_t application_bytes, int requested_device,
-    const std::string& device_uuid, CUcontext context, compat::OperationCompleteFn operation_complete)
-{
-  CUcheckpointLockArgs lock_args{};
-  lock_args.timeoutMs = kLockTimeoutMs;
-  CheckCUDA(cuCheckpointProcessLock(pid, &lock_args), "cuCheckpointProcessLock");
-  ExpectProcessState(pid, CU_PROCESS_STATE_LOCKED, "after_lock");
-
-  custom_storage::Operation operation;
-  CheckCUDA(operation.BeginCheckpoint(pid), "cuCheckpointProcessCheckpoint(CustomStorage)");
-  const compat::StorageInfo* info = operation.storage_info();
-  ValidateStandaloneStorageInfo(info);
-
-  Artifact artifact{
-      .application_ptr = application_ptr,
-      .application_bytes = application_bytes,
-      .extent =
-          {
-              .device = requested_device,
-              .device_uuid = device_uuid,
-              .checkpoint_ptr = info->perDeviceData[0].devPtr,
-              .stream = reinterpret_cast<uintptr_t>(info->perDeviceData[0].stream),
-              .size = info->perDeviceData[0].size,
-          },
-  };
-  const fs::path checkpoint_file = directory / kExtentFilename;
-  CopyExtent(info->perDeviceData[0], context, checkpoint_file, true);
-  try {
-    CheckCUDA(operation.Complete(operation_complete), "cuCheckpointOperationComplete(checkpoint)");
-    ExpectProcessState(pid, CU_PROCESS_STATE_CHECKPOINTED, "after_checkpoint_completion");
-  }
-  catch (...) {
-    std::error_code ignored;
-    (void)fs::remove(checkpoint_file, ignored);
-    throw;
-  }
-  return artifact;
-}
-
-void
-RestoreProcess(
-    pid_t pid, const fs::path& directory, const Artifact& artifact, CUcontext context,
-    compat::OperationCompleteFn operation_complete)
-{
-  custom_storage::Operation operation;
-  CheckCUDA(operation.BeginRestore(pid), "cuCheckpointProcessRestore(CustomStorage)");
-  const compat::StorageInfo* info = operation.storage_info();
-  ValidateStandaloneStorageInfo(info);
-  if (info->perDeviceData[0].size != artifact.extent.size) {
-    throw std::runtime_error("restore returned a different device extent size");
-  }
-  CopyExtent(info->perDeviceData[0], context, directory / kExtentFilename, false);
-  CheckCUDA(operation.Complete(operation_complete), "cuCheckpointOperationComplete(restore)");
-  ExpectProcessState(pid, CU_PROCESS_STATE_LOCKED, "after_restore_completion");
-  CUcheckpointUnlockArgs unlock_args{};
-  CheckCUDA(cuCheckpointProcessUnlock(pid, &unlock_args), "cuCheckpointProcessUnlock");
-  ExpectProcessState(pid, CU_PROCESS_STATE_RUNNING, "after_unlock");
-}
-
-void
-FillDevicePattern(CUdeviceptr pointer, size_t size)
-{
-  for (size_t offset = 0; offset < size;) {
-    const size_t length = std::min(kCopyChunkBytes, size - offset);
-    const std::vector<unsigned char> pattern = Pattern(length, offset);
-    CheckCUDA(cuMemcpyHtoD(pointer + offset, pattern.data(), length), "initialize application buffer");
-    offset += length;
-  }
-}
-
-void
-VerifyDevicePattern(CUdeviceptr pointer, size_t size)
-{
-  std::vector<unsigned char> actual(std::min(kCopyChunkBytes, size));
-  for (size_t offset = 0; offset < size;) {
-    const size_t length = std::min(actual.size(), size - offset);
-    const std::vector<unsigned char> expected = Pattern(length, offset);
-    CheckCUDA(cuMemcpyDtoH(actual.data(), pointer + offset, length), "read restored application buffer");
-    const auto mismatch =
-        std::mismatch(actual.begin(), actual.begin() + static_cast<ptrdiff_t>(length), expected.begin());
-    if (mismatch.first != actual.begin() + static_cast<ptrdiff_t>(length)) {
-      const size_t mismatch_offset = offset + static_cast<size_t>(mismatch.first - actual.begin());
-      throw std::runtime_error("restored application bytes differ at offset " + std::to_string(mismatch_offset));
-    }
-    offset += length;
-  }
-}
-
-int
-RunWorkload(int ready_fd, int command_fd, const Options& options)
-{
-  try {
-    CheckCUDA(cuInit(0), "workload cuInit");
-    CUdevice device = 0;
-    CUcontext context = nullptr;
-    CheckCUDA(cuDeviceGet(&device, options.device), "workload cuDeviceGet");
-    CheckCUDA(cuDevicePrimaryCtxRetain(&context, device), "workload cuDevicePrimaryCtxRetain");
-    CheckCUDA(cuCtxSetCurrent(context), "workload cuCtxSetCurrent");
-
-    CUdeviceptr application = 0;
-    CUdeviceptr scratch = 0;
-    CheckCUDA(cuMemAlloc(&application, options.bytes), "workload application allocation");
-    CheckCUDA(cuMemAlloc(&scratch, 4096), "workload scratch allocation");
-    FillDevicePattern(application, options.bytes);
-
-    const ReadyMessage ready{application, options.bytes};
-    WriteAll(ready_fd, &ready, sizeof(ready));
-    char command = 0;
-    ReadAll(command_fd, &command, sizeof(command));
-    if (command != 'V') {
-      throw std::runtime_error("workload received an invalid command");
-    }
-
-    VerifyDevicePattern(application, options.bytes);
-    CheckCUDA(cuMemsetD8(scratch, 0x5a, 4096), "post-restore CUDA operation");
-    std::array<unsigned char, 4096> scratch_bytes{};
-    CheckCUDA(cuMemcpyDtoH(scratch_bytes.data(), scratch, scratch_bytes.size()), "verify post-restore CUDA operation");
-    if (!std::all_of(scratch_bytes.begin(), scratch_bytes.end(), [](unsigned char value) { return value == 0x5a; })) {
-      throw std::runtime_error("post-restore CUDA operation produced incorrect data");
-    }
-
-    CheckCUDA(cuMemFree(scratch), "workload scratch cleanup");
-    CheckCUDA(cuMemFree(application), "workload application cleanup");
-    CheckCUDA(cuDevicePrimaryCtxRelease(device), "workload primary context cleanup");
-    const char result = 'P';
-    WriteAll(ready_fd, &result, sizeof(result));
-    return 0;
-  }
-  catch (const std::exception& exception) {
-    std::fprintf(stderr, "workload failed: %s\n", exception.what());
-    const char result = 'F';
-    try {
-      WriteAll(ready_fd, &result, sizeof(result));
-    }
-    catch (...) {
-    }
-    return 1;
-  }
-}
+namespace cuda_custom_storage_benchmark { namespace {
 
 bool
 ParseUnsigned(std::string_view value, size_t* result)
@@ -757,6 +45,14 @@ ParseUnsigned(std::string_view value, size_t* result)
   return true;
 }
 
+[[noreturn]] void
+ThrowUsage()
+{
+  throw std::runtime_error(
+      "usage: cuda-custom-storage-roundtrip --artifact-dir <absolute-empty-directory> "
+      "[--bytes N] [--device N] [--truncate-before-restore | --corrupt-before-restore]");
+}
+
 Options
 ParseOptions(int argc, char** argv)
 {
@@ -765,8 +61,12 @@ ParseOptions(int argc, char** argv)
     const std::string argument = argv[index];
     if (argument == "--artifact-dir" && ++index < argc) {
       options.artifact_dir = argv[index];
-    } else if (
-        argument == "--bytes" && ++index < argc && ParseUnsigned(argv[index], &options.bytes) && options.bytes > 0) {
+    } else if (argument == "--bytes" && ++index < argc) {
+      size_t bytes = 0;
+      if (!ParseUnsigned(argv[index], &bytes) || bytes == 0) {
+        ThrowUsage();
+      }
+      options.bytes = bytes;
     } else if (argument == "--device" && ++index < argc) {
       size_t device = 0;
       if (!ParseUnsigned(argv[index], &device) || device > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -778,21 +78,19 @@ ParseOptions(int argc, char** argv)
     } else if (argument == "--corrupt-before-restore" && options.corruption == CorruptionMode::kNone) {
       options.corruption = CorruptionMode::kSameSize;
     } else {
-      throw std::runtime_error(
-          "usage: cuda-custom-storage-roundtrip --artifact-dir <absolute-empty-directory> "
-          "[--bytes N] [--device N] [--truncate-before-restore | --corrupt-before-restore]");
+      ThrowUsage();
     }
   }
   if (options.artifact_dir.empty() || !options.artifact_dir.is_absolute()) {
     throw std::runtime_error("--artifact-dir must name an absolute directory");
   }
+
+  const mode_t previous_umask = umask(0077);
   std::error_code error;
-  if (!fs::create_directory(options.artifact_dir, error) || error) {
+  const bool is_created = fs::create_directory(options.artifact_dir, error);
+  (void)umask(previous_umask);
+  if (!is_created || error) {
     throw std::runtime_error("artifact directory must not already exist and its parent must be writable");
-  }
-  fs::permissions(options.artifact_dir, fs::perms::owner_all, fs::perm_options::replace, error);
-  if (error) {
-    throw std::runtime_error("failed to restrict artifact directory permissions");
   }
   return options;
 }
@@ -815,6 +113,12 @@ Run(const Options& options)
   Watchdog watchdog;
   const pid_t child_pid = fork();
   if (child_pid < 0) {
+    const int saved_errno = errno;
+    (void)close(child_to_parent[0]);
+    (void)close(child_to_parent[1]);
+    (void)close(parent_to_child[0]);
+    (void)close(parent_to_child[1]);
+    errno = saved_errno;
     ThrowErrno("fork");
   }
   if (child_pid == 0) {
@@ -835,18 +139,13 @@ Run(const Options& options)
   ReadyMessage ready{};
   ReadAll(ready_read.get(), &ready, sizeof(ready), deadline);
   CheckCUDA(cuInit(0), "controller cuInit");
-  RetainedPrimaryContexts retained_context(options.device);
+  RetainedPrimaryContext retained_context(options.device);
   const std::string device_uuid = DeviceUUID(retained_context.device());
-  bool custom_storage_available = false;
-  const compat::OperationCompleteFn operation_complete = compat::ResolveOperationComplete(&custom_storage_available);
-  if (!custom_storage_available) {
-    throw std::runtime_error("CUDA driver does not expose CUDA 13.4 CustomStorage");
-  }
   ExpectProcessState(child.pid(), CU_PROCESS_STATE_RUNNING, "before_lock");
 
   const Artifact artifact = CheckpointProcess(
       child.pid(), options.artifact_dir, ready.device_ptr, ready.bytes, options.device, device_uuid,
-      retained_context.context(), operation_complete);
+      retained_context.context());
   if (artifact.application_ptr != ready.device_ptr || artifact.application_bytes != ready.bytes ||
       artifact.extent.device != options.device || artifact.extent.device_uuid != device_uuid) {
     throw std::runtime_error("checkpoint application or device identity changed");
@@ -860,15 +159,20 @@ Run(const Options& options)
   const fs::path checkpoint_file = options.artifact_dir / kExtentFilename;
   ValidateExtentFile(checkpoint_file, artifact.extent.size);
   if (options.corruption == CorruptionMode::kTruncate) {
-    fs::resize_file(checkpoint_file, artifact.extent.size - 1);
+    const size_t truncated_size = artifact.extent.size - 1;
+    fs::resize_file(checkpoint_file, truncated_size);
+    if (ExtentFileSize(checkpoint_file) != truncated_size) {
+      throw std::runtime_error("truncation did not produce the expected artifact size");
+    }
+    bool is_rejected = false;
     try {
       ValidateExtentFile(checkpoint_file, artifact.extent.size);
-      throw std::runtime_error("truncated artifact was incorrectly accepted");
     }
-    catch (const std::runtime_error& error) {
-      if (std::string(error.what()).find("wrong size") == std::string::npos) {
-        throw;
-      }
+    catch (const ExtentSizeMismatch&) {
+      is_rejected = true;
+    }
+    if (!is_rejected) {
+      throw std::runtime_error("truncated artifact was incorrectly accepted");
     }
     child.KillAndWait();
     std::cout << "corruption_check=passed mode=truncated detection=file_size_validation\n";
@@ -880,9 +184,9 @@ Run(const Options& options)
   }
 
   try {
-    RestoreProcess(child.pid(), options.artifact_dir, artifact, retained_context.context(), operation_complete);
+    RestoreProcess(child.pid(), options.artifact_dir, artifact, retained_context.context());
   }
-  catch (const std::exception& error) {
+  catch (const RestoreRejected& error) {
     if (options.corruption == CorruptionMode::kSameSize) {
       child.KillAndWait();
       std::cout << "corruption_check=passed mode=same_size detection=cuda_restore_error error=" << error.what() << '\n';
@@ -893,21 +197,18 @@ Run(const Options& options)
 
   const char verify = 'V';
   WriteAll(command_write.get(), &verify, sizeof(verify));
-  char result = 0;
+  WorkloadResult result = WorkloadResult::kUnexpectedFailure;
   ReadAll(ready_read.get(), &result, sizeof(result), deadline);
   const int child_status = child.Wait(deadline);
-  const bool workload_passed = result == 'P' && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
+  const bool has_child_succeeded = WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
   if (options.corruption == CorruptionMode::kSameSize) {
-    if (workload_passed) {
-      throw std::runtime_error("same-size corruption did not affect restored application state");
-    }
-    if (result != 'F' || !WIFEXITED(child_status) || WEXITSTATUS(child_status) == 0) {
-      throw std::runtime_error("corrupted restore did not produce an explicit workload verification failure");
+    if (result != WorkloadResult::kRestoredBytesMismatch || has_child_succeeded) {
+      throw std::runtime_error("corrupted restore did not produce an explicit restored-byte mismatch");
     }
     std::cout << "corruption_check=passed mode=same_size detection=workload_verification\n";
     return 0;
   }
-  if (!workload_passed) {
+  if (result != WorkloadResult::kPassed || !has_child_succeeded) {
     throw std::runtime_error("workload did not verify restored bytes and post-restore CUDA execution");
   }
 
@@ -916,14 +217,15 @@ Run(const Options& options)
   return 0;
 }
 
-}  // namespace
+}}  // namespace cuda_custom_storage_benchmark
 
 int
 main(int argc, char** argv)
 {
   try {
-    const Options options = ParseOptions(argc, argv);
-    return Run(options);
+    cuda_custom_storage_benchmark::IgnoreBrokenPipeSignal();
+    const cuda_custom_storage_benchmark::Options options = cuda_custom_storage_benchmark::ParseOptions(argc, argv);
+    return cuda_custom_storage_benchmark::Run(options);
   }
   catch (const std::exception& exception) {
     std::fprintf(stderr, "cuda-custom-storage-roundtrip failed: %s\n", exception.what());

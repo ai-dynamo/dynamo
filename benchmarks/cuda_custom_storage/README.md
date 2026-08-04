@@ -8,10 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 This single-GPU harness validates the CUDA 13.4 CustomStorage checkpoint contract without
 Snapshot, CRIU, GMS, HVBM, NIXL, or Kubernetes.
 
-The target-PID CustomStorage operation and capability handling live in
-`deploy/snapshot/cmd/cuda-checkpoint-helper/custom_storage_operation.*`. The harness is
-their smallest consumer. It deliberately supplies its own single-buffer POSIX transfer
-instead of depending on Snapshot's daemon, NIXL engine, or artifact format.
+The target-PID CustomStorage operation and capability handling are benchmark-local. The
+harness deliberately supplies its own single-buffer POSIX transfer instead of depending
+on Snapshot's daemon, NIXL engine, or artifact format. Production integration belongs in
+Snapshot only when the snapshot helper consumes this C++ path.
 
 It forks a standalone CUDA workload that allocates a deterministic local device
 buffer. The controller process then:
@@ -40,12 +40,19 @@ application pointer against the returned extent pointer.
 
 - Linux on x86-64
 - CUDA driver exposing the CUDA 13.4 CustomStorage API
-- CUDA toolkit headers and driver stubs under `CUDA_HOME`
+- CUDA 13.4 or newer toolkit headers and driver stubs under `CUDA_HOME`
 - Permission to checkpoint the child process
 
-The compatibility header temporarily permits a build image with pre-13.4 headers when
-the runtime driver already exposes the 13.4 symbol. Prefer the released CUDA 13.4
-headers as soon as they are available.
+The benchmark intentionally does not recreate CUDA 13.4 declarations when compiling
+against older toolkit headers.
+
+## Source layout
+
+- `roundtrip.cpp` owns argument parsing and controller orchestration.
+- `workload.cpp` owns the child CUDA workload and its typed result protocol.
+- `storage.cpp` owns POSIX extent transfer and checkpoint/restore sequencing.
+- `custom_storage_operation.cpp` owns the benchmark-local CUDA operation state.
+- `roundtrip_common.cpp` owns process, pipe, watchdog, and CUDA utility code.
 
 ## Build
 

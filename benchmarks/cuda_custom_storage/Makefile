@@ -5,18 +5,24 @@ CUDA_HOME ?= /usr/local/cuda
 CXX ?= g++
 CXXFLAGS ?= -O2 -g
 
-TARGET := cuda-custom-storage-roundtrip
-SHARED_DIR := ../../deploy/snapshot/cmd/cuda-checkpoint-helper
-SOURCES := roundtrip.cpp $(SHARED_DIR)/custom_storage_operation.cpp
+BENCHMARK_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+TARGET := $(BENCHMARK_DIR)/cuda-custom-storage-roundtrip
+SOURCES := $(addprefix $(BENCHMARK_DIR)/, \
+	custom_storage_operation.cpp \
+	roundtrip.cpp \
+	roundtrip_common.cpp \
+	storage.cpp \
+	workload.cpp)
+HEADERS := $(wildcard $(BENCHMARK_DIR)/*.hpp)
 
 .PHONY: all clean
 
 all: $(TARGET)
 
-$(TARGET): $(SOURCES) $(SHARED_DIR)/custom_storage_operation.h $(SHARED_DIR)/cuda_checkpoint_compat.h
+$(TARGET): $(SOURCES) $(HEADERS)
 	$(CXX) -std=c++20 $(CXXFLAGS) -Wall -Wextra -Werror \
 		-I$(CUDA_HOME)/include \
-		-I$(SHARED_DIR) \
+		-I$(BENCHMARK_DIR) \
 		-L$(CUDA_HOME)/lib64/stubs \
 		-Wl,-rpath,$(CUDA_HOME)/lib64 \
 		-o $@ $(SOURCES) -lcuda
