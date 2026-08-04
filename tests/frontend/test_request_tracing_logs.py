@@ -20,6 +20,7 @@ and disaggregated (prefill+decode) deployment.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -186,6 +187,12 @@ def assert_error_completion(req_logs):
 # assert_lifecycle_logs() above depend on the debug stream. Resetting this to
 # "info" makes those assertions fail with a count mismatch, not a level error.
 # Use JSONL_ENV_INFO below for tests that need the default operational level.
+#
+# The debug stream costs a fixed startup/registration delta here, not a
+# per-token one: no debug site sits on the token loop, so a 50-token stream
+# logs one line more than a 5-token unary response (measured: frontend 163 vs.
+# 164 lines). read_log_file()/parse_jsonl_logs() therefore stay cheap even for
+# the 2000-token cancellation and crash tests below.
 JSONL_ENV = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "debug"}
 
 # The default operational level, used to pin that the routine lifecycle events
@@ -198,27 +205,29 @@ JSONL_ENV_INFO = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="function")
-def tracing_services(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_tokenizers,
-):
-    """Aggregated frontend + mocker with JSONL logging."""
-    ports = dynamo_dynamic_ports
+@contextlib.contextmanager
+def _agg_services(request, ports, env, speedup_ratio=None):
+    """Start one aggregated frontend + mocker pair and yield the test handle.
+
+    The single implementation of the aggregated startup. The fixtures below
+    differ only in the JSONL env dict they pass (debug vs. the default info
+    level) and, for the cancellation/crash fixture, the mocker speedup ratio,
+    so they configure this helper rather than restating the startup.
+    """
+    worker_kwargs = {} if speedup_ratio is None else {"speedup_ratio": speedup_ratio}
     with DynamoFrontendProcess(
         request,
         frontend_port=ports.frontend_port,
         terminate_all_matching_process_names=False,
-        extra_env=JSONL_ENV,
+        extra_env=env,
     ) as frontend:
         with MockerWorkerProcess(
             request,
             model=TEST_MODEL,
             frontend_port=ports.frontend_port,
             system_port=ports.system_ports[0],
-            extra_env=JSONL_ENV,
+            extra_env=env,
+            **worker_kwargs,
         ) as worker:
             wait_for_http_completions_ready(
                 frontend_port=ports.frontend_port, model=TEST_MODEL
@@ -228,6 +237,18 @@ def tracing_services(
                 "frontend": frontend,
                 "worker": worker,
             }
+
+
+@pytest.fixture(scope="function")
+def tracing_services(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Aggregated frontend + mocker with JSONL logging at DYN_LOG=debug."""
+    with _agg_services(request, dynamo_dynamic_ports, JSONL_ENV) as services:
+        yield services
 
 
 @pytest.fixture(scope="function")
@@ -238,28 +259,8 @@ def tracing_services_info_level(
     predownload_tokenizers,
 ):
     """Aggregated frontend + mocker at the default DYN_LOG=info level."""
-    ports = dynamo_dynamic_ports
-    with DynamoFrontendProcess(
-        request,
-        frontend_port=ports.frontend_port,
-        terminate_all_matching_process_names=False,
-        extra_env=JSONL_ENV_INFO,
-    ) as frontend:
-        with MockerWorkerProcess(
-            request,
-            model=TEST_MODEL,
-            frontend_port=ports.frontend_port,
-            system_port=ports.system_ports[0],
-            extra_env=JSONL_ENV_INFO,
-        ) as worker:
-            wait_for_http_completions_ready(
-                frontend_port=ports.frontend_port, model=TEST_MODEL
-            )
-            yield {
-                "frontend_port": ports.frontend_port,
-                "frontend": frontend,
-                "worker": worker,
-            }
+    with _agg_services(request, dynamo_dynamic_ports, JSONL_ENV_INFO) as services:
+        yield services
 
 
 @pytest.fixture(scope="function")
@@ -270,29 +271,10 @@ def tracing_services_slow(
     predownload_tokenizers,
 ):
     """Aggregated frontend + slow mocker for cancellation/crash testing."""
-    ports = dynamo_dynamic_ports
-    with DynamoFrontendProcess(
-        request,
-        frontend_port=ports.frontend_port,
-        terminate_all_matching_process_names=False,
-        extra_env=JSONL_ENV,
-    ) as frontend:
-        with MockerWorkerProcess(
-            request,
-            model=TEST_MODEL,
-            frontend_port=ports.frontend_port,
-            system_port=ports.system_ports[0],
-            speedup_ratio=0.1,
-            extra_env=JSONL_ENV,
-        ) as worker:
-            wait_for_http_completions_ready(
-                frontend_port=ports.frontend_port, model=TEST_MODEL
-            )
-            yield {
-                "frontend_port": ports.frontend_port,
-                "frontend": frontend,
-                "worker": worker,
-            }
+    with _agg_services(
+        request, dynamo_dynamic_ports, JSONL_ENV, speedup_ratio=0.1
+    ) as services:
+        yield services
 
 
 @pytest.fixture(scope="function")
