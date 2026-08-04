@@ -5,7 +5,6 @@ import asyncio
 import importlib
 import json
 import logging
-import os
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urlparse
 
@@ -41,12 +40,14 @@ from dynamo.common.multimodal.media_source import (
     read_local_media_bytes,
 )
 from dynamo.common.multimodal.nvdec_decoder import (
+    DISABLE_ENV,
     nvdec_available,
     probe_video_codec,
     should_use_nvdec,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -511,7 +512,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         or when the model's SGLang video preprocessing cannot accept
         pre-decoded frames (see ``_NVDEC_UNSAFE_MODEL_TYPES``).
         """
-        if os.environ.get("DYN_DISABLE_NVDEC"):
+        # env_bool, not a truthiness test on the raw value: everywhere else this
+        # switch is read that way, and a bare os.environ.get makes
+        # DYN_DISABLE_NVDEC=0 *disable* NVDEC here while leaving it enabled in
+        # vLLM and TensorRT-LLM -- the same setting meaning opposite things
+        # depending on the backend.
+        if env_bool(DISABLE_ENV):
             return False
         if not nvdec_available():
             return False
