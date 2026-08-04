@@ -4,7 +4,7 @@
 use uuid::Uuid;
 
 use super::super::core::{EngineEventBatch, EngineProgress, NoEngineEvents};
-use super::super::runtime_utils::WorkerCompletionPayload;
+use super::super::events::WorkerCompletionPayload;
 use super::super::state::OfflineWorkerState;
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestPayload;
@@ -111,9 +111,9 @@ pub(in crate::replay) struct ObservedOffloadEffects<Events: EngineEventBatch> {
 }
 
 #[derive(Debug)]
-pub(in crate::replay::offline) struct ScheduledWorkerCompletion<Events: EngineEventBatch = ()> {
+pub(in crate::replay::offline) struct ScheduledWorkerCompletions<Events: EngineEventBatch = ()> {
     pub(in crate::replay::offline) at_ms: f64,
-    pub(in crate::replay::offline) payload: WorkerCompletionPayload<Events>,
+    pub(in crate::replay::offline) payloads: Vec<WorkerCompletionPayload<Events>>,
 }
 
 #[derive(Debug, Default)]
@@ -121,16 +121,40 @@ pub(in crate::replay::offline) struct EngineEffects<Events: EngineEventBatch = (
     pub(in crate::replay::offline) admissions: Vec<AdmissionEvent>,
     pub(in crate::replay::offline) pass_start_events: Events,
     pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload<Events>>,
-    pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion<Events>>,
+    pub(in crate::replay::offline) scheduled_completion: Option<ScheduledWorkerCompletions<Events>>,
     pub(in crate::replay::offline) progress: EngineProgress,
 }
 
 impl<Events: EngineEventBatch> EngineEffects<Events> {
+    pub(in crate::replay::offline) fn schedule_completion(
+        &mut self,
+        at_ms: f64,
+        payload: WorkerCompletionPayload<Events>,
+        capacity_hint: usize,
+    ) {
+        assert!(
+            capacity_hint > 0,
+            "scheduled completion capacity hint must be non-zero"
+        );
+        let scheduled =
+            self.scheduled_completion
+                .get_or_insert_with(|| ScheduledWorkerCompletions {
+                    at_ms,
+                    payloads: Vec::with_capacity(capacity_hint),
+                });
+        assert_eq!(
+            scheduled.at_ms.to_bits(),
+            at_ms.to_bits(),
+            "offline replay engine effects contain mismatched completion timestamps"
+        );
+        scheduled.payloads.push(payload);
+    }
+
     pub(in crate::replay::offline) fn is_empty(&self) -> bool {
         self.admissions.is_empty()
             && self.pass_start_events.is_empty()
             && self.immediate_completions.is_empty()
-            && self.scheduled_completions.is_empty()
+            && self.scheduled_completion.is_none()
             && !self.progress.made_progress
     }
 }

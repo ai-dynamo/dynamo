@@ -327,6 +327,13 @@ fn json_value_to_string(value: &Value) -> String {
     }
 }
 
+/// Tokens appended since the previous chunk. SGLang streams `output_ids`
+/// cumulatively, so each chunk carries the full sequence so far; `offset` is the
+/// previous chunk's total length. Guards against a non-growing chunk.
+pub(crate) fn new_output_ids(output_ids: &[i32], offset: usize) -> &[i32] {
+    output_ids.get(offset..).unwrap_or(&[])
+}
+
 pub(crate) fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
     ids.iter()
         .map(|id| {
@@ -423,17 +430,45 @@ fn prompt_logprobs_from_meta(meta: &HashMap<String, String>) -> Result<Option<Va
         return Ok(None);
     }
     let input_top_logprobs = match meta_value(meta, "input_top_logprobs") {
-        Some(Value::Array(values)) => values,
-        _ => Vec::new(),
+        Some(Value::Array(values)) if !values.is_empty() => Some(values),
+        _ => None,
     };
 
-    let mut payload = Vec::with_capacity(input_logprobs.len() + 1);
-    payload.push(Value::Null);
+    // Current SGLang encodes the first requested prompt position as
+    // `[null, token_id, null]`; older releases omitted it entirely.
+    let has_native_sentinel = input_logprobs.first().is_some_and(|entry| {
+        entry.is_null()
+            || entry
+                .as_array()
+                .and_then(|parts| parts.first())
+                .is_some_and(Value::is_null)
+    });
+    if let Some(input_top_logprobs) = input_top_logprobs.as_ref() {
+        let top_has_native_sentinel = input_top_logprobs.first().is_some_and(Value::is_null);
+        if input_top_logprobs.len() != input_logprobs.len()
+            || top_has_native_sentinel != has_native_sentinel
+        {
+            return Err(client::protocol_error(
+                "input_token_logprobs and input_top_logprobs use inconsistent position encoding",
+            ));
+        }
+    }
+    let mut payload = Vec::with_capacity(input_logprobs.len() + usize::from(!has_native_sentinel));
+    if !has_native_sentinel {
+        payload.push(Value::Null);
+    }
     for (index, selected) in input_logprobs.iter().enumerate() {
+        if index == 0 && has_native_sentinel {
+            payload.push(Value::Null);
+            continue;
+        }
         let (token_id, entry) = prompt_logprob_entry(selected, "input_token_logprobs")?;
         let mut position = Map::new();
         position.insert(token_id, entry);
-        if let Some(Value::Array(alternatives)) = input_top_logprobs.get(index) {
+        if let Some(Value::Array(alternatives)) = input_top_logprobs
+            .as_ref()
+            .and_then(|values| values.get(index))
+        {
             for alternative in alternatives {
                 let (token_id, entry) = prompt_logprob_entry(alternative, "input_top_logprobs")?;
                 position.entry(token_id).or_insert(entry);
@@ -550,7 +585,7 @@ mod tests {
 
     use super::{
         build_generate_request, disaggregated_params_to_json, engine_data_from_meta,
-        extract_logprobs, terminal_from_meta,
+        extract_logprobs, new_output_ids, terminal_from_meta,
     };
 
     fn request() -> PreprocessedRequest {
@@ -644,6 +679,34 @@ mod tests {
     }
 
     #[test]
+    fn new_output_ids_slices_the_cumulative_stream() {
+        // SGLang re-sends the whole sequence each chunk; only the tail is new.
+        assert_eq!(new_output_ids(&[1, 2, 3], 0), &[1, 2, 3]);
+        assert_eq!(new_output_ids(&[1, 2, 3], 2), &[3]);
+        assert_eq!(new_output_ids(&[1, 2, 3], 3), &[] as &[i32]);
+        // A chunk that did not grow (or an over-large offset) yields nothing.
+        assert_eq!(new_output_ids(&[1, 2, 3], 5), &[] as &[i32]);
+    }
+
+    #[test]
+    fn cumulative_offset_never_rewinds_on_regression() {
+        // Mirror the engine loop: emit the new tail, then advance the offset
+        // monotonically (token_offset.max(len)) so a regressive chunk can't cause
+        // re-emission when the sequence later grows again.
+        let mut offset = 0usize;
+        let mut step = |ids: &[i32]| -> Vec<i32> {
+            let new = new_output_ids(ids, offset).to_vec();
+            offset = offset.max(ids.len());
+            new
+        };
+        assert_eq!(step(&[1, 2, 3]), vec![1, 2, 3]);
+        // Regressive chunk: emits nothing and leaves the offset at 3.
+        assert_eq!(step(&[1, 2]), Vec::<i32>::new());
+        // Growth resumes: only the genuinely-new tail is emitted, not 1..3 again.
+        assert_eq!(step(&[1, 2, 3, 4]), vec![4]);
+    }
+
+    #[test]
     fn logprobs_are_sliced_from_cumulative_metadata() {
         let meta = HashMap::from([
             (
@@ -701,8 +764,26 @@ mod tests {
     }
 
     #[test]
-    fn terminal_engine_data_contains_prompt_logprobs_and_routed_experts() {
+    fn terminal_engine_data_handles_prompt_logprob_encodings() {
         let meta = HashMap::from([
+            (
+                "input_token_logprobs".to_string(),
+                json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
+            ),
+            (
+                "input_top_logprobs".to_string(),
+                json!([null, [[-0.3, 12, "c"]]]).to_string(),
+            ),
+            ("routed_experts".to_string(), json!([1, 2]).to_string()),
+        ]);
+        let data = engine_data_from_meta(&meta, true).unwrap().unwrap();
+        let prompt = data["prompt_logprobs"].as_array().unwrap();
+        assert!(prompt[0].is_null());
+        assert_eq!(prompt[1]["11"]["logprob"], json!(-0.2));
+        assert_eq!(prompt[1]["12"]["decoded_token"], json!("c"));
+        assert_eq!(data["routed_experts"], json!([1, 2]));
+
+        let legacy = HashMap::from([
             (
                 "input_token_logprobs".to_string(),
                 json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
@@ -711,14 +792,24 @@ mod tests {
                 "input_top_logprobs".to_string(),
                 json!([[[-0.3, 12, "c"]], []]).to_string(),
             ),
-            ("routed_experts".to_string(), json!([1, 2]).to_string()),
         ]);
-        let data = engine_data_from_meta(&meta, true).unwrap().unwrap();
+        let data = engine_data_from_meta(&legacy, true).unwrap().unwrap();
         let prompt = data["prompt_logprobs"].as_array().unwrap();
         assert!(prompt[0].is_null());
         assert_eq!(prompt[1]["10"]["logprob"], json!(-0.1));
         assert_eq!(prompt[1]["12"]["decoded_token"], json!("c"));
-        assert_eq!(data["routed_experts"], json!([1, 2]));
+
+        let mismatched = HashMap::from([
+            (
+                "input_token_logprobs".to_string(),
+                json!([[null, 10, null], [-0.2, 11, "b"]]).to_string(),
+            ),
+            (
+                "input_top_logprobs".to_string(),
+                json!([[[-0.3, 12, "c"]], []]).to_string(),
+            ),
+        ]);
+        assert!(engine_data_from_meta(&mismatched, true).is_err());
     }
 
     #[test]

@@ -11,13 +11,14 @@ use super::core::{
     AdmissionSource as CoreAdmissionSource, EngineEventBatch, NoEngineEvents, Placement,
     PlacementDecision, PlacementPolicy, ReadyArrival, WorkerTopology,
 };
-use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::events::{SimulationEvent, SimulationWorkerStage, WorkerCompletionPayload};
 #[cfg(test)]
 use super::extensions::kv_router::AggRuntime;
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_scaling_tick, pop_ready_worker_completion,
-    pop_ready_worker_ready, push_scaling_tick, push_worker_completion, push_worker_ready,
+    ReadyWorkerCompletions, next_timestamp as choose_next_timestamp, pop_ready_scaling_tick,
+    pop_ready_worker_completions, pop_ready_worker_ready, push_scaling_tick,
+    push_worker_completions, push_worker_ready,
 };
 #[cfg(test)]
 use super::scaling::ReplayScalingDecision;
@@ -29,8 +30,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, NoReplayMetadata,
-        ReplayAdmissionMetadata, ReplayEngineObservation, ScheduledWorkerCompletion,
-        TrafficAccumulator,
+        ReplayAdmissionMetadata, ReplayEngineObservation, TrafficAccumulator,
     },
     state::AggRequestState,
 };
@@ -632,26 +632,42 @@ where
         // each pass may drain router-pending work before its sibling ranks are applied.
         // Preserve this lower-rank-first tie-break for now. Atomic settlement requires
         // splitting router state mutation from pending-admission draining.
-        while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
-            debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
-            let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.record_fpm(payload.worker_idx, fpm)?;
+        while let Some(completions) = pop_ready_worker_completions(&mut self.events, self.now_ms) {
+            match completions {
+                ReadyWorkerCompletions::Single(payload) => {
+                    self.apply_worker_completion(payload)?;
+                }
+                ReadyWorkerCompletions::Batch(payloads) => {
+                    for payload in payloads {
+                        self.apply_worker_completion(payload)?;
+                    }
+                }
             }
-            self.process_completed_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
             changed = true;
         }
 
         Ok(changed)
+    }
+
+    fn apply_worker_completion(
+        &mut self,
+        payload: WorkerCompletionPayload<Observation::Batch>,
+    ) -> anyhow::Result<()> {
+        debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
+        let payload = self.engine.on_scheduled_completion(payload)?;
+        if self.collect_fpm
+            && let Some(fpm) = payload.fpm
+        {
+            self.record_fpm(payload.worker_idx, fpm)?;
+        }
+        self.process_completed_pass(
+            payload.worker_idx,
+            payload.completed_requests,
+            payload.output_signals,
+            payload.engine_events,
+            payload.accept_length_output_tokens,
+            payload.accept_length_decode_forwards,
+        )
     }
 
     /// Release every admission made ready by the shared admission queue.
@@ -701,23 +717,10 @@ where
     ) -> anyhow::Result<()> {
         self.apply_engine_observations(effects.pass_start_events)?;
         for payload in effects.immediate_completions {
-            let payload = self.engine.on_scheduled_completion(payload)?;
-            if self.collect_fpm
-                && let Some(fpm) = payload.fpm
-            {
-                self.record_fpm(payload.worker_idx, fpm)?;
-            }
-            self.process_completed_pass(
-                payload.worker_idx,
-                payload.completed_requests,
-                payload.output_signals,
-                payload.engine_events,
-                payload.accept_length_output_tokens,
-                payload.accept_length_decode_forwards,
-            )?;
+            self.apply_worker_completion(payload)?;
         }
-        for ScheduledWorkerCompletion { at_ms, payload } in effects.scheduled_completions {
-            push_worker_completion(&mut self.events, &mut self.next_event_seq, at_ms, payload);
+        if let Some(scheduled) = effects.scheduled_completion {
+            push_worker_completions(&mut self.events, &mut self.next_event_seq, scheduled);
         }
         Ok(())
     }
