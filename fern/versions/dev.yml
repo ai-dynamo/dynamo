@@ -967,6 +967,8 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: ../pages-dev/reference/components/runtime-configuration.mdx
+          - page: TLS Configuration
+            path: ../pages-dev/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: ../pages-dev/reference/components/frontend-configuration.mdx
           - page: Planner Configuration
