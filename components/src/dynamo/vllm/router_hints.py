@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from typing import Any
 
@@ -52,15 +53,31 @@ def _router_hint_tiers(engine_args: Any) -> list[Any]:
     ]
 
 
+def _router_hint_source_host(host: Any) -> str | None:
+    if not isinstance(host, str) or not host:
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if address.is_unspecified:
+        return None
+    if address.version == 6:
+        return f"[{address.compressed}]"
+    return address.compressed
+
+
 def _router_hint_source_control_endpoint(tier: Any, port_offset: int = 0) -> str | None:
     try:
         control_port = int(_get(tier, "control_port")) + port_offset
     except (TypeError, ValueError):
         return None
-    if control_port <= 0:
+    if not 0 < control_port <= 65535:
         return None
-    host = _get(tier, "control_advertise_host") or _get(tier, "control_host")
-    if not isinstance(host, str) or not host or host in {"0.0.0.0", "::"}:
+    host = _router_hint_source_host(
+        _get(tier, "control_advertise_host") or _get(tier, "control_host")
+    )
+    if host is None:
         return None
     return f"tcp://{host}:{control_port}"
 
