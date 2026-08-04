@@ -1,0 +1,476 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ============================================================================
+# Run A — GMS V1 + Dynamo Snapshot, GLM-5.2 DEP8 on vLLM, node s2877.
+#
+# ADAPTED FROM the proven-Ready reference:
+#   reference/prior-working-gms-ssd-checkpoint.json
+#   (DynamoCheckpoint glm52-tep8-gms-ssd-top-29213270567-source-v2)
+# Everything not called out in a "CHANGED FROM REFERENCE" comment is verbatim
+# from that object, including every NCCL_*/VLLM_* env var, probes, securityContext,
+# volumes and tolerations. Do not "tidy" those - they are what made it work.
+#
+# THE FOUR DELIBERATE CHANGES (V0 -> V1, TEP8 -> DEP8):
+#   1. main: -"--load-format gms"  +"--worker-cls ...GMSV1Worker" +"--enable-sleep-mode"
+#   2. main: TP8            -> TP1 + DP8   (DEP8)
+#   3. gms-server: args     -> ["--use-v1"]
+#   4. image on all 3 containers -> the PR #12011 PLACEHOLDER image
+#
+# PREREQUISITES (in order):
+#   06-placeholder-image.md  <-- BLOCKER: a -vllm-placeholder image must exist
+#   00-namespace-scoped-operator.md  (both gates ON + webhook patch)
+#   07-disk-cleanup.md       (optional; Run A fits without it)
+#
+# Apply:
+#   kubectl --context nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster \
+#           -n schwinns apply -f 20-dynamocheckpoint.yaml
+# ============================================================================
+---
+# ----------------------------------------------------------------------------
+# DRA ResourceClaimTemplate — 8 GPUs shared by main + gms-server + gms-saver.
+#
+# MUST be hand-authored. The standalone DynamoCheckpoint controller does NOT
+# create it: only the DGD-driven path calls syncCheckpointGMSResourceClaimTemplate
+# (deploy/operator/internal/controller/dgd_checkpoints_reconciler.go:281-296).
+# deploy/operator/internal/controller/dynamocheckpoint_controller.go only syncs
+# the Job. The reference pointed at a DGD-created template
+# ("checkpoint-a865bb8c27ecf46826107776ce84a60c-worker-gpu"); we own ours.
+#
+# Shape mirrors dra.GenerateResourceClaimTemplate (deploy/operator/internal/dra/dra.go:194-209):
+#   spec.spec.devices.requests[0] = {name: gpus, exactly: {deviceClassName, allocationMode, count}}
+# ----------------------------------------------------------------------------
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gmsv1-glm52-dep8-gpu
+  namespace: schwinns
+spec:
+  spec:
+    devices:
+      requests:
+        # Name "gpus" matches dra.go:199.
+        - name: gpus
+          exactly:
+            # dra.DefaultDeviceClassName - deploy/operator/internal/dra/dra.go:32
+            deviceClassName: gpu.nvidia.com
+            # resourcev1.DeviceAllocationModeExactCount - dra.go:201
+            allocationMode: ExactCount
+            # DEP8 => 8 GPUs. Also drives the operator's wrapLaunchJob decision
+            # (checkpoint_job.go:146-167): gpuCount 8 > 1 => the target container
+            # entrypoint is rewritten to `cuda-checkpoint --launch-job ...`,
+            # which is why the PLACEHOLDER image is mandatory. See 06-placeholder-image.md.
+            count: 8
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoCheckpoint
+metadata:
+  name: gmsv1-glm52-dep8
+  namespace: schwinns
+  annotations:
+    # snapshotprotocol.CheckpointArtifactVersionAnnotation - deploy/snapshot/protocol/common.go:26
+    # Read by checkpoint_job.go:178 to build the artifact path.
+    nvidia.com/snapshot-artifact-version: "1"
+    # Keep artifacts if the object is deleted (reference used the same).
+    nvidia.com/dynamo-checkpoint-deletion-policy: Retain
+    schwinns.ai-dynamo.io/topology: DEP8-IntraPod-GMS-V1
+    schwinns.ai-dynamo.io/gms-backend: sharded-ssd
+    schwinns.ai-dynamo.io/dynamo-sha: 05dac0c7da0372312819e256e1b0cd4a07a61eab
+    schwinns.ai-dynamo.io/probe: run-a-cumem-posix-fd-cucheckpoint
+spec:
+  # Deprecated but REQUIRED for standalone v1alpha1 checkpoints
+  # (deploy/operator/api/v1alpha1/dynamocheckpoint_types.go:143-144).
+  # Feeds the checkpoint identity hash -> the artifact directory name.
+  identity:
+    model: schwinns/gmsv1-glm52-dep8
+    # +kubebuilder:validation:Enum=vllm;sglang;trtllm - dynamocheckpoint_types.go:59
+    backendFramework: vllm
+    # CHANGED FROM REFERENCE: reference had tensorParallelSize 8 (TEP8).
+    # DEP8 is TP=1; these identity fields are deprecated//informational only
+    # (the pod template is authoritative) but keep them honest.
+    tensorParallelSize: 1
+    pipelineParallelSize: 1
+    extraParameters:
+      topology: DEP8
+      gms: v1
+      probe: run-a
+
+  gpuMemoryService:
+    # v1alpha1 GPUMemoryServiceSpec - deploy/operator/api/v1alpha1/common.go:180-206
+    enabled: true
+    # +kubebuilder:validation:Enum=intraPod;interPod - common.go:186 (lowercase in v1alpha1!)
+    mode: intraPod
+    deviceClassName: gpu.nvidia.com
+    # NOTE: the live CRD on this cluster PRUNED this field from the reference
+    # object (present in its last-applied-configuration, absent from its live
+    # spec). See 05-prior-attempts.md. We set it anyway AND hand-write the full
+    # GMS client contract on gms-saver below, so the saver works either way.
+    extraClientContainers:
+      - gms-saver
+
+  job:
+    # consts.MainContainerName - deploy/operator/internal/consts/consts.go:223
+    targetContainerName: main
+    # Verbatim from reference. 2h covers NVFP4 load + autotune + save.
+    activeDeadlineSeconds: 7200
+    # DynamoCheckpointJobConfig.SharedMemory - dynamocheckpoint_types.go:117
+    sharedMemory:
+      size: 64Gi
+
+    podTemplateSpec:
+      metadata:
+        annotations:
+          schwinns.ai-dynamo.io/topology: DEP8-IntraPod-GMS-V1
+          schwinns.ai-dynamo.io/gms-backend: sharded-ssd
+          schwinns.ai-dynamo.io/dynamo-sha: 05dac0c7da0372312819e256e1b0cd4a07a61eab
+      spec:
+        # snapshotprotocol.NewCheckpointJob forces this anyway (checkpoint.go:41).
+        restartPolicy: Never
+        terminationGracePeriodSeconds: 60
+        # Verbatim from reference: pin to the only node with the NVMe roots.
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+        tolerations:
+          # First three verbatim from reference.
+          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - {key: dra, operator: Exists, effect: NoSchedule}
+          - {key: schwinns.ai-dynamo.io/gms-bench, operator: Exists, effect: NoSchedule}
+          # CHANGED FROM REFERENCE: the reference tolerated
+          # "autopilot/2026-05-29-qwen06b-tp2-p2p-reserved", which is no longer on
+          # the node. The current 4th taint is schwinns.ai-dynamo.io/reserved.
+          - {key: schwinns.ai-dynamo.io/reserved, operator: Exists, effect: NoSchedule}
+        securityContext:
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+        imagePullSecrets:
+          - name: acr-token-secret
+        # NOTE: the reference used serviceAccountName
+        # "glm52-tep8-gms-ssd-top-29213270567-k8s-service-discovery", created by
+        # its parent DGD. A standalone checkpoint has no such SA, so we omit it
+        # and use "default". The checkpoint Job does not need Kubernetes
+        # discovery: DYN_DISCOVERY_BACKEND below is left as in the reference but
+        # the engine never registers (it sleeps and is snapshotted).
+        # UNVERIFIED: if the Job fails with an RBAC/discovery error, create an SA
+        # or set DYN_DISCOVERY_BACKEND=none.
+
+        # ---------------------------------------------------------------
+        # POD-LEVEL DRA CLAIM. Required by the operator's GMS validation:
+        #   common.HasPodResourceClaim(podSpec, dra.ClaimName)
+        #   - checkpoint/gms_pod_validation.go:45-47
+        #   - webhook/validation/dynamocheckpoint.go:193-198
+        # dra.ClaimName == "intrapod-shared-gpu" - dra/dra.go:26
+        # ---------------------------------------------------------------
+        resourceClaims:
+          - name: intrapod-shared-gpu
+            resourceClaimTemplateName: gmsv1-glm52-dep8-gpu
+
+        volumes:
+          # --- verbatim from reference -------------------------------------
+          - name: hf-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache      # 50Ti RWX; NVFP4 already cached
+          - name: checkpoint-storage
+            persistentVolumeClaim:
+              claimName: snapshot-pvc            # 2Ti vast RWX; CRIU artifacts
+          - name: criu-work
+            emptyDir: {}
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          # gms.SharedVolumeName - deploy/operator/internal/gms/gms.go:24
+          # Required by gms_pod_validation.go:48-50.
+          - name: gms-intrapod-control
+            emptyDir: {}
+          # --- 7 NVMe roots, HOST paths, verbatim from reference ------------
+          # There is no nvme3. hostPath type Directory fails the pod if missing.
+          - {name: gms-ssd-nvme2, hostPath: {path: /mnt/dynamo-gms-nvme2, type: Directory}}
+          - {name: gms-ssd-nvme4, hostPath: {path: /mnt/dynamo-gms-nvme4, type: Directory}}
+          - {name: gms-ssd-nvme5, hostPath: {path: /mnt/dynamo-gms-nvme5, type: Directory}}
+          - {name: gms-ssd-nvme6, hostPath: {path: /mnt/dynamo-gms-nvme6, type: Directory}}
+          - {name: gms-ssd-nvme7, hostPath: {path: /mnt/dynamo-gms-nvme7, type: Directory}}
+          - {name: gms-ssd-nvme8, hostPath: {path: /mnt/dynamo-gms-nvme8, type: Directory}}
+          - {name: gms-ssd-nvme9, hostPath: {path: /mnt/dynamo-gms-nvme9, type: Directory}}
+
+        # =================================================================
+        # gms-server — GMS V1 rank-local sidecar, one child per visible GPU.
+        #
+        # MUST be an initContainer with restartPolicy: Always (native sidecar):
+        #   gms.EnsureServerSidecar - gms/gms.go:49-56
+        #   validated by gms_pod_validation.go:55-61
+        # Name "gms-server" == gms.ServerContainerName (gms/gms.go:18).
+        # =================================================================
+        initContainers:
+          - name: gms-server
+            # TODO: confirm this matches the tag produced by build-on-demand.
+            # The `&image` anchor sets the image for ALL THREE containers
+            # (gms-server, main, gms-saver). Change it here only.
+            # MUST be -vllm-placeholder, NOT -vllm-runtime: with 8 GPUs the
+            # operator rewrites this container's entrypoint to
+            # `cuda-checkpoint --launch-job` (checkpoint_job.go:167 ->
+            # protocol/checkpoint.go:155-160), and that binary exists only in
+            # the placeholder image (deploy/snapshot/Dockerfile:407).
+            # Produced by:
+            #   gh workflow run build-on-demand.yml --repo ai-dynamo/dynamo \
+            #     --ref <branch> -f build_vllm_placeholder=true \
+            #     -f placeholder_base_image=dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-runtime
+            # The tag below assumes the dispatched branch head is 05dac0c7...;
+            # otherwise use the ACR tag printed in the run's step summary.
+            # See 06-placeholder-image.md.
+            image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-placeholder
+            imagePullPolicy: Always
+            restartPolicy: Always
+            command: ["python3", "-m", "gpu_memory_service.cli.server"]
+            # ***** CHANGE 3 of 4 — THE V1 SELECTOR *****
+            # The operator's own gms.Container() passes NO args
+            # (gms/gms.go:126), which is why this checkpoint is hand-authored.
+            # cli/server.py:64-68 defines --use-v1; cli/runner.py:90-94 dispatches
+            # to v1.cli.main, which serves the "weights" and "kv_cache" domains
+            # (v1/cli.py:19,64-72). Reference had args: null (V0).
+            args: ["--use-v1"]
+            env:
+              # gms.EnvSocketDir=gms.SharedMountPath - gms/gms.go:30,27
+              # Required by gms_pod_validation.go:82-84.
+              - name: GMS_SOCKET_DIR
+                value: /gms-intrapod-control
+            volumeMounts:
+              - name: gms-intrapod-control
+                mountPath: /gms-intrapod-control
+            resources:
+              claims:
+                - name: intrapod-shared-gpu
+
+        containers:
+          # =============================================================
+          # main — the vLLM engine. Snapshot target.
+          # =============================================================
+          - name: main
+            image: *image
+            imagePullPolicy: Always
+            command: ["python3", "-m", "dynamo.vllm"]
+            args:
+              # ---- TOPOLOGY BLOCK: DEP8 (active) -----------------------
+              # ***** CHANGE 2 of 4 *****
+              # DEP8 = TP1 + DP8 + expert-parallel. Verified:
+              # components/src/dynamo/profiler/utils/config_modifiers/vllm.go... vllm.py:417-451
+              #   "For DEP: TP=1, DP=dep_size -> EP size = dep_size"
+              # Reference (TEP8) had: --tensor-parallel-size 8 --enable-expert-parallel
+              #
+              # >>> IF DEP8 FAILS, SWAP THIS BLOCK FOR THE TEP8 CONTROL BELOW. <<<
+              # DEP8 has the worse track record in prior runs (1 Ready / 2 Failed
+              # vs TEP8's 5/6) - see 05-prior-attempts.md.
+              - --tensor-parallel-size
+              - "1"
+              - --data-parallel-size
+              - "8"
+              - --enable-expert-parallel
+              # ---- TEP8 CONTROL (commented out; verbatim reference) -----
+              # - --tensor-parallel-size
+              # - "8"
+              # - --enable-expert-parallel
+              # ----------------------------------------------------------
+
+              # ***** CHANGE 1 of 4 — THE V1 SELECTOR *****
+              # Reference had "--load-format gms", which selects the V0 worker:
+              #   components/src/dynamo/vllm/main.py:547-548
+              #     if engine_args.load_format == "gms":
+              #         engine_args.worker_cls = "...integrations.vllm.worker.GMSWorker"
+              # V1 instead keeps vLLM's NORMAL load format and selects the worker
+              # explicitly (lib/gpu_memory_service/v1/README.md "Running V1";
+              # v1/integrations/vllm/worker.py:6-9).
+              - --worker-cls
+              - gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
+              # GMSV1Worker.init_device raises "GMS V1 requires vLLM sleep mode"
+              # unless this is set (v1/integrations/vllm/worker.py:23-25).
+              # NOTE: prepare_snapshot_engine also forces it when
+              # DYN_SNAPSHOT_CONTROL_DIR is set (vllm/snapshot.py:39); passing it
+              # explicitly makes the intent local and survives that path changing.
+              - --enable-sleep-mode
+
+              # ---- model + all remaining flags: verbatim from reference ----
+              # EDIT HERE to change model. NVFP4 is already in shared-model-cache,
+              # which is why HF_HUB_OFFLINE=1 below is safe.
+              - --model
+              - nvidia/GLM-5.2-NVFP4
+              - --trust-remote-code
+              - --moe-backend
+              - flashinfer_trtllm
+              - --all2all-backend
+              - flashinfer_nvlink_one_sided
+              - --enable-flashinfer-autotune
+              - --disable-custom-all-reduce
+              # vLLM engine flag (NOT the frontend's --dyn-reasoning-parser, which
+              # is defined in components/src/dynamo/common/configuration/groups/runtime_args.py:222
+              # and belongs on dynamo.frontend). Reference used the engine flag here.
+              - --reasoning-parser
+              - glm45
+              # EDIT HERE for a larger context. 4096 kept from the reference:
+              # this is a driver-capability probe, not a throughput test.
+              - --max-model-len
+              - "4096"
+              - --max-num-seqs
+              - "8"
+              - --max-num-batched-tokens
+              - "4096"
+              - --gpu-memory-utilization
+              - "0.80"
+              - --kv-cache-memory-bytes
+              - 8G
+              - --kv-cache-dtype
+              - fp8_e4m3
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
+            env:
+              # ----- ALL VERBATIM FROM REFERENCE. Do not prune. -----
+              - {name: DYN_COMPONENT, value: worker}
+              - {name: DYN_DISCOVERY_BACKEND, value: kubernetes}
+              - {name: DYN_FORWARDPASS_METRIC_PORT, value: "20380"}
+              - {name: DYN_HEALTH_CHECK_ENABLED, value: "false"}
+              - {name: DYN_NAMESPACE, value: schwinns-gmsv1-glm52-dep8}
+              - {name: DYN_PARENT_DGD_K8S_NAME, value: gmsv1-glm52-dep8}
+              - {name: DYN_PARENT_DGD_K8S_NAMESPACE, value: schwinns}
+              - {name: DYN_SYSTEM_ENABLED, value: "true"}
+              - {name: DYN_SYSTEM_PORT, value: "9090"}
+              - {name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, value: '["generate"]'}
+              - {name: GLOO_SOCKET_IFNAME, value: eth0}
+              - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
+              # Model is pre-cached on shared-model-cache; no egress at snapshot time.
+              - {name: HF_HUB_OFFLINE, value: "1"}
+              - {name: TRANSFORMERS_OFFLINE, value: "1"}
+              - {name: NATS_SERVER, value: "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"}
+              # --- NCCL settings tuned for CRIU/cuda-checkpoint ---
+              # configure_snapshot_capture_env() also forces most of these
+              # (components/src/dynamo/common/snapshot/lifecycle.py:107-153);
+              # kept explicit so the manifest documents the requirement.
+              # NCCL_CUMEM_ENABLE=0 in particular: cuda-checkpoint cannot dump
+              # cuMem-backed NCCL allocations (lifecycle.py:108-115).
+              - {name: NCCL_CUMEM_ENABLE, value: "0"}
+              - {name: NCCL_IB_DISABLE, value: "1"}
+              - {name: NCCL_NVLS_ENABLE, value: "0"}
+              - {name: NCCL_RAS_ENABLE, value: "0"}
+              - {name: NCCL_P2P_DISABLE, value: "1"}
+              - {name: NCCL_SHM_DISABLE, value: "0"}
+              - {name: NCCL_DEBUG, value: INFO}
+              - {name: NCCL_DEBUG_SUBSYS, value: "INIT,GRAPH,P2P,SHM,NET"}
+              - {name: VLLM_ALLREDUCE_USE_SYMM_MEM, value: "0"}
+              - {name: VLLM_USE_NCCL_SYMM_MEM, value: "0"}
+              - {name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP, value: "0"}
+              - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "7200"}
+              - {name: VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP, value: "0"}
+              - {name: VLLM_EXPERIMENT_CHECKPOINT_PINNED_HOST_CACHE_FLUSH, value: "0"}
+              - {name: VLLM_EXPERIMENT_LAZY_FLASHINFER_WRAPPER_WORKSPACE, value: "0"}
+              - {name: NIXL_TELEMETRY_ENABLE, value: "n"}
+              - {name: NIXL_TELEMETRY_EXPORTER, value: prometheus}
+              - {name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090"}
+              - name: POD_NAME
+                valueFrom: {fieldRef: {fieldPath: metadata.name}}
+              - name: POD_NAMESPACE
+                valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+              - name: POD_UID
+                valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+              # GMS client contract - gms/gms.go:94, validated at
+              # gms_pod_validation.go:82-84 and dynamocheckpoint.go:151-156.
+              - {name: GMS_SOCKET_DIR, value: /gms-intrapod-control}
+              # NOTE: DYN_SNAPSHOT_CONTROL_DIR is injected by the operator via
+              # snapshotprotocol.EnsureControlVolume (control_volume.go:331-383,
+              # called from NewCheckpointJob at checkpoint.go:75) together with
+              # the snapshot-control emptyDir and a readiness probe on
+              # $DYN_SNAPSHOT_CONTROL_DIR/ready-for-snapshot (checkpoint.go:76-83).
+              # Do NOT hand-write it; the operator owns the subPath.
+            ports:
+              - {containerPort: 9090, name: system, protocol: TCP}
+            # Reference probes. NewCheckpointJob REPLACES readinessProbe with the
+            # ready-for-snapshot exec probe and CLEARS liveness/startup
+            # (checkpoint.go:76-85) - kept for parity with the reference and for
+            # reuse of this container spec in 30-dgd-restore.yaml.
+            livenessProbe:
+              httpGet: {path: /live, port: 9090}
+              periodSeconds: 5
+              failureThreshold: 1
+            readinessProbe:
+              httpGet: {path: /health, port: 9090}
+              periodSeconds: 10
+            startupProbe:
+              httpGet: {path: /health, port: 9090}
+              periodSeconds: 10
+              failureThreshold: 720          # 2h for NVFP4 load + autotune
+            securityContext:
+              runAsUser: 0
+              capabilities:
+                add: ["SYS_PTRACE"]          # CRIU needs ptrace
+            resources:
+              limits: {memory: 1536Gi}
+              requests: {memory: 128Gi}
+              # GPUs come ONLY via the DRA claim. Never add nvidia.com/gpu here:
+              # gms.EnsureClient strips scalar GPU resources (gms/gms.go:107-108)
+              # and the node advertises nvidia.com/gpu: 0.
+              claims:
+                - name: intrapod-shared-gpu
+            volumeMounts:
+              - {name: hf-cache, mountPath: /home/dynamo/.cache/huggingface}
+              - {name: checkpoint-storage, mountPath: /checkpoints}
+              - {name: criu-work, mountPath: /var/criu-work}
+              - {name: shared-memory, mountPath: /dev/shm}
+              - {name: gms-intrapod-control, mountPath: /gms-intrapod-control}
+
+          # =============================================================
+          # gms-saver — drains committed GMS weights to sharded NVMe, then exits.
+          #
+          # Listed in spec.gpuMemoryService.extraClientContainers above AND given
+          # the full GMS client contract here (claim + mount + GMS_SOCKET_DIR),
+          # because the live CRD may prune that field (05-prior-attempts.md).
+          # Contract validated by gms_pod_validation.go:63-71 / 75-85.
+          # =============================================================
+          - name: gms-saver
+            image: *image
+            imagePullPolicy: Always
+            # Flags verified against lib/gpu_memory_service/cli/snapshot/saver.py:80-118.
+            command: ["python3", "-m", "gpu_memory_service.cli.snapshot.saver"]
+            args:
+              # saver.py:80-84. Path shape must match what the snapshot agent
+              # resolves: <basePath>/<checkpointID>/versions/<artifactVersion>
+              # (protocol/common.go:87-94). basePath=/checkpoints comes from the
+              # operator's checkpoint.storage.pvc.basePath (00-namespace-scoped-operator.md).
+              # UNVERIFIED: the reference hard-coded a DGD-derived path
+              # ("/checkpoints/gms/<dgd-name>/versions/1"). The saver only needs a
+              # writable dir - it is the GMS shard sidecar path, distinct from the
+              # CRIU artifact path the agent writes. Keeping the reference's shape
+              # with our own run name.
+              - --checkpoint-dir
+              - /checkpoints/gms/gmsv1-glm52-dep8/versions/1
+              # saver.py:107-111, parsed by parse_sharded_ssd_roots
+              # (snapshot/backends/sharded_ssd.py:30-33) INSIDE THIS CONTAINER,
+              # so these are CONTAINER paths matching volumeMounts below - not
+              # the host /mnt/dynamo-gms-nvme* paths. Verbatim mapping from the
+              # reference; only the per-run leaf changed.
+              # 7 roots (no nvme3). Each root gets ~53GB (see 07-disk-cleanup.md).
+              - --sharded-ssd-roots
+              - /mnt/gms-ssd/nvme2/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme4/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme5/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme6/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme7/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme8/schwinns/gmsv1-glm52-dep8,/mnt/gms-ssd/nvme9/schwinns/gmsv1-glm52-dep8
+              # saver.py:101-106; 4 GiB. Matches the saver default, set explicitly.
+              - --shard-size-bytes
+              - "4294967296"
+              # saver.py:85-90; shard-save workers PER DEVICE.
+              - --max-workers
+              - "8"
+              # NOTE: --save-lock-timeout-ms defaults to 30min (saver.py:91-100),
+              # bounding the RO-lock wait so a crashed engine cannot wedge the Job.
+              # activeDeadlineSeconds 7200 is the outer bound.
+            env:
+              - {name: GMS_SOCKET_DIR, value: /gms-intrapod-control}
+            securityContext:
+              runAsUser: 0
+            resources:
+              claims:
+                - name: intrapod-shared-gpu
+            volumeMounts:
+              - {name: checkpoint-storage, mountPath: /checkpoints}
+              # CONTAINER mount paths - these form --sharded-ssd-roots above.
+              - {name: gms-ssd-nvme2, mountPath: /mnt/gms-ssd/nvme2}
+              - {name: gms-ssd-nvme4, mountPath: /mnt/gms-ssd/nvme4}
+              - {name: gms-ssd-nvme5, mountPath: /mnt/gms-ssd/nvme5}
+              - {name: gms-ssd-nvme6, mountPath: /mnt/gms-ssd/nvme6}
+              - {name: gms-ssd-nvme7, mountPath: /mnt/gms-ssd/nvme7}
+              - {name: gms-ssd-nvme8, mountPath: /mnt/gms-ssd/nvme8}
+              - {name: gms-ssd-nvme9, mountPath: /mnt/gms-ssd/nvme9}
+              - {name: gms-intrapod-control, mountPath: /gms-intrapod-control}

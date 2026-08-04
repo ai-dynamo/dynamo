@@ -1,0 +1,310 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ============================================================================
+# Run A, restore half — DGD that restores from the checkpoint created by
+# 20-dynamocheckpoint.yaml via checkpointRef.
+#
+# THIS IS WHERE THE DRIVER QUESTION IS ANSWERED. The checkpoint half only
+# proves the engine can sleep and be captured. It is the RESTORE that exercises
+# cuCheckpoint over cuMem POSIX-FD-backed VMM allocations.
+#
+# Apply ONLY after the DynamoCheckpoint reports status.phase=Ready.
+#
+#   kubectl --context nv-prd-dgxc.teleport.sh-dynamo-nscale-dev-cluster \
+#           -n schwinns apply -f 30-dgd-restore.yaml
+# ============================================================================
+#
+# HOW THE RESTORE PATH WORKS (verified, so you know where to look when it fails)
+#
+#  1. The DGD controller sees experimental.checkpoint.checkpointRef and resolves
+#     the named DynamoCheckpoint (checkpoint/podspec.go:209-225).
+#  2. Worker pods are stamped as restore candidates
+#     (checkpoint.ApplyRestoreCandidateMetadata - checkpoint/podspec.go:95-130):
+#       annotations: nvidia.com/dynamo-checkpoint-restore-candidate: "true"
+#                    nvidia.com/dynamo-checkpoint-name: gmsv1-glm52-dep8
+#                    nvidia.com/snapshot-target-containers: main
+#  3. On pod CREATE the mutating webhook mpodcheckpointrestore.kb.io fires
+#     (webhook/mutation/pod_checkpoint_restore_handler.go:96-175). If the
+#     checkpoint is Ready it:
+#       - stamps restore labels/annotations
+#       - injects the checkpoint PVC + snapshot-control volume, and
+#         DYN_SNAPSHOT_RESTORE_STANDBY=1 (protocol/restore.go:98-118)
+#       - installs a restore-complete startup probe (restore.go:127-156)
+#       - **re-injects the GMS sidecar + client wiring** from the CHECKPOINT's
+#         gpuMemoryService spec (podspec.go:296-305 -> EnsureIntraPodGPUMemoryService
+#         at podspec.go:332-357)
+#  4. DYN_SNAPSHOT_RESTORE_STANDBY=1 makes dynamo.vllm write restore context and
+#     exec `sleep infinity` INSTEAD of starting the engine
+#     (components/src/dynamo/vllm/__main__.py:10-14 ->
+#      common/snapshot/restore_context.py:236-244).
+#  5. The snapshot-agent then nsenters the sleeping container and runs
+#     /usr/local/bin/nsrestore (executor/restore.go:206-210), which does the CRIU
+#     restore and the CUDA restore. <-- THE MOMENT OF TRUTH.
+#
+# !! CONSEQUENCE OF STEP 3 !!
+#   The webhook injects the GMS server sidecar by calling gms.EnsureServerSidecar,
+#   whose gms.Container() passes NO ARGS (gms/gms.go:49, 122-136). It will inject a
+#   **V0** gms-server, not `--use-v1`. Our hand-authored gms-server below has the
+#   same name ("gms-server"), and EnsureServerSidecar is idempotent-by-name
+#   (gms/gms.go:51-55: it returns early if an initContainer with that name exists),
+#   so OUR --use-v1 sidecar wins. DO NOT RENAME IT. Verify after the pod is created:
+#     kubectl -n schwinns get pod <restore-pod> \
+#       -o jsonpath='{.spec.initContainers[?(@.name=="gms-server")].args}'
+#   Expect ["--use-v1"]. If it is empty, the restore is running a V0 server against
+#   V1 clients and any failure is (P) plumbing, NOT a driver signal.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gmsv1-glm52-dep8-restore
+  namespace: schwinns
+  annotations:
+    # Grove adds a scheduling layer that is not needed for a single-pod probe
+    # and complicates pod-identity debugging. Matches the trtllm snapshot sample
+    # (examples/backends/trtllm/deploy/v1beta1/snapshot-restore.yaml:27).
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: vllm
+  components:
+    # ---------------------------------------------------------------
+    # Frontend. Not restored; plain cold start. Present so the restored
+    # worker has something to register with and can be smoke-tested.
+    # ---------------------------------------------------------------
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+          tolerations:
+            - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+            - {key: dra, operator: Exists, effect: NoSchedule}
+            - {key: schwinns.ai-dynamo.io/gms-bench, operator: Exists, effect: NoSchedule}
+            - {key: schwinns.ai-dynamo.io/reserved, operator: Exists, effect: NoSchedule}
+          imagePullSecrets:
+            - name: acr-token-secret
+          containers:
+            - name: main
+              # Frontend can use the plain runtime image - it is not a CRIU target.
+              # Using the placeholder too keeps the tag set to one value.
+              # TODO: confirm this matches the tag produced by build-on-demand.
+              # Keep in lockstep with 20-dynamocheckpoint.yaml - the restore
+              # container must be the SAME image the checkpoint was captured
+              # from. The `&image` anchor covers the frontend, the restored
+              # worker and the gms-server sidecar. MUST be -vllm-placeholder:
+              # the agent nsenters this container and runs
+              # /usr/local/bin/nsrestore from its filesystem
+              # (executor/restore.go:206-210, snapshot values.yaml:176).
+              # See 06-placeholder-image.md.
+              image: &image dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-05dac0c7da0372312819e256e1b0cd4a07a61eab-vllm-placeholder
+              imagePullPolicy: Always
+
+    # ---------------------------------------------------------------
+    # The restored worker.
+    # ---------------------------------------------------------------
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      experimental:
+        # v1beta1 GPUMemoryServiceSpec - deploy/operator/api/v1beta1/common.go:206-236.
+        # NOTE the mode enum is CAPITALISED here (IntraPod), unlike v1alpha1's
+        # lowercase intraPod used in 20-dynamocheckpoint.yaml (common.go:210-211
+        # vs v1alpha1/common.go:186). This asymmetry is real; do not "fix" either.
+        gpuMemoryService:
+          mode: IntraPod
+          deviceClassName: gpu.nvidia.com
+        checkpoint:
+          # ComponentCheckpointConfig - v1beta1/common.go:325-347
+          enabled: true
+          # Restore from OUR existing checkpoint rather than creating a new one.
+          # With checkpointRef set, this component's identity is ignored and the
+          # DGD never owns/deletes the checkpoint (common.go:338, 343-346).
+          checkpointRef: gmsv1-glm52-dep8
+          # Keep replicas at 0 until the checkpoint is Ready, then start FROM it.
+          # With Immediate the pod would cold-start first and only later pods
+          # would be restore-shaped (common.go:329-335) - useless for this probe.
+          startupPolicy: WaitForCheckpoint
+      podTemplate:
+        spec:
+          # Must land on the same node: the GMS shards live on s2877's local NVMe
+          # and CRIU/cuda-checkpoint restore is node-local.
+          nodeSelector:
+            kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+          tolerations:
+            - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+            - {key: dra, operator: Exists, effect: NoSchedule}
+            - {key: schwinns.ai-dynamo.io/gms-bench, operator: Exists, effect: NoSchedule}
+            - {key: schwinns.ai-dynamo.io/reserved, operator: Exists, effect: NoSchedule}
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          imagePullSecrets:
+            - name: acr-token-secret
+
+          # Our own --use-v1 sidecar. See the "CONSEQUENCE OF STEP 3" note above:
+          # this must exist BEFORE the webhook runs so EnsureServerSidecar's
+          # name check (gms/gms.go:51-55) short-circuits and does not inject a
+          # V0 server.
+          initContainers:
+            - name: gms-server
+              image: *image
+              imagePullPolicy: Always
+              restartPolicy: Always
+              command: ["python3", "-m", "gpu_memory_service.cli.server"]
+              args: ["--use-v1"]
+              env:
+                - {name: GMS_SOCKET_DIR, value: /gms-intrapod-control}
+              volumeMounts:
+                - {name: gms-intrapod-control, mountPath: /gms-intrapod-control}
+              resources:
+                claims:
+                  - name: intrapod-shared-gpu
+
+          volumes:
+            - name: hf-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: criu-work
+              emptyDir: {}
+            - name: shared-memory
+              emptyDir: {medium: Memory, sizeLimit: 64Gi}
+            - name: gms-intrapod-control
+              emptyDir: {}
+            # 7 NVMe roots. The GMS server re-imports weight shards from these
+            # on wake, so the restored pod needs the same host mounts.
+            # No nvme3. Host paths; see 05-prior-attempts.md.
+            - {name: gms-ssd-nvme2, hostPath: {path: /mnt/dynamo-gms-nvme2, type: Directory}}
+            - {name: gms-ssd-nvme4, hostPath: {path: /mnt/dynamo-gms-nvme4, type: Directory}}
+            - {name: gms-ssd-nvme5, hostPath: {path: /mnt/dynamo-gms-nvme5, type: Directory}}
+            - {name: gms-ssd-nvme6, hostPath: {path: /mnt/dynamo-gms-nvme6, type: Directory}}
+            - {name: gms-ssd-nvme7, hostPath: {path: /mnt/dynamo-gms-nvme7, type: Directory}}
+            - {name: gms-ssd-nvme8, hostPath: {path: /mnt/dynamo-gms-nvme8, type: Directory}}
+            - {name: gms-ssd-nvme9, hostPath: {path: /mnt/dynamo-gms-nvme9, type: Directory}}
+            # NOTE: the "checkpoint-storage" PVC volume and the "snapshot-control"
+            # emptyDir are injected by the restore webhook
+            # (protocol/restore.go:80-97). Do NOT declare them here - a name clash
+            # with a different source would break InjectCheckpointVolume's
+            # idempotency check (restore.go:369-384).
+
+          containers:
+            - name: main
+              image: *image
+              imagePullPolicy: Always
+              # Command/args MUST match the checkpoint source exactly: CRIU restores
+              # the process image, and DYN_SNAPSHOT_RESTORE_STANDBY=1 makes this
+              # entrypoint sleep rather than execute (restore_context.py:236-244).
+              # A mismatch means the pre-restore standby container differs from the
+              # captured process - keep these in lockstep with 20-dynamocheckpoint.yaml.
+              command: ["python3", "-m", "dynamo.vllm"]
+              args:
+                # DEP8 - must match 20-dynamocheckpoint.yaml. If you flipped that
+                # file to the TEP8 control, flip this too.
+                - --tensor-parallel-size
+                - "1"
+                - --data-parallel-size
+                - "8"
+                - --enable-expert-parallel
+                - --worker-cls
+                - gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
+                - --enable-sleep-mode
+                - --model
+                - nvidia/GLM-5.2-NVFP4
+                - --trust-remote-code
+                - --moe-backend
+                - flashinfer_trtllm
+                - --all2all-backend
+                - flashinfer_nvlink_one_sided
+                - --enable-flashinfer-autotune
+                - --disable-custom-all-reduce
+                - --reasoning-parser
+                - glm45
+                - --max-model-len
+                - "4096"
+                - --max-num-seqs
+                - "8"
+                - --max-num-batched-tokens
+                - "4096"
+                - --gpu-memory-utilization
+                - "0.80"
+                - --kv-cache-memory-bytes
+                - 8G
+                - --kv-cache-dtype
+                - fp8_e4m3
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                # Same set as the checkpoint source. DYN_NAMESPACE/DGD names are
+                # set by the operator for DGD-managed pods; the rest must match.
+                - {name: DYN_COMPONENT, value: worker}
+                - {name: DYN_DISCOVERY_BACKEND, value: kubernetes}
+                - {name: DYN_FORWARDPASS_METRIC_PORT, value: "20380"}
+                - {name: DYN_HEALTH_CHECK_ENABLED, value: "false"}
+                - {name: DYN_SYSTEM_ENABLED, value: "true"}
+                - {name: DYN_SYSTEM_PORT, value: "9090"}
+                - {name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, value: '["generate"]'}
+                - {name: GLOO_SOCKET_IFNAME, value: eth0}
+                - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
+                - {name: NCCL_CUMEM_ENABLE, value: "0"}
+                - {name: NCCL_IB_DISABLE, value: "1"}
+                - {name: NCCL_NVLS_ENABLE, value: "0"}
+                - {name: NCCL_RAS_ENABLE, value: "0"}
+                - {name: NCCL_P2P_DISABLE, value: "1"}
+                - {name: NCCL_SHM_DISABLE, value: "0"}
+                - {name: NCCL_DEBUG, value: INFO}
+                - {name: NCCL_DEBUG_SUBSYS, value: "INIT,GRAPH,P2P,SHM,NET"}
+                - {name: VLLM_ALLREDUCE_USE_SYMM_MEM, value: "0"}
+                - {name: VLLM_USE_NCCL_SYMM_MEM, value: "0"}
+                - {name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP, value: "0"}
+                - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "7200"}
+                - {name: VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP, value: "0"}
+                - {name: VLLM_EXPERIMENT_CHECKPOINT_PINNED_HOST_CACHE_FLUSH, value: "0"}
+                - {name: VLLM_EXPERIMENT_LAZY_FLASHINFER_WRAPPER_WORKSPACE, value: "0"}
+                - {name: NIXL_TELEMETRY_ENABLE, value: "n"}
+                - {name: NIXL_TELEMETRY_EXPORTER, value: prometheus}
+                - {name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090"}
+                - {name: GMS_SOCKET_DIR, value: /gms-intrapod-control}
+                # DYN_SNAPSHOT_RESTORE_STANDBY=1 and DYN_SNAPSHOT_CONTROL_DIR are
+                # injected by the restore webhook (restore.go:98-118, EnsureControlVolume).
+                # Do NOT set them by hand.
+              ports:
+                - {containerPort: 9090, name: system, protocol: TCP}
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: ["SYS_PTRACE"]
+              resources:
+                limits: {memory: 1536Gi}
+                requests: {memory: 128Gi}
+                # GPUs via DRA only. The operator replaces scalar GPU resources
+                # with the intrapod-shared-gpu claim and creates the
+                # ResourceClaimTemplate for DGD components
+                # (dynamo/graph.go:1609-1613 -> dra.ApplyClaim;
+                #  controller/dgd_gms_resource_claims_reconciler.go:83-89).
+                # Unlike the standalone checkpoint, we do NOT hand-author a
+                # template here - the DGD path creates
+                # "<dgd-name>-<component>-gpu" (dra.go:93-95).
+                # UNVERIFIED: dra.ExtractGPUCountFromResourceRequirements reads the
+                # GPU COUNT from the main container's resources
+                # (dgd_gms_resource_claims_reconciler.go:73). With no
+                # nvidia.com/gpu request here it may compute 0 and render an empty
+                # template. If the restore pod gets 0 GPUs, add
+                #     limits: {nvidia.com/gpu: "8"}
+                # to this block - ApplyClaim strips it after reading the count
+                # (dra.go:45-47).
+              volumeMounts:
+                - {name: hf-cache, mountPath: /home/dynamo/.cache/huggingface}
+                - {name: criu-work, mountPath: /var/criu-work}
+                - {name: shared-memory, mountPath: /dev/shm}
+                - {name: gms-intrapod-control, mountPath: /gms-intrapod-control}
+                - {name: gms-ssd-nvme2, mountPath: /mnt/gms-ssd/nvme2}
+                - {name: gms-ssd-nvme4, mountPath: /mnt/gms-ssd/nvme4}
+                - {name: gms-ssd-nvme5, mountPath: /mnt/gms-ssd/nvme5}
+                - {name: gms-ssd-nvme6, mountPath: /mnt/gms-ssd/nvme6}
+                - {name: gms-ssd-nvme7, mountPath: /mnt/gms-ssd/nvme7}
+                - {name: gms-ssd-nvme8, mountPath: /mnt/gms-ssd/nvme8}
+                - {name: gms-ssd-nvme9, mountPath: /mnt/gms-ssd/nvme9}

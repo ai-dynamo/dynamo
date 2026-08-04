@@ -1,0 +1,572 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "DynamoCheckpoint",
+  "metadata": {
+    "annotations": {
+      "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"DynamoCheckpoint\",\"metadata\":{\"annotations\":{\"nvidia.com/dynamo-checkpoint-deletion-policy\":\"Retain\",\"nvidia.com/snapshot-artifact-version\":\"1\"},\"labels\":{\"nvidia.com/dynamo-component\":\"VllmDecodeWorker\",\"nvidia.com/dynamo-graph-deployment-name\":\"glm52-tep8-gms-ssd-top-29213270567\",\"nvidia.com/dynamo-worker-hash\":\"c3e13396\",\"schwinns.ai-dynamo.io/recovery\":\"explicit-source-after-auto-job-race\"},\"name\":\"glm52-tep8-gms-ssd-top-29213270567-source-v2\",\"namespace\":\"schwinns\"},\"spec\":{\"gpuMemoryService\":{\"deviceClassName\":\"gpu.nvidia.com\",\"enabled\":true,\"extraClientContainers\":[\"gms-saver\"],\"mode\":\"intraPod\"},\"identity\":{\"backendFramework\":\"vllm\",\"extraParameters\":{\"component\":\"VllmDecodeWorker\",\"run\":\"29213270567\",\"source\":\"explicit-dckpt-v2\"},\"model\":\"schwinns/glm52-tep8-gms-ssd-top-29213270567\",\"pipelineParallelSize\":1,\"tensorParallelSize\":8},\"job\":{\"activeDeadlineSeconds\":7200,\"podTemplateSpec\":{\"metadata\":{\"annotations\":{\"schwinns.ai-dynamo.io/build-run\":\"29213270567\",\"schwinns.ai-dynamo.io/dynamo-sha\":\"8a8035b9799fc21ac24ae73013a6411f99f11ed4\",\"schwinns.ai-dynamo.io/gms-backend\":\"sharded-ssd\",\"schwinns.ai-dynamo.io/topology\":\"TP8-EP8-IntraPod-GMS\"},\"labels\":{\"nvidia.com/dynamo-component\":\"VllmDecodeWorker\",\"nvidia.com/dynamo-graph-deployment-name\":\"glm52-tep8-gms-ssd-top-29213270567\",\"nvidia.com/dynamo-worker-hash\":\"c3e13396\"}},\"spec\":{\"activeDeadlineSeconds\":7200,\"containers\":[{\"args\":[\"--model\",\"nvidia/GLM-5.2-NVFP4\",\"--trust-remote-code\",\"--load-format\",\"gms\",\"--tensor-parallel-size\",\"8\",\"--enable-expert-parallel\",\"--moe-backend\",\"flashinfer_trtllm\",\"--all2all-backend\",\"flashinfer_nvlink_one_sided\",\"--enable-flashinfer-autotune\",\"--disable-custom-all-reduce\",\"--reasoning-parser\",\"glm45\",\"--max-model-len\",\"4096\",\"--max-num-seqs\",\"8\",\"--max-num-batched-tokens\",\"4096\",\"--gpu-memory-utilization\",\"0.80\",\"--kv-cache-memory-bytes\",\"8G\",\"--kv-cache-dtype\",\"fp8_e4m3\"],\"command\":[\"python3\",\"-m\",\"dynamo.vllm\"],\"env\":[{\"name\":\"DYN_COMPONENT\",\"value\":\"worker\"},{\"name\":\"DYN_DISCOVERY_BACKEND\",\"value\":\"kubernetes\"},{\"name\":\"DYN_FORWARDPASS_METRIC_PORT\",\"value\":\"20380\"},{\"name\":\"DYN_HEALTH_CHECK_ENABLED\",\"value\":\"false\"},{\"name\":\"DYN_NAMESPACE\",\"value\":\"schwinns-glm52-tep8-gms-ssd-top-29213270567\"},{\"name\":\"DYN_PARENT_DGD_K8S_NAME\",\"value\":\"glm52-tep8-gms-ssd-top-29213270567\"},{\"name\":\"DYN_PARENT_DGD_K8S_NAMESPACE\",\"value\":\"schwinns\"},{\"name\":\"DYN_SYSTEM_ENABLED\",\"value\":\"true\"},{\"name\":\"DYN_SYSTEM_PORT\",\"value\":\"9090\"},{\"name\":\"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS\",\"value\":\"[\\\"generate\\\"]\"},{\"name\":\"GLOO_SOCKET_IFNAME\",\"value\":\"eth0\"},{\"name\":\"HF_HOME\",\"value\":\"/home/dynamo/.cache/huggingface\"},{\"name\":\"HF_HUB_OFFLINE\",\"value\":\"1\"},{\"name\":\"NATS_SERVER\",\"value\":\"nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222\"},{\"name\":\"NCCL_CUMEM_ENABLE\",\"value\":\"0\"},{\"name\":\"NCCL_DEBUG\",\"value\":\"INFO\"},{\"name\":\"NCCL_DEBUG_SUBSYS\",\"value\":\"INIT,GRAPH,P2P,SHM,NET\"},{\"name\":\"NCCL_IB_DISABLE\",\"value\":\"1\"},{\"name\":\"NCCL_NVLS_ENABLE\",\"value\":\"0\"},{\"name\":\"NCCL_P2P_DISABLE\",\"value\":\"1\"},{\"name\":\"NCCL_RAS_ENABLE\",\"value\":\"0\"},{\"name\":\"NCCL_SHM_DISABLE\",\"value\":\"0\"},{\"name\":\"NIXL_TELEMETRY_ENABLE\",\"value\":\"n\"},{\"name\":\"NIXL_TELEMETRY_EXPORTER\",\"value\":\"prometheus\"},{\"name\":\"NIXL_TELEMETRY_PROMETHEUS_PORT\",\"value\":\"19090\"},{\"name\":\"POD_NAME\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}},{\"name\":\"POD_NAMESPACE\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.namespace\"}}},{\"name\":\"POD_UID\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.uid\"}}},{\"name\":\"TRANSFORMERS_OFFLINE\",\"value\":\"1\"},{\"name\":\"VLLM_ALLREDUCE_USE_SYMM_MEM\",\"value\":\"0\"},{\"name\":\"VLLM_DISTRIBUTED_USE_SPLIT_GROUP\",\"value\":\"0\"},{\"name\":\"VLLM_ENGINE_READY_TIMEOUT_S\",\"value\":\"7200\"},{\"name\":\"VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP\",\"value\":\"0\"},{\"name\":\"VLLM_EXPERIMENT_CHECKPOINT_PINNED_HOST_CACHE_FLUSH\",\"value\":\"0\"},{\"name\":\"VLLM_EXPERIMENT_LAZY_FLASHINFER_WRAPPER_WORKSPACE\",\"value\":\"0\"},{\"name\":\"VLLM_USE_NCCL_SYMM_MEM\",\"value\":\"0\"},{\"name\":\"GMS_SOCKET_DIR\",\"value\":\"/gms-intrapod-control\"}],\"envFrom\":[{\"secretRef\":{\"name\":\"hf-token-secret\"}}],\"image\":\"dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8\",\"imagePullPolicy\":\"Always\",\"livenessProbe\":{\"failureThreshold\":1,\"httpGet\":{\"path\":\"/live\",\"port\":9090},\"periodSeconds\":5},\"name\":\"main\",\"ports\":[{\"containerPort\":9090,\"name\":\"system\",\"protocol\":\"TCP\"}],\"readinessProbe\":{\"httpGet\":{\"path\":\"/health\",\"port\":9090},\"periodSeconds\":10},\"resources\":{\"claims\":[{\"name\":\"intrapod-shared-gpu\"}],\"limits\":{\"memory\":\"1536Gi\"},\"requests\":{\"memory\":\"128Gi\"}},\"securityContext\":{\"capabilities\":{\"add\":[\"SYS_PTRACE\"]},\"runAsUser\":0},\"startupProbe\":{\"failureThreshold\":720,\"httpGet\":{\"path\":\"/health\",\"port\":9090},\"periodSeconds\":10},\"volumeMounts\":[{\"mountPath\":\"/home/dynamo/.cache/huggingface\",\"name\":\"hf-cache\"},{\"mountPath\":\"/checkpoints\",\"name\":\"checkpoint-storage\"},{\"mountPath\":\"/var/criu-work\",\"name\":\"criu-work\"},{\"mountPath\":\"/dev/shm\",\"name\":\"shared-memory\"},{\"mountPath\":\"/gms-intrapod-control\",\"name\":\"gms-intrapod-control\"}]},{\"args\":[\"--checkpoint-dir\",\"/checkpoints/gms/glm52-tep8-gms-ssd-top-29213270567/versions/1\",\"--sharded-ssd-roots\",\"/mnt/gms-ssd/nvme2/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme4/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme5/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme6/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme7/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme8/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme9/schwinns/glm52-tep8-gms-ssd-top-29213270567\"],\"command\":[\"python3\",\"-m\",\"gpu_memory_service.cli.snapshot.saver\"],\"env\":[{\"name\":\"GMS_SOCKET_DIR\",\"value\":\"/gms-intrapod-control\"}],\"image\":\"dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8\",\"imagePullPolicy\":\"Always\",\"name\":\"gms-saver\",\"resources\":{\"claims\":[{\"name\":\"intrapod-shared-gpu\"}]},\"securityContext\":{\"runAsUser\":0},\"volumeMounts\":[{\"mountPath\":\"/checkpoints\",\"name\":\"checkpoint-storage\"},{\"mountPath\":\"/mnt/gms-ssd/nvme2\",\"name\":\"gms-ssd-nvme2\"},{\"mountPath\":\"/mnt/gms-ssd/nvme4\",\"name\":\"gms-ssd-nvme4\"},{\"mountPath\":\"/mnt/gms-ssd/nvme5\",\"name\":\"gms-ssd-nvme5\"},{\"mountPath\":\"/mnt/gms-ssd/nvme6\",\"name\":\"gms-ssd-nvme6\"},{\"mountPath\":\"/mnt/gms-ssd/nvme7\",\"name\":\"gms-ssd-nvme7\"},{\"mountPath\":\"/mnt/gms-ssd/nvme8\",\"name\":\"gms-ssd-nvme8\"},{\"mountPath\":\"/mnt/gms-ssd/nvme9\",\"name\":\"gms-ssd-nvme9\"},{\"mountPath\":\"/gms-intrapod-control\",\"name\":\"gms-intrapod-control\"}]}],\"imagePullSecrets\":[{\"name\":\"acr-token-secret\"}],\"initContainers\":[{\"command\":[\"python3\",\"-m\",\"gpu_memory_service.cli.server\"],\"env\":[{\"name\":\"GMS_SOCKET_DIR\",\"value\":\"/gms-intrapod-control\"}],\"image\":\"dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8\",\"name\":\"gms-server\",\"resources\":{\"claims\":[{\"name\":\"intrapod-shared-gpu\"}]},\"restartPolicy\":\"Always\",\"volumeMounts\":[{\"mountPath\":\"/gms-intrapod-control\",\"name\":\"gms-intrapod-control\"}]}],\"nodeSelector\":{\"kubernetes.io/hostname\":\"cluster-0967a26d-pool-14bee067-prctr-s2877\"},\"resourceClaims\":[{\"name\":\"intrapod-shared-gpu\",\"resourceClaimTemplateName\":\"checkpoint-a865bb8c27ecf46826107776ce84a60c-worker-gpu\"}],\"restartPolicy\":\"Never\",\"securityContext\":{\"fsGroup\":1000,\"fsGroupChangePolicy\":\"OnRootMismatch\"},\"serviceAccountName\":\"glm52-tep8-gms-ssd-top-29213270567-k8s-service-discovery\",\"terminationGracePeriodSeconds\":60,\"tolerations\":[{\"effect\":\"NoSchedule\",\"key\":\"nvidia.com/gpu\",\"operator\":\"Exists\"},{\"effect\":\"NoSchedule\",\"key\":\"dra\",\"operator\":\"Exists\"},{\"effect\":\"NoSchedule\",\"key\":\"schwinns.ai-dynamo.io/gms-bench\",\"operator\":\"Exists\"},{\"effect\":\"NoSchedule\",\"key\":\"autopilot/2026-05-29-qwen06b-tp2-p2p-reserved\",\"operator\":\"Exists\"}],\"volumes\":[{\"name\":\"hf-cache\",\"persistentVolumeClaim\":{\"claimName\":\"shared-model-cache\"}},{\"name\":\"checkpoint-storage\",\"persistentVolumeClaim\":{\"claimName\":\"snapshot-pvc\"}},{\"emptyDir\":{},\"name\":\"criu-work\"},{\"emptyDir\":{\"medium\":\"Memory\",\"sizeLimit\":\"64Gi\"},\"name\":\"shared-memory\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme2\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme2\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme4\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme4\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme5\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme5\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme6\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme6\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme7\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme7\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme8\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme8\"},{\"hostPath\":{\"path\":\"/mnt/dynamo-gms-nvme9\",\"type\":\"Directory\"},\"name\":\"gms-ssd-nvme9\"},{\"emptyDir\":{},\"name\":\"gms-intrapod-control\"}]}},\"sharedMemory\":{\"size\":\"64Gi\"},\"targetContainerName\":\"main\"}}}\n",
+      "nvidia.com/dynamo-checkpoint-deletion-policy": "Retain",
+      "nvidia.com/snapshot-artifact-version": "1",
+      "schwinns.ai-dynamo.io/cache-refresh": "2026-07-13T01:11:54Z"
+    },
+    "creationTimestamp": "2026-07-13T00:42:30Z",
+    "generation": 1,
+    "labels": {
+      "nvidia.com/dynamo-component": "VllmDecodeWorker",
+      "nvidia.com/dynamo-graph-deployment-name": "glm52-tep8-gms-ssd-top-29213270567",
+      "nvidia.com/dynamo-worker-hash": "c3e13396",
+      "nvidia.com/snapshot-checkpoint-id": "dbde5ab07f1ee977",
+      "schwinns.ai-dynamo.io/recovery": "explicit-source-after-auto-job-race"
+    },
+    "name": "glm52-tep8-gms-ssd-top-29213270567-source-v2",
+    "namespace": "schwinns"
+  },
+  "spec": {
+    "gpuMemoryService": {
+      "deviceClassName": "gpu.nvidia.com",
+      "enabled": true,
+      "mode": "intraPod"
+    },
+    "identity": {
+      "backendFramework": "vllm",
+      "extraParameters": {
+        "component": "VllmDecodeWorker",
+        "run": "29213270567",
+        "source": "explicit-dckpt-v2"
+      },
+      "model": "schwinns/glm52-tep8-gms-ssd-top-29213270567",
+      "pipelineParallelSize": 1,
+      "tensorParallelSize": 8
+    },
+    "job": {
+      "activeDeadlineSeconds": 7200,
+      "podTemplateSpec": {
+        "metadata": {
+          "annotations": {
+            "schwinns.ai-dynamo.io/build-run": "29213270567",
+            "schwinns.ai-dynamo.io/dynamo-sha": "8a8035b9799fc21ac24ae73013a6411f99f11ed4",
+            "schwinns.ai-dynamo.io/gms-backend": "sharded-ssd",
+            "schwinns.ai-dynamo.io/topology": "TP8-EP8-IntraPod-GMS"
+          },
+          "labels": {
+            "nvidia.com/dynamo-component": "VllmDecodeWorker",
+            "nvidia.com/dynamo-graph-deployment-name": "glm52-tep8-gms-ssd-top-29213270567",
+            "nvidia.com/dynamo-worker-hash": "c3e13396"
+          }
+        },
+        "spec": {
+          "activeDeadlineSeconds": 7200,
+          "containers": [
+            {
+              "args": [
+                "--model",
+                "nvidia/GLM-5.2-NVFP4",
+                "--trust-remote-code",
+                "--load-format",
+                "gms",
+                "--tensor-parallel-size",
+                "8",
+                "--enable-expert-parallel",
+                "--moe-backend",
+                "flashinfer_trtllm",
+                "--all2all-backend",
+                "flashinfer_nvlink_one_sided",
+                "--enable-flashinfer-autotune",
+                "--disable-custom-all-reduce",
+                "--reasoning-parser",
+                "glm45",
+                "--max-model-len",
+                "4096",
+                "--max-num-seqs",
+                "8",
+                "--max-num-batched-tokens",
+                "4096",
+                "--gpu-memory-utilization",
+                "0.80",
+                "--kv-cache-memory-bytes",
+                "8G",
+                "--kv-cache-dtype",
+                "fp8_e4m3"
+              ],
+              "command": [
+                "python3",
+                "-m",
+                "dynamo.vllm"
+              ],
+              "env": [
+                {
+                  "name": "DYN_COMPONENT",
+                  "value": "worker"
+                },
+                {
+                  "name": "DYN_DISCOVERY_BACKEND",
+                  "value": "kubernetes"
+                },
+                {
+                  "name": "DYN_FORWARDPASS_METRIC_PORT",
+                  "value": "20380"
+                },
+                {
+                  "name": "DYN_HEALTH_CHECK_ENABLED",
+                  "value": "false"
+                },
+                {
+                  "name": "DYN_NAMESPACE",
+                  "value": "schwinns-glm52-tep8-gms-ssd-top-29213270567"
+                },
+                {
+                  "name": "DYN_PARENT_DGD_K8S_NAME",
+                  "value": "glm52-tep8-gms-ssd-top-29213270567"
+                },
+                {
+                  "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                  "value": "schwinns"
+                },
+                {
+                  "name": "DYN_SYSTEM_ENABLED",
+                  "value": "true"
+                },
+                {
+                  "name": "DYN_SYSTEM_PORT",
+                  "value": "9090"
+                },
+                {
+                  "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                  "value": "[\"generate\"]"
+                },
+                {
+                  "name": "GLOO_SOCKET_IFNAME",
+                  "value": "eth0"
+                },
+                {
+                  "name": "HF_HOME",
+                  "value": "/home/dynamo/.cache/huggingface"
+                },
+                {
+                  "name": "HF_HUB_OFFLINE",
+                  "value": "1"
+                },
+                {
+                  "name": "NATS_SERVER",
+                  "value": "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+                },
+                {
+                  "name": "NCCL_CUMEM_ENABLE",
+                  "value": "0"
+                },
+                {
+                  "name": "NCCL_DEBUG",
+                  "value": "INFO"
+                },
+                {
+                  "name": "NCCL_DEBUG_SUBSYS",
+                  "value": "INIT,GRAPH,P2P,SHM,NET"
+                },
+                {
+                  "name": "NCCL_IB_DISABLE",
+                  "value": "1"
+                },
+                {
+                  "name": "NCCL_NVLS_ENABLE",
+                  "value": "0"
+                },
+                {
+                  "name": "NCCL_P2P_DISABLE",
+                  "value": "1"
+                },
+                {
+                  "name": "NCCL_RAS_ENABLE",
+                  "value": "0"
+                },
+                {
+                  "name": "NCCL_SHM_DISABLE",
+                  "value": "0"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_ENABLE",
+                  "value": "n"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_EXPORTER",
+                  "value": "prometheus"
+                },
+                {
+                  "name": "NIXL_TELEMETRY_PROMETHEUS_PORT",
+                  "value": "19090"
+                },
+                {
+                  "name": "POD_NAME",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.name"
+                    }
+                  }
+                },
+                {
+                  "name": "POD_NAMESPACE",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.namespace"
+                    }
+                  }
+                },
+                {
+                  "name": "POD_UID",
+                  "valueFrom": {
+                    "fieldRef": {
+                      "fieldPath": "metadata.uid"
+                    }
+                  }
+                },
+                {
+                  "name": "TRANSFORMERS_OFFLINE",
+                  "value": "1"
+                },
+                {
+                  "name": "VLLM_ALLREDUCE_USE_SYMM_MEM",
+                  "value": "0"
+                },
+                {
+                  "name": "VLLM_DISTRIBUTED_USE_SPLIT_GROUP",
+                  "value": "0"
+                },
+                {
+                  "name": "VLLM_ENGINE_READY_TIMEOUT_S",
+                  "value": "7200"
+                },
+                {
+                  "name": "VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP",
+                  "value": "0"
+                },
+                {
+                  "name": "VLLM_EXPERIMENT_CHECKPOINT_PINNED_HOST_CACHE_FLUSH",
+                  "value": "0"
+                },
+                {
+                  "name": "VLLM_EXPERIMENT_LAZY_FLASHINFER_WRAPPER_WORKSPACE",
+                  "value": "0"
+                },
+                {
+                  "name": "VLLM_USE_NCCL_SYMM_MEM",
+                  "value": "0"
+                },
+                {
+                  "name": "GMS_SOCKET_DIR",
+                  "value": "/gms-intrapod-control"
+                }
+              ],
+              "envFrom": [
+                {
+                  "secretRef": {
+                    "name": "hf-token-secret"
+                  }
+                }
+              ],
+              "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8",
+              "imagePullPolicy": "Always",
+              "livenessProbe": {
+                "failureThreshold": 1,
+                "httpGet": {
+                  "path": "/live",
+                  "port": 9090
+                },
+                "periodSeconds": 5
+              },
+              "name": "main",
+              "ports": [
+                {
+                  "containerPort": 9090,
+                  "name": "system",
+                  "protocol": "TCP"
+                }
+              ],
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 9090
+                },
+                "periodSeconds": 10
+              },
+              "resources": {
+                "claims": [
+                  {
+                    "name": "intrapod-shared-gpu"
+                  }
+                ],
+                "limits": {
+                  "memory": "1536Gi"
+                },
+                "requests": {
+                  "memory": "128Gi"
+                }
+              },
+              "securityContext": {
+                "capabilities": {
+                  "add": [
+                    "SYS_PTRACE"
+                  ]
+                },
+                "runAsUser": 0
+              },
+              "startupProbe": {
+                "failureThreshold": 720,
+                "httpGet": {
+                  "path": "/health",
+                  "port": 9090
+                },
+                "periodSeconds": 10
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/home/dynamo/.cache/huggingface",
+                  "name": "hf-cache"
+                },
+                {
+                  "mountPath": "/checkpoints",
+                  "name": "checkpoint-storage"
+                },
+                {
+                  "mountPath": "/var/criu-work",
+                  "name": "criu-work"
+                },
+                {
+                  "mountPath": "/dev/shm",
+                  "name": "shared-memory"
+                },
+                {
+                  "mountPath": "/gms-intrapod-control",
+                  "name": "gms-intrapod-control"
+                }
+              ]
+            },
+            {
+              "args": [
+                "--checkpoint-dir",
+                "/checkpoints/gms/glm52-tep8-gms-ssd-top-29213270567/versions/1",
+                "--sharded-ssd-roots",
+                "/mnt/gms-ssd/nvme2/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme4/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme5/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme6/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme7/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme8/schwinns/glm52-tep8-gms-ssd-top-29213270567,/mnt/gms-ssd/nvme9/schwinns/glm52-tep8-gms-ssd-top-29213270567"
+              ],
+              "command": [
+                "python3",
+                "-m",
+                "gpu_memory_service.cli.snapshot.saver"
+              ],
+              "env": [
+                {
+                  "name": "GMS_SOCKET_DIR",
+                  "value": "/gms-intrapod-control"
+                }
+              ],
+              "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8",
+              "imagePullPolicy": "Always",
+              "name": "gms-saver",
+              "resources": {
+                "claims": [
+                  {
+                    "name": "intrapod-shared-gpu"
+                  }
+                ]
+              },
+              "securityContext": {
+                "runAsUser": 0
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/checkpoints",
+                  "name": "checkpoint-storage"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme2",
+                  "name": "gms-ssd-nvme2"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme4",
+                  "name": "gms-ssd-nvme4"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme5",
+                  "name": "gms-ssd-nvme5"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme6",
+                  "name": "gms-ssd-nvme6"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme7",
+                  "name": "gms-ssd-nvme7"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme8",
+                  "name": "gms-ssd-nvme8"
+                },
+                {
+                  "mountPath": "/mnt/gms-ssd/nvme9",
+                  "name": "gms-ssd-nvme9"
+                },
+                {
+                  "mountPath": "/gms-intrapod-control",
+                  "name": "gms-intrapod-control"
+                }
+              ]
+            }
+          ],
+          "imagePullSecrets": [
+            {
+              "name": "acr-token-secret"
+            }
+          ],
+          "initContainers": [
+            {
+              "command": [
+                "python3",
+                "-m",
+                "gpu_memory_service.cli.server"
+              ],
+              "env": [
+                {
+                  "name": "GMS_SOCKET_DIR",
+                  "value": "/gms-intrapod-control"
+                }
+              ],
+              "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:8a8035b9799fc21ac24ae73013a6411f99f11ed4-vllm-placeholder-run-29213270567-1@sha256:c3e66f09092d354ba2ad17703a5fb4b59c7bb7d113ddf7eb9b3939bd96fa18e8",
+              "name": "gms-server",
+              "resources": {
+                "claims": [
+                  {
+                    "name": "intrapod-shared-gpu"
+                  }
+                ]
+              },
+              "restartPolicy": "Always",
+              "volumeMounts": [
+                {
+                  "mountPath": "/gms-intrapod-control",
+                  "name": "gms-intrapod-control"
+                }
+              ]
+            }
+          ],
+          "nodeSelector": {
+            "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+          },
+          "resourceClaims": [
+            {
+              "name": "intrapod-shared-gpu",
+              "resourceClaimTemplateName": "checkpoint-a865bb8c27ecf46826107776ce84a60c-worker-gpu"
+            }
+          ],
+          "restartPolicy": "Never",
+          "securityContext": {
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch"
+          },
+          "serviceAccountName": "glm52-tep8-gms-ssd-top-29213270567-k8s-service-discovery",
+          "terminationGracePeriodSeconds": 60,
+          "tolerations": [
+            {
+              "effect": "NoSchedule",
+              "key": "nvidia.com/gpu",
+              "operator": "Exists"
+            },
+            {
+              "effect": "NoSchedule",
+              "key": "dra",
+              "operator": "Exists"
+            },
+            {
+              "effect": "NoSchedule",
+              "key": "schwinns.ai-dynamo.io/gms-bench",
+              "operator": "Exists"
+            },
+            {
+              "effect": "NoSchedule",
+              "key": "autopilot/2026-05-29-qwen06b-tp2-p2p-reserved",
+              "operator": "Exists"
+            }
+          ],
+          "volumes": [
+            {
+              "name": "hf-cache",
+              "persistentVolumeClaim": {
+                "claimName": "shared-model-cache"
+              }
+            },
+            {
+              "name": "checkpoint-storage",
+              "persistentVolumeClaim": {
+                "claimName": "snapshot-pvc"
+              }
+            },
+            {
+              "emptyDir": {},
+              "name": "criu-work"
+            },
+            {
+              "emptyDir": {
+                "medium": "Memory",
+                "sizeLimit": "64Gi"
+              },
+              "name": "shared-memory"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme2",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme2"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme4",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme4"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme5",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme5"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme6",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme6"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme7",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme7"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme8",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme8"
+            },
+            {
+              "hostPath": {
+                "path": "/mnt/dynamo-gms-nvme9",
+                "type": "Directory"
+              },
+              "name": "gms-ssd-nvme9"
+            },
+            {
+              "emptyDir": {},
+              "name": "gms-intrapod-control"
+            }
+          ]
+        }
+      },
+      "sharedMemory": {
+        "size": "64Gi"
+      },
+      "targetContainerName": "main"
+    }
+  }
+}
