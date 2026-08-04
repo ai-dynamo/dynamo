@@ -614,7 +614,7 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 						snapshotprotocol.CheckpointIDLabel: "stale",
 					},
 					Annotations: map[string]string{
-						snapshotprotocol.CheckpointStatusAnnotation: "stale",
+						snapshotprotocol.CheckpointArtifactVersionAnnotation: "stale",
 					},
 				},
 			},
