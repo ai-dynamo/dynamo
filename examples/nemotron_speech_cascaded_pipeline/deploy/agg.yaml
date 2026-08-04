@@ -28,9 +28,6 @@ spec:
               image: ${DYNAMO_FRONTEND_IMAGE}
               command: [python3, -m, dynamo.frontend]
               args: [--http-port, "8000"]
-          imagePullSecrets: &imagePullSecrets
-            - name: dynamo-image-pull-secret
-            - name: ngc-secret
       replicas: 1
       type: frontend
     - name: SpeechAsrWorker
@@ -87,7 +84,9 @@ spec:
               volumeMounts:
                 - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-asr}
                 - {mountPath: /dev/shm, name: shared-memory}
-          imagePullSecrets: *imagePullSecrets
+          imagePullSecrets: &speechImagePullSecrets
+            - name: custom-adapter-image-pull-secret
+            - name: ngc-secret
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
@@ -136,7 +135,6 @@ spec:
                   nvidia.com/gpu: "1"
               volumeMounts:
                 - {mountPath: /home/dynamo/.cache/huggingface, name: model-cache, subPath: nemotron-speech-cascaded-llm}
-          imagePullSecrets: *imagePullSecrets
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
@@ -192,7 +190,7 @@ spec:
               volumeMounts:
                 - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-tts}
                 - {mountPath: /dev/shm, name: shared-memory}
-          imagePullSecrets: *imagePullSecrets
+          imagePullSecrets: *speechImagePullSecrets
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
