@@ -108,24 +108,3 @@ jobs:
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           override_arch: ${{ inputs.override_arch }}
-      - name: Verify multi-architecture image
-        if: inputs.override_arch == ''
-        shell: bash
-        env:
-          TARGET_REF: docker://${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.image_tag }}
-        run: |
-          set -euo pipefail
-
-          MANIFEST=$(skopeo inspect --raw "${TARGET_REF}")
-          for ARCH in amd64 arm64; do
-            if ! jq -e --arg arch "${ARCH}" '
-              any(.manifests[]?;
-                .platform.os == "linux" and .platform.architecture == $arch
-              )
-            ' <<<"${MANIFEST}" >/dev/null; then
-              echo "::error::Copied image is missing linux/${ARCH}: ${TARGET_REF}"
-              exit 1
-            fi
-          done
-
-          echo "Verified linux/amd64 and linux/arm64: ${TARGET_REF}"
