@@ -1956,8 +1956,8 @@ mod tests {
         assert_eq!(kv_ingest.tier_counts["device"], 40);
         assert_eq!(kv_ingest.tier_counts["host_pinned"], 62);
         assert_eq!(kv_ingest.boundaries["offload_tick"].events, 63);
-        assert_eq!(kv_ingest.boundaries["pass_start"].events, 39);
-        assert_eq!(kv_ingest.boundaries["pass_end"].events, 0);
+        assert_eq!(kv_ingest.boundaries["pass_start"].events, 0);
+        assert_eq!(kv_ingest.boundaries["pass_end"].events, 39);
         assert_eq!(
             kv_ingest.boundaries["offload_tick"].last_at_ms,
             report.throughput.duration_ms

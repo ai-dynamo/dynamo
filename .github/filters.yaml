@@ -78,8 +78,6 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/local_dev.Dockerfile'
-  - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
@@ -139,6 +137,18 @@ core:
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
+
+# dev/local-dev image templates. These are NOT in `core`: dev.Dockerfile is `FROM
+# runtime` and local_dev.Dockerfile is `FROM dev`, so neither can change a runtime
+# artifact or a runtime test result -- gating them on `core` would run all three
+# runtime builds plus the GPU test matrix for a change that cannot affect them.
+# They were previously in `ignore`, which meant the templates defining every
+# developer's image were never built by CI at all: both the missing libprotobuf-dev
+# (#12443) and the vLLM dev image whose ENTRYPOINT pointed at a script it does not
+# ship (#12515) shipped that way. Gate only the dev/local-dev build jobs on this.
+dev_images:
+  - 'container/templates/dev.Dockerfile'
+  - 'container/templates/local_dev.Dockerfile'
 
 operator:
   - *ci

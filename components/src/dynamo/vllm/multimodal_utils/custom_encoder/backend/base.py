@@ -6,15 +6,14 @@
 ``VisionEncoderBackend`` is the **single surface an encoder author implements**.
 It is a pure policy + compute backend: no threads, no futures, no event loop.
 Dynamo owns all the *driving* — the dedicated actor thread, cross-request
-coalescing, the embeds splice, and the lifecycle — via ``ThreadedMicroBatcher``
+coalescing, engine adaptation, and the lifecycle — via ``ThreadedMicroBatcher``
 (the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
 request-API glue). This module defines only the contract those drivers call.
 
 The encoder runs in the **same process** as the aggregated vLLM worker (no
-separate encode worker, no NIXL transfer): it turns image inputs into the
-visual-token embeddings for each image, and Dynamo splices those embeds into a
-mixed ``EmbedsPrompt`` at the placeholder positions (see
-``adapter.linear.build_mixed_embeds``) for a text-only LM.
+separate encode worker, no NIXL transfer): it turns image inputs into ordered,
+producer-defined artifacts. The resolved downstream decoder selects an adapter
+that validates those artifacts and constructs the final engine prompt.
 
 Division of labour (author vs. Dynamo):
 
@@ -32,20 +31,16 @@ Division of labour (author vs. Dynamo):
   there is no preprocess phase — ``preprocess`` is never called and raws go
   straight to ``forward_batch``. A mismatch (overridden ``preprocess`` with
   ``preprocess_concurrency`` left at ``0``) fails fast at startup.
-- ``forward_batch(items, target_bucket=None) -> list[torch.Tensor]`` — **actor
+- ``forward_batch(items, target_bucket=None) -> list[ArtifactT]`` — **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
-  returning, so results are safe to consume from another thread and splice
-  directly. Returns one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per
-  item, in input order. ``target_bucket`` is reserved for CUDA-graph batching,
-  once supported (the ladder rung to pad to); it is ``None`` until then.
+  returning, so results are safe to consume from another thread. Returns one
+  artifact per item, in input order. ``target_bucket`` is reserved for CUDA-graph
+  batching, once supported (the ladder rung to pad to); it is ``None`` until then.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
 Attributes read **once at setup** (never per-request):
 
-- ``image_token_id`` — the token id marking image positions in the prompt;
-  **hardcode it for your model** (e.g. ``151655`` for Qwen3-VL's ``<|image_pad|>``).
-  Dynamo uses it to locate each image span for the splice.
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
   *chosen* budget (a token budget when ``cost`` is a token count). ``None`` (the
   default) ⇒ **pass-through**: no cap (the author owns sizing).
@@ -67,10 +62,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Generic, List, Optional, Sequence, TypeVar
 
-import torch
-
 RawT = TypeVar("RawT")  # raw input the author preprocesses (e.g. an image URL)
 ItemT = TypeVar("ItemT")  # opaque payload preprocess() hands to forward_batch()
+ArtifactT = TypeVar("ArtifactT")  # opaque result consumed by a decoder adapter
 
 
 @dataclass(frozen=True)
@@ -93,22 +87,16 @@ class Preprocessed(Generic[ItemT]):
     cost: int = 1
 
 
-class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
+class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
     """Author-written, in-process vision encoder contract.
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
     request API (``AsyncVisionEncoder``). Subclasses implement ``build`` and
-    ``forward_batch`` and set ``image_token_id``; ``preprocess`` (default identity
-    passthrough), ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency``
-    are overridden only as needed.
+    ``forward_batch``; ``preprocess`` (default identity passthrough),
+    ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency`` are overridden
+    only as needed. Artifact interpretation belongs to the selected adapter.
     """
-
-    #: Image placeholder token id — **hardcode it for your model** (e.g. ``151655``
-    #: for Qwen3-VL's ``<|image_pad|>``; resolve it from your tokenizer offline if
-    #: unsure). Dynamo uses it to locate each image span for the splice. Declared
-    #: without a default so a backend that forgets to set it fails fast at startup.
-    image_token_id: int
 
     #: Scalar dispatch ceiling: the batcher packs items up to this summed ``cost``
     #: per ``forward_batch`` call. ``None`` (the default) ⇒ **pass-through**: no cap
@@ -158,14 +146,17 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     @abstractmethod
     def forward_batch(
         self, items: List[ItemT], target_bucket: Optional[int] = None
-    ) -> List[torch.Tensor]:
-        """Encode one cost-bounded batch (actor thread); one tensor per item, in order.
+    ) -> List[ArtifactT]:
+        """Encode one cost-bounded batch; one artifact per item, in input order.
+
+        Artifacts are opaque, producer-defined values. Dynamo preserves their
+        order and passes them unchanged to the selected adapter, which owns the
+        concrete artifact contract and validation.
 
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
-        so results are safe to consume from another thread and splice directly.
-        Return one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per item, in
-        input order. ``target_bucket`` is reserved for CUDA-graph batching, once
-        supported (the ladder rung to pad to), and is ``None`` until then.
+        so results are safe to consume from another thread. ``target_bucket`` is
+        reserved for CUDA-graph batching, once supported (the ladder rung to pad
+        to), and is ``None`` until then.
         """
         ...
 
