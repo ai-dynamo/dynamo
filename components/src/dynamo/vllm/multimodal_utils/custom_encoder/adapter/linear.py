@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mixed token-ids/embeds assembly for the aggregated CustomEncoder path.
+"""Linear embedding adapter for the aggregated CustomEncoder path.
 
 The encoder returns only the visual token embeddings; this module builds the
 inputs for vLLM's mixed ``EmbedsPrompt`` mode (``prompt_token_ids`` +
@@ -32,8 +32,21 @@ separator between consecutive images.
 from __future__ import annotations
 
 import logging
+from typing import Any, Sequence
 
 import torch
+from vllm.inputs import EmbedsPrompt, TokensPrompt
+
+from dynamo.vllm.multimodal_utils.custom_encoder.adapter.base import (
+    CustomEncoderAdapter,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.adapter.model_config import (
+    _hidden_size,
+    _is_multimodal_model,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.backend.base import (
+    VisionEncoderBackend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,3 +163,67 @@ def build_mixed_embeds(
         dtype,
     )
     return prompt_embeds, out_token_ids, is_token_ids
+
+
+class LinearEmbedsAdapter(CustomEncoderAdapter):
+    """Build mixed ``EmbedsPrompt`` inputs for a text-only decoder."""
+
+    def __init__(
+        self,
+        backend: VisionEncoderBackend,
+        model_config: Any,
+        engine_args: Any,
+    ) -> None:
+        if model_config is None:
+            raise ValueError("CustomEncoder requires the resolved vLLM ModelConfig")
+        if _is_multimodal_model(model_config):
+            raise ValueError(
+                "CustomEncoder does not yet support this multimodal decoder; "
+                "the linear EmbedsPrompt adapter is only valid for text-only models"
+            )
+        if not getattr(engine_args, "enable_prompt_embeds", False):
+            raise ValueError(
+                "text-only CustomEncoder output requires --enable-prompt-embeds"
+            )
+        image_token_id = getattr(backend, "image_token_id", None)
+        if not isinstance(image_token_id, int) or isinstance(image_token_id, bool):
+            raise ValueError(
+                "text-only CustomEncoder output requires an integer image_token_id"
+            )
+
+        self._image_token_id = image_token_id
+        self._hidden_size = _hidden_size(model_config)
+        model_dtype = getattr(model_config, "dtype", None)
+        self._dtype = model_dtype if isinstance(model_dtype, torch.dtype) else None
+
+    def prepare_prompt(
+        self,
+        token_ids: list[int],
+        encodings: Sequence[torch.Tensor],
+    ) -> EmbedsPrompt | TokensPrompt:
+        rows = list(encodings)
+        for index, tensor in enumerate(rows):
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(
+                    "text-only CustomEncoder must return tensors; "
+                    f"result {index} is {type(tensor).__name__}"
+                )
+            if tensor.dim() != 2 or tensor.shape[1] != self._hidden_size:
+                raise ValueError(
+                    f"image tensor {index} has shape {tuple(tensor.shape)}; "
+                    f"expected 2D with decoder hidden size {self._hidden_size}"
+                )
+            if self._dtype is not None and tensor.dtype != self._dtype:
+                raise ValueError(
+                    f"image tensor {index} has dtype {tensor.dtype}; "
+                    f"expected decoder dtype {self._dtype}"
+                )
+
+        prompt_embeds, prompt_token_ids, prompt_is_token_ids = build_mixed_embeds(
+            token_ids, rows, self._image_token_id
+        )
+        return EmbedsPrompt(
+            prompt_embeds=prompt_embeds,
+            prompt_token_ids=prompt_token_ids,
+            prompt_is_token_ids=prompt_is_token_ids,
+        )

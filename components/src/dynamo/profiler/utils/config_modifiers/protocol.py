@@ -35,6 +35,7 @@ from dynamo.profiler.utils.config import (
     update_image,
 )
 from dynamo.profiler.utils.defaults import EngineType
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -220,11 +221,8 @@ class BaseConfigModifier:
 
     @classmethod
     def _normalize_model_path(cls, pvc_mount_path: str, pvc_path: str) -> str:
-        mount = (pvc_mount_path or "").rstrip("/")
-        sub = (pvc_path or "").lstrip("/")
-        if not sub:
-            return mount
-        return f"{mount}/{sub}"
+        """Resolve a PVC model-cache path to the mounted container path."""
+        return normalize_model_cache_path(pvc_mount_path, pvc_path)
 
     @classmethod
     def _ensure_component_volume_mount(
