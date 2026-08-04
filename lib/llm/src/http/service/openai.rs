@@ -1956,14 +1956,6 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
-/// OpenAI Chat Completions Request Handler
-///
-/// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
-/// for an [`super::OpenAIChatCompletionsStreamingEngine`] and will return a stream of responses which will be
-/// forward to the client.
-///
-/// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
-/// non-streaming requests, we will fold the stream into a single response as part of this handler.
 fn apply_chat_completions_request_template(
     request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
     template: Option<&RequestTemplate>,
@@ -1981,6 +1973,14 @@ fn apply_chat_completions_request_template(
     }
 }
 
+/// OpenAI Chat Completions Request Handler
+///
+/// This method will handle the incoming request for the /v1/chat/completions endpoint. The endpoint is a "source"
+/// for an [`super::OpenAIChatCompletionsStreamingEngine`] and will return a stream of responses which will be
+/// forward to the client.
+///
+/// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
+/// non-streaming requests, we will fold the stream into a single response as part of this handler.
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
